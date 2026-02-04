@@ -14,9 +14,17 @@ import types
 import threading
 import time
 import hashlib
+import sys
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import Dict, Set, List, Any, Optional, Callable
 from enum import Enum
+
+# Try imports
+try:
+    import objgraph
+except ImportError:
+    objgraph = None
 
 class NamespaceLayer(Enum):
     """三层命名空间架构"""
@@ -26,44 +34,64 @@ class NamespaceLayer(Enum):
 
 class ReferenceTracker:
     """智能引用追踪器"""
+    
     def __init__(self):
-        # map: object_id -> list of logical paths
-        self._registry: Dict[int, List[str]] = {}
-        # map: object_id -> weakref to object
-        self._refs: Dict[int, weakref.ref] = {}
-        self._lock = threading.RLock()
-
-    def track(self, obj: Any, path: str):
-        """追踪对象引用"""
-        if obj is None: return
+        self.reference_map: Dict[int, List[str]] = defaultdict(list)  # id -> 引用路径列表
+        self.reverse_map: Dict[str, Set[int]] = defaultdict(set)      # 模块:属性 -> 对象ids
+        self.creation_time: Dict[int, float] = {}                     # 对象创建时间
+        self.access_counter: Dict[int, int] = defaultdict(int)        # 对象访问计数
         
-        # 仅追踪复杂对象（类、函数、模块、实例），跳过基础类型
-        if isinstance(obj, (int, float, str, bool)):
-            return
-
+    def track(self, obj: Any, reference_path: str):
+        """追踪对象引用"""
         obj_id = id(obj)
-        with self._lock:
-            if obj_id not in self._registry:
-                self._registry[obj_id] = []
-                try:
-                    # 创建弱引用，当对象被回收时回调（可选）
-                    self._refs[obj_id] = weakref.ref(obj)
-                except TypeError:
-                    pass
+        self.reference_map[obj_id].append(reference_path)
+        self.reverse_map[reference_path].add(obj_id)
+        if obj_id not in self.creation_time:
+            self.creation_time[obj_id] = time.time()
+        
+        # 追踪对象的所有引用
+        # 注意: 递归追踪可能会导致性能问题，可以限制深度或在调试模式下开启
+        try:
+            referrers = gc.get_referrers(obj)
+            for referrer in referrers:
+                if hasattr(referrer, '__name__'):
+                    # 避免循环递归追踪
+                    pass 
+                    # self.track(referrer, f"referrer:{referrer.__name__}")
+        except:
+            pass
+    
+    def get_stale_references(self, module_name: str, min_age_seconds: float = 5.0) -> Set[int]:
+        """获取过期的引用"""
+        stale_refs = set()
+        current_time = time.time()
+        
+        for ref_path, obj_ids in self.reverse_map.items():
+            if module_name in ref_path:
+                for obj_id in obj_ids:
+                    age = current_time - self.creation_time.get(obj_id, 0)
+                    if age > min_age_seconds and self.access_counter[obj_id] == 0:
+                        stale_refs.add(obj_id)
+        
+        return stale_refs
+    
+    def clean_references(self, obj_ids: Set[int]):
+        """清理指定对象的引用"""
+        for obj_id in obj_ids:
+            if obj_id in self.reference_map:
+                for ref_path in self.reference_map[obj_id]:
+                    self.reverse_map[ref_path].discard(obj_id)
+                del self.reference_map[obj_id]
             
-            if path not in self._registry[obj_id]:
-                self._registry[obj_id].append(path)
-
-    def get_paths(self, obj: Any) -> List[str]:
-        return self._registry.get(id(obj), [])
+            if obj_id in self.creation_time:
+                del self.creation_time[obj_id]
+            
+            if obj_id in self.access_counter:
+                del self.access_counter[obj_id]
     
     def cleanup_dead_refs(self):
-        """清理已死亡对象的记录"""
-        with self._lock:
-            dead_ids = [oid for oid, ref in self._refs.items() if ref() is None]
-            for oid in dead_ids:
-                self._registry.pop(oid, None)
-                self._refs.pop(oid, None)
+         # Compatibility method
+         pass
 
 class SmartGC:
     """智能垃圾回收器"""
