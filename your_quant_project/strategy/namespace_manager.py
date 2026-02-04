@@ -15,6 +15,8 @@ import threading
 import time
 import hashlib
 import sys
+import ctypes
+import importlib 
 from collections import defaultdict
 from contextlib import contextmanager
 from typing import Dict, Set, List, Any, Optional, Callable
@@ -93,13 +95,71 @@ class ReferenceTracker:
          # Compatibility method
          pass
 
+class CycleDetector:
+    """循环引用检测器"""
+    def find_cycles(self, module_name: str) -> List[List[int]]:
+        cycles = []
+        # 使用 gc.garbage 检测无法回收的对象
+        if gc.garbage:
+            for obj in gc.garbage:
+                # 简单 heuristic: 假设所有 garbage 都是需要打破的循环的一部分
+                if hasattr(obj, '__module__') and obj.__module__ and module_name in obj.__module__:
+                    cycles.append([id(obj)])
+        
+        # 如果有 objgraph，可以使用更高级的检测
+        if objgraph:
+             # Placeholder for objgraph logic
+             pass
+             
+        return cycles
+
+class MemoryProfiler:
+    """内存分析器"""
+    def snapshot(self):
+        pass
+
 class SmartGC:
     """智能垃圾回收器"""
+    
     def __init__(self):
-        self.stats = {"collected": 0, "cycles": 0}
+        self.cycle_detector = CycleDetector()
+        self.memory_profiler = MemoryProfiler()
+        self.stats = {"collected": 0, "cycles": 0, "broken_cycles": 0}
+        
+    def purge_namespace(self, module_name: str, aggressive: bool = False):
+        """清洗命名空间"""
+        
+        # 步骤1: 打破循环引用
+        cycles = self.cycle_detector.find_cycles(module_name)
+        for cycle in cycles:
+            self._break_cycle(cycle)
+        
+        # 步骤2: 清理弱引用
+        self._clean_weak_references(module_name)
+        
+        # 步骤3: 分代清理
+        for generation in range(3):
+            self._collect_generation(generation, module_name)
+        
+        # 步骤4: 清理模块缓存
+        self._purge_module_cache(module_name)
+        
+        # 步骤5: 清理import缓存
+        if aggressive:
+            self._purge_import_caches(module_name)
+        
+        # 步骤6: 最终强制GC
+        collected = gc.collect()
+        self.stats["collected"] += collected
+        
+        return collected
 
     def force_clean(self, layer_objects: Dict[str, Any]):
-        """强制清理指定层级的对象引用"""
+        """强制清理指定层级的对象引用 (兼容旧接口)"""
+        # 先执行深度清理
+        module_name_guess = "your_quant_project"
+        self.purge_namespace(module_name_guess)
+        
         cleaned_count = 0
         keys = list(layer_objects.keys())
         for k in keys:
@@ -107,18 +167,58 @@ class SmartGC:
             # 对于模块类型，尝试清理其字典以断开循环引用
             if isinstance(obj, types.ModuleType):
                 try:
-                    # 注意：仅清理应用层模块，避免破坏系统模块
                     if hasattr(obj, "__file__") and "your_quant_project" in obj.__file__:
                         obj.__dict__.clear()
                 except: pass
             del obj
             cleaned_count += 1
-        
-        # 显式触发GC（建议在低频操作如热重载时调用）
-        gc.collect()
-        self.stats["collected"] += cleaned_count
-        self.stats["cycles"] += 1
         return cleaned_count
+    
+    def _break_cycle(self, cycle: List[int]):
+        """打破循环引用"""
+        # 找到循环中最弱的引用并打破它
+        # weakest = self._find_weakest_link(cycle) # Simplified: just break first found attr
+        
+        self.stats["broken_cycles"] += 1
+        # 使用弱引用替换强引用
+        for obj_id in cycle:
+            obj = self._get_object_by_id(obj_id)
+            if obj and hasattr(obj, '__dict__'):
+                try:
+                    for attr_name, attr_value in list(obj.__dict__.items()):
+                        attr_id = id(attr_value)
+                        # 如果属性值也在循环（或者是循环中的另一个对象），这里简单化处理：
+                        # 实际上我们需要图算法来确定边。
+                        # 这里我们只做防御性编程：如果发现属性持有 module 相关的对象，尝试弱引用化
+                        if hasattr(attr_value, '__module__') and attr_value.__module__ and "your_quant_project" in attr_value.__module__:
+                             obj.__dict__[attr_name] = weakref.ref(attr_value)
+                except:
+                    pass
+
+    def _get_object_by_id(self, obj_id: int) -> Any:
+        try:
+            return ctypes.cast(obj_id, ctypes.py_object).value
+        except:
+            return None
+
+    def _find_weakest_link(self, cycle: List[int]):
+        return cycle[0] if cycle else None
+
+    def _clean_weak_references(self, module_name: str):
+        pass
+
+    def _collect_generation(self, generation: int, module_name: str):
+        gc.collect(generation)
+
+    def _purge_module_cache(self, module_name: str):
+        # 清理 sys.modules 中相关的旧模块（如果它们已经是 None 或过期的）
+        to_remove = [k for k in sys.modules if module_name in k and sys.modules[k] is None]
+        for k in to_remove:
+            del sys.modules[k]
+
+    def _purge_import_caches(self, module_name: str):
+         importlib.invalidate_caches()
+
 
 class VersionController:
     """版本控制器"""
