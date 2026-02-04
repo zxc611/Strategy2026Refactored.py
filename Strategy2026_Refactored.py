@@ -53,32 +53,53 @@ try:
     # [HOTFIX] Deep Force reload
     print(">>> [BOOTSTRAP] Deep Reloading Strategy Modules...")
     
-    # 暴力清除 sys.modules 缓存，强迫 Python 重新从磁盘读取文件
-    # 这是解决 "修改不生效" 的终极方案
-    modules_to_kill = [
-        "your_quant_project.strategy.params",
-        "your_quant_project.strategy.market_calendar",
-        "your_quant_project.strategy.platform_compat",
-        "your_quant_project.strategy.context_utils",
-        "your_quant_project.strategy.scheduler_utils",
-        "your_quant_project.strategy.emergency_pause",
-        "your_quant_project.strategy.validation",
-        "your_quant_project.strategy.instruments",
-        "your_quant_project.strategy.kline_manager",
-        "your_quant_project.strategy.subscriptions",
-        "your_quant_project.strategy.data_container",
-        "your_quant_project.strategy.calculation",
-        "your_quant_project.strategy.position_manager",
-        "your_quant_project.strategy.order_execution",
-        "your_quant_project.strategy.trading_logic",
-        "your_quant_project.strategy.ui_mixin",
-        "your_quant_project.strategy.container",
-    ]
-    
-    for m in modules_to_kill:
-        if m in sys.modules:
-            del sys.modules[m]
-            # print(f"Deleted {m} from sys.modules")
+    # 尝试使用高级动态命名空间清洗器
+    try:
+        from your_quant_project.strategy.namespace_manager import GarbageSweeper, ConfigLoader, NamespaceDashboard
+        import threading
+        
+        print(">>> [BOOTSTRAP] Taking out the trash (SmartGC)...")
+        sweeper = GarbageSweeper()
+        # 激进模式清洗 your_quant_project 下的所有模块引用
+        cleaned_refs = sweeper.sweep("your_quant_project")
+        print(f">>> [BOOTSTRAP] SmartGC cleaned {cleaned_refs} references.")
+
+        # 启动监控面板 (如果配置启用)
+        config = ConfigLoader.load()
+        if config.get('dynamic_namespace', {}).get('monitoring', {}).get('enable_dashboard', False):
+             print(">>> [BOOTSTRAP] Starting Namespace Dashboard...")
+             dashboard = NamespaceDashboard()
+             dashboard.start_monitoring()
+
+    except Exception as e:
+        print(f">>> [BOOTSTRAP] SmartGC Init Failed ({e}), falling back to brute force...")
+        # 暴力清除 sys.modules 缓存，强迫 Python 重新从磁盘读取文件
+        # 这是解决 "修改不生效" 的终极方案
+        modules_to_kill = [
+            "your_quant_project.strategy.params",
+            "your_quant_project.strategy.market_calendar",
+            "your_quant_project.strategy.platform_compat",
+            "your_quant_project.strategy.context_utils",
+            "your_quant_project.strategy.scheduler_utils",
+            "your_quant_project.strategy.emergency_pause",
+            "your_quant_project.strategy.validation",
+            "your_quant_project.strategy.instruments",
+            "your_quant_project.strategy.kline_manager",
+            "your_quant_project.strategy.subscriptions",
+            "your_quant_project.strategy.data_container",
+            "your_quant_project.strategy.calculation",
+            "your_quant_project.strategy.position_manager",
+            "your_quant_project.strategy.order_execution",
+            "your_quant_project.strategy.trading_logic",
+            "your_quant_project.strategy.ui_mixin",
+            "your_quant_project.strategy.container",
+        ]
+        
+        for m in modules_to_kill:
+            keys_to_remove = [k for k in sys.modules if k.startswith(m) or k == m] # Better matching
+            for k in keys_to_remove:
+                if k in sys.modules:
+                    del sys.modules[k]
 
     # 重新导入
     import your_quant_project.strategy.params
