@@ -57,6 +57,8 @@ try:
     try:
         from your_quant_project.strategy.namespace_manager import GarbageSweeper, ConfigLoader, NamespaceDashboard
         import threading
+        import pkgutil
+        import your_quant_project.strategy
         
         print(">>> [BOOTSTRAP] Taking out the trash (SmartGC)...")
         sweeper = GarbageSweeper()
@@ -71,38 +73,63 @@ try:
              dashboard = NamespaceDashboard()
              dashboard.start_monitoring()
 
-    except Exception as e:
-        print(f">>> [BOOTSTRAP] SmartGC Init Failed ({e}), falling back to brute force...")
-        # 暴力清除 sys.modules 缓存，强迫 Python 重新从磁盘读取文件
-        # 这是解决 "修改不生效" 的终极方案
-        modules_to_kill = [
+        # 动态发现并重载所有模块
+        print(">>> [BOOTSTRAP] Discovering and reloading all strategy modules...")
+        package_path = os.path.dirname(your_quant_project.strategy.__file__)
+        found_modules = []
+        
+        # 1. 扫描所有模块
+        for _, name, _ in pkgutil.iter_modules([package_path]):
+            if name == "container": continue # 放最后
+            found_modules.append(f"your_quant_project.strategy.{name}")
+            
+        # 2. 暴力清除
+        for m in found_modules + ["your_quant_project.strategy.container"]:
+            if m in sys.modules:
+                del sys.modules[m]
+                
+        # 3. 按顺序重新导入
+        # 优先导入基础模块（如果有特定依赖顺序需求，可以在这里调整）
+        priority_modules = [
             "your_quant_project.strategy.params",
-            "your_quant_project.strategy.market_calendar",
-            "your_quant_project.strategy.platform_compat",
-            "your_quant_project.strategy.context_utils",
-            "your_quant_project.strategy.scheduler_utils",
-            "your_quant_project.strategy.emergency_pause",
-            "your_quant_project.strategy.validation",
-            "your_quant_project.strategy.instruments",
-            "your_quant_project.strategy.kline_manager",
-            "your_quant_project.strategy.subscriptions",
-            "your_quant_project.strategy.data_container",
-            "your_quant_project.strategy.calculation",
-            "your_quant_project.strategy.position_manager",
-            "your_quant_project.strategy.order_execution",
-            "your_quant_project.strategy.trading_logic",
-            "your_quant_project.strategy.ui_mixin",
-            "your_quant_project.strategy.container",
+            "your_quant_project.strategy.namespace_manager",
+            "your_quant_project.strategy.hot_reloader"
         ]
         
-        for m in modules_to_kill:
-            keys_to_remove = [k for k in sys.modules if k.startswith(m) or k == m] # Better matching
-            for k in keys_to_remove:
-                if k in sys.modules:
-                    del sys.modules[k]
+        # 先导入高优先级
+        for m in priority_modules:
+            if m in found_modules:
+                importlib.import_module(m)
+                found_modules.remove(m)
+        
+        # 导入剩余模块
+        for m in found_modules:
+            importlib.import_module(m)
+            
+        # 最后导入容器
+        import your_quant_project.strategy.container
 
-    # 重新导入
-    import your_quant_project.strategy.params
+    except Exception as e:
+        print(f">>> [BOOTSTRAP] SmartGC Init Failed ({e}), falling back to brute force...")
+        # 暴力清除 sys.modules 缓存 - 终极方案 (Fallback)
+        # 获取包路径下所有 .py 文件模拟 reload 列表
+        import your_quant_project.strategy
+        pkg_dir = os.path.dirname(your_quant_project.strategy.__file__)
+        all_files = [f[:-3] for f in os.listdir(pkg_dir) if f.endswith(".py") and f != "__init__.py"]
+        
+        for name in all_files:
+            full_name = f"your_quant_project.strategy.{name}"
+            if full_name in sys.modules:
+                del sys.modules[full_name]
+
+            # 重新导入
+            try:
+                importlib.import_module(full_name)
+            except Exception as import_err:
+                print(f"!!! Failed to reload {full_name}: {import_err}")
+
+    # 重新导入 (Explicitly import container to expose Strategy class)
+    import your_quant_project.strategy.container
     import your_quant_project.strategy.market_calendar
     import your_quant_project.strategy.platform_compat
     import your_quant_project.strategy.context_utils
