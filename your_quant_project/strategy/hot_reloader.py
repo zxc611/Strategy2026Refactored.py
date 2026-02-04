@@ -4,7 +4,7 @@ import types
 import gc
 import logging
 from contextlib import contextmanager
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import importlib.util
 import random
 
@@ -59,23 +59,51 @@ class HealthChecker:
         return True
 
 class IsolatedModuleLoader:
-    """Custom loader to enforce namespace isolation."""
-    def __init__(self, namespace: DynamicNamespace):
+    """隔离模块加载器"""
+    
+    def __init__(self, namespace: DynamicNamespace, module_path: str):
         self.namespace = namespace
+        self.module_path = module_path
+        self.loaded_modules: Dict[str, types.ModuleType] = {}
+        
+    def find_module(self, fullname: str, path: Optional[List[str]] = None):
+        """查找模块"""
+        # 只处理我们关心的模块
+        if fullname.startswith(self.namespace.module_name):
+            return self
+        return None
+    
+    def load_module(self, fullname: str) -> types.ModuleType:
+        """加载模块到隔离命名空间"""
+        if fullname in self.loaded_modules:
+            return self.loaded_modules[fullname]
+        
+        # 创建新的模块对象
+        module = types.ModuleType(fullname)
+        
+        # 设置自定义的__dict__来隔离命名空间
+        # 注意：这里直接引用了 NamespaceLayer，确保已导入
+        module.__dict__ = self.namespace.layers[NamespaceLayer.SCRATCH]
+        
+        # 必须确保 __builtins__ 存在，否则代码执行会失败
+        if '__builtins__' not in module.__dict__:
+            module.__dict__['__builtins__'] = __builtins__
 
-    def find_spec(self, fullname, path, target=None):
-        # We only handle the specific module we are targeting (simplification)
-        # In a full implementation, this would match specific patterns
-        return None 
-        # Returning None means we rely on default finders, 
-        # but we use exec_module to inject our namespace.
-        # To truly isolate, we might need to conform to importlib.abc.MetaPathFinder
+        # 执行模块代码
+        with open(self._get_module_path(fullname), 'r', encoding='utf-8') as f:
+            code = compile(f.read(), fullname, 'exec')
+            
+        # 在隔离的命名空间中执行
+        exec(code, module.__dict__)
+        
+        # 记录加载的模块
+        self.loaded_modules[fullname] = module
+        
+        return module
 
-    def exec_module(self, module):
-        # Inject our isolated dict
-        # This is strictly harder to plug into strictly via sys.meta_path for 'exec' 
-        # unless we return a Spec that points to this loader.
-        pass
+    def _get_module_path(self, fullname: str) -> str:
+        # 简化：假设只对应此时初始化的那个路径
+        return self.module_path
 
 class NamespaceManagerWrapper:
     """Adapter to make DynamicNamespace fit the ZeroDowntimeHotReloader API expectations"""
@@ -217,30 +245,9 @@ class ZeroDowntimeHotReloader:
         """在隔离的命名空间中加载模块"""
         module_name = self._extract_module_name(module_path)
         
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        if spec and spec.loader:
-            module = importlib.util.module_from_spec(spec)
-            
-            # Inject the SCRATCH dict as the module's dict logic
-            # However, module.__dict__ is special. We can update it or swap it.
-            # Best way to use our DynamicNamespace is to use its dict.
-            scratch_dict = dns.get(None, NamespaceLayer.SCRATCH) # This API needs adjustment in DNA or we access layers directly
-            
-            # Accessing layers directly for this engine
-            scratch_dict = dns.layers[NamespaceLayer.SCRATCH]
-            
-            # We copy builtins to the scratch dict so the module can run
-            if '__builtins__' not in scratch_dict:
-                 scratch_dict['__builtins__'] = __builtins__
-            
-            # Execute the module code using the scratch_dict as globals
-            # This is safer than replacing __dict__
-            with open(module_path, 'r', encoding='utf-8') as f:
-                code = compile(f.read(), module_path, 'exec')
-                exec(code, scratch_dict)
-            
-            # Update module object with these values so it looks like a module
-            module.__dict__.update(scratch_dict)
-            return module
-        else:
-            raise ImportError(f"Cannot find spec for {module_path}")
+        # 使用自定义的加载器
+        loader = IsolatedModuleLoader(dns, module_path)
+        
+        # 直接使用 loader 加载，绕过 sys.modules 检查，确保真正的隔离
+        # 这是一个比 __import__ 更安全的方式，可以避免污染全局 sys.modules
+        return loader.load_module(module_name)
