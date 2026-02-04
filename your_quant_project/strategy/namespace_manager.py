@@ -219,6 +219,98 @@ class SmartGC:
     def _purge_import_caches(self, module_name: str):
          importlib.invalidate_caches()
 
+class VersionMismatchError(Exception):
+    """版本不匹配异常"""
+    pass
+
+class VersionMigrationError(Exception):
+    """版本迁移失败异常"""
+    pass
+
+class VersionMigratorRegistry:
+    """版本迁移注册表"""
+    _migrators: Dict[tuple, Any] = {}
+    
+    @classmethod
+    def register(cls, from_version: str, to_version: str, migrator: Any):
+        cls._migrators[(from_version, to_version)] = migrator
+        
+    @classmethod
+    def get_migrator(cls, from_version: str, to_version: str) -> Optional[Any]:
+        return cls._migrators.get((from_version, to_version))
+
+class VersionAwareReference:
+    """版本感知的引用"""
+    
+    __slots__ = ['_target', '_version', '_proxy']
+    
+    def __init__(self, target: Any, version: str):
+        self._target = weakref.ref(target)
+        self._version = version
+        self._proxy = self._create_proxy(target)
+        
+    def _create_proxy(self, target: Any):
+        """创建动态代理"""
+        class VersionProxy:
+            def __init__(self, target_ref, version):
+                self._target_ref = target_ref
+                self._version = version
+                
+            def __getattr__(self, name):
+                target = self._target_ref()
+                if target is None:
+                    raise ReferenceError("目标对象已被垃圾回收")
+                    
+                # 检查版本兼容性
+                current_version = getattr(target, '__version__', '0.0.0')
+                if not self._is_compatible(current_version, self._version):
+                    raise VersionMismatchError(
+                        f"版本不兼容: 期望{self._version}, 实际{current_version}"
+                    )
+                    
+                return getattr(target, name)
+            
+            def _is_compatible(self, current: str, expected: str) -> bool:
+                # 简化的语义化版本检查
+                return current.split('.')[0] == expected.split('.')[0]
+        
+        return VersionProxy(weakref.ref(target), self._version)
+    
+    def get(self):
+        """获取当前版本的对象"""
+        target = self._target()
+        if target is None:
+            return None
+            
+        # 验证版本
+        current_version = getattr(target, '__version__', '0.0.0')
+        if current_version != self._version:
+            # 自动升级引用
+            return self._upgrade_reference(target, current_version)
+            
+        return target
+    
+    def _upgrade_reference(self, target: Any, new_version: str):
+        """升级引用到新版本"""
+        # 查找版本迁移器
+        migrator = VersionMigratorRegistry.get_migrator(
+            from_version=self._version,
+            to_version=new_version
+        )
+        
+        if migrator:
+            # 执行迁移
+            migrated = migrator.migrate(target)
+            self._version = new_version
+            return migrated
+        
+        # 如果没有迁移器但版本兼容（主版本号相同），则只更新版本号
+        if target and hasattr(target, '__version__') and target.__version__.split('.')[0] == self._version.split('.')[0]:
+             self._version = new_version
+             return target
+
+        raise VersionMigrationError(f"无法从{self._version}迁移到{new_version}")
+
 
 class VersionController:
     """版本控制器"""
