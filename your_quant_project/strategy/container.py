@@ -20,35 +20,50 @@ if project_root not in sys.path:
 
 # [Logic] Import Mixins from Package (Absolute Imports Preferred)
 try:
-    from .market_calendar import MarketCalendarMixin
-    from .param_table import ParamTableMixin
-    from .emergency_pause import EmergencyPauseMixin
-    from .scheduler_utils import SchedulerMixin
-    from .calculation import OptionWidthCalculationMixin
-    from .trading_logic import TradingLogicMixin
-    from .validation import ValidationMixin
-    from .order_execution import OrderExecutionMixin
-    from .platform_compat import PlatformCompatMixin
-    from .context_utils import ContextMixin
-    from .position_manager import PositionManager
-    from .params import Params
-    from .data_container import DataStrategyContainer # [Data Container]
+    from your_quant_project.strategy.market_calendar import MarketCalendarMixin
+    from your_quant_project.strategy.param_table import ParamTableMixin
+    from your_quant_project.strategy.emergency_pause import EmergencyPauseMixin
+    from your_quant_project.strategy.scheduler_utils import SchedulerMixin
+    from your_quant_project.strategy.calculation import OptionWidthCalculationMixin
+    from your_quant_project.strategy.trading_logic import TradingLogicMixin
+    from your_quant_project.strategy.validation import ValidationMixin
+    from your_quant_project.strategy.order_execution import OrderExecutionMixin
+    from your_quant_project.strategy.platform_compat import PlatformCompatMixin
+    from your_quant_project.strategy.context_utils import ContextMixin
+    from your_quant_project.strategy.position_manager import PositionManager
+    from your_quant_project.strategy.params import Params
+    from your_quant_project.strategy.data_container import DataStrategyContainer # [Data Container]
     
     # [Additional Mixins for "24 Files" Completeness]
-    from .instruments import InstrumentLoaderMixin    # instruments.py
-    from .kline_manager import KlineManagerMixin      # kline_manager.py
-    from .subscriptions import SubscriptionMixin      # subscriptions.py
+    from your_quant_project.strategy.instruments import InstrumentLoaderMixin    # instruments.py
+    from your_quant_project.strategy.kline_manager import KlineManagerMixin      # kline_manager.py
+    from your_quant_project.strategy.subscriptions import SubscriptionMixin      # subscriptions.py
 
     # [UI] Try package UI, fallback to local if needed, but prefer package
     try:
-        from .ui_mixin import UIMixin
+        from your_quant_project.strategy.ui_mixin import UIMixin
     except ImportError:
         # If running from inside package without context, this might fail, try fallback
         from ui_mixin import UIMixin
-except ImportError as e:
-    # If package imports fail, we are in serious trouble.
-    # Try dynamic path fix?
-    raise e
+except ImportError:
+    # Fallback to relative imports if absolute fails (e.g. if package not in path)
+    from .market_calendar import MarketCalendarMixin  # type: ignore
+    from .param_table import ParamTableMixin  # type: ignore
+    from .emergency_pause import EmergencyPauseMixin  # type: ignore
+    from .scheduler_utils import SchedulerMixin  # type: ignore
+    from .calculation import OptionWidthCalculationMixin  # type: ignore
+    from .trading_logic import TradingLogicMixin  # type: ignore
+    from .validation import ValidationMixin  # type: ignore
+    from .order_execution import OrderExecutionMixin  # type: ignore
+    from .platform_compat import PlatformCompatMixin  # type: ignore
+    from .context_utils import ContextMixin  # type: ignore
+    from .position_manager import PositionManager  # type: ignore
+    from .params import Params  # type: ignore
+    from .data_container import DataStrategyContainer  # type: ignore
+    from .instruments import InstrumentLoaderMixin  # type: ignore
+    from .kline_manager import KlineManagerMixin  # type: ignore
+    from .subscriptions import SubscriptionMixin  # type: ignore
+    from .ui_mixin import UIMixin  # type: ignore
 
 # [Pythongo Support]
 try:

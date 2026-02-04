@@ -9,8 +9,8 @@ try:
     if _IS_TEST_MODE:
         print("Note: Running in Test Mode - Forcing Mock PyQt implementation")
         raise ImportError("Test Mode: Forcing Mocks")
-    from PyQt5.QtCore import QThread, pyqtSignal, QObject
-    from PyQt5.QtWidgets import QApplication, QMessageBox
+    from PyQt5.QtCore import QThread, pyqtSignal, QObject  # type: ignore
+    from PyQt5.QtWidgets import QApplication, QMessageBox  # type: ignore
 except ImportError:
     # Fallback or Mock for environment without PyQt5
     class QObject: 
@@ -67,7 +67,7 @@ class SafeEventFilter(QObject):
     def eventFilter(self, obj, event):
         """过滤危险事件"""
         try:
-            from PyQt5.QtCore import QEvent
+            from PyQt5.QtCore import QEvent  # type: ignore
             
             # 检查关闭事件
             if event.type() == QEvent.Close:
@@ -150,7 +150,7 @@ class UIProtector:
                 
                 # 显示确认对话框
                 try:
-                    from PyQt5.QtWidgets import QMessageBox
+                    from PyQt5.QtWidgets import QMessageBox  # type: ignore
                     reply = QMessageBox.question(
                         widget, '确认关闭',
                         '确定要关闭窗口吗？',
