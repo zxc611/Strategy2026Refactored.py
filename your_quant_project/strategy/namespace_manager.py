@@ -586,3 +586,84 @@ class DynamicNamespacePurger:
 
     def _validate_step(self, step) -> bool:
         return True
+
+class MetricsCollector:
+    def collect(self):
+        # Placeholder for metric collection
+        # In a real scenario, this would measure memory of modules using tracemalloc or pympler
+        return {'modules': {'core': 10, 'strategy': 50, 'data': 200}}
+
+class NamespaceVisualizer:
+    pass
+
+class AlertManager:
+    pass
+
+class NamespaceDashboard:
+    """命名空间监控仪表板"""
+    
+    def __init__(self):
+        self.metrics_collector = MetricsCollector()
+        self.visualizer = NamespaceVisualizer()
+        self.alert_manager = AlertManager()
+        
+    def start_monitoring(self):
+        """启动实时监控"""
+        try:
+            import dash
+            from dash import dcc, html
+            import plotly.graph_objs as go
+        except ImportError:
+            print("Dash/Plotly not installed. Dashboard disabled.")
+            return
+
+        app = dash.Dash(__name__)
+        
+        # 实时更新布局
+        app.layout = html.Div([
+            html.H1("动态命名空间监控面板"),
+            
+            # 内存使用图表
+            dcc.Graph(id='memory-usage'),
+            dcc.Interval(id='memory-interval', interval=1000),
+            
+            # 引用关系图
+            dcc.Graph(id='reference-graph'),
+            
+            # 迁移状态
+            html.Div(id='migration-status'),
+            
+            # 控制面板
+            html.Div([
+                html.Button("强制GC", id='force-gc'),
+                html.Button("深度清理", id='deep-clean'),
+                html.Button("显示引用", id='show-refs'),
+            ])
+        ])
+        
+        # 实时更新回调
+        @app.callback(
+            dash.dependencies.Output('memory-usage', 'figure'),
+            [dash.dependencies.Input('memory-interval', 'n_intervals')]
+        )
+        def update_memory_usage(n):
+            """实时更新内存使用图表"""
+            metrics = self.metrics_collector.collect()
+            
+            fig = go.Figure(
+                data=[go.Bar(
+                    x=list(metrics['modules'].keys()),
+                    y=list(metrics['modules'].values()),
+                    name='模块内存'
+                )],
+                layout=go.Layout(
+                    title='模块内存使用情况',
+                    yaxis=dict(title='内存 (MB)')
+                )
+            )
+            
+            return fig
+        
+        # 启动服务器 (在独立线程中运行，避免阻塞)
+        threading.Thread(target=lambda: app.run_server(debug=False, port=8050), daemon=True).start()
+
