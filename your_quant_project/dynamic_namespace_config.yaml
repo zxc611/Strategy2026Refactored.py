@@ -1,0 +1,44 @@
+dynamic_namespace:
+  # 清洗策略
+  purge_strategy: "incremental"  # incremental | aggressive | conservative
+  
+  # 命名空间层配置
+  namespace_layers:
+    stable:
+      max_age_seconds: 3600
+      auto_promote: true
+    staging:
+      max_age_seconds: 300
+      validation_required: true
+    scratch:
+      max_age_seconds: 60
+      auto_cleanup: true
+  
+  # 引用追踪配置
+  reference_tracking:
+    enabled: true
+    track_cycles: true
+    track_weak_refs: true
+    max_references_per_module: 1000
+  
+  # 迁移配置
+  migration:
+    max_parallel_migrations: 3
+    timeout_seconds: 30
+    rollback_on_failure: true
+    validate_after_each_step: true
+  
+  # 垃圾回收配置
+  garbage_collection:
+    enable_smart_gc: true
+    collect_threshold_mb: 100
+    break_cycles: true
+    clean_import_cache: false
+  
+  # 监控配置
+  monitoring:
+    enable_dashboard: true
+    dashboard_port: 8050
+    collect_metrics: true
+    alert_on_memory_leak: true
+    alert_threshold_mb: 500

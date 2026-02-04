@@ -17,6 +17,7 @@ import hashlib
 import sys
 import ctypes
 import importlib 
+import os
 from collections import defaultdict
 from contextlib import contextmanager
 from typing import Dict, Set, List, Any, Optional, Callable
@@ -27,6 +28,11 @@ try:
     import objgraph
 except ImportError:
     objgraph = None
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 class NamespaceLayer(Enum):
     """ä¸‰å±‚å‘½åç©ºé—´æ¶æ„"""
@@ -464,14 +470,46 @@ class GarbageSweeper(SmartGC):
     def sweep(self, module_name: str, keep_references: List[Any] = None) -> int:
         return self.purge_namespace(module_name)
 
+class ConfigLoader:
+    DEFAULT_CONFIG = {
+        "dynamic_namespace": {
+            "purge_strategy": "incremental",
+            "monitoring": {"enable_dashboard": True, "dashboard_port": 8050},
+            "garbage_collection": {"enable_smart_gc": True}
+        }
+    }
+
+    @staticmethod
+    def load(config_path: str = None) -> Dict[str, Any]:
+        if not config_path:
+             # Try to find it relative to this file
+             # Assuming structure: your_quant_project/strategy/namespace_manager.py
+             # Config at: your_quant_project/dynamic_namespace_config.yaml
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config_path = os.path.join(base_dir, "dynamic_namespace_config.yaml")
+
+        if yaml and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f)
+            except Exception as e:
+                print(f"Failed to load config: {e}")
+        
+        return ConfigLoader.DEFAULT_CONFIG
+
 class DynamicNamespacePurger:
     """åŠ¨æ€å‘½åç©ºé—´æ¸…æ´—å™¨ - ä¸»æ§åˆ¶å™¨"""
     
-    def __init__(self):
+    def __init__(self, config_path: str = None):
+        self.config = ConfigLoader.load(config_path).get('dynamic_namespace', {})
         self.namespace_layers = NamespaceLayerManager()
         self.reference_scanner = ReferenceScanner()
         self.dependency_mapper = DependencyMapper()
         self.garbage_sweeper = GarbageSweeper()
+        
+        # Apply config
+        self.purge_strategy = self.config.get('purge_strategy', 'incremental')
+
         
     def purge_and_reload(self, module_name: str, new_code: str) -> bool:
         """
@@ -680,52 +718,100 @@ class NamespaceDashboard:
         # å¯åŠ¨æœåŠ¡å™¨ (åœ¨ç‹¬ç«‹çº¿ç¨‹ä¸­è¿è¡Œï¼Œé¿å…é˜»å¡)
         threading.Thread(target=lambda: app.run_server(debug=False, port=8050), daemon=True).start()
 
- 
- #   cmèdeÀ~på} 
- i f   _ _ n a m e _ _   = =   " _ _ m a i n _ _ " :  
-         d e f   m a i n ( ) :  
-                 #   R“ÆoPçV“'héY¬“xOáaZ“‡]%Â•X[ûz2Z@iÒj 
-                 p u r g e r   =   D y n a m i c N a m e s p a c e P u r g e r ( )  
-                  
-                 #   )”b6^e“¶pŸv 
-                 d e f   o n _ n a m e s p a c e _ c h a n g e ( e v e n t ) :  
-                         p r i n t ( f " [“É…•`Ì~*mÿhY“;j?m:   { e v e n t . m o d u l e }   -   { e v e n t . a c t i o n } " )  
-                  
-                 #   	Z%1=U)”b6^ 
-                 p u r g e r . r e g i s t e r _ c a l l b a c k ( ' n a m e s p a c e _ c h a n g e ' ,   o n _ n a m e s p a c e _ c h a n g e )  
-                  
-                 #   İY…0)æ¯Y!ÙZ`mGÿr•}\„uÄ•lTZ"”&1i4d¾e6}O“ç0an9p´pƒg`mú4U9p?  
-                 m o d u l e _ n a m e   =   " d e m o _ s t r a t e g y "  
-                 n e w _ c o d e   =   " " "  
- d e f   r u n ( ) :  
-         p r i n t ( ' N e w   v e r s i o n   r u n n i n g   i n   i s o l a t e d   n a m e s p a c e ' )  
- " " "  
-                  
-                 t r y :  
-                         s u c c e s s   =   p u r g e r . p u r g e _ a n d _ r e l o a d ( m o d u l e _ n a m e ,   n e w _ c o d e )  
-                          
-                         i f   s u c c e s s :  
-                                 p r i n t ( " A’? ”báxV^g¥‚šWT“·qlu´“? " )  
-                                  
-                                 #   Ä“gRZ0»qxáÇm!O 
-                                 s t a t s   =   p u r g e r . g e t _ s t a t i s t i c s ( )  
-                                 p r i n t ( f " " "  
-                                 »qxá¶“å0¡a:  
-                                 = = = = = = = = = = = = = = = = = = = = = = = =  
-                                 ¬“ò‹)}"”&1Ÿf:   { s t a t s [ ' t o t a l _ r e f e r e n c e s ' ] }  
-                                 igzO)î[àfde:   { s t a t s [ ' m i g r a t e d _ r e f e r e n c e s ' ] }  
-                                 ZoTŠ`î[àfde:   { s t a t s [ ' c l e a n e d _ r e f e r e n c e s ' ] }  
-                                 P“mTètz”œP7n:   { s t a t s [ ' m e m o r y _ s a v e d _ m b ' ] : . 2 f }   M B  
-                                 p”Aii:   { s t a t s [ ' d u r a t i o n _ m s ' ] }   m s  
-                                 = = = = = = = = = = = = = = = = = = = = = = = =  
-                                 " " " )  
-                         e l s e :  
-                                 p r i n t ( " B’? ”báxV^gÉ…Q0t? )  
-                                  
-                 e x c e p t   E x c e p t i o n   a s   e :  
-                         p r i n t ( f " B’? Y“ bSe¿•käá:   { e } " )  
-                         i m p o r t   t r a c e b a c k  
-                         t r a c e b a c k . p r i n t _ e x c ( )  
-  
-         m a i n ( )  
+
+ 
+ #   cmï¿½deï¿½~pï¿½ï¿½}
+ 
+ i f   _ _ n a m e _ _   = =   " _ _ m a i n _ _ " : 
+ 
+         d e f   m a i n ( ) : 
+ 
+                 #   Rï¿½ï¿½oPï¿½Vï¿½'hï¿½Yï¿½ï¿½xOï¿½aZï¿½ï¿½]%Â•X[ï¿½z2Z@iï¿½j
+ 
+                 p u r g e r   =   D y n a m i c N a m e s p a c e P u r g e r ( ) 
+ 
+                 
+ 
+                 #   )ï¿½b6^eï¿½ï¿½pï¿½v
+ 
+                 d e f   o n _ n a m e s p a c e _ c h a n g e ( e v e n t ) : 
+ 
+                         p r i n t ( f " [ï¿½É…ï¿½`ï¿½~*mï¿½hYï¿½;j?m:   { e v e n t . m o d u l e }   -   { e v e n t . a c t i o n } " ) 
+ 
+                 
+ 
+                 #   	Z%1=U)ï¿½b6^
+ 
+                 p u r g e r . r e g i s t e r _ c a l l b a c k ( ' n a m e s p a c e _ c h a n g e ' ,   o n _ n a m e s p a c e _ c h a n g e ) 
+ 
+                 
+ 
+                 #   ï¿½Yï¿½0)ï¿½Y!ï¿½Z`mGï¿½rï¿½}\ï¿½uÄ•lTZ"ï¿½&1i4dï¿½e6}Oï¿½ï¿½0an9pï¿½pï¿½g`mï¿½ï¿½4U9p? 
+ 
+                 m o d u l e _ n a m e   =   " d e m o _ s t r a t e g y " 
+ 
+                 n e w _ c o d e   =   " " " 
+ 
+ d e f   r u n ( ) : 
+ 
+         p r i n t ( ' N e w   v e r s i o n   r u n n i n g   i n   i s o l a t e d   n a m e s p a c e ' ) 
+ 
+ " " " 
+ 
+                 
+ 
+                 t r y : 
+ 
+                         s u c c e s s   =   p u r g e r . p u r g e _ a n d _ r e l o a d ( m o d u l e _ n a m e ,   n e w _ c o d e ) 
+ 
+                         
+ 
+                         i f   s u c c e s s : 
+ 
+                                 p r i n t ( " Aï¿½? ï¿½bï¿½xV^gï¿½ï¿½ï¿½WTï¿½ï¿½qluï¿½ï¿½? " ) 
+ 
+                                 
+ 
+                                 #   Ä“gRZ0ï¿½qxï¿½ï¿½m!O
+ 
+                                 s t a t s   =   p u r g e r . g e t _ s t a t i s t i c s ( ) 
+ 
+                                 p r i n t ( f " " " 
+ 
+                                 ï¿½qxá¶“ï¿½0ï¿½a: 
+ 
+                                 = = = = = = = = = = = = = = = = = = = = = = = = 
+ 
+                                 ï¿½ï¿½ï¿½)}"ï¿½&1ï¿½f:   { s t a t s [ ' t o t a l _ r e f e r e n c e s ' ] } 
+ 
+                                 igzO)ï¿½[ï¿½fde:   { s t a t s [ ' m i g r a t e d _ r e f e r e n c e s ' ] } 
+ 
+                                 ZoTï¿½`ï¿½[ï¿½fde:   { s t a t s [ ' c l e a n e d _ r e f e r e n c e s ' ] } 
+ 
+                                 Pï¿½mTï¿½tzï¿½ï¿½P7n:   { s t a t s [ ' m e m o r y _ s a v e d _ m b ' ] : . 2 f }   M B 
+ 
+                                 pï¿½Aii:   { s t a t s [ ' d u r a t i o n _ m s ' ] }   m s 
+ 
+                                 = = = = = = = = = = = = = = = = = = = = = = = = 
+ 
+                                 " " " ) 
+ 
+                         e l s e : 
+ 
+                                 p r i n t ( " Bï¿½? ï¿½bï¿½xV^gÉ…Q0ï¿½t? ) 
+ 
+                                 
+ 
+                 e x c e p t   E x c e p t i o n   a s   e : 
+ 
+                         p r i n t ( f " Bï¿½? Yï¿½ bSeï¿½ï¿½kï¿½ï¿½:   { e } " ) 
+ 
+                         i m p o r t   t r a c e b a c k 
+ 
+                         t r a c e b a c k . p r i n t _ e x c ( ) 
+ 
+ 
+ 
+         m a i n ( ) 
+ 
  
