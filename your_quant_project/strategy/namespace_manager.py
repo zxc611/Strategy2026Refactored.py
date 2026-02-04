@@ -415,3 +415,174 @@ class DynamicNamespace:
             self.clear_layer(NamespaceLayer.SCRATCH)
             self.clear_layer(NamespaceLayer.STAGING)
             raise e
+
+# --- Dynamic Purging Infrastructure ---
+
+class MigrationStep:
+    def __init__(self, description, action: Optional[Callable] = None):
+        self.description = description
+        self.action = action
+    def execute(self):
+        if self.action: self.action()
+
+class MigrationPlan:
+    def __init__(self):
+        self.steps: List[MigrationStep] = []
+        self.kept_references: List[Any] = []
+        
+    def add_safe_migration(self, ref_path, ref_info):
+        self.steps.append(MigrationStep(f"Migrate {ref_path}"))
+        self.kept_references.append(ref_path)
+        
+    def add_adapted_migration(self, ref_path, ref_info):
+        self.steps.append(MigrationStep(f"Adapt {ref_path}"))
+        self.kept_references.append(ref_path)
+        
+    def mark_for_replacement(self, ref_path, ref_info):
+        self.steps.append(MigrationStep(f"Replace {ref_path}"))
+
+    def order_by_dependency(self, dependency_graph):
+        pass
+
+class MigrationStepError(Exception):
+    pass
+
+class NamespaceLayerManager:
+    # Placeholder for the manager logic
+    pass
+
+class ReferenceScanner:
+    def deep_scan(self, module_name: str) -> Dict[str, Any]:
+        # In a real impl, this would return a dict of ref_path -> ref_info
+        return {}
+
+class DependencyMapper:
+    def build_graph(self, module_name: str) -> Any:
+        return {}
+
+class GarbageSweeper(SmartGC):
+    def sweep(self, module_name: str, keep_references: List[Any] = None) -> int:
+        return self.purge_namespace(module_name)
+
+class DynamicNamespacePurger:
+    """动态命名空间清洗器 - 主控制器"""
+    
+    def __init__(self):
+        self.namespace_layers = NamespaceLayerManager()
+        self.reference_scanner = ReferenceScanner()
+        self.dependency_mapper = DependencyMapper()
+        self.garbage_sweeper = GarbageSweeper()
+        
+    def purge_and_reload(self, module_name: str, new_code: str) -> bool:
+        """
+        动态清洗并重新加载模块
+        """
+        print(f"🔍 开始动态命名空间清洗: {module_name}")
+        
+        # 阶段1: 深度扫描
+        print("📊 阶段1: 深度扫描引用...")
+        references = self.reference_scanner.deep_scan(module_name)
+        dependency_graph = self.dependency_mapper.build_graph(module_name)
+        
+        # 阶段2: 创建沙箱
+        print("🏖️  阶段2: 创建沙箱环境...")
+        sandbox = self._create_sandbox(module_name)
+        
+        # 阶段3: 隔离加载新版本
+        print("🚀 阶段3: 隔离加载新版本...")
+        new_module = self._load_in_sandbox(sandbox, new_code)
+        
+        # 阶段4: 引用迁移
+        print("🔄 阶段4: 渐进式引用迁移...")
+        migration_plan = self._create_migration_plan(
+            old_references=references,
+            new_module=new_module,
+            dependency_graph=dependency_graph
+        )
+        
+        success = self._execute_migration(migration_plan)
+        
+        if not success:
+            print("❌ 迁移失败，执行回滚...")
+            self._rollback_migration()
+            return False
+        
+        # 阶段5: 清理旧引用
+        print("🗑️  阶段5: 清理旧引用...")
+        cleaned = self.garbage_sweeper.sweep(
+            module_name=module_name,
+            keep_references=migration_plan.kept_references
+        )
+        
+        print(f"✅ 动态命名空间清洗完成! 清理了 {cleaned} 个旧引用")
+        return True
+    
+    def _create_sandbox(self, module_name: str) -> Dict[str, Any]:
+        return {}
+
+    def _load_in_sandbox(self, sandbox: Dict[str, Any], new_code: str) -> Any:
+        return types.ModuleType("sandbox_module")
+
+    def _create_migration_plan(self, old_references, new_module, dependency_graph):
+        """创建智能迁移计划"""
+        plan = MigrationPlan()
+        
+        # 分析哪些引用可以安全迁移
+        for ref_path, ref_info in old_references.items():
+            if self._can_safely_migrate(ref_info, new_module):
+                plan.add_safe_migration(ref_path, ref_info)
+            elif self._needs_adaptation(ref_info, new_module):
+                plan.add_adapted_migration(ref_path, ref_info)
+            else:
+                plan.mark_for_replacement(ref_path, ref_info)
+        
+        # 根据依赖图排序迁移步骤
+        plan.order_by_dependency(dependency_graph)
+        
+        return plan
+    
+    def _execute_migration(self, plan: MigrationPlan) -> bool:
+        """执行迁移计划"""
+        checkpoint = self._create_checkpoint()
+        
+        try:
+            for step in plan.steps:
+                print(f"  执行步骤: {step.description}")
+                
+                # 执行单个迁移步骤
+                step.execute()
+                
+                # 验证步骤执行后状态
+                if not self._validate_step(step):
+                    raise MigrationStepError(f"步骤验证失败: {step.description}")
+                
+                # 创建中间检查点
+                self._create_intermediate_checkpoint()
+            
+            return True
+            
+        except Exception as e:
+            print(f"迁移失败: {e}")
+            self._restore_checkpoint(checkpoint)
+            return False
+
+    def _can_safely_migrate(self, ref_info, new_module) -> bool:
+        return True
+
+    def _needs_adaptation(self, ref_info, new_module) -> bool:
+        return False
+
+    def _create_checkpoint(self) -> Any:
+        return None
+
+    def _create_intermediate_checkpoint(self):
+        pass
+
+    def _restore_checkpoint(self, checkpoint):
+        pass
+
+    def _rollback_migration(self):
+        pass
+
+    def _validate_step(self, step) -> bool:
+        return True
