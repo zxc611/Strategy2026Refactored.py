@@ -250,11 +250,35 @@ class PlatformCompatMixin:
 
     def pause_strategy(self) -> None:
         self.my_is_paused = True
-        self.output("Strategy Paused")
+        # [Fix] Use thread-safe print instead of UI-bound output
+        print(">>> [Compat] Strategy Paused (Thread-Safe)")
+        
+        # [SafePause] Send UI update request securely
+        if hasattr(self, "_ui_queue") and self._ui_queue:
+            try:
+                self._ui_queue.put({"action": "pause_status", "paused": True})
+            except: pass
+
+    # [SafePause] Explicit alias for Manager compliance
+    def safe_pause(self) -> bool:
+        """安全暂停接口，返回是否成功"""
+        try:
+            self.pause_strategy()
+            return True
+        except Exception as e:
+            print(f"Safe Pause Failed: {e}")
+            return False
 
     def resume_strategy(self) -> None:
         self.my_is_paused = False
-        self.output("Strategy Resumed")
+        # [Fix] Use thread-safe print instead of UI-bound output
+        print(">>> [Compat] Strategy Resumed (Thread-Safe)")
+        
+        # [SafePause] Send UI update request securely
+        if hasattr(self, "_ui_queue") and self._ui_queue:
+            try:
+                self._ui_queue.put({"action": "pause_status", "paused": False})
+            except: pass
 
     def on_pause(self, *args: Any) -> None:
         self.pause_strategy()

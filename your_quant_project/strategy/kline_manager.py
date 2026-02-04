@@ -787,6 +787,8 @@ class KlineManagerMixin:
                         item = pending_items.pop(0)
                         fut = executor.submit(_fetch_single_instrument, item)
                         futures_map[fut] = item
+                        # [Optimization] Throttle requests to avoid 3116/429 errors (Flow Control)
+                        time.sleep(0.02)
 
                     if not futures_map:
                         break

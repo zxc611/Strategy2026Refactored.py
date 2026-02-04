@@ -4,8 +4,18 @@ import json
 import os
 import time
 import threading
+import queue  # [SafePause] Thread-safe UI communication
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from .safe_pause_manager import SafePauseManager
+except ImportError:
+    # Try absolute import or ignore if setup incorrect
+    try:
+        from your_quant_project.strategy.safe_pause_manager import SafePauseManager
+    except:
+        SafePauseManager = None
 
 class UIMixin:
     """Strategy UI Mixin. Contains all Tkinter based UI logic."""
@@ -29,6 +39,22 @@ class UIMixin:
 
     def _start_output_mode_ui(self) -> None:
         """启动简易输出模式界面（调试/交易按钮）"""
+        
+        # [SafePause] 0. Always Init Queue First
+        if not hasattr(self, "_ui_queue"):
+            self._ui_queue = queue.Queue()
+
+        # [SafePause] Initialize Manager
+        if not hasattr(self, "safe_pause_manager"):
+            if SafePauseManager:
+                 try:
+                     self.safe_pause_manager = SafePauseManager(parent_ui=None) # We pass None as UI is not ready yet
+                     # Identify self as the strategy logic provider if needed
+                     # self.safe_pause_manager.set_strategy(self) 
+                     self.output("[SafePause] Manager Initialized.", force=True)
+                 except Exception as e:
+                     self.output(f"[SafePause] Manager Init Failed: {e}", force=True)
+
         try:
             import tkinter as tk
         except Exception:
@@ -37,37 +63,18 @@ class UIMixin:
 
         cls = self.__class__
 
-        # 遗留窗口自检
+        # [Safety] Force cleanup of any legacy global root to ensure fresh thread binding
+        # Reusing old roots is dangerous as they are bound to old queues/threads.
         try:
-            existing_root = getattr(cls, "_ui_global_root", None)
-            if existing_root:
-                try:
-                    if existing_root.winfo_exists():
-                        self._ui_root = existing_root
-                        self._schedule_bring_output_mode_ui_front()
-                        setattr(cls, "_ui_global_running", True)
-                        setattr(cls, "_ui_global_creating", False)
-                        self.output("检测到遗留输出界面，已复用并置前", force=True)
-                        return
-                except Exception:
-                    pass
-                setattr(cls, "_ui_global_root", None)
-                setattr(cls, "_ui_global_running", False)
-                setattr(cls, "_ui_global_creating", False)
-        except Exception:
-            pass
-
-        # 进程内单例保护
-        try:
-            if getattr(cls, "_ui_global_running", False) or getattr(cls, "_ui_global_creating", False):
-                try:
-                    if not getattr(self, "_ui_root", None):
-                        self._ui_root = getattr(cls, "_ui_global_root", None)
-                    self._schedule_bring_output_mode_ui_front()
-                except Exception:
-                    pass
-                self.output("输出模式界面已在运行（全局），已聚焦现有窗口", force=True)
-                return
+            old_root = getattr(cls, "_ui_global_root", None)
+            if old_root:
+                 try: 
+                     self.output("清理遗留 UI 窗口...", force=True)
+                     old_root.destroy()
+                 except: pass
+                 setattr(cls, "_ui_global_root", None)
+                 setattr(cls, "_ui_global_running", False)
+                 setattr(cls, "_ui_global_creating", False)
         except Exception:
             pass
 
@@ -86,6 +93,68 @@ class UIMixin:
         def _ui_thread():
             try:
                 root = tk.Tk()
+                
+                # [SafePause] 2. Queue Consumer (Runs in UI Thread)
+                def _process_queue():
+                    should_continue = True
+                    try:
+                        while not self._ui_queue.empty():
+                            msg = self._ui_queue.get_nowait()
+                            action = msg.get("action")
+                            
+                            # Handle messages
+                            if action == "pause_status":
+                                is_paused = msg.get("paused")
+                                if is_paused:
+                                    try: 
+                                        root.title("输出模式控制 - [已暂停]")
+                                        root.configure(bg="#f0f0f0") # Visual cue
+                                    except: pass
+                                else:
+                                    try: 
+                                        root.title("输出模式控制")
+                                        root.configure(bg="SystemButtonFace")
+                                    except: pass
+                                    
+                            elif action == "refresh_style":
+                                try: self._refresh_output_mode_ui_styles()
+                                except: pass
+                                
+                            elif action == "bring_front":
+                                try:
+                                    root.deiconify()
+                                    root.lift()
+                                    root.focus_force()
+                                except: pass
+                            
+                            elif action == "destroy":
+                                try:
+                                    root.destroy()
+                                    should_continue = False
+                                    self._ui_running = False
+                                    setattr(cls, "_ui_global_running", False)
+                                except: pass
+
+                            elif action == "log":
+                                # Placeholder for safe logging
+                                msg_txt = msg.get("text")
+                                # print(f"[UI Safe Log] {msg_txt}")
+                    except queue.Empty:
+                        pass
+                    except Exception as e:
+                        # Prevent loop crash on one bad message
+                        pass
+                        
+                    finally:
+                        # Schedule next check (100ms) only if still running
+                        if should_continue and getattr(self, "_ui_running", False):
+                            try:
+                                root.after(100, _process_queue)
+                            except: pass # Catch destroy race
+                
+                # Start polling
+                root.after(100, _process_queue)
+
                 root.title("输出模式控制")
                 try:
                     w = int(getattr(self.params, "ui_window_width", 320) or 320)
@@ -117,6 +186,31 @@ class UIMixin:
                 btn_auto.pack(side="left", expand=True, fill="x", padx=(0, 6))
                 btn_manual.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
+                # [SafePause] Pause Button
+                pause_frame = tk.Frame(root)
+                pause_frame.pack(fill="x", padx=12, pady=(5, 8))
+                
+                def _do_safe_pause():
+                    try:
+                        self.output(">>> [UI] 用户点击安全暂停...", force=True)
+                        if hasattr(self, "safe_pause_manager") and self.safe_pause_manager:
+                             # Call safe pause
+                             self.safe_pause_manager.safe_pause()
+                             
+                             # Visual feedback
+                             try:
+                                 btn_safe_pause.config(text="正在暂停...", state="disabled")
+                                 root.after(2000, lambda: btn_safe_pause.config(text="⚠️ 安全暂停 (Safe Pause)", state="normal"))
+                             except: pass
+                        else:
+                             self.output("!!! 错误: 安全暂停管理器未初始化", force=True)
+                    except Exception as e:
+                        self.output(f"安全暂停触发失败: {e}", force=True)
+
+                btn_safe_pause = tk.Button(pause_frame, text="⚠️ 安全暂停 (Safe Pause)", width=24, bg="#ffebee", fg="#c62828")
+                btn_safe_pause.config(command=_do_safe_pause)
+                btn_safe_pause.pack(fill="x")
+
                 btn_daily = tk.Button(root, text="日结输出 (15:01)", width=24)
                 btn_daily.pack(fill="x", padx=12, pady=(0, 8))
 
@@ -143,7 +237,6 @@ class UIMixin:
                         pass
                     self._apply_param_overrides_for_debug()
                     self.set_output_mode("debug")
-                    self._refresh_output_mode_ui_styles()
 
                 def _to_close_debug():
                     try:
@@ -158,7 +251,6 @@ class UIMixin:
                             pass
                         self._apply_param_overrides_for_debug()
                         self.set_output_mode("debug") 
-                        self._refresh_output_mode_ui_styles()
                     except Exception as e:
                         try:
                             self.output(f"收市调试切换失败: {e}", force=True)
@@ -176,7 +268,6 @@ class UIMixin:
                     except Exception:
                         pass
                     self.set_output_mode("trade")
-                    self._refresh_output_mode_ui_styles()
 
                 def _to_backtest_mode():
                     try:
@@ -188,15 +279,17 @@ class UIMixin:
                         self._enforce_diagnostic_silence()
                     except Exception:
                         pass
-                    self._refresh_output_mode_ui_styles()
+                    # Usually backtest mode change needs refresh too
+                    try:
+                        if hasattr(self, "_ui_queue"):
+                            self._ui_queue.put({"action": "refresh_style"})
+                    except: pass
 
                 def _to_auto_trading():
                     self.set_auto_trading_mode(True)
-                    self._refresh_output_mode_ui_styles()
 
                 def _to_manual_trading():
                     self.set_auto_trading_mode(False)
-                    self._refresh_output_mode_ui_styles()
 
                 def _daily_summary():
                     try:
@@ -307,23 +400,9 @@ class UIMixin:
 
     def _schedule_bring_output_mode_ui_front(self) -> None:
         try:
-            root = None
-            try:
-                root = getattr(self, "_ui_root", None) or getattr(self.__class__, "_ui_global_root", None)
-            except Exception:
-                root = getattr(self, "_ui_root", None)
-            if root:
-                try:
-                    def _bring():
-                        try:
-                            root.deiconify()
-                            root.lift()
-                            root.focus_force()
-                        except Exception:
-                            pass
-                    root.after(0, _bring)
-                except Exception:
-                    pass
+            # [SafePause] Use Queue
+            if hasattr(self, "_ui_queue"):
+                self._ui_queue.put({"action": "bring_front"})
         except Exception:
             pass
 
@@ -376,8 +455,9 @@ class UIMixin:
             
     def _schedule_output_mode_ui_refresh(self) -> None:
         try:
-            if hasattr(self, "_ui_root") and self._ui_root:
-                 self._ui_root.after(0, self._refresh_output_mode_ui_styles)
+             # [SafePause] Use Queue
+            if hasattr(self, "_ui_queue"):
+                self._ui_queue.put({"action": "refresh_style"})
         except Exception:
             pass
 

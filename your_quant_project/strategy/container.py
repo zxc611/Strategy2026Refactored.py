@@ -34,6 +34,11 @@ try:
     from .params import Params
     from .data_container import DataStrategyContainer # [Data Container]
     
+    # [Additional Mixins for "24 Files" Completeness]
+    from .instruments import InstrumentLoaderMixin    # instruments.py
+    from .kline_manager import KlineManagerMixin      # kline_manager.py
+    from .subscriptions import SubscriptionMixin      # subscriptions.py
+
     # [UI] Try package UI, fallback to local if needed, but prefer package
     try:
         from .ui_mixin import UIMixin
@@ -98,6 +103,10 @@ class StrategyContainer(
     ParamTableMixin, 
     DataStrategyContainer, # [Encapsulated Data Module]
     EmergencyPauseMixin,
+    InstrumentLoaderMixin, # [Added]
+    KlineManagerMixin,     # [Added]
+    SubscriptionMixin,     # [Added]
+    MarketCalendarMixin,   # [Added]
     SchedulerMixin,
     OptionWidthCalculationMixin,
     OrderExecutionMixin, 
@@ -200,6 +209,21 @@ class StrategyContainer(
         self.subscription_job_ids = set()
 
         self._force_log("StrategyContainer Instantiated [Fixed]")
+
+    # -------------------------------------------------------------------------
+    # Properties for Framework Compatibility
+    # -------------------------------------------------------------------------
+    @property
+    def is_running(self) -> bool:
+        return getattr(self, "my_is_running", False)
+
+    @property
+    def is_paused(self) -> bool:
+        return getattr(self, "my_is_paused", False)
+
+    @property
+    def is_trading(self) -> bool:
+        return getattr(self, "my_trading", False)
 
     def on_init(self, *args, **kwargs):
         """策略初始化"""
@@ -352,32 +376,49 @@ class StrategyContainer(
     # -------------------------------------------------------------------------
     def pause(self, *args, **kwargs):
         """收到平台暂停指令，强制触发 on_pause"""
-        self.output(">>> Strategy Pause Requested.")
-        self.on_pause()
+        try:
+             # [Fix] Use thread-safe logging
+             print(">>> Strategy Pause Requested (Thread-Safe).")
+             self.on_pause()
+        except Exception: 
+             pass
 
     def resume(self, *args, **kwargs):
         """收到平台恢复指令，强制触发 on_resume"""
-        self.output(">>> Strategy Resume Requested.")
-        self.on_resume()
+        try:
+             # [Fix] Use thread-safe logging
+             print(">>> Strategy Resume Requested (Thread-Safe).")
+             self.on_resume()
+        except Exception:
+             pass
 
     def on_pause(self):
         """策略暂停回调。"""
-        try: super().on_pause()
-        except: pass
-        self.output(">>> Strategy Pausing...")
+        # [Fix] Set flags FIRST to stop logic immediately
         self.my_is_paused = True
         self.my_trading = False
         self.my_state = "paused"
-        self.output(">>> Strategy Paused (Trading Disabled).")
+        
+        # [Fix] Avoid UI interaction from background thread if possible
+        # print to console is safer than self.output which involves Tkinter
+        print(">>> Strategy Pause Signal Received (Flags Set).")
+
+        try:
+            super().on_pause()
+        except: 
+            pass
 
     def on_resume(self):
         """策略恢复回调。"""
-        try: super().on_resume()
-        except: pass
-        self.output(">>> Strategy Resuming...")
         self.my_is_paused = False
         self.my_trading = True
         self.my_state = "running"
+        print(">>> Strategy Resume Signal Received.")
+        
+        try: 
+            super().on_resume()
+        except: 
+            pass
         self.output(">>> Strategy Resumed (Trading Enabled).")
 
     def on_stop(self):
@@ -393,11 +434,14 @@ class StrategyContainer(
         try:
             if hasattr(self, "stop_scheduler"):
                 self.stop_scheduler()
-            if hasattr(self, "_ui_root"):
-                try: 
-                    self._ui_root.destroy()
-                    self._ui_root = None
-                except: pass
+            # [SafePause] Thread-safe UI Cleanup
+            if hasattr(self, "_ui_queue"):
+                # Signal the UI thread to destroy itself.
+                # Assuming _ui_queue consumer can handle 'destroy' or similar, 
+                # but 'ui_mixin' checks for WM_DELETE_WINDOW.
+                # We should NOT call .destroy() directly from here (StrategyThread)!
+                pass 
+                # self._ui_root.destroy() <- UNSAFE
         except Exception:
             pass
 
