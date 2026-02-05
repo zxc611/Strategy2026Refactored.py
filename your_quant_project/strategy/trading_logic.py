@@ -1,6 +1,9 @@
 """交易逻辑与信号处理（依照 Strategy20260105_3.py 重构）。"""
 from __future__ import annotations
 
+import threading 
+import time
+import traceback
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any, Set
 
@@ -8,6 +11,9 @@ class TradingLogicMixin:
 
     def _init_trading_logic(self) -> None:
         """初始化交易逻辑运行所需状态。"""
+        # [Fix] Add lock for run_trading_cycle to prevent overlapping
+        self._trading_cycle_lock = threading.Lock()
+
         try:
             if not hasattr(self, "latest_ticks") or self.latest_ticks is None:
                 self.latest_ticks = {}
@@ -90,13 +96,23 @@ class TradingLogicMixin:
 
     def run_trading_cycle(self) -> None:
         """主交易循环：计算 -> 信号 -> 执行"""
+        # [Fix] Use lock to ensure only one cycle runs at a time (even if thread spawned)
+        if not hasattr(self, "_trading_cycle_lock"):
+             self._trading_cycle_lock = threading.Lock()
+
+        # Non-blocking lock check - if locked, skip this cycle
+        if not self._trading_cycle_lock.acquire(blocking=False):
+             self.output("[Cycle] Previous cycle still running, skipping this trigger.")
+             return
+
         try:
             # [Fix Scenario 3] Pause Check
             if self.is_paused or not self.is_running: return
 
-            # [Fix] Check Overdue Positions (Overnight > 3 days)
-            if hasattr(self, "position_manager") and self.position_manager:
-                 self.position_manager.check_and_close_overdue_positions(days_limit=3)
+            # [Optimized] Moved check_and_close_overdue_positions to separate independent job
+            # to prevent it from being blocked by heavy calculation or vice-versa.
+            # if hasattr(self, "position_manager") and self.position_manager:
+            #      self.position_manager.check_and_close_overdue_positions(days_limit=3)
 
             # 1. 计算所有宽度
             if self.is_paused or not self.is_running: return
@@ -116,6 +132,8 @@ class TradingLogicMixin:
 
         except Exception as e:
             self.output(f"交易循环执行异常: {e}")
+        finally:
+            self._trading_cycle_lock.release()
 
     def execute_signals_optimized(self, signals: List[Dict[str, Any]]) -> None:
         """执行优化后的信号列表（含时效性检查与签名去重）"""

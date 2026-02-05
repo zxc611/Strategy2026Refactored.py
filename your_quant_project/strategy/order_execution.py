@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import collections
 import threading
+import time
 import json
 import os
 from datetime import datetime
@@ -43,53 +44,59 @@ class OrderExecutionMixin:
     def register_open_chase(self, instrument_id: str, exchange: str, direction: str, 
                           ids: List[Union[str, int]], target_volume: int, price: float) -> None:
         """注册开仓追单任务"""
-        if not hasattr(self, "open_chase_tasks"):
-            self.open_chase_tasks = {}
-            
-        task_key = f"OPEN_{instrument_id}_{datetime.now().timestamp()}"
-        current_oid = None
-        if ids and len(ids) > 0:
-            try:
-                current_oid = int(ids[0])
-            except:
-                current_oid = ids[0] 
+        if not hasattr(self, "_lock"): self._lock = threading.RLock()
         
-        self.open_chase_tasks[task_key] = {
-            "instrument_id": instrument_id,
-            "exchange": exchange,
-            "direction": direction,
-            "target_volume": target_volume,
-            "traded_volume": 0,
-            "current_order_id": current_oid,
-            "current_order_price": price,
-            "current_order_status": "Unknown",
-            "retry_count": 0,
-            "max_retries": getattr(self.params, "close_max_chase_attempts", 5),
-            "created_at": datetime.now(),
-            "last_update": datetime.now()
-        }
-        if hasattr(self, "output"):
-             self.message_output(f"[开仓追单] 任务注册: {instrument_id} 目标:{target_volume} 初始单:{current_oid}")
+        with self._lock:
+            if not hasattr(self, "open_chase_tasks"):
+                self.open_chase_tasks = {}
+                
+            task_key = f"OPEN_{instrument_id}_{datetime.now().timestamp()}"
+            current_oid = None
+            if ids and len(ids) > 0:
+                try:
+                    current_oid = int(ids[0])
+                except:
+                    current_oid = ids[0] 
+            
+            self.open_chase_tasks[task_key] = {
+                "instrument_id": instrument_id,
+                "exchange": exchange,
+                "direction": direction,
+                "target_volume": target_volume,
+                "traded_volume": 0,
+                "current_order_id": current_oid,
+                "current_order_price": price,
+                "current_order_status": "Unknown",
+                "retry_count": 0,
+                "max_retries": getattr(self.params, "close_max_chase_attempts", 5),
+                "created_at": datetime.now(),
+                "last_update": datetime.now()
+            }
+            if hasattr(self, "output"):
+                 self.message_output(f"[开仓追单] 任务注册: {instrument_id} 目标:{target_volume} 初始单:{current_oid}")
 
     def check_active_chase_tasks(self) -> None:
         """检查并处理当前活跃的追单任务 (Run by Scheduler)"""
         if not hasattr(self, "open_chase_tasks") or not self.open_chase_tasks:
             return
 
-        tasks_to_remove = []
-        
-        # 复制 keys 防止遍历时修改字典
-        for key in list(self.open_chase_tasks.keys()):
-            task = self.open_chase_tasks[key]
-            try:
-                self._process_single_chase_task(key, task, tasks_to_remove)
-            except Exception as e:
-                # self.output(f"[追单] 任务处理异常 {key}: {e}")
-                pass
-                
-        for k in tasks_to_remove:
-            if k in self.open_chase_tasks:
-                del self.open_chase_tasks[k]
+        if not hasattr(self, "_lock"): self._lock = threading.RLock()
+
+        with self._lock:
+            tasks_to_remove = []
+            
+            # 复制 keys 防止遍历时修改字典
+            for key in list(self.open_chase_tasks.keys()):
+                task = self.open_chase_tasks[key]
+                try:
+                    self._process_single_chase_task(key, task, tasks_to_remove)
+                except Exception as e:
+                    # self.output(f"[追单] 任务处理异常 {key}: {e}")
+                    pass
+                    
+            for k in tasks_to_remove:
+                if k in self.open_chase_tasks:
+                    del self.open_chase_tasks[k]
 
     def _process_single_chase_task(self, key: str, task: Dict, tasks_to_remove: List[str]) -> None:
         inst_id = task.get("instrument_id")
@@ -327,6 +334,22 @@ class OrderExecutionMixin:
         try:
             # 状态检查
             if (not getattr(self, "my_is_running", False)) or getattr(self, "my_is_paused", False) or (getattr(self, "my_trading", True) is False) or getattr(self, "my_destroyed", False):
+                try:
+                    if not hasattr(self, "_order_block_log_ts"):
+                        self._order_block_log_ts = {}
+                    key = ("send_order_safe", remark, instrument_info.get("InstrumentID", ""))
+                    now_ts = time.time()
+                    last_ts = self._order_block_log_ts.get(key, 0)
+                    if now_ts - last_ts >= 5:
+                        self._order_block_log_ts[key] = now_ts
+                        if hasattr(self, "output"):
+                            self.output(
+                                f"[下单拦截] 状态阻止下单 {remark} {instrument_info.get('InstrumentID','')} "
+                                f"running={getattr(self, 'my_is_running', False)} paused={getattr(self, 'my_is_paused', False)} "
+                                f"trading={getattr(self, 'my_trading', True)} destroyed={getattr(self, 'my_destroyed', False)}"
+                            )
+                except Exception:
+                    pass
                 return None
 
             exchange = instrument_info.get("ExchangeID")
@@ -360,7 +383,18 @@ class OrderExecutionMixin:
                         order_price = getattr(tick, "LastPrice", 0) or getattr(tick, "last_price", 0) or getattr(tick, "last", 0)
             
             if order_price <= 0:
-                 if hasattr(self, "output"): self.output(f"下单失败：无法获取有效价格 {instrument_id}")
+                 try:
+                     if not hasattr(self, "_order_fail_log_ts"):
+                         self._order_fail_log_ts = {}
+                     key = ("price_invalid", remark, instrument_id)
+                     now_ts = time.time()
+                     last_ts = self._order_fail_log_ts.get(key, 0)
+                     if now_ts - last_ts >= 5:
+                         self._order_fail_log_ts[key] = now_ts
+                         if hasattr(self, "output"):
+                             self.output(f"下单失败：无法获取有效价格 {instrument_id}")
+                 except Exception:
+                     pass
                  return None
 
             # 映射 API 参数
@@ -373,8 +407,8 @@ class OrderExecutionMixin:
             # 如果是 refactored 结构，self 可能是 Mixin，需要调用 self.place_order (由 BaseStrategy 或 Mixin 组合提供)
             
             ret_id = None
-            if hasattr(self, "place_order"):
-                ret_id = self.place_order(
+            if hasattr(self, "_place_order_raw"):
+                ret_id = self._place_order_raw(
                     exchange=exchange,
                     instrument_id=instrument_id,
                     direction=d_arg,
@@ -383,6 +417,21 @@ class OrderExecutionMixin:
                     volume=int(volume),
                     order_price_type="2" # Limit Price
                 )
+            else:
+                try:
+                    super_place = getattr(super(), "place_order", None)
+                    if callable(super_place):
+                        ret_id = super_place(
+                            exchange=exchange,
+                            instrument_id=instrument_id,
+                            direction=d_arg,
+                            offset_flag=o_arg,
+                            price=float(order_price),
+                            volume=int(volume),
+                            order_price_type="2"
+                        )
+                except Exception:
+                    pass
             
             # Mock Execution Support (In place_order logic usually, but checks here too)
             # If place_order returns ID, log it
@@ -391,15 +440,25 @@ class OrderExecutionMixin:
                     self.output(f"[下单成功] {remark} ID:{ret_id} {instrument_id} {direction} {volume}@{order_price}")
                 return ret_id
             else:
-                if hasattr(self, "output"):
-                     self.output(f"[下单失败] {remark} {instrument_id}")
+                try:
+                    if not hasattr(self, "_order_fail_log_ts"):
+                        self._order_fail_log_ts = {}
+                    key = ("order_fail", remark, instrument_id)
+                    now_ts = time.time()
+                    last_ts = self._order_fail_log_ts.get(key, 0)
+                    if now_ts - last_ts >= 5:
+                        self._order_fail_log_ts[key] = now_ts
+                        if hasattr(self, "output"):
+                             self.output(f"[下单失败] {remark} {instrument_id}")
+                except Exception:
+                    pass
                 return None
 
         except Exception as e:
             if hasattr(self, "output"): self.output(f"下单接口异常: {e}")
             return None
 
-    def place_order(
+    def _place_order_raw(
         self,
         exchange: str,
         instrument_id: str,
@@ -409,8 +468,8 @@ class OrderExecutionMixin:
         volume: int,
         order_price_type: str = "2",
         **kwargs
-    ) -> Optional[int]:
-        """发单函数（适配 PythonGO 原生接口 & 模拟调试拦截）"""
+    ) -> Optional[Union[str, int]]:
+        """底层发单函数（尽量调用真实交易API，不做状态/价格校验）"""
         
         # 1. 模拟拦截 (Mock Execution for Debug)
         # 即使在重构版，如果开启了 DEBUG_ENABLE_MOCK_EXECUTION 或 output_mode=debug 且无真实API连接
@@ -431,57 +490,84 @@ class OrderExecutionMixin:
         # PythonGO standard is insert_order or buy/sell helpers.
         
         try:
-             # Try standardized insert_order if available (Platform API)
-             if hasattr(super(), "insert_order"):
-                 # Construct OrderReq
-                 pass
-             
-             # Try buy/sell helpers if BaseStrategy provides them
-             # Direction 0=Buy, 1=Sell; Offset 0=Open, 1=Close
-             if direction == "0": # Buy
-                 if offset_flag == "0": # Open
-                      if hasattr(super(), "buy"): return super().buy(exchange, instrument_id, price, volume)
-                 else: # Close
-                      if hasattr(super(), "sell"): return super().sell(exchange, instrument_id, price, volume) # ? Buy Close? usually sell close 
-                      # Wait, Buy Close (Cover) is buying to close short.
-                      # PythonGO usually: buy(price, vol, offset)
-             
-             # Fallback: use generic method provided by older Strategy class if exists
-             # But here we are Refactored.
-             # Let's assume the platform injects `buy`, `sell`, `short`, `cover` OR `insert_order`.
-             # Most generic:
-             if hasattr(self, "api") and hasattr(self.api, "insert_order"):
-                 pass # Use API directly
-             
-             # If inherited from pythongo.base.BaseStrategy:
-             # It usually has send_order(self, exchange, instrument_id, price, volume, direction, offset)
-             # Let's try calling super().send_order or similar.
-             
-             # For now, let's assume valid API call is super().send_order or we log missing API.
-             # Inspecting _3.py: It uses self.buy / self.sell wrappers likely?
-             # No, _3.py definition of place_order (Line 5362) logic is:
-             # self.req_order_insert(...)
-             
-             if hasattr(self, "req_order_insert"):
-                 # Construct request
-                 req = {
-                     "InstrumentID": instrument_id,
-                     "ExchangeID": exchange,
-                     "Price": price,
-                     "Volume": volume,
-                     "Direction": direction,
-                     "OffsetFlag": offset_flag,
-                     "OrderPriceType": order_price_type
-                 }
-                 return self.req_order_insert(req)
-                 
-             # Fallback to output
-             if hasattr(self, "output"):
-                 self.output(f"[MOCK/DEV] 真实API未连接，调用 place_order({instrument_id}, {direction}, {offset_flag}, {volume}@{price})")
-             return 0 # Fail
+            def _normalize_order_id(ret: Any) -> Optional[Union[str, int]]:
+                if ret is None:
+                    return None
+                if isinstance(ret, dict):
+                    return ret.get("order_id") or ret.get("OrderID") or ret.get("order_sys_id") or ret.get("order_sys_id")
+                return ret
+
+            # Try BaseStrategy.send_order (preferred on platform)
+            super_send = getattr(super(), "send_order", None)
+            if callable(super_send):
+                d_map = {"0": "Buy", "1": "Sell", "buy": "Buy", "sell": "Sell"}
+                o_map = {
+                    "0": "Open",
+                    "1": "Close",
+                    "3": "CloseToday",
+                    "4": "CloseYesterday",
+                    "open": "Open",
+                    "close": "Close",
+                    "close_today": "CloseToday",
+                    "close_yesterday": "CloseYesterday",
+                }
+                d_arg = d_map.get(str(direction).lower(), "Buy")
+                o_arg = o_map.get(str(offset_flag).lower(), "Close")
+                ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, offset_flag=o_arg, order_price_type=order_price_type)
+                norm = _normalize_order_id(ret)
+                if norm is not None:
+                    return norm
+
+            # Try req_order_insert if available
+            if hasattr(self, "req_order_insert"):
+                req = {
+                    "InstrumentID": instrument_id,
+                    "ExchangeID": exchange,
+                    "Price": price,
+                    "Volume": volume,
+                    "Direction": direction,
+                    "OffsetFlag": offset_flag,
+                    "OrderPriceType": order_price_type
+                }
+                return _normalize_order_id(self.req_order_insert(req))
+
+            # Try buy/sell helpers if BaseStrategy provides them
+            if str(direction) in ["0", "buy"]:
+                if str(offset_flag) in ["0", "open"]:
+                    super_buy = getattr(super(), "buy", None)
+                    if callable(super_buy):
+                        return _normalize_order_id(super_buy(exchange, instrument_id, price, volume))
+                else:
+                    super_sell = getattr(super(), "sell", None)
+                    if callable(super_sell):
+                        return _normalize_order_id(super_sell(exchange, instrument_id, price, volume))
+            else:
+                super_sell = getattr(super(), "sell", None)
+                if callable(super_sell):
+                    return _normalize_order_id(super_sell(exchange, instrument_id, price, volume))
+
+            # Try API direct
+            api = getattr(self, "api", None)
+            if api and hasattr(api, "insert_order"):
+                req = {
+                    "InstrumentID": instrument_id,
+                    "ExchangeID": exchange,
+                    "Price": price,
+                    "Volume": volume,
+                    "Direction": direction,
+                    "OffsetFlag": offset_flag,
+                    "OrderPriceType": order_price_type
+                }
+                return _normalize_order_id(api.insert_order(req))
+
+            # Fallback to output
+            if hasattr(self, "output"):
+                self.output(f"[MOCK/DEV] 真实API未连接，调用 place_order({instrument_id}, {direction}, {offset_flag}, {volume}@{price})")
+            return None
 
         except Exception as e:
-            if hasattr(self, "output"): self.output(f"place_order调用失败: {e}")
+            if hasattr(self, "output"):
+                self.output(f"place_order调用失败: {e}")
             return None
 
 
@@ -871,7 +957,8 @@ class OrderExecutionMixin:
              self.output(f"自动交易模式已{'开启' if enabled else '关闭'}")
         # Sync to params if needed
         if hasattr(self, "params"):
-             setattr(self.params, "auto_trading", enabled)
+               setattr(self.params, "auto_trading", enabled)
+               setattr(self.params, "auto_trading_enabled", enabled)
 
     def record_trade_event(self, event_type: str, details: str) -> None:
         """记录交易事件"""

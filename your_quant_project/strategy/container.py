@@ -5,9 +5,11 @@ Encapsulates the core Strategy2026Refactored class and its initialization to pre
 import sys
 import os
 import types
+import time
 import threading
 import collections
 import traceback
+import logging
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -118,10 +120,10 @@ class StrategyContainer(
     ParamTableMixin, 
     DataStrategyContainer, # [Encapsulated Data Module]
     EmergencyPauseMixin,
-    InstrumentLoaderMixin, # [Added]
-    KlineManagerMixin,     # [Added]
-    SubscriptionMixin,     # [Added]
-    MarketCalendarMixin,   # [Added]
+    MarketCalendarMixin,   # [Ordered to match DataStrategyContainer]
+    InstrumentLoaderMixin, # [Ordered to match DataStrategyContainer]
+    KlineManagerMixin,     # [Ordered to match DataStrategyContainer]
+    SubscriptionMixin,     # [Ordered to match DataStrategyContainer]
     SchedulerMixin,
     OptionWidthCalculationMixin,
     OrderExecutionMixin, 
@@ -136,6 +138,28 @@ class StrategyContainer(
     Params = Params
 
     def __init__(self, *args, **kwargs):
+        # [User Request] Log Encoding Fix
+        try:
+            self.use_file_logging = True
+            log_dir = os.path.dirname(os.path.abspath(__file__))
+            self.log_file = os.path.join(log_dir, "StrategyRun.log")
+            
+            if self.use_file_logging:
+                self.logger = logging.getLogger('StrategyLogger')
+                self.logger.setLevel(logging.INFO)
+                
+                # Prevent adding multiple handlers on reload
+                if not self.logger.handlers:
+                    # handler = logging.FileHandler(self.log_file) # OLD
+                    handler = logging.FileHandler(self.log_file, encoding='utf-8')
+                    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                    handler.setFormatter(formatter)
+                    self.logger.addHandler(handler)
+                
+                self.logger.info("StrategyLogger initialized with UTF-8 encoding.")
+        except Exception as e:
+            print(f"Log init failed: {e}")
+
         # [Core] Thread Safety
         self.data_lock = threading.RLock()
         
@@ -156,7 +180,10 @@ class StrategyContainer(
         self.option_width_results = collections.defaultdict(dict)
         self.zero_price_logged = set()
         self.kline_outdated_logged = set()
-        self.scheduler_handle = None 
+        self.scheduler_handle = None
+        
+        # [Fix] Ensure scheduler attribute exists even if init fails later
+        self.scheduler = None
 
         # [Lifecycle] Base Init
         try:
@@ -240,6 +267,26 @@ class StrategyContainer(
     def is_trading(self) -> bool:
         return getattr(self, "my_trading", False)
 
+    def output(self, msg, **kwargs):
+        """Unified output: Platform + LogFile (UTF-8)"""
+        try:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.info(str(msg))
+        except: pass
+
+        # [Fix] Push to UI Queue if available (Thread-Safe UI Logging)
+        try:
+            if hasattr(self, "_ui_queue") and self._ui_queue:
+                # Use put_nowait to avoid blocking strategy thread if queue is full
+                # (though queue is infinite by default, good practice)
+                self._ui_queue.put_nowait({"action": "log", "text": str(msg)})
+        except: pass
+
+        try:
+            super().output(msg, **kwargs)
+        except:
+            print(msg)
+
     def on_init(self, *args, **kwargs):
         """策略初始化"""
         try:
@@ -294,6 +341,10 @@ class StrategyContainer(
             self.position_manager = None
             self.output("Warning: PositionManager missing")
 
+        # [Requirement 5 & 6] Output Schedulers Init
+        self.last_width_output_time = 0
+        self._safe_add_periodic_job("width_output_task", self._check_width_ranking_output, interval_seconds=1)
+
         self.output(">>> Initialization Complete.")
 
     def on_start(self):
@@ -342,6 +393,19 @@ class StrategyContainer(
                     if hasattr(self, "load_historical_klines"): 
                         self.load_historical_klines()
                     self.output(">>> [Async] History Loaded.")
+                    
+                    # [Diagnosis] Check Scheduler Status after heavy load
+                    try:
+                        sched_running = getattr(self.scheduler, 'running', 'Unknown')
+                        jobs = len(self.scheduler.get_jobs()) if hasattr(self.scheduler, 'get_jobs') else 'Unknown'
+                        self.output(f">>> [Async] Scheduler Status: Running={sched_running}, Jobs={jobs}")
+                        # Force trigger one cycle to verify
+                        if hasattr(self, "run_trading_cycle"):
+                            self.output(">>> [Async] Force triggering run_trading_cycle...")
+                            self.run_trading_cycle()
+                    except Exception as diag_e:
+                        self.output(f">>> [Async] Diagnosis Error: {diag_e}")
+
             except Exception as e:
                 self.output(f">>> [Async] Startup Error: {e}")
                 traceback.print_exc()
@@ -350,10 +414,21 @@ class StrategyContainer(
 
         # Scheduler
         if hasattr(self, "_safe_add_periodic_job"):
-            self._safe_add_periodic_job("run_trading_cycle", self.run_trading_cycle, interval_seconds=getattr(self.params, "calculation_interval", 3))
-            self._safe_add_periodic_job("check_chase_tasks", self.check_active_chase_tasks, interval_seconds=1)
-            # Source parity: second timer for 14:58/15:58 checks
-            self._safe_add_periodic_job("second_timer", self._on_second_timer, interval_seconds=1)
+            # [FIX] Default execution cycle changed from 3s to 60s per user requirements
+            calc_interval = getattr(self.params, "calculation_interval", 60)
+            # [Fix] Run specific heavy logic async to prevent scheduler master loop blocking
+            self._safe_add_periodic_job("run_trading_cycle", self.run_trading_cycle, interval_seconds=calc_interval, run_async=True)
+            
+            # [Fix] Independent Position Check Job (Uncoupled from Trading Cycle)
+            def _position_check_job():
+                if hasattr(self, "position_manager") and self.position_manager:
+                     self.position_manager.check_and_close_overdue_positions(days_limit=3)
+            self._safe_add_periodic_job("position_check_periodic", _position_check_job, interval_seconds=60, run_async=True)
+
+            # [Fix] Async check chase tasks (Network IO)
+            self._safe_add_periodic_job("check_chase_tasks", self.check_active_chase_tasks, interval_seconds=1, run_async=True)
+            # Source parity: second timer for 14:58/15:58 checks (Time checks are fast, but callbacks might be slow)
+            self._safe_add_periodic_job("second_timer", self._on_second_timer, interval_seconds=1, run_async=True)
 
         self.output(">>> Strategy Started (Async Startup in Progress).")
 
@@ -515,7 +590,15 @@ class StrategyContainer(
         try:
             debug_on = getattr(self.params, "debug_output", True)
             if debug_on:
-                self.output(f"[DEBUG] {msg}")
+                # [User Request] Throttle regular logs to 60s
+                # "Other logs in debug mode should output every 60s"
+                now = time.time()
+                last_t = getattr(self, "_last_debug_log_time", 0)
+                
+                # Allow output during initialization or if 60s passed
+                if getattr(self, "my_state", "") == "initializing" or (now - last_t >= 60):
+                    self.output(f"[DEBUG] {msg}")
+                    self._last_debug_log_time = now
         except Exception:
             try:
                 self.output(msg)
@@ -562,3 +645,67 @@ class StrategyContainer(
     def state(self) -> str: return getattr(self, "my_state", "stopped")
     @state.setter
     def state(self, value: str): self.my_state = value
+
+    # -------------------------------------------------------------------------
+    # [Requirement 5 & 6] Periodic Output Logic
+    # -------------------------------------------------------------------------
+    def _check_width_ranking_output(self):
+        """Timer check for periodic width ranking output"""
+        try:
+            current_time = time.time()
+            
+            # Determine interval based on mode
+            mode = str(getattr(self.params, "output_mode", "debug")).lower()
+            is_debug = mode != "trade"
+            if is_debug:
+                interval = getattr(self.params, "debug_output_interval", 180) # 3 mins
+            else:
+                interval = getattr(self.params, "trade_output_interval", 900) # 15 mins
+            
+            if current_time - self.last_width_output_time >= interval:
+                self._perform_width_output()
+                self.last_width_output_time = current_time
+                
+        except Exception as e:
+            self._force_log(f"Width output check error: {e}")
+
+    def _perform_width_output(self):
+        """Actual logic to output width rankings"""
+        try:
+            if not hasattr(self, "option_width_results"):
+                return
+
+            mode_str = 'DEBUG' if getattr(self.params, 'debug_output', True) else 'TRADE'
+            self.output(f"\n[Periodic] Option Width Ranking Report ({mode_str})")
+            self.output("-" * 60)
+            
+            # Structure: { instrument_id: { 'width_ratio': val, ... } }
+            items = []
+            for instr, res in self.option_width_results.items():
+                if not isinstance(res, dict): continue
+                # Use stored result
+                w = res.get('width_ratio', 999)
+                if w == 999: continue
+                items.append((instr, w, res))
+            
+            # Sort by width ascending
+            items.sort(key=lambda x: x[1])
+            
+            top_n = 10
+            for i, (instr, w, res) in enumerate(items[:top_n]):
+                call_mid = res.get('call_mid', 0)
+                put_mid = res.get('put_mid', 0)
+                self.output(f"Rank #{i+1:02d} {instr}: Width={w:.4f} (C={call_mid:.1f}, P={put_mid:.1f})")
+            
+            # [Requirement 4] Immediate Cleanup of large temporary output list
+            del items
+
+            if len(self.option_width_results) > top_n:
+                self.output(f"... and {len(self.option_width_results)-top_n} more instruments.")
+            elif len(self.option_width_results) == 0:
+                self.output("No valid width data available yet.")
+                
+            self.output("-" * 60 + "\n")
+            
+        except Exception as e:
+            self._force_log(f"Perform width output error: {e}")

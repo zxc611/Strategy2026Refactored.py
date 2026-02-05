@@ -13,6 +13,7 @@ except ImportError:
 
 class Params(BaseParams):
     max_kline: int = Field(default=200, title="K线缓存长度(V17)[CLASS_MATCH]")
+    kline_request_count: int = Field(default=6, title="单次请求K线数量（默认6）")
     kline_style: str = Field(default="M1", title="K线周期")
     subscribe_options: bool = Field(default=True, title="是否订阅期权行情")
     debug_output: bool = Field(default=True, title="是否输出调试信息")
@@ -22,18 +23,29 @@ class Params(BaseParams):
     access_key: str = Field(default="", title="访问密钥 AccessKey（平台提供）")
     access_secret: str = Field(default="", title="访问密钥 AccessSecret（平台提供）")
     run_profile: str = Field(default="full", title="运行预设(full|lite)")
+    history_load_max_workers: int = Field(default=16, title="加载历史K线的最大并发线程数")
     enable_scheduler: bool = Field(default=True, title="是否启用定时任务（回测可关闭）")
     use_tick_kline_generator: bool = Field(default=True, title="是否启用Tick合成K线")
     backtest_tick_mode: bool = Field(default=False, title="回测模式：仅用Tick驱动K线（跳过历史K线拉取）")
     exchange: str = Field(default="CFFEX", title="默认交易所，用于查询合约")
     future_product: str = Field(default="IF", title="期货品种，用于查询合约")
     option_product: str = Field(default="IO", title="期权品种，用于查询合约")
+
+    # [New Requirements 2026-02-04]
+    calculation_interval: int = Field(default=60, title="策略主循环/计算触发间隔(秒) [User Required: 60s]")
+    kline_duration_seconds: int = Field(default=60, title="K线时间范围(秒)，用于拉取限制和计算超时")
+    option_width_threshold: float = Field(default=4.0, title="期权宽度阈值，小于等于此值不交易")
+    debug_output_interval: int = Field(default=180, title="调试状态下宽度排行输出间隔(秒)")
+    trade_output_interval: int = Field(default=900, title="交易状态下宽度排行输出间隔(秒)")
+    # Note: User request wording for 8 seemed swapped, assuming logical mapping:
+    # "K线时间长度" -> kline_duration_seconds (default 60s)
+    # "期权宽度阀值" -> option_width_threshold (default 4)
     auto_load_history: bool = Field(default=True, title="启动后自动加载历史K线")
     load_history_options: bool = Field(default=True, title="加载历史K线时是否包含期权")
-    load_all_products: bool = Field(default=True, title="是否加载全部品种（忽略产品过滤）")
+    load_all_products: bool = Field(default=False, title="是否加载全部品种（忽略产品过滤）")
     exchanges: str = Field(default="CFFEX,SHFE,DCE,CZCE", title="交易所列表（逗号分隔）")
-    future_products: str = Field(default="IF,IH,IM,CU,AL,ZN,RB,AU,AG,M,Y,A,J,JM,I,CF,SR,MA,TA", title="期货品种列表（逗号分隔）")
-    option_products: str = Field(default="IO,HO,MO", title="期权品种列表（逗号分隔）")
+    future_products: str = Field(default="IF,CU,M,SR", title="期货品种列表（逗号分隔）")
+    option_products: str = Field(default="IO", title="期权品种列表（逗号分隔）")
     include_future_products_for_options: bool = Field(default=True, title="将期货品种一并尝试作为期权品种加载（覆盖商品期权）")
     subscription_batch_size: int = Field(default=10, title="订阅批次大小")
     subscription_interval: int = Field(default=1, title="订阅批次间隔(秒)")
@@ -96,9 +108,10 @@ class Params(BaseParams):
     close_order_price_type: str = Field(default="2", title="平仓委托价类型")
 
     output_mode: str = Field(default="debug", title="输出模式(debug|trade|none)")
+    auto_trading_enabled: bool = Field(default=False, title="自动交易开关")
     force_debug_on_start: bool = Field(default=True, title="启动时强制开启调试输出")
-    ui_window_width: int = Field(default=260, title="UI窗口宽度")
-    ui_window_height: int = Field(default=240, title="UI窗口高度")
+    ui_window_width: int = Field(default=320, title="UI窗口宽度")
+    ui_window_height: int = Field(default=360, title="UI窗口高度")
     ui_font_large: int = Field(default=11, title="UI大字体字号")
     ui_font_small: int = Field(default=10, title="UI小字体字号")
     enable_output_mode_ui: bool = Field(default=True, title="是否启用输出模式UI")
@@ -106,6 +119,9 @@ class Params(BaseParams):
     daily_summary_minute: int = Field(default=1, title="日终汇总分钟")
     trade_quiet: bool = Field(default=True, title="交易模式下减少输出")
     print_start_snapshots: bool = Field(default=False, title="启动时打印快照")
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
     trade_debug_allowlist: str = Field(default="", title="交易调试白名单(逗号分隔)")
     debug_disable_categories: str = Field(default="", title="禁用调试类别(逗号分隔)")

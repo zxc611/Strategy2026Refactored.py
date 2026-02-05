@@ -98,8 +98,11 @@ class UIMixin:
                 def _process_queue():
                     should_continue = True
                     try:
-                        while not self._ui_queue.empty():
+                        # [Optimization] Limit messages per frame to prevent UI freeze during log spam
+                        msg_count = 0
+                        while not self._ui_queue.empty() and msg_count < 20:
                             msg = self._ui_queue.get_nowait()
+                            msg_count += 1
                             action = msg.get("action")
                             
                             # Handle messages
@@ -162,6 +165,10 @@ class UIMixin:
                 except Exception:
                     w, h = 320, 310
                 root.geometry(f"{w}x{h}")
+                try:
+                    root.minsize(max(300, w), max(320, h))
+                except Exception:
+                    pass
                 
                 lbl = tk.Label(root, text=f"当前模式: {getattr(self.params, 'output_mode', 'debug')}")
                 lbl.pack(pady=8)
@@ -233,6 +240,13 @@ class UIMixin:
                         setattr(self.params, "diagnostic_output", True)
                         setattr(self.params, "test_mode", False)
                         self.DEBUG_ENABLE_MOCK_EXECUTION = False
+                        try:
+                            prev_age = getattr(self, "_close_debug_prev_kline_max_age_sec", None)
+                            if prev_age is not None:
+                                setattr(self.params, "kline_max_age_sec", prev_age)
+                                self._close_debug_prev_kline_max_age_sec = None
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     self._apply_param_overrides_for_debug()
@@ -241,12 +255,77 @@ class UIMixin:
                 def _to_close_debug():
                     try:
                         try:
+                            try:
+                                if hasattr(self, "is_market_open") and self.is_market_open():
+                                    try:
+                                        if hasattr(self, "_ui_lbl") and self._ui_lbl:
+                                            self._ui_lbl.config(text="正在开盘！", fg="red")
+                                    except Exception:
+                                        pass
+                                    self.output("正在开盘！", force=True)
+                                    return
+                            except Exception:
+                                pass
                             setattr(self.params, "debug_output", True)
                             setattr(self.params, "run_profile", "full")
                             setattr(self.params, "backtest_tick_mode", False)
                             setattr(self.params, "diagnostic_output", True)
                             setattr(self.params, "test_mode", True)
                             self.DEBUG_ENABLE_MOCK_EXECUTION = True
+                            try:
+                                if not hasattr(self, "_close_debug_prev_kline_max_age_sec"):
+                                    self._close_debug_prev_kline_max_age_sec = getattr(self.params, "kline_max_age_sec", None)
+                                setattr(self.params, "kline_max_age_sec", 0)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self, "resume_strategy"):
+                                self.resume_strategy()
+                            self.my_is_running = True
+                            self.my_is_paused = False
+                            self.my_state = "running"
+                            self.my_trading = True
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self, "safe_pause_manager") and self.safe_pause_manager:
+                                if hasattr(self.safe_pause_manager, "reset"):
+                                    self.safe_pause_manager.reset()
+                                elif hasattr(self.safe_pause_manager, "manager") and hasattr(self.safe_pause_manager.manager, "is_paused"):
+                                    self.safe_pause_manager.manager.is_paused = False
+                        except Exception:
+                            pass
+                        try:
+                            if (not hasattr(self, "scheduler")) or (self.scheduler is None):
+                                if hasattr(self, "_create_default_scheduler"):
+                                    self.scheduler = self._create_default_scheduler()
+                            else:
+                                if hasattr(self.scheduler, "running") and not getattr(self.scheduler, "running"):
+                                    self.scheduler.start()
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self, "_safe_add_periodic_job"):
+                                calc_interval = getattr(self.params, "calculation_interval", 60)
+                                self._safe_add_periodic_job("run_trading_cycle", self.run_trading_cycle, interval_seconds=calc_interval, run_async=True)
+
+                                def _pos_check():
+                                    if hasattr(self, "position_manager") and self.position_manager:
+                                        try:
+                                            self.position_manager.check_and_close_overdue_positions(days_limit=3)
+                                        except Exception:
+                                            pass
+
+                                self._safe_add_periodic_job("position_check_periodic", _pos_check, interval_seconds=60, run_async=True)
+                                self._safe_add_periodic_job("check_chase_tasks", self.check_active_chase_tasks, interval_seconds=1, run_async=True)
+                                self._safe_add_periodic_job("second_timer", self._on_second_timer, interval_seconds=1, run_async=True)
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self, "run_trading_cycle"):
+                                self.run_trading_cycle()
                         except Exception:
                             pass
                         self._apply_param_overrides_for_debug()
@@ -265,6 +344,13 @@ class UIMixin:
                         setattr(self.params, "diagnostic_output", False)
                         setattr(self.params, "test_mode", False)
                         self.DEBUG_ENABLE_MOCK_EXECUTION = False
+                        try:
+                            prev_age = getattr(self, "_close_debug_prev_kline_max_age_sec", None)
+                            if prev_age is not None:
+                                setattr(self.params, "kline_max_age_sec", prev_age)
+                                self._close_debug_prev_kline_max_age_sec = None
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     self.set_output_mode("trade")
@@ -446,7 +532,9 @@ class UIMixin:
                 
                 # Auto/Manual
                 _set_style("_ui_btn_auto", is_auto, color="#1565c0")
-                _set_style("_ui_btn_manual", not is_auto, color="#757575")
+                # [Fix] Manual Button Style: If active (manual mode), use a distinct color instead of Grey
+                # _set_style("_ui_btn_manual", not is_auto, color="#757575")
+                _set_style("_ui_btn_manual", not is_auto, color="#546e7a") # Blue Grey
 
             except Exception:
                 pass
@@ -486,28 +574,14 @@ class UIMixin:
         try:
             self._reset_manual_limits_if_new_day()
             target_auto = bool(auto)
-            if not target_auto:
-                session_key = self._current_session_half()
-                limit_per_half = max(1, int(getattr(self.params, "manual_trade_limit_per_half", 1) or 1))
-                if session_key:
-                    # simplistic lock fallback 
-                    lock = getattr(self, "_lock", None)
-                    if lock:
-                        with lock:
-                            current = self.manual_trade_attempts.get(session_key, 0)
-                            if current >= limit_per_half:
-                                self.output("手动交易已经超额！", force=True)
-                                return
-                            self.manual_trade_attempts[session_key] = current + 1
-                    else:
-                        current = self.manual_trade_attempts.get(session_key, 0)
-                        if current >= limit_per_half:
-                            self.output("手动交易已经超额！", force=True)
-                            return
-                        self.manual_trade_attempts[session_key] = current + 1
+            
+            # [Fix] Mode switching should not be subject to trade limits.
+            # Limits apply to actual order execution, not the state of the bot.
 
             self.auto_trading_enabled = target_auto
+            self.my_trading = target_auto
             setattr(self.params, "auto_trading_enabled", self.auto_trading_enabled)
+            setattr(self.params, "auto_trading", self.auto_trading_enabled)
             if self.auto_trading_enabled:
                 self.output("已切换为自动交易模式", force=True)
             else:
@@ -636,10 +710,31 @@ class UIMixin:
                     # Save
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(content)
-                    messagebox.showinfo("成功", "参数表已保存！\n(部分参数需重启策略生效，热更已触发)")
-                    # Trigger reload
+                    # Trigger reload + apply immediately
+                    applied = 0
                     if hasattr(self, "_load_param_table"):
-                        self._load_param_table()
+                        table = self._load_param_table()
+                        if isinstance(table, dict):
+                            self._param_override_cache = table
+                            param_map = table.get("params") if isinstance(table.get("params"), dict) else table
+                            if isinstance(param_map, dict) and hasattr(self, "params"):
+                                for k, v in param_map.items():
+                                    if hasattr(self.params, k):
+                                        try:
+                                            setattr(self.params, k, v)
+                                            applied += 1
+                                        except Exception:
+                                            pass
+                            backtest_map = table.get("backtest_params") if isinstance(table.get("backtest_params"), dict) else {}
+                            if isinstance(backtest_map, dict) and hasattr(self, "params"):
+                                for k, v in backtest_map.items():
+                                    if hasattr(self.params, k):
+                                        try:
+                                            setattr(self.params, k, v)
+                                            applied += 1
+                                        except Exception:
+                                            pass
+                    messagebox.showinfo("成功", f"参数表已保存并立即生效！\n已应用 {applied} 项")
                     # Close
                     editor.destroy()
                 except json.JSONDecodeError as je:

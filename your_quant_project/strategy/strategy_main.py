@@ -7,6 +7,7 @@ from datetime import datetime
 import collections
 import traceback
 import os
+import threading
 
 try:
     from pythongo.base import BaseStrategy  # type: ignore
@@ -75,7 +76,12 @@ except ImportError:
 try:
     from your_quant_project.strategy.context_utils import ContextMixin
 except ImportError:
-    from .context_utils import ContextMixin
+    try:
+        from .context_utils import ContextMixin  # type: ignore
+    except ImportError:
+        class ContextMixin:
+            def _is_backtest_context(self) -> bool: return False
+            def _is_trade_context(self) -> bool: return True
 
 class Strategy2026Refactored(
     PlatformCompatMixin, 
@@ -258,6 +264,12 @@ class Strategy2026Refactored(
         self.my_trading = True
         self.my_destroyed = False
         self.managed_instruments = [] # 初始化
+
+        # [Safe Init] Ensure core locks/scheduler exist even if on_init is skipped
+        if not hasattr(self, "data_lock") or self.data_lock is None:
+            self.data_lock = threading.RLock()
+        if not hasattr(self, "scheduler"):
+            self.scheduler = None
 
         # 确保 self.params 存在 - 提前到属性初始化之前，因为某些属性初始化可能依赖 params
         if not hasattr(self, "params"):
@@ -452,6 +464,12 @@ class Strategy2026Refactored(
              )
              self.output(f"已启动定时任务，每隔 {interval} 秒计算一次期权宽度")
              
+             # [Fix] Independent Position Check Job
+             def _position_check_job():
+                if hasattr(self, "position_manager") and self.position_manager:
+                     self.position_manager.check_and_close_overdue_positions(days_limit=3)
+             self._safe_add_periodic_job("position_check_periodic", _position_check_job, interval_seconds=60)
+
              # Add Daily Close Check
              if hasattr(self, "_check_daily_closing"):
                   self._safe_add_periodic_job(
@@ -461,12 +479,14 @@ class Strategy2026Refactored(
                   )
         
         # 5. 立即计算一次 (Source parity)
-        if hasattr(self, "calculate_all_option_widths"):
-             self.output("[调试] 准备调用 calculate_all_option_widths (首次计算)")
-             try:
-                 self.calculate_all_option_widths()
-             except Exception as e:
-                 self.output(f"首次立即计算失败: {e}")
+        # [Fix] Remove blocking synchronous call in on_start.
+        # The scheduler (RobustLoopScheduler) will pick up the job immediately (last_run=0).
+        # if hasattr(self, "calculate_all_option_widths"):
+        #      self.output("[调试] 准备调用 calculate_all_option_widths (首次计算)")
+        #      try:
+        #          self.calculate_all_option_widths()
+        #      except Exception as e:
+        #          self.output(f"首次立即计算失败: {e}")
 
         self.output("Strategy2026Refactored 启动流程结束")
 
@@ -479,6 +499,39 @@ class Strategy2026Refactored(
         self.output("策略停止...")
         self.my_is_running = False
         self.my_trading = False
+        
+        # [Fix Req #2] Explicitly Destroy UI on Stop to prevent hanging threads and allow deletion.
+        # This fixes "UI disappears" (clean exit instead of crash) and "Cannot Delete Instance" (breaks ref loop)
+        try:
+            if hasattr(self, "_ui_root") and self._ui_root:
+                def _safe_destroy():
+                    try:
+                        if hasattr(self, "_ui_root") and self._ui_root:
+                            self._ui_root.quit() # Stop mainloop
+                            self._ui_root.destroy()
+                    except: pass
+                
+                # Check if we are in UI thread or another thread
+                # Tkinter methods usually need to run in main thread, but quit() is thread-safe-ish.
+                # Use after() if loop is running.
+                try:
+                    self._ui_root.after(0, _safe_destroy)
+                except:
+                    # If after fails (loop assumed dead?), try direct
+                    _safe_destroy()
+                
+                self._ui_root = None
+        except Exception:
+             pass
+
+    def on_pause(self):
+        """[Fix Req #2] Handle Pause Explicitly to manage UI state"""
+        self.output("策略暂停...")
+        self.my_is_paused = True
+        # Note: We do NOT destroy UI on pause, just update state.
+        # If UI disappeared before, it was likely due to Platform killing threads on 'Pause'.
+        # By defining on_pause, we might intercept default behavior if logic allows.
+        pass
 
     def on_tick(self, tick: TickData):
         """
@@ -547,3 +600,13 @@ class Strategy2026Refactored(
     def on_destroy(self):
         self.my_destroyed = True
         self.output("策略销毁")
+        # [Fix Req #2] Explicit UI Cleanup
+        try:
+             if hasattr(self, "_ui_root") and self._ui_root:
+                  try:
+                      self._ui_root.quit()
+                      self._ui_root.destroy()
+                  except: pass
+                  self._ui_root = None
+        except: pass
+

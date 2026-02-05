@@ -5,6 +5,7 @@ import json
 import os
 import re
 import traceback
+import types
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
@@ -1159,6 +1160,35 @@ class InstrumentLoaderMixin:
         """加载所有期货和期权合约"""
         self.output("[调试] load_all_instruments() 方法入口", force=True)
         try:
+            if (not hasattr(self, "params")) or (self.params is None):
+                try:
+                    try:
+                        from .params import Params  # type: ignore
+                    except Exception:
+                        from params import Params  # type: ignore
+                    self.params = Params()
+                except Exception:
+                    self.params = types.SimpleNamespace()
+            # [Robust] 防止未初始化导致加载崩溃
+            if not hasattr(self, "market_center"):
+                self.market_center = None
+            if not hasattr(self, "kline_data") or self.kline_data is None:
+                self.kline_data = {}
+            if not hasattr(self, "managed_instruments") or self.managed_instruments is None:
+                self.managed_instruments = []
+            if not hasattr(self, "future_instruments") or self.future_instruments is None:
+                self.future_instruments = []
+            if not hasattr(self, "option_instruments") or self.option_instruments is None:
+                self.option_instruments = {}
+            if not hasattr(self, "future_symbol_to_exchange") or self.future_symbol_to_exchange is None:
+                self.future_symbol_to_exchange = {}
+            if not hasattr(self, "futures_without_options") or self.futures_without_options is None:
+                self.futures_without_options = set()
+            if not hasattr(self, "subscribed_instruments") or self.subscribed_instruments is None:
+                self.subscribed_instruments = set()
+            if not hasattr(self, "latest_ticks") or self.latest_ticks is None:
+                self.latest_ticks = {}
+
             # [CRITICAL FIX] 确保 month_mapping 始终有默认值
             # Refactored Strategy lacks the __init__ injection, so we do it here (Just-in-Time)
             if not getattr(self.params, "month_mapping", None):

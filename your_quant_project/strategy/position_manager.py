@@ -424,6 +424,11 @@ class PositionManager:
         try:
             if not self.strategy: return
             
+            # [Debug] Log heartbeat occasionally if debug enabled
+            if getattr(self.strategy.params, "debug_output", False):
+                 # self.strategy.output(f"[PositionManager] Checking overdue positions (Limit: {days_limit} days)...")
+                 pass
+
             # Use current date
             current_date = datetime.now().date()
             overdue_list = []
@@ -448,38 +453,30 @@ class PositionManager:
                     # Logic 7 "IsClose" logic:
                     # If Long (PositionType.LONG) -> Sell
                     # If Short (PositionType.SHORT) -> Buy
+                    is_long = (str(rec.direction).lower() == "long" or rec.volume > 0)
+                    direction = "sell" if is_long else "buy"
                     
-                    is_buy = (str(rec.direction) == "short") or (rec.position_type == PositionType.SHORT)
+                    inst_info = {"ExchangeID": rec.exchange, "InstrumentID": rec.instrument_id}
                     
-                    # Prevent duplicate orders? 
-                    # Ideally Strategy should handle order placement.
-                    # We call insert_order directly.
-                    
-                    if hasattr(self.strategy, "valid_limit_order"):
-                         # Use existing robust ordering
-                         direction = "buy" if is_buy else "sell"
-                         action = "open" # Wait, closing is usually action="close" or offset="close"
-                         # PythonGO interface usually implies "close" offset.
-                         # But here we use 'valid_limit_order' which might just take direction.
-                         
-                         # Check strategy interface in trading_logic.py
-                         # It usually calls self.limit_order or similar.
-                         
-                         # Call strategy helper
-                         self.strategy.output(f"[风控] 执行平仓: {rec.instrument_id} {direction} {rec.volume}手")
-                         
-                         # Assuming standard Pythongo method or Strategy wrapper
-                         # We need to use offset='close' if applicable
-                         
+                    if hasattr(self.strategy, "send_order_safe"):
+                         # Use robust order method
+                         self.strategy.send_order_safe(
+                             inst_info, 
+                             abs(rec.volume), 
+                             direction, 
+                             "OverdueClose", 
+                             is_close=True,
+                             price=0.0 # Market/Best
+                         )
+                    elif hasattr(self.strategy, "limit_order"):
+                         # Fallback
                          self.strategy.limit_order(
                              exchange=rec.exchange,
                              instrument_id=rec.instrument_id,
-                             action=direction, # buy/sell
-                             price=0.0, # Market/Best price? 0 implies logic handles it
-                             volume=rec.volume,
-                             algo="", # Direct
-                             remark="OverdueClose",
-                             is_quote=False
+                             action=direction,
+                             price=0.0,
+                             volume=abs(rec.volume),
+                             remark="OverdueClose"
                          )
                          
                 except Exception as e:

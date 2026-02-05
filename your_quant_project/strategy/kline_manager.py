@@ -5,6 +5,7 @@ import concurrent.futures
 import types
 import time
 import re
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -34,20 +35,125 @@ except Exception:
                     if self.callback:
                         self.callback(tick)
 
-# [Optimization] LightKLine using slots for memory efficiency
+# [Optimization 4] LightKLine using slots for memory efficiency
+# Upgraded: Add slots for exchange/instrument_id/style to prevent dict creation when these are set later
 class LightKLine:
-    __slots__ = ('open', 'high', 'low', 'close', 'volume', 'datetime')
+    __slots__ = ('open', 'high', 'low', 'close', 'volume', 'datetime', 'exchange', 'instrument_id', 'style')
     def __init__(self, open: float, high: float, low: float, close: float, volume: float, datetime: Any):
-        self.open = open
-        self.high = high
-        self.low = low
-        self.close = close
-        self.volume = volume
+        self.open = float(open) # Force float (Point 4: Precision control handled by python float which is C double usually, 
+                                # but explicit cast ensures no object overhead from non-native types)
+        self.high = float(high)
+        self.low = float(low)
+        self.close = float(close)
+        self.volume = float(volume)
         self.datetime = datetime
+        # Initialize optional slots to avoid attribute errors if accessed before assignment
+        self.exchange = ""
+        self.instrument_id = ""
+        self.style = ""
 
 class KlineManagerMixin:
+    # [Requirement 1] Data Fetch Rate Limit
+    
+    def _wait_for_rate_limit(self) -> None:
+        """Atomic rate limiter to prevent API 429 errors during concurrency."""
+        if not hasattr(self, "_rate_lock"):
+            self._rate_lock = threading.Lock()
+            self._last_atomic_fetch = 0.0
+
+        # Dynamic throttling: 0.2s = 5 QPS (Very Strict for stability)
+        limit_interval = 0.2
+        
+        with self._rate_lock:
+            now = time.time()
+            target_time = self._last_atomic_fetch + limit_interval
+            if now < target_time:
+                sleep_time = target_time - now
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+            self._last_atomic_fetch = time.time()
+
+    def _should_fetch_data(self, instrument_id: str, exchange: Optional[str] = None) -> bool:
+        """Check if we can fetch data for this instrument (Rate Limit: 2 times per minute, immediate)."""
+        # [Fix] Thread-Safe Atomic Rate Limiter
+        if not hasattr(self, "_limit_lock"):
+            self._limit_lock = threading.RLock()
+            
+        with self._limit_lock:
+            if not hasattr(self, "_data_fetch_timestamps"):
+                self._data_fetch_timestamps = {}
+                
+            now = time.time()
+            try:
+                # Fixed 60s as per requirement "per minute"
+                duration = 60
+            except Exception:
+                duration = 60
+            
+            # [Req] 2 requests per minute, allowing immediate back-to-back
+            max_requests = 2
+            
+            key = f"{exchange}_{instrument_id}" if exchange else instrument_id
+            global_key = "__GLOBAL__"
+            
+            # Retrieve history, handling legacy float format if exists
+            history = self._data_fetch_timestamps.get(key, [])
+            global_history = self._data_fetch_timestamps.get(global_key, [])
+            if isinstance(history, (float, int)):
+                history = [history]
+            if isinstance(global_history, (float, int)):
+                global_history = [global_history]
+                
+            # [Cleanup] strictly remove expired timestamps ("used up and delete")
+            # Keep only timestamps that are NOT older than 'duration'
+            valid_history = [t for t in history if (now - t) < duration]
+            valid_global_history = [t for t in global_history if (now - t) < duration]
+            
+            if len(valid_history) < max_requests and len(valid_global_history) < max_requests:
+                valid_history.append(now)
+                valid_global_history.append(now)
+                self._data_fetch_timestamps[key] = valid_history
+                self._data_fetch_timestamps[global_key] = valid_global_history
+                return True
+            else:
+                # Update cache to just keep valid ones even if we reject
+                # This prevents list from growing indefinitely if we didn't slice above
+                self._data_fetch_timestamps[key] = valid_history
+                self._data_fetch_timestamps[global_key] = valid_global_history
+                # [Log] Warn about rate limit hit (Optional)
+                if hasattr(self, "output") and getattr(self, "params", {}).get("debug_output", False):
+                    # Don't spam, check last log time for this key
+                    limit_key = f"{key}_limit_log"
+                    last_log = getattr(self, limit_key, 0)
+                    if now - last_log > 10:
+                        try:
+                            self.output(f"[RateLimit] Fetch blocked for {key}. Count: {len(valid_history)}/{max_requests} in {duration}s")
+                        except: pass
+                        setattr(self, limit_key, now)
+                return False
+    
     def _to_light_kline(self, bar: Any) -> Any:
         """将任意bar 转为轻量K线对象（仅包含open/high/low/close/volume 属性）"""
+        # [Optimization: Fast Path] Avoid generic lookup for known types
+        if isinstance(bar, LightKLine): 
+            return bar
+            
+        # 1. Fast Object attributes (KLineData, Structs)
+        try:
+            # Assuming standard naming (pythongo KLineData or TickData)
+            return LightKLine(bar.open, bar.high, bar.low, bar.close, bar.volume, bar.datetime)
+        except AttributeError:
+            pass
+
+        # 2. Fast Dict attributes
+        if isinstance(bar, dict):
+            try:
+                # Common lowercase keys
+                return LightKLine(bar['open'], bar['high'], bar['low'], bar['close'], bar['volume'], bar['datetime'])
+            except KeyError:
+                pass
+
+        # 3. Slow Generic Fallback (Legacy Support)
         try:
             def _get(o: Any, names: list, default: float = 0.0) -> float:
                 for n in names:
@@ -379,37 +485,67 @@ class KlineManagerMixin:
 
     def get_recent_m1_kline(self, exchange: str, instrument_id: str, count: int = 10, style: Optional[str] = None) -> List[KLineData]:
         """获取最近N根K线（优先使用 MarketCenter.get_kline_data 的count 参数）"""
+        # [Requirement 1] Enforce Data Fetch Rate Limit (Per Instrument)
+        if not self._should_fetch_data(instrument_id, exchange):
+            return []
+            
+        # [Validation 2] Enforce Global API Throttling (Per Strategy) to prevent "Request too frequent"
+        # Use Thread-Safe Atomic Rate Limiter
+        try:
+            self._wait_for_rate_limit()
+        except Exception:
+            pass
+
         try:
             mc_get_kline = getattr(self.market_center, "get_kline_data", None)
             bars = []
             if callable(mc_get_kline):
                 primary_style = (style or getattr(self.params, "kline_style", "M1") or "M1").strip()
                 styles_to_try = [primary_style] + (["M1"] if primary_style != "M1" else [])
+                try:
+                    limit = int(getattr(self.params, "kline_request_count", 6) or 6)
+                except Exception:
+                    limit = 6
+                count = max(1, min(abs(int(count)), limit))
+                
+                # [No Retry] Request once. If failed, return empty to prevent 'Too Frequent' errors.
+                # Do not retry on failure (especially "Too Frequent" errors).
                 for sty in styles_to_try:
                     try:
-                        bars = mc_get_kline(
-                            exchange=exchange,
-                            instrument_id=instrument_id,
-                            style=sty,
-                            count=-(abs(count)),
-                        )
-                    except TypeError:
-                        end_dt = datetime.now()
-                        start_dt = end_dt - timedelta(minutes=abs(count))
-                        bars = mc_get_kline(
-                            exchange=exchange,
-                            instrument_id=instrument_id,
-                            style=sty,
-                            start_time=start_dt,
-                            end_time=end_dt,
-                        )
-                    if bars and len(bars) > 0:
-                        break
+                        try:
+                            bars = mc_get_kline(
+                                exchange=exchange,
+                                instrument_id=instrument_id,
+                                style=sty,
+                                count=-(abs(count)),
+                            )
+                        except TypeError:
+                            end_dt = datetime.now()
+                            start_dt = end_dt - timedelta(minutes=abs(count))
+                            bars = mc_get_kline(
+                                exchange=exchange,
+                                instrument_id=instrument_id,
+                                style=sty,
+                                start_time=start_dt,
+                                end_time=end_dt,
+                            )
+                        
+                        if bars and len(bars) > 0:
+                            break
+                    except Exception:
+                        # If a specific call fails, do not retry. Move to next style or finish.
+                        pass
+
             result: List[KLineData] = []
             for bar in bars or []:
                 lk = self._to_light_kline(bar)
-                if getattr(lk, "close", 0) and lk.close > 0:
-                    result.append(lk)
+                result.append(lk)
+            if len(result) < count:
+                missing = count - len(result)
+                for _ in range(missing):
+                    result.append(self._to_light_kline({"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0, "datetime": datetime.now()}))
+            if len(result) > count:
+                result = result[-count:]
             if result:
                 for key_fmt in (f"{exchange}_{instrument_id}", f"{exchange}|{instrument_id}"):
                     if key_fmt not in self.kline_data:
@@ -417,8 +553,12 @@ class KlineManagerMixin:
                     data_list = self.kline_data[key_fmt].get("data", [])
                     if isinstance(data_list, list):
                         self.kline_data[key_fmt]["data"].extend(result)
-                        if len(self.kline_data[key_fmt]["data"]) > self.params.max_kline:
-                            self.kline_data[key_fmt]["data"] = self.kline_data[key_fmt]["data"][-self.params.max_kline:]
+                        try:
+                            limit = int(getattr(self.params, "kline_request_count", 6) or 6)
+                        except Exception:
+                            limit = 6
+                        if len(self.kline_data[key_fmt]["data"]) > limit:
+                            self.kline_data[key_fmt]["data"] = self.kline_data[key_fmt]["data"][-limit:]
             return result
         except Exception as e:
             self.output(f"获取最近K线失败 {exchange}.{instrument_id}: {e}")
@@ -426,6 +566,10 @@ class KlineManagerMixin:
 
     def get_m1_kline_range(self, exchange: str, instrument_id: str, start_time: datetime, end_time: datetime) -> List[KLineData]:
         """按时间区间获取K线，调用 MarketCenter.get_kline_data(start_time, end_time)"""
+        # [Requirement 1] Enforce Data Fetch Rate Limit
+        if not self._should_fetch_data(instrument_id, exchange):
+            return []
+            
         try:
             mc_get_kline = getattr(self.market_center, "get_kline_data", None)
             bars = []
@@ -446,11 +590,20 @@ class KlineManagerMixin:
                     except Exception as e:
                         self.output(f"时间区间获取失败 {exchange}.{instrument_id}({sty}): {e}")
                         bars = []
+            try:
+                limit = int(getattr(self.params, "kline_request_count", 6) or 6)
+            except Exception:
+                limit = 6
             result: List[KLineData] = []
             for bar in bars or []:
                 lk = self._to_light_kline(bar)
-                if getattr(lk, "close", 0) and lk.close > 0:
-                    result.append(lk)
+                result.append(lk)
+            if len(result) < limit:
+                missing = limit - len(result)
+                for _ in range(missing):
+                    result.append(self._to_light_kline({"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0, "datetime": datetime.now()}))
+            if len(result) > limit:
+                result = result[-limit:]
             if result:
                 for key_fmt in (f"{exchange}_{instrument_id}", f"{exchange}|{instrument_id}"):
                     if key_fmt not in self.kline_data:
@@ -458,8 +611,8 @@ class KlineManagerMixin:
                     data_list = self.kline_data[key_fmt].get("data", [])
                     if isinstance(data_list, list):
                         self.kline_data[key_fmt]["data"].extend(result)
-                        if len(self.kline_data[key_fmt]["data"]) > self.params.max_kline:
-                            self.kline_data[key_fmt]["data"] = self.kline_data[key_fmt]["data"][-self.params.max_kline:]
+                        if len(self.kline_data[key_fmt]["data"]) > limit:
+                            self.kline_data[key_fmt]["data"] = self.kline_data[key_fmt]["data"][-limit:]
             return result
         except Exception as e:
             self.output(f"时间区间K线失败 {exchange}.{instrument_id}: {e}")
@@ -605,12 +758,31 @@ class KlineManagerMixin:
             styles_to_try = [primary_style] + (["M1"] if primary_style != "M1" else [])
 
             def _fetch_single_instrument(instrument):
-                # [Fast Fail] Check if strategy is running
-                if hasattr(self, "my_is_running") and not self.my_is_running:
-                    return False, f"{instrument.get('exchange')}_{instrument.get('instrument_id')}"
-
                 exchange = instrument["exchange"]
                 instrument_id = instrument["instrument_id"]
+
+                # [Fix] Enforce strict rate limit per instrument (1 min rule)
+                # Note: _should_fetch_data auto-updates timestamp if True.
+                # So logic is: Check (and mark) -> Fetch. Even if fetch fails, it's marked.
+                if not self._should_fetch_data(instrument_id, exchange):
+                    # Only log debug if needed, to avoid spam
+                    # self._debug(f"[KLineSkip] Skipped {exchange}.{instrument_id} due to rate limit")
+                    
+                    # [Compliance] "Treat as read regardless of result"
+                    # The timestamp was updated inside _should_fetch_data at the moment it returned True.
+                    # Since we are returning here because it returned False, it means it WAS recently read.
+                    return True, f"{exchange}_{instrument_id}"
+
+                # [Fast Fail] Check if strategy is running
+                if hasattr(self, "my_is_running") and not self.my_is_running:
+                    return False, f"{exchange}_{instrument_id}"
+
+                # [Fix] Enforce global QPS limit via atomic lock
+                try:
+                    self._wait_for_rate_limit()
+                except Exception:
+                    pass
+
                 exch_upper = str(exchange).upper()
                 inst_upper = str(instrument_id).upper()
                 key = f"{exchange}_{instrument_id}"
@@ -642,19 +814,23 @@ class KlineManagerMixin:
                         for cand_id in id_candidates:
                             for sty in styles_to_try:
                                 try:
-                                    bars = get_bars_fn(exchange=exchange, instrument_id=cand_id, period=sty, count=self.params.max_kline)
+                                    try:
+                                        limit = int(getattr(self.params, "kline_request_count", 6) or 6)
+                                    except Exception:
+                                        limit = 6
+                                    bars = get_bars_fn(exchange=exchange, instrument_id=cand_id, period=sty, count=limit)
                                 except TypeError:
                                     pass
                                 except Exception:
                                     pass
                                 if not bars:
                                     try:
-                                        bars = get_bars_fn(instrument_id=cand_id, period=sty, count=-(abs(self.params.max_kline)))
+                                        bars = get_bars_fn(instrument_id=cand_id, period=sty, count=-(abs(limit)))
                                     except Exception:
                                         pass
                                 if not bars:
                                     try:
-                                        bars = get_bars_fn(instrument_id=cand_id, period=sty, count=self.params.max_kline)
+                                        bars = get_bars_fn(instrument_id=cand_id, period=sty, count=limit)
                                     except Exception:
                                         pass
                                 if bars and len(bars) > 0:
@@ -667,7 +843,11 @@ class KlineManagerMixin:
                             for sty in styles_to_try:
                                 # Attempt 1: Keyword args (Standard)
                                 try:
-                                    bars = mc_get_kline(exchange=exchange, instrument_id=cand_id, style=sty, count=-(abs(self.params.max_kline)))
+                                    try:
+                                        limit = int(getattr(self.params, "kline_request_count", 6) or 6)
+                                    except Exception:
+                                        limit = 6
+                                    bars = mc_get_kline(exchange=exchange, instrument_id=cand_id, style=sty, count=-(abs(limit)))
                                     if bars and len(bars) > 0:
                                         self._debug(f"[KLineSuccess] KWArgs Exchange+ID: {cand_id} {sty} = {len(bars)}")
                                         break
@@ -678,7 +858,7 @@ class KlineManagerMixin:
                                 # Attempt 2: Positional args (inst, period, count) - Common in some APIs
                                 if not bars:
                                     try:
-                                        bars = mc_get_kline(cand_id, sty, -(abs(self.params.max_kline)))
+                                        bars = mc_get_kline(cand_id, sty, -(abs(limit)))
                                         if bars and len(bars) > 0:
                                             self._debug(f"[KLineSuccess] Positional ID: {cand_id} {sty} = {len(bars)}")
                                             break
@@ -689,7 +869,7 @@ class KlineManagerMixin:
                                 # Attempt 3: KWArgs but no exchange (some APIs don't want exchange)
                                 if not bars:
                                     try:
-                                        bars = mc_get_kline(instrument_id=cand_id, style=sty, count=-(abs(self.params.max_kline)))
+                                        bars = mc_get_kline(instrument_id=cand_id, style=sty, count=-(abs(limit)))
                                         if bars and len(bars) > 0:
                                             self._debug(f"[KLineSuccess] KWArgs ID-Only: {cand_id} {sty} = {len(bars)}")
                                             break
@@ -712,7 +892,7 @@ class KlineManagerMixin:
 
                     if (not bars or len(bars) == 0):
                         try:
-                            recent = self.get_recent_m1_kline(exchange, instrument_id, count=self.params.max_kline, style=primary_style)
+                            recent = self.get_recent_m1_kline(exchange, instrument_id, count=getattr(self.params, "kline_request_count", 6), style=primary_style)
                             if recent:
                                 bars = recent
                         except Exception:
@@ -739,12 +919,21 @@ class KlineManagerMixin:
                         processed_bars = []
                         for bar in bars:
                             lk = self._to_light_kline(bar)
-                            if getattr(lk, "close", 0) and lk.close > 0:
-                                processed_bars.append(lk)
-                        if len(processed_bars) > self.params.max_kline:
-                            processed_bars = processed_bars[-self.params.max_kline:]
+                            processed_bars.append(lk)
+                        try:
+                            limit = int(getattr(self.params, "kline_request_count", 6) or 6)
+                        except Exception:
+                            limit = 6
+                        if len(processed_bars) < limit:
+                            missing = limit - len(processed_bars)
+                            for _ in range(missing):
+                                processed_bars.append(self._to_light_kline({"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0, "datetime": datetime.now()}))
+                        if len(processed_bars) > limit:
+                            processed_bars = processed_bars[-limit:]
 
                         if len(processed_bars) > 0:
+                            if not hasattr(self, "data_lock") or self.data_lock is None:
+                                self.data_lock = threading.RLock()
                             with self.data_lock:
                                 for k_item in key_list:
                                     if k_item not in self.kline_data:
