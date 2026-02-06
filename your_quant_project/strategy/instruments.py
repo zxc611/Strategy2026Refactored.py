@@ -1169,9 +1169,31 @@ class InstrumentLoaderMixin:
                     self.params = Params()
                 except Exception:
                     self.params = types.SimpleNamespace()
+            # 中文注释：再次兜底，防止 params 仍为 None
+            if self.params is None:
+                try:
+                    from types import SimpleNamespace
+                    self.params = SimpleNamespace()
+                    if not hasattr(self, "_params_missing_warned"):
+                        self._params_missing_warned = False
+                    if not self._params_missing_warned:
+                        self.output("[警告] params 初始化失败，已使用 SimpleNamespace 兜底", force=True)
+                        self._params_missing_warned = True
+                except Exception:
+                    pass
             # [Robust] 防止未初始化导致加载崩溃
             if not hasattr(self, "market_center"):
                 self.market_center = None
+            # 中文注释：market_center 缺失时降级为仅使用 infini，且仅告警一次
+            if not hasattr(self, "_market_center_missing_warned"):
+                self._market_center_missing_warned = False
+            if not getattr(self, "market_center", None):
+                if not self._market_center_missing_warned:
+                    self.output("[警告] market_center 缺失，已降级为仅使用 infini 拉取合约", force=True)
+                    self._market_center_missing_warned = True
+                market_center_available = False
+            else:
+                market_center_available = True
             if not hasattr(self, "kline_data") or self.kline_data is None:
                 self.kline_data = {}
             if not hasattr(self, "managed_instruments") or self.managed_instruments is None:
@@ -1409,7 +1431,7 @@ class InstrumentLoaderMixin:
                     return True
 
                 mc_by_prod = None
-                if getattr(self, "market_center", None):
+                if market_center_available:
                     mc_by_prod = getattr(self.market_center, "get_instruments_by_product", None)
                 
                 if callable(mc_by_prod):
@@ -1423,7 +1445,7 @@ class InstrumentLoaderMixin:
                         self._debug(f"MarketCenter 获取{category} {exchange_code}.{product_code} 失败: {e}")
 
                 mc_get_all = None
-                if getattr(self, "market_center", None):
+                if market_center_available:
                     mc_get_all = getattr(self.market_center, "get_instruments", None)
 
                 if callable(mc_get_all):
@@ -1463,7 +1485,7 @@ class InstrumentLoaderMixin:
                     self._debug("infini.get_instruments 未获取到合约，尝试使用MarketCenter...")
                     try:
                         mc_get_all = None
-                        if getattr(self, "market_center", None):
+                        if market_center_available:
                             mc_get_all = getattr(self.market_center, "get_instruments", None)
                         
                         if callable(mc_get_all):

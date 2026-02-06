@@ -6,6 +6,13 @@ from typing import Optional, Set
 
 
 class SubscriptionMixin:
+    def _get_subscription_interval_seconds(self) -> float:
+        try:
+            interval = float(getattr(self.params, "subscription_interval", 0.2) or 0.2)
+        except Exception:
+            interval = 0.2
+        return max(0.2, interval)
+
     def _subscribe_in_batches(self) -> None:
         """使用定时器分批订阅合约，避免在启动时阻塞主线程"""
         try:
@@ -119,6 +126,15 @@ class SubscriptionMixin:
 
             build_ms = (datetime.now() - start_time).total_seconds() * 1000
             self.output(f"订阅队列已构建 {len(self.subscription_queue)} 个合约（期货: {fut_included} 个，期权: {included_options} 个），耗时 {build_ms:.1f}ms")
+            if not self.subscription_queue:
+                try:
+                    self.output(
+                        f"[警告] 订阅队列为空 | fut_included={fut_included}, opt_included={included_options}, "
+                        f"fut_skipped={fut_skipped}, opt_skipped={skipped_options}",
+                        force=True,
+                    )
+                except Exception:
+                    pass
             if self._resolve_subscribe_flag(
                 "subscribe_only_specified_month_futures",
                 "subscribe_only_current_next_futures",
@@ -130,17 +146,19 @@ class SubscriptionMixin:
 
             self._subscribe_next_batch(0)
 
-            next_batch_index = self.subscription_batch_size
+            batch_size = self._get_subscription_batch_size()
+            next_batch_index = batch_size
             if next_batch_index < len(self.subscription_queue):
-                next_job_id = f"subscribe_batch_{next_batch_index // self.subscription_batch_size + 1}"
-                batch_seq = next_batch_index // self.subscription_batch_size + 1
-                dynamic_delay = int(max(1, self.subscription_interval * (1 + self.subscription_backoff_factor * (batch_seq - 1))))
+                next_job_id = f"subscribe_batch_{next_batch_index // batch_size + 1}"
+                batch_seq = next_batch_index // batch_size + 1
+                base_interval = self._get_subscription_interval_seconds()
+                dynamic_delay = max(0.2, base_interval * (1 + self.subscription_backoff_factor * (batch_seq - 1)))
                 self._safe_add_once_job(
                     job_id=next_job_id,
                     func=lambda: self._subscribe_next_batch(next_batch_index, next_job_id),
                     delay_seconds=dynamic_delay,
                 )
-                self.output(f"已安排下一批订阅，批次 {next_batch_index // self.subscription_batch_size + 1}")
+                self.output(f"已安排下一批订阅，批次 {next_batch_index // batch_size + 1}")
 
             self.output(f"=== 分批订阅完成，共订阅 {len(self.subscription_queue)} 个合约 ===")
         except Exception as e:
@@ -149,9 +167,26 @@ class SubscriptionMixin:
     def _subscribe_next_batch(self, batch_index: int, job_id: Optional[str] = None) -> None:
         """订阅下一批合约"""
         if (not self.my_is_running) or self.my_is_paused or (self.my_trading is False) or getattr(self, "my_destroyed", False):
-            if job_id:
-                self._remove_job_silent(job_id)
-            self._debug("已暂停/非运行，跳过本批次订阅并停止级联安排")
+            self._debug("已暂停/非运行，跳过本批次订阅并延后重试")
+            if not hasattr(self, "_subscribe_retry_counts"):
+                self._subscribe_retry_counts = {}
+            retry_count = int(self._subscribe_retry_counts.get(batch_index, 0) or 0)
+            if retry_count >= 2:
+                self._debug(f"订阅重试已达上限(2次)，停止重试 batch_index={batch_index}")
+                return
+            self._subscribe_retry_counts[batch_index] = retry_count + 1
+
+            base_interval = self._get_subscription_interval_seconds()
+            backoff_factor = min(1 + retry_count, 2)
+            delay = max(0.2, base_interval * backoff_factor)
+            try:
+                self._safe_add_once_job(
+                    job_id=job_id or f"subscribe_retry_{batch_index}",
+                    func=lambda: self._subscribe_next_batch(batch_index, job_id),
+                    delay_seconds=delay,
+                )
+            except Exception:
+                pass
             return
         self.output(f"=== _subscribe_next_batch 被调用，batch_index={batch_index} ===")
         if batch_index >= len(self.subscription_queue):
@@ -160,7 +195,8 @@ class SubscriptionMixin:
                 self._remove_job_silent(job_id)
             return
 
-        batch = self.subscription_queue[batch_index:batch_index + self.subscription_batch_size]
+        batch_size = self._get_subscription_batch_size()
+        batch = self.subscription_queue[batch_index:batch_index + batch_size]
         success_cnt = 0
         fail_cnt = 0
         dup_cnt = 0
@@ -185,20 +221,31 @@ class SubscriptionMixin:
                 fail_cnt += 1
                 self.output(f"订阅失败 {item['exchange']}.{item['instrument_id']}: {e}")
 
-        next_batch_index = batch_index + self.subscription_batch_size
+        next_batch_index = batch_index + batch_size
         self._debug(f"订阅批次完成: 成功 {success_cnt}，失败{fail_cnt}，重复{dup_cnt}")
         if job_id:
             self._remove_job_silent(job_id)
         if next_batch_index < len(self.subscription_queue):
-            next_job_id = f"subscribe_batch_{next_batch_index // self.subscription_batch_size + 1}"
-            batch_seq = next_batch_index // self.subscription_batch_size + 1
-            dynamic_delay = int(max(1, self.subscription_interval * (1 + self.subscription_backoff_factor * (batch_seq - 1))))
+            next_job_id = f"subscribe_batch_{next_batch_index // batch_size + 1}"
+            batch_seq = next_batch_index // batch_size + 1
+            base_interval = self._get_subscription_interval_seconds()
+            dynamic_delay = max(0.2, base_interval * (1 + self.subscription_backoff_factor * (batch_seq - 1)))
             self._safe_add_once_job(
                 job_id=next_job_id,
                 func=lambda: self._subscribe_next_batch(next_batch_index, next_job_id),
                 delay_seconds=dynamic_delay,
             )
-            self._debug(f"已安排下一批订阅，批次 {next_batch_index // self.subscription_batch_size + 1}")
+            self._debug(f"已安排下一批订阅，批次 {next_batch_index // batch_size + 1}")
+
+    def _get_subscription_batch_size(self) -> int:
+        """中文注释：统一从 params 读取订阅批次大小，缺失时回退默认值"""
+        try:
+            val = getattr(self.params, "subscription_batch_size", None)
+            if val is None:
+                return 10
+            return max(1, int(val))
+        except Exception:
+            return 10
 
     def _resolve_subscribe_flag(self, primary: str, legacy: str, default: bool = False) -> bool:
         """解析订阅过滤参数优先级"""

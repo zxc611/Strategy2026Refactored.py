@@ -35,7 +35,8 @@ class Params(BaseParams):
     calculation_interval: int = Field(default=60, title="策略主循环/计算触发间隔(秒) [User Required: 60s]")
     kline_duration_seconds: int = Field(default=60, title="K线时间范围(秒)，用于拉取限制和计算超时")
     option_width_threshold: float = Field(default=4.0, title="期权宽度阈值，小于等于此值不交易")
-    debug_output_interval: int = Field(default=180, title="调试状态下宽度排行输出间隔(秒)")
+    debug_output_interval: int = Field(default=180, title="收市调试状态下宽度排行输出间隔(秒)")
+    open_debug_output_interval: int = Field(default=60, title="开盘调试状态下宽度排行输出间隔(秒)")
     trade_output_interval: int = Field(default=900, title="交易状态下宽度排行输出间隔(秒)")
     # Note: User request wording for 8 seemed swapped, assuming logical mapping:
     # "K线时间长度" -> kline_duration_seconds (default 60s)
@@ -44,11 +45,11 @@ class Params(BaseParams):
     load_history_options: bool = Field(default=True, title="加载历史K线时是否包含期权")
     load_all_products: bool = Field(default=False, title="是否加载全部品种（忽略产品过滤）")
     exchanges: str = Field(default="CFFEX,SHFE,DCE,CZCE", title="交易所列表（逗号分隔）")
-    future_products: str = Field(default="IF,CU,M,SR", title="期货品种列表（逗号分隔）")
+    future_products: str = Field(default="IF,IH,IM,CU,AL,ZN,RB,AU,AG,M,Y,A,JM,I,J,CF,SR,MA,TA", title="期货品种列表（逗号分隔）")
     option_products: str = Field(default="IO", title="期权品种列表（逗号分隔）")
     include_future_products_for_options: bool = Field(default=True, title="将期货品种一并尝试作为期权品种加载（覆盖商品期权）")
     subscription_batch_size: int = Field(default=10, title="订阅批次大小")
-    subscription_interval: int = Field(default=1, title="订阅批次间隔(秒)")
+    subscription_interval: float = Field(default=0.2, title="订阅批次间隔(秒)")
     subscription_backoff_factor: float = Field(default=1.0, title="订阅批次退避因子")
     subscribe_only_current_next_options: bool = Field(default=True, title="仅订阅指定月/指定下月期权（旧字段名）")
     subscribe_only_current_next_futures: bool = Field(default=True, title="仅订阅指定月/指定下月期货（旧字段名，仅限CFFEX IF/IH/IC）")
@@ -71,7 +72,7 @@ class Params(BaseParams):
     signal_cooldown: int = Field(default=60, title="信号冷却时间(秒)")
     lots_min: int = Field(default=1, title="手数最小值")
     width_threshold: float = Field(default=4.0, title="交易信号宽度阈值")
-    debug_output_interval: int = Field(default=180, title="调试模式下输出间隔(秒)")
+    debug_output_interval: int = Field(default=180, title="收市调试模式下输出间隔(秒)")
     lots_max: int = Field(default=100, title="手数最大值")
 
     # 开仓/风控参数
@@ -107,8 +108,9 @@ class Params(BaseParams):
     close_delayed_max_retries: int = Field(default=3, title="延迟平仓最大重试次数")
     close_order_price_type: str = Field(default="2", title="平仓委托价类型")
 
-    output_mode: str = Field(default="debug", title="输出模式(debug|trade|none)")
+    output_mode: str = Field(default="debug", title="输出模式(open_debug|close_debug|trade|none)")
     auto_trading_enabled: bool = Field(default=False, title="自动交易开关")
+    auto_trading: bool = Field(default=False, title="自动交易开关(兼容字段)")
     force_debug_on_start: bool = Field(default=True, title="启动时强制开启调试输出")
     ui_window_width: int = Field(default=320, title="UI窗口宽度")
     ui_window_height: int = Field(default=360, title="UI窗口高度")

@@ -190,8 +190,13 @@ class SchedulerMixin:
 
     def _safe_add_periodic_job(self, job_id: str, func: Callable, interval_seconds: float, **kwargs) -> Optional[Any]:
         try:
-            if (not hasattr(self, "scheduler")) or (self.scheduler is None):
-                self.scheduler = self._create_default_scheduler()
+            if (not hasattr(self, "scheduler")) or (self.scheduler is None) or (not hasattr(self.scheduler, "add_job")):
+                try:
+                    self.scheduler = self._create_default_scheduler()
+                except Exception as e:
+                    # 中文注释：创建默认调度器失败时给出告警并退出
+                    self._debug(f"[警告] 创建默认调度器失败: {e}")
+                    return None
             else:
                 try:
                     if hasattr(self.scheduler, "running") and not getattr(self.scheduler, "running"):

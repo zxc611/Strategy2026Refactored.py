@@ -49,6 +49,9 @@ class ParamTableMixin:
             mode = str(getattr(self.params, "output_mode", "debug")).lower()
         except Exception:
             mode = "debug"
+        if mode == "debug":
+            mode = "close_debug"
+        is_trade_like = mode in ("trade", "open_debug")
 
         is_trade_msg = bool(kwargs.get("trade", False))
         is_force_msg = bool(kwargs.get("force", False))
@@ -62,7 +65,7 @@ class ParamTableMixin:
         # [Safety Logic] 如果 BaseStrategy 是 Dummy，那么 super().output 可能无效
         # 此时应尽量确保日志生成，而非直接返回
         # override: 如果模式是 trade 且要求 quiet，则拦截
-        if mode == "trade" and trade_quiet and not is_trade_table:
+        if is_trade_like and trade_quiet and not is_trade_table:
             return
 
         # 诊断/测试输出自动识别关键字，可显式传入 diag=True
@@ -86,12 +89,12 @@ class ParamTableMixin:
 
         # 在调试模式下，默认开启调试输出开关
         try:
-            dbg_enabled = diag_enabled and (bool(getattr(self.params, "debug_output", False)) or mode == "debug")
+            dbg_enabled = diag_enabled and (bool(getattr(self.params, "debug_output", False)) or mode == "close_debug")
         except Exception:
             dbg_enabled = True # 默认开启，防止无日志
 
         # 交易模式下，仅输出交易或强制信息
-        if mode == "trade" and not is_trade_msg and not is_force_msg:
+        if is_trade_like and not is_trade_msg and not is_force_msg:
             return
         # 非交易模式，若调试开关关闭且非强制，跳过输出
         if not is_trade_msg and not is_force_msg and not dbg_enabled:

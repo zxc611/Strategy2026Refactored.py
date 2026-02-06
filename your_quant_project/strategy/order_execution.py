@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 from typing import Any, Dict, Optional, Union, Tuple, List
 from .position_models import OrderStatus, ChaseOrderTask, PositionType
+from .market_calendar import is_market_open_safe
 
 class LimitConfig:
     def __init__(self, limit_amount: float, effective_until: Optional[datetime] = None):
@@ -49,6 +50,12 @@ class OrderExecutionMixin:
         with self._lock:
             if not hasattr(self, "open_chase_tasks"):
                 self.open_chase_tasks = {}
+
+            d_str = str(direction).lower()
+            if d_str in ("0", "buy", "long"):
+                d_norm = "buy"
+            else:
+                d_norm = "sell"
                 
             task_key = f"OPEN_{instrument_id}_{datetime.now().timestamp()}"
             current_oid = None
@@ -61,7 +68,7 @@ class OrderExecutionMixin:
             self.open_chase_tasks[task_key] = {
                 "instrument_id": instrument_id,
                 "exchange": exchange,
-                "direction": direction,
+                "direction": d_norm,
                 "target_volume": target_volume,
                 "traded_volume": 0,
                 "current_order_id": current_oid,
@@ -73,7 +80,7 @@ class OrderExecutionMixin:
                 "last_update": datetime.now()
             }
             if hasattr(self, "output"):
-                 self.message_output(f"[开仓追单] 任务注册: {instrument_id} 目标:{target_volume} 初始单:{current_oid}")
+                 self.output(f"[开仓追单] 任务注册: {instrument_id} 目标:{target_volume} 初始单:{current_oid}")
 
     def check_active_chase_tasks(self) -> None:
         """检查并处理当前活跃的追单任务 (Run by Scheduler)"""
@@ -111,6 +118,21 @@ class OrderExecutionMixin:
         if retry_count >= max_retries:
             self.message_output(f"[追单] {inst_id} 达到最大重试次数 {max_retries}，任务终止")
             tasks_to_remove.append(key)
+            return
+
+        # 0. 初始下单失败或无订单号时，尝试重发
+        if not curr_oid:
+            timeout = getattr(self.params, "chase_interval_seconds", 2)
+            if (datetime.now() - last_update).total_seconds() >= timeout:
+                self.message_output(f"[追单] {inst_id} 未获取到订单号，重发 {target_vol - traded_vol} 手...")
+                new_oid = self._resend_chase_order(task, max(1, target_vol - traded_vol))
+                task["retry_count"] = retry_count + 1
+                task["last_update"] = datetime.now()
+                if new_oid:
+                    task["current_order_id"] = new_oid
+                else:
+                    if task["retry_count"] >= max_retries:
+                        tasks_to_remove.append(key)
             return
 
         # 2. 获取订单状态
@@ -169,6 +191,11 @@ class OrderExecutionMixin:
             exch = task.get("exchange")
             inst_id = task.get("instrument_id")
             direction = task.get("direction")
+            d_str = str(direction).lower()
+            if d_str in ("0", "buy", "long"):
+                direction = "buy"
+            else:
+                direction = "sell"
             
             # Get Price (Market or Ask1/Bid1)
             price = 0.0
@@ -452,6 +479,22 @@ class OrderExecutionMixin:
                              self.output(f"[下单失败] {remark} {instrument_id}")
                 except Exception:
                     pass
+                try:
+                    allow_retry = bool(getattr(self.params, "open_chase_retry_on_fail", True))
+                except Exception:
+                    allow_retry = True
+                if allow_retry and (not is_close) and instrument_id and exchange:
+                    try:
+                        self.register_open_chase(
+                            instrument_id=instrument_id,
+                            exchange=exchange,
+                            direction=direction,
+                            ids=[],
+                            target_volume=int(volume),
+                            price=float(order_price)
+                        )
+                    except Exception:
+                        pass
                 return None
 
         except Exception as e:
@@ -473,7 +516,9 @@ class OrderExecutionMixin:
         
         # 1. 模拟拦截 (Mock Execution for Debug)
         # 即使在重构版，如果开启了 DEBUG_ENABLE_MOCK_EXECUTION 或 output_mode=debug 且无真实API连接
-        mock_mode = getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)
+        mock_mode = bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)) or bool(getattr(self.params, "test_mode", False))
+        if is_market_open_safe(self):
+            mock_mode = False
         
         if mock_mode:
             import time
@@ -513,10 +558,22 @@ class OrderExecutionMixin:
                 }
                 d_arg = d_map.get(str(direction).lower(), "Buy")
                 o_arg = o_map.get(str(offset_flag).lower(), "Close")
-                ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, offset_flag=o_arg, order_price_type=order_price_type)
-                norm = _normalize_order_id(ret)
-                if norm is not None:
-                    return norm
+                try:
+                    ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, offset_flag=o_arg, order_price_type=order_price_type)
+                    norm = _normalize_order_id(ret)
+                    if norm is not None:
+                        return norm
+                except TypeError:
+                    try:
+                        ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, offset=o_arg, order_price_type=order_price_type)
+                        norm = _normalize_order_id(ret)
+                        if norm is not None:
+                            return norm
+                    except TypeError:
+                        ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, o_arg, order_price_type)
+                        norm = _normalize_order_id(ret)
+                        if norm is not None:
+                            return norm
 
             # Try req_order_insert if available
             if hasattr(self, "req_order_insert"):
@@ -1035,7 +1092,10 @@ class OrderExecutionMixin:
                                     break
                 
                 # Mock Price Injection (Strict Parity with _3.py)
-                if (not price or price <= 0) and getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False):
+                mock_price_allowed = bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)) or bool(getattr(self.params, "test_mode", False))
+                if is_market_open_safe(self):
+                    mock_price_allowed = False
+                if (not price or price <= 0) and mock_price_allowed:
                     price = 100.0
                     price_src = "MockDefault"
                     self.output(f"[收市调试] 无Tick，注入模拟价格 {price} 用于 {opt_id}", trade=True)

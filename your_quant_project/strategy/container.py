@@ -141,7 +141,8 @@ class StrategyContainer(
         # [User Request] Log Encoding Fix
         try:
             self.use_file_logging = True
-            log_dir = os.path.dirname(os.path.abspath(__file__))
+            # Write logs to project root to keep a stable root-level StrategyRun.log
+            log_dir = project_root
             self.log_file = os.path.join(log_dir, "StrategyRun.log")
             
             if self.use_file_logging:
@@ -193,6 +194,10 @@ class StrategyContainer(
         except Exception as e:
             self._force_log(f"super().__init__ error: {e}")
 
+        # 中文注释：确保 kline_data 预初始化，避免后续加载报错
+        if not hasattr(self, "kline_data") or self.kline_data is None:
+            self.kline_data = {}
+
         self.signal_times = {}
         self.history_retry_count = 0 
 
@@ -208,6 +213,18 @@ class StrategyContainer(
                      self.params = Params()
                  except Exception:
                      self.params = None
+        # 中文注释：再次兜底，防止 params 仍为 None（避免早期调用 subscribe_options 等字段报错）
+        if self.params is None:
+            try:
+                from types import SimpleNamespace
+                self.params = SimpleNamespace()
+                if not hasattr(self, "_params_missing_warned"):
+                    self._params_missing_warned = False
+                if not self._params_missing_warned:
+                    self._force_log("[警告] params 初始化失败，已使用 SimpleNamespace 兜底")
+                    self._params_missing_warned = True
+            except Exception:
+                pass
 
         # [Core] 日志路径
         self.log_file_path = getattr(self.params, "log_file_path", "strategy_startup.log") or "strategy_startup.log"
@@ -237,6 +254,13 @@ class StrategyContainer(
                     self.scheduler = Scheduler("PythonGO")
             except Exception as e:
                 self._force_log(f"Scheduler init error: {e}")
+        # 中文注释：启动时若 scheduler 缺失则创建默认调度器
+        if (not hasattr(self, "scheduler")) or (self.scheduler is None):
+            try:
+                if hasattr(self, "_create_default_scheduler"):
+                    self.scheduler = self._create_default_scheduler()
+            except Exception as e:
+                self._force_log(f"[警告] 默认调度器创建失败: {e}")
 
         # [Core] 订阅节流配置
         self.subscription_queue = []
@@ -244,8 +268,8 @@ class StrategyContainer(
         p_batch = getattr(self.params, "subscription_batch_size", 10)
         self.subscription_batch_size = p_batch if p_batch is not None else 10
         
-        p_interval = getattr(self.params, "subscription_interval", 1)
-        self.subscription_interval = p_interval if p_interval is not None else 1
+        p_interval = getattr(self.params, "subscription_interval", 0.2)
+        self.subscription_interval = float(p_interval or 0.2)
         
         self.subscription_backoff_factor = getattr(self.params, "subscription_backoff_factor", 1.0)
         self.subscription_job_ids = set()
@@ -259,13 +283,49 @@ class StrategyContainer(
     def is_running(self) -> bool:
         return getattr(self, "my_is_running", False)
 
+    @is_running.setter
+    def is_running(self, value: bool) -> None:
+        self.my_is_running = bool(value)
+
     @property
     def is_paused(self) -> bool:
         return getattr(self, "my_is_paused", False)
 
+    @is_paused.setter
+    def is_paused(self, value: bool) -> None:
+        self.my_is_paused = bool(value)
+
     @property
     def is_trading(self) -> bool:
         return getattr(self, "my_trading", False)
+
+    @is_trading.setter
+    def is_trading(self, value: bool) -> None:
+        self.my_trading = bool(value)
+
+    @property
+    def running(self) -> bool:
+        return getattr(self, "my_is_running", False)
+
+    @running.setter
+    def running(self, value: bool) -> None:
+        self.my_is_running = bool(value)
+
+    @property
+    def paused(self) -> bool:
+        return getattr(self, "my_is_paused", False)
+
+    @paused.setter
+    def paused(self, value: bool) -> None:
+        self.my_is_paused = bool(value)
+
+    @property
+    def trading(self) -> bool:
+        return getattr(self, "my_trading", False)
+
+    @trading.setter
+    def trading(self, value: bool) -> None:
+        self.my_trading = bool(value)
 
     def output(self, msg, **kwargs):
         """Unified output: Platform + LogFile (UTF-8)"""
@@ -347,6 +407,13 @@ class StrategyContainer(
 
         self.output(">>> Initialization Complete.")
 
+        try:
+            if getattr(self.params, "auto_start_after_init", False) and not getattr(self, "my_started", False):
+                self.output(">>> Auto-start after init enabled, calling on_start()", force=True)
+                self.on_start()
+        except Exception:
+            pass
+
     def on_start(self):
         """策略启动"""
         try:
@@ -360,6 +427,12 @@ class StrategyContainer(
         self.my_state = "running"
         
         if hasattr(self, "_load_param_table"): self._load_param_table()
+
+        try:
+            if (not getattr(self, "position_manager", None)) and PositionManager:
+                self.position_manager = PositionManager(self)
+        except Exception:
+            pass
 
         # [UI] Start Dashboard
         try:
@@ -430,7 +503,43 @@ class StrategyContainer(
             # Source parity: second timer for 14:58/15:58 checks (Time checks are fast, but callbacks might be slow)
             self._safe_add_periodic_job("second_timer", self._on_second_timer, interval_seconds=1, run_async=True)
 
+        try:
+            self._start_calc_watchdog()
+        except Exception:
+            pass
+
         self.output(">>> Strategy Started (Async Startup in Progress).")
+
+    def _start_calc_watchdog(self) -> None:
+        """Fallback loop to kick off trading cycles if scheduler stops firing."""
+        if getattr(self, "_calc_watchdog_started", False):
+            return
+        self._calc_watchdog_started = True
+
+        def _watchdog_loop():
+            while True:
+                try:
+                    if getattr(self, "my_destroyed", False):
+                        return
+                    if not getattr(self, "my_is_running", False) or getattr(self, "my_is_paused", False):
+                        time.sleep(1)
+                        continue
+
+                    interval = float(getattr(self.params, "calculation_interval", 60) or 60)
+                    last_ts = float(getattr(self, "_last_trading_cycle_ts", 0) or 0)
+                    now_ts = time.time()
+
+                    # If no cycle has run for 2.5x interval, force one
+                    if last_ts == 0 or (now_ts - last_ts) >= (interval * 2.5):
+                        self.output("[Watchdog] run_trading_cycle fallback trigger", force=True)
+                        if hasattr(self, "run_trading_cycle"):
+                            self.run_trading_cycle()
+
+                    time.sleep(max(1.0, interval))
+                except Exception:
+                    time.sleep(2)
+
+        threading.Thread(target=_watchdog_loop, daemon=True, name="CalcWatchdog").start()
 
     def _on_second_timer(self) -> None:
         """每秒定时器（对齐源策略规则4&5、规则3&6）"""
@@ -656,11 +765,14 @@ class StrategyContainer(
             
             # Determine interval based on mode
             mode = str(getattr(self.params, "output_mode", "debug")).lower()
-            is_debug = mode != "trade"
-            if is_debug:
-                interval = getattr(self.params, "debug_output_interval", 180) # 3 mins
+            if mode == "debug":
+                mode = "close_debug"
+            if mode == "open_debug":
+                interval = getattr(self.params, "open_debug_output_interval", 60)
+            elif mode == "trade":
+                interval = getattr(self.params, "trade_output_interval", 900)
             else:
-                interval = getattr(self.params, "trade_output_interval", 900) # 15 mins
+                interval = getattr(self.params, "debug_output_interval", 180)
             
             if current_time - self.last_width_output_time >= interval:
                 self._perform_width_output()
@@ -675,7 +787,10 @@ class StrategyContainer(
             if not hasattr(self, "option_width_results"):
                 return
 
-            mode_str = 'DEBUG' if getattr(self.params, 'debug_output', True) else 'TRADE'
+            mode = str(getattr(self.params, "output_mode", "debug")).lower()
+            if mode == "debug":
+                mode = "close_debug"
+            mode_str = "OPEN_DEBUG" if mode == "open_debug" else ("CLOSE_DEBUG" if mode == "close_debug" else "TRADE")
             self.output(f"\n[Periodic] Option Width Ranking Report ({mode_str})")
             self.output("-" * 60)
             

@@ -77,6 +77,28 @@ def get_trading_sessions(
     return sessions
 
 
+def is_market_open_safe(obj: object) -> bool:
+    """尽量安全判断是否开盘；若对象无方法则退回时段计算。"""
+    try:
+        fn = getattr(obj, "is_market_open", None)
+        if callable(fn):
+            return bool(fn())
+    except Exception:
+        pass
+
+    try:
+        params = getattr(obj, "params", None)
+        default_exch = getattr(params, "exchange", None) if params else None
+        now_dt = datetime.now()
+        for start, end in get_trading_sessions(now_dt, default_exch):
+            if start <= now_dt <= end:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
 class MarketCalendarMixin:
     """交易时段/开盘判断混入。"""
 

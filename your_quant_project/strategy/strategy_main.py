@@ -558,10 +558,7 @@ class Strategy2026Refactored(
             
             # Forward to Position Manager
             if hasattr(self, "position_manager") and self.position_manager:
-                # 检查是否为开仓（offset_flag == "0"）
-                offset = getattr(trade_data, "offset_flag", "") or getattr(trade_data, "OffsetFlag", "")
-                if str(offset) == "0":
-                    self.position_manager.handle_new_position(trade_data)
+                self.position_manager.on_trade(trade_data)
         except Exception as e:
             self.output(f"on_trade Error: {e}")
 

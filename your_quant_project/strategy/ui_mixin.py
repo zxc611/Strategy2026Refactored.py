@@ -234,10 +234,10 @@ class UIMixin:
 
                 def _to_debug():
                     try:
-                        setattr(self.params, "debug_output", True)
+                        setattr(self.params, "debug_output", False)
                         setattr(self.params, "run_profile", "full")
                         setattr(self.params, "backtest_tick_mode", False)
-                        setattr(self.params, "diagnostic_output", True)
+                        setattr(self.params, "diagnostic_output", False)
                         setattr(self.params, "test_mode", False)
                         self.DEBUG_ENABLE_MOCK_EXECUTION = False
                         try:
@@ -250,7 +250,7 @@ class UIMixin:
                     except Exception:
                         pass
                     self._apply_param_overrides_for_debug()
-                    self.set_output_mode("debug")
+                    self.set_output_mode("open_debug")
 
                 def _to_close_debug():
                     try:
@@ -329,7 +329,7 @@ class UIMixin:
                         except Exception:
                             pass
                         self._apply_param_overrides_for_debug()
-                        self.set_output_mode("debug") 
+                        self.set_output_mode("close_debug") 
                     except Exception as e:
                         try:
                             self.output(f"收市调试切换失败: {e}", force=True)
@@ -359,7 +359,7 @@ class UIMixin:
                     try:
                         setattr(self.params, "run_profile", "backtest")
                         setattr(self.params, "backtest_tick_mode", True)
-                        setattr(self.params, "output_mode", "debug")
+                        setattr(self.params, "output_mode", "close_debug")
                         setattr(self.params, "debug_output", False)
                         setattr(self.params, "diagnostic_output", False)
                         self._enforce_diagnostic_silence()
@@ -498,6 +498,7 @@ class UIMixin:
                 return
             import tkinter as tk
             cur = str(getattr(self.params, 'output_mode', 'debug')).lower()
+            mode = "close_debug" if cur == "debug" else cur
             try:
                 if hasattr(self, "_ui_lbl") and self._ui_lbl:
                     self._ui_lbl.config(text=f"当前模式: {cur}")
@@ -511,11 +512,9 @@ class UIMixin:
                 except Exception:
                     f_lg, f_sm = 11, 10
                 
-                is_debug_mode = (cur == 'debug')
-                is_mock_on = getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)
-                is_open_debug = is_debug_mode and (not is_mock_on)
-                is_close_debug = is_debug_mode and is_mock_on
-                is_trade_mode = (cur == 'trade')
+                is_open_debug = (mode == 'open_debug')
+                is_close_debug = (mode == 'close_debug')
+                is_trade_mode = (mode == 'trade')
                 is_auto = getattr(self, "auto_trading_enabled", False)
 
                 def _set_style(btn_attr, active, color="#2e7d32"):
@@ -552,14 +551,16 @@ class UIMixin:
     def set_output_mode(self, mode: str) -> None:
         try:
             m = str(mode).lower()
-            if m not in ("debug", "trade"):
+            if m == "debug":
+                m = "close_debug"
+            if m not in ("open_debug", "close_debug", "trade"):
                 self.output(f"无效输出模式: {mode}", force=True)
                 return
             setattr(self.params, "output_mode", m)
-            if m == "debug":
+            if m == "close_debug":
                 setattr(self.params, "debug_output", True)
                 setattr(self.params, "diagnostic_output", True)
-            elif m == "trade":
+            elif m == "open_debug" or m == "trade":
                 setattr(self.params, "debug_output", False)
                 setattr(self.params, "diagnostic_output", False)
             try:

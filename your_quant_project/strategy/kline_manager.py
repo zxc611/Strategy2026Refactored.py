@@ -488,6 +488,13 @@ class KlineManagerMixin:
         # [Requirement 1] Enforce Data Fetch Rate Limit (Per Instrument)
         if not self._should_fetch_data(instrument_id, exchange):
             return []
+        # 中文注释：market_center 缺失时降级（仅告警一次）
+        if not hasattr(self, "_market_center_missing_warned"):
+            self._market_center_missing_warned = False
+        if not getattr(self, "market_center", None):
+            if not self._market_center_missing_warned:
+                self.output("[警告] market_center 缺失，get_recent_m1_kline 将仅使用 infini 或返回空", force=True)
+                self._market_center_missing_warned = True
             
         # [Validation 2] Enforce Global API Throttling (Per Strategy) to prevent "Request too frequent"
         # Use Thread-Safe Atomic Rate Limiter
@@ -497,7 +504,7 @@ class KlineManagerMixin:
             pass
 
         try:
-            mc_get_kline = getattr(self.market_center, "get_kline_data", None)
+            mc_get_kline = getattr(self.market_center, "get_kline_data", None) if getattr(self, "market_center", None) else None
             bars = []
             if callable(mc_get_kline):
                 primary_style = (style or getattr(self.params, "kline_style", "M1") or "M1").strip()
@@ -674,9 +681,17 @@ class KlineManagerMixin:
         try:
             self._debug("=== 开始获取历史K线数据 ===")
 
-            mc_get_bars = getattr(self.market_center, "get_bars", None)
+            # 中文注释：market_center 缺失时降级（仅告警一次）
+            if not hasattr(self, "_market_center_missing_warned"):
+                self._market_center_missing_warned = False
+            if not getattr(self, "market_center", None):
+                if not self._market_center_missing_warned:
+                    self.output("[警告] market_center 缺失，历史K线将仅尝试 infini 或直接跳过", force=True)
+                    self._market_center_missing_warned = True
+
+            mc_get_bars = getattr(self.market_center, "get_bars", None) if getattr(self, "market_center", None) else None
             infini_get_bars = getattr(__import__("pythongo").infini, "get_bars", None) if hasattr(__import__("pythongo"), "infini") else None
-            mc_get_kline = getattr(self.market_center, "get_kline_data", None)
+            mc_get_kline = getattr(self.market_center, "get_kline_data", None) if getattr(self, "market_center", None) else None
 
             get_bars_fn = mc_get_bars if callable(mc_get_bars) else None
             get_bars_source = "MarketCenter"

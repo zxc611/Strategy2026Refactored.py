@@ -12,6 +12,7 @@ import traceback
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Set
+from .market_calendar import is_market_open_safe
 
 try:
     from pythongo import KLineData
@@ -197,7 +198,7 @@ class OptionWidthCalculationMixin:
             if baseline_products_cfg:
                 baseline_products = set([p.strip().upper() for p in baseline_products_cfg.split(',') if p.strip()])
             else:
-                baseline_products = set(["CU","RB","AL","ZN","AU","AG","M","Y","A","J","JM","I","CF","SR","MA","TA"])
+                baseline_products = set(["IF","IH","IM","CU","AL","ZN","RB","AU","AG","M","Y","A","J","JM","I","CF","SR","MA","TA"])
 
             tasks = {}
             # [Optimization: Concurrency] Use dynamic workers based on CPU count * 1.5, capped at 32
@@ -209,6 +210,19 @@ class OptionWidthCalculationMixin:
                 # 1. Submit Futures Tasks
                 with self.data_lock:
                      futures_list = list(self.future_instruments)
+
+                try:
+                    now_ts = time.time()
+                    last_ts = getattr(self, "_calc_entry_log_time", 0)
+                    if now_ts - last_ts >= 60:
+                        msg = f"[Calc] futures={len(futures_list)}"
+                        if hasattr(self, "_debug"):
+                            self._debug(msg)
+                        else:
+                            self.output(msg)
+                        self._calc_entry_log_time = now_ts
+                except Exception:
+                    pass
                 
                 for future in futures_list:
                     if self._is_paused_or_stopped(): return
@@ -216,12 +230,6 @@ class OptionWidthCalculationMixin:
                     future_id = future.get("InstrumentID", "")
                     if not exchange or not future_id: continue
                     
-                    # Filtering logic can be inside the task or here. Keeping here for efficiency.
-                    if not self._is_real_month_contract(future_id): continue
-                    prod = self._extract_product_code(future_id)
-                    if prod and not self._has_option_for_product(prod): 
-                         if prod not in ("MA", "TA", "CU", "RB", "SR"): continue
-
                     future_task = executor.submit(self.calculate_option_width_optimized, exchange, future_id)
                     tasks[future_task] = ("F", exchange, future_id)
 
@@ -334,8 +342,15 @@ class OptionWidthCalculationMixin:
         # Debug >= 20s, Trade >= 600s (10min)
         try:
              last_log = getattr(self, "_last_calc_log_time", 0)
-             is_debug_mode = str(getattr(self.params, "output_mode", "trade")).lower() != "trade"
-             interval = 20 if is_debug_mode else 600
+             mode = str(getattr(self.params, "output_mode", "trade")).lower()
+             if mode == "debug":
+                 mode = "close_debug"
+             if mode == "open_debug":
+                 interval = float(getattr(self.params, "open_debug_output_interval", 60) or 60)
+             elif mode == "trade":
+                 interval = float(getattr(self.params, "trade_output_interval", 900) or 900)
+             else:
+                 interval = float(getattr(self.params, "debug_output_interval", 180) or 180)
              if end_time - last_log >= interval:
                   self.output(f"concurrent_calc 执行完成，耗时 {calculation_time:.2f}s", force=True)
                   self._last_calc_log_time = end_time
@@ -375,18 +390,25 @@ class OptionWidthCalculationMixin:
     def _output_debug_table(self):
         try:
             mode = str(getattr(self.params, "output_mode", "debug")).lower()
-        except: mode = "debug"
+            if mode == "debug":
+                mode = "close_debug"
+        except: mode = "close_debug"
         
         # [Req 2] Log Throttling (Applied to Debug/Trade Table Output too)
         # Check against the shared log timer
         try:
-             last_log = getattr(self, "_last_calc_log_time", 0)
-             interval = 20 if mode != "trade" else 600
-             if time.time() - last_log < interval:
-                  return
+            last_log = getattr(self, "_last_calc_log_time", 0)
+            if mode == "open_debug":
+                interval = float(getattr(self.params, "open_debug_output_interval", 60) or 60)
+            elif mode == "trade":
+                interval = float(getattr(self.params, "trade_output_interval", 900) or 900)
+            else:
+                interval = float(getattr(self.params, "debug_output_interval", 180) or 180)
+            if time.time() - last_log < interval:
+                return
         except: pass
 
-        if mode == "trade" or getattr(self.params, "debug_output", False):
+        if mode in ("trade", "open_debug") or getattr(self.params, "debug_output", False):
             try:
                 with self.data_lock:
                     results = list(self.option_width_results.values())
@@ -400,7 +422,7 @@ class OptionWidthCalculationMixin:
                 
                 if getattr(self.params, "top3_rows", 3):
                     top_n = int(getattr(self.params, "top3_rows", 3))
-                    rows = rows[:top_n] if mode == "trade" else rows
+                    rows = rows[:top_n] if mode in ("trade", "open_debug") else rows
 
                 if rows:
                     headers = ["#", "交易所", "品种", "方向", "宽度", "指定月", "下月", "虚值总数", "时间"]
@@ -416,7 +438,8 @@ class OptionWidthCalculationMixin:
                                               f"{r.get('total_all_om_specified')}/{r.get('total_all_om_next_specified')}", tstr])
                     
                     # Simple table print
-                    self.output(f"{'交易' if mode=='trade' else '调试'}模式：Top{len(rows)}", trade=True, trade_table=True)
+                    tag = "交易" if mode in ("trade", "open_debug") else "调试"
+                    self.output(f"{tag}模式：Top{len(rows)}", trade=True, trade_table=True)
                     for row in display_rows:
                         self.output(" | ".join(row), trade=True, trade_table=True)
             except Exception: pass
@@ -427,7 +450,10 @@ class OptionWidthCalculationMixin:
             # [Optimization] Normalize keys moved to outer loop
             # self._normalize_option_group_keys()
 
-            is_debug = str(getattr(self.params, "output_mode", "trade")).lower() != "trade"
+            mode = str(getattr(self.params, "output_mode", "trade")).lower()
+            if mode == "debug":
+                mode = "close_debug"
+            is_debug = mode not in ("trade", "open_debug")
             forced_debug = getattr(self.params, "test_mode", False) or getattr(self.params, "diagnostic_output", False)
             if forced_debug: is_debug = True
 
@@ -460,7 +486,10 @@ class OptionWidthCalculationMixin:
 
             # [CHECK-FIX] KLine Freshness Check
             try:
-                if getattr(self.params, "test_mode", False) or getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False):
+                mock_mode = bool(getattr(self.params, "test_mode", False)) or bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False))
+                if is_market_open_safe(self):
+                    mock_mode = False
+                if mock_mode:
                     max_age = 0
                 else:
                     conf_val = getattr(self.params, "kline_max_age_sec", None)
@@ -524,10 +553,30 @@ class OptionWidthCalculationMixin:
                     next_specified_options = self._get_option_group_options(next_norm)
 
             if not specified_options and not next_specified_options:
-                 # 无论如何连个期权都找不到，那确实无法计算
-                 if future_id in self.option_width_results: del self.option_width_results[future_id]
-                 self._cleanup_kline_cache_for_symbol(future_id)
-                 return
+                 # 无期权时输出 0 宽度结果，避免早退断链
+                 current_price = self._get_backup_price(future_id, exchange)
+                 if current_price <= 0:
+                     current_price = 0.0001
+                 res_val = {
+                     "exchange": exchange,
+                     "future_id": future_id,
+                     "future_rising": False,
+                     "current_price": current_price,
+                     "previous_price": current_price,
+                     "specified_month_count": 0,
+                     "next_specified_month_count": 0,
+                     "total_specified_target": 0,
+                     "total_next_specified_target": 0,
+                     "total_all_om_specified": 0,
+                     "total_all_om_next_specified": 0,
+                     "option_width": 0,
+                     "all_sync": False,
+                     "has_direction_options": False,
+                     "timestamp": datetime.now(),
+                     "top_active_calls": [],
+                     "top_active_puts": [],
+                 }
+                 return {"action": "update", "key": future_id, "value": res_val}
             
             # [Optimization] 缺少下月期权链时，不直接 return，允许空下月列表
             if not next_month_id: next_specified_options = []
@@ -743,7 +792,10 @@ class OptionWidthCalculationMixin:
                                                  all_option_groups: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Optional[Dict[str, Any]]:
         """基于期权分组计算宽度（带时效检查 + Top2） - Thread Safe Return"""
         try:
-            is_debug = str(getattr(self.params, "output_mode", "trade")).lower() != "trade"
+            mode = str(getattr(self.params, "output_mode", "trade")).lower()
+            if mode == "debug":
+                mode = "close_debug"
+            is_debug = mode not in ("trade", "open_debug")
             forced_debug = getattr(self.params, "test_mode", False) or getattr(self.params, "diagnostic_output", False)
             if forced_debug: is_debug = True
 
@@ -763,12 +815,16 @@ class OptionWidthCalculationMixin:
 
             # [CHECK-FIX] KLine Freshness Logic
             try:
-                if getattr(self.params, "test_mode", False) or getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False):
+                mock_mode = bool(getattr(self.params, "test_mode", False)) or bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False))
+                if is_market_open_safe(self):
+                    mock_mode = False
+                if mock_mode:
                     max_age = 0
                 else:
                     conf_val = getattr(self.params, "kline_max_age_sec", None)
                     max_age = int(conf_val) if conf_val is not None else 1800
-            except Exception: max_age = 1800
+            except Exception:
+                max_age = 1800
             
             if max_age > 0 and len(klines) >= 1:
                  def _get_ts_g(bar: Any) -> Optional[datetime]:
@@ -1164,18 +1220,20 @@ class OptionWidthCalculationMixin:
         """优化版信号输出与执行"""
         now = datetime.now()
         mode = str(getattr(self.params, "output_mode", "trade")).lower()
+        if mode == "debug":
+            mode = "close_debug"
         trade_quiet = bool(getattr(self.params, "trade_quiet", True))
 
-        if not signals and mode == "trade":
+        if not signals and mode in ("trade", "open_debug"):
             return
 
-        if mode != "trade":
+        if mode not in ("trade", "open_debug"):
             # [Requirement 5 & 6] Consolidated Output Logic
             # REMOVED: Redundant debug printing. 
             # The printing of ranking is now handled by Container._check_width_ranking_output periodically.
             pass
         
-        if mode == "trade":
+        if mode in ("trade", "open_debug"):
              # Trade 模式：仅在 Top 发生变化或满足刷新间隔时输出，避免刷屏
              # Logic continues below for signal execution...
              try: market_open = bool(self.is_market_open())

@@ -6,6 +6,7 @@ import time
 import traceback
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any, Set
+from .market_calendar import is_market_open_safe
 
 class TradingLogicMixin:
 
@@ -109,6 +110,9 @@ class TradingLogicMixin:
             # [Fix Scenario 3] Pause Check
             if self.is_paused or not self.is_running: return
 
+            # Track last successful cycle start for watchdog checks
+            self._last_trading_cycle_ts = time.time()
+
             # [Optimized] Moved check_and_close_overdue_positions to separate independent job
             # to prevent it from being blocked by heavy calculation or vice-versa.
             # if hasattr(self, "position_manager") and self.position_manager:
@@ -133,6 +137,10 @@ class TradingLogicMixin:
         except Exception as e:
             self.output(f"交易循环执行异常: {e}")
         finally:
+            try:
+                self._last_trading_cycle_end_ts = time.time()
+            except Exception:
+                pass
             self._trading_cycle_lock.release()
 
     def execute_signals_optimized(self, signals: List[Dict[str, Any]]) -> None:
@@ -274,8 +282,10 @@ class TradingLogicMixin:
                 # 2. 获取价格 (Enhanced Fallback)
                 price = self._get_execution_price_for_option(exchange, opt_id, "buy")
                 
-                # Mock Price Injection for Debug Mode
-                mock_enabled = getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False) or str(getattr(self.params, "output_mode", "trade")).lower() == "debug"
+                # Mock Price Injection only when explicitly enabled and market is closed
+                mock_enabled = bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)) or bool(getattr(self.params, "test_mode", False))
+                if is_market_open_safe(self):
+                    mock_enabled = False
                 if (not price or price <= 0) and mock_enabled:
                      price = 100.0
                      self.output(f"[调试] 注入模拟价格 {price} 用于 {opt_id}")

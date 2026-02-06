@@ -318,7 +318,9 @@ class PlatformCompatMixin:
         """诊断/测试输出是否允许；交易/回测统一关闭。"""
         try:
             mode = str(getattr(self.params, "output_mode", "debug")).lower()
-            if mode == "trade" or self._is_trade_context() or self._is_backtest_context():
+            if mode == "debug":
+                mode = "close_debug"
+            if mode in ("trade", "open_debug") or self._is_trade_context() or self._is_backtest_context():
                 return False
         except Exception:
             pass
