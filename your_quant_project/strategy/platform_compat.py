@@ -99,6 +99,38 @@ class PlatformCompatMixin:
             pass
         self.my_state = "stopped"
 
+    # --- 行情回调别名映射 ---
+    # [Fix] 显式映射常见行情回调到 on_tick，防止 SDK 调用命名不匹配导致无行情
+    def on_quote(self, tick: Any) -> None:
+        """Alias for on_tick (Standard Python/SnakeCase)"""
+        if hasattr(self, "on_tick"):
+            self.on_tick(tick)
+
+    def OnQuote(self, tick: Any) -> None:
+        """Alias for on_tick (PascalCase/C++ Style)"""
+        if hasattr(self, "on_tick"):
+            self.on_tick(tick)
+            
+    def quote(self, tick: Any) -> None:
+        """Alias for on_tick (Short)"""
+        if hasattr(self, "on_tick"):
+            self.on_tick(tick)
+            
+    def Quote(self, tick: Any) -> None:
+        """Alias for on_tick (Short Pascal)"""
+        if hasattr(self, "on_tick"):
+            self.on_tick(tick)
+
+    def on_market_data(self, tick: Any) -> None:
+        """Alias for on_tick (Generic)"""
+        if hasattr(self, "on_tick"):
+            self.on_tick(tick)
+
+    def OnTick(self, tick: Any) -> None:
+        """Alias for on_tick (PascalCase)"""
+        if hasattr(self, "on_tick"):
+            self.on_tick(tick)
+
     def onStop(self, *args: Any, **kwargs: Any) -> None:
         if hasattr(self, "on_stop"):
             self.on_stop(*args, **kwargs)

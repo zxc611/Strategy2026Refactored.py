@@ -36,7 +36,7 @@ except ImportError:
 
 # 导入 Mixins
 try:
-    from your_quant_project.strategy.market_calendar import MarketCalendarMixin
+    from your_quant_project.strategy.market_calendar import MarketCalendarMixin, is_close_debug_allowed
     from your_quant_project.strategy.param_table import ParamTableMixin
     from your_quant_project.strategy.instruments import InstrumentLoaderMixin
     from your_quant_project.strategy.kline_manager import KlineManagerMixin
@@ -200,6 +200,18 @@ class Strategy2026Refactored(
     def _on_second_timer(self) -> None:
         """每秒定时器（修正：移除所有14:30相关逻辑）"""
         try:
+            try:
+                mode = str(getattr(self.params, "output_mode", "debug")).lower()
+                if mode == "debug":
+                    mode = "close_debug"
+                if mode == "close_debug":
+                    allowed, reason = is_close_debug_allowed(self, minutes_to_open=30)
+                    if not allowed:
+                        if hasattr(self, "_exit_close_debug_mode"):
+                            self._exit_close_debug_mode(reason or "")
+            except Exception:
+                pass
+
             # 调用开仓追单处理
             if hasattr(self, "_process_open_chase_tasks"):
                 self._process_open_chase_tasks()
@@ -378,16 +390,20 @@ class Strategy2026Refactored(
             self.output("环境自检失败，策略停止初始化")
             return
         
-        # 3. 初始化其他模块
-        if hasattr(self, "init_emergency_pause"):
-            self.init_emergency_pause()
-        
-        # 4. 初始化 PositionManager
+        # 3. 初始化 PositionManager
         if PositionManager:
             self.position_manager = PositionManager(self)
         else:
             self.position_manager = None
             self.output("警告: PositionManager 模块未加载")
+
+        # 4. 初始化其他模块（紧急暂停放在后置，避免影响主流程）
+        if hasattr(self, "init_emergency_pause"):
+            self._suppress_emergency_pause_output = True
+            try:
+                self.init_emergency_pause()
+            finally:
+                self._suppress_emergency_pause_output = False
 
         self.output("Strategy2026Refactored 初始化完成")
 

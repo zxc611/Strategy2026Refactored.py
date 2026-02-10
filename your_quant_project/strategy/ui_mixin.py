@@ -8,6 +8,8 @@ import queue  # [SafePause] Thread-safe UI communication
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from .market_calendar import is_close_debug_allowed
+
 try:
     from .safe_pause_manager import SafePauseManager
 except ImportError:
@@ -63,18 +65,28 @@ class UIMixin:
 
         cls = self.__class__
 
-        # [Safety] Force cleanup of any legacy global root to ensure fresh thread binding
-        # Reusing old roots is dangerous as they are bound to old queues/threads.
+        # [Safety] Avoid destroying Tk root from non-UI thread; prefer queue signal
         try:
+            if getattr(cls, "_ui_global_running", False):
+                try:
+                    self._schedule_bring_output_mode_ui_front()
+                    self.output("输出模式界面已在运行，已聚焦现有窗口", force=True)
+                    return
+                except Exception:
+                    pass
             old_root = getattr(cls, "_ui_global_root", None)
             if old_root:
-                 try: 
-                     self.output("清理遗留 UI 窗口...", force=True)
-                     old_root.destroy()
-                 except: pass
-                 setattr(cls, "_ui_global_root", None)
-                 setattr(cls, "_ui_global_running", False)
-                 setattr(cls, "_ui_global_creating", False)
+                try:
+                    self.output("清理遗留 UI 窗口...", force=True)
+                    if hasattr(self, "_ui_queue") and self._ui_queue:
+                        self._ui_queue.put_nowait({"action": "destroy"})
+                    else:
+                        old_root.destroy()
+                except Exception:
+                    pass
+                setattr(cls, "_ui_global_root", None)
+                setattr(cls, "_ui_global_running", False)
+                setattr(cls, "_ui_global_creating", False)
         except Exception:
             pass
 
@@ -249,20 +261,74 @@ class UIMixin:
                             pass
                     except Exception:
                         pass
+                    try:
+                        if hasattr(self, "resume_strategy"):
+                            self.resume_strategy()
+                        self.my_is_running = True
+                        self.my_is_paused = False
+                        self.my_state = "running"
+                        self.my_trading = True
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self, "safe_pause_manager") and self.safe_pause_manager:
+                            if hasattr(self.safe_pause_manager, "reset"):
+                                self.safe_pause_manager.reset()
+                            elif hasattr(self.safe_pause_manager, "manager") and hasattr(self.safe_pause_manager.manager, "is_paused"):
+                                self.safe_pause_manager.manager.is_paused = False
+                    except Exception:
+                        pass
+                    try:
+                        if (not hasattr(self, "scheduler")) or (self.scheduler is None):
+                            if hasattr(self, "_create_default_scheduler"):
+                                self.scheduler = self._create_default_scheduler()
+                        else:
+                            if hasattr(self.scheduler, "running") and not getattr(self.scheduler, "running"):
+                                self.scheduler.start()
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self, "_safe_add_periodic_job"):
+                            calc_interval = getattr(self.params, "calculation_interval", 60)
+                            self._safe_add_periodic_job("run_trading_cycle", self.run_trading_cycle, interval_seconds=calc_interval, run_async=True)
+
+                            def _pos_check():
+                                if hasattr(self, "position_manager") and self.position_manager:
+                                    try:
+                                        self.position_manager.check_and_close_overdue_positions(days_limit=3)
+                                    except Exception:
+                                        pass
+
+                            self._safe_add_periodic_job("position_check_periodic", _pos_check, interval_seconds=60, run_async=True)
+                            self._safe_add_periodic_job("check_chase_tasks", self.check_active_chase_tasks, interval_seconds=1, run_async=True)
+                            self._safe_add_periodic_job("second_timer", self._on_second_timer, interval_seconds=1, run_async=True)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self, "run_trading_cycle"):
+                            self.run_trading_cycle()
+                    except Exception:
+                        pass
                     self._apply_param_overrides_for_debug()
-                    self.set_output_mode("open_debug")
+                    self.set_output_mode("trade")
 
                 def _to_close_debug():
                     try:
                         try:
                             try:
-                                if hasattr(self, "is_market_open") and self.is_market_open():
+                                allowed, reason = is_close_debug_allowed(self, minutes_to_open=30)
+                                if not allowed:
                                     try:
                                         if hasattr(self, "_ui_lbl") and self._ui_lbl:
-                                            self._ui_lbl.config(text="正在开盘！", fg="red")
+                                            msg = "收市调试不可用"
+                                            if reason == "near_open":
+                                                msg = "距离开盘不足30分钟"
+                                            elif reason == "market_open":
+                                                msg = "正在开盘！"
+                                            self._ui_lbl.config(text=msg, fg="red")
                                     except Exception:
                                         pass
-                                    self.output("正在开盘！", force=True)
+                                    self.output("收市调试不可用：开盘中或临近开盘", force=True)
                                     return
                             except Exception:
                                 pass
@@ -355,6 +421,30 @@ class UIMixin:
                         pass
                     self.set_output_mode("trade")
 
+                def _exit_close_debug_mode(reason: str = ""):
+                    try:
+                        if hasattr(self, "_reset_close_debug_state"):
+                            self._reset_close_debug_state()
+                    except Exception:
+                        pass
+                    try:
+                        setattr(self.params, "debug_output", False)
+                        setattr(self.params, "diagnostic_output", False)
+                        setattr(self.params, "test_mode", False)
+                        self.DEBUG_ENABLE_MOCK_EXECUTION = False
+                        prev_age = getattr(self, "_close_debug_prev_kline_max_age_sec", None)
+                        if prev_age is not None:
+                            setattr(self.params, "kline_max_age_sec", prev_age)
+                            self._close_debug_prev_kline_max_age_sec = None
+                    except Exception:
+                        pass
+                    try:
+                        self.set_output_mode("trade")
+                        if reason:
+                            self.output(f"收市调试已关闭: {reason}", force=True)
+                    except Exception:
+                        pass
+
                 def _to_backtest_mode():
                     try:
                         setattr(self.params, "run_profile", "backtest")
@@ -406,6 +496,8 @@ class UIMixin:
                 btn_daily.config(command=_daily_summary)
                 btn_param.config(command=_param_modify)
                 btn_backtest.config(command=_backtest_modify)
+
+                self._exit_close_debug_mode = _exit_close_debug_mode
 
                 try:
                     self._ui_root = root
@@ -556,6 +648,15 @@ class UIMixin:
             if m not in ("open_debug", "close_debug", "trade"):
                 self.output(f"无效输出模式: {mode}", force=True)
                 return
+            try:
+                prev = str(getattr(self.params, "output_mode", "debug")).lower()
+                if prev == "debug":
+                    prev = "close_debug"
+                if prev == "close_debug" and m != "close_debug":
+                    if hasattr(self, "_reset_close_debug_state"):
+                        self._reset_close_debug_state()
+            except Exception:
+                pass
             setattr(self.params, "output_mode", m)
             if m == "close_debug":
                 setattr(self.params, "debug_output", True)

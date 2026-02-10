@@ -21,7 +21,7 @@ class RobustLoopScheduler:
         self._active_async_threads: Dict[str, threading.Thread] = {}
 
     def start(self):
-        """�������Ź�ѭ��"""
+        """主线程循环"""
         if self.running:
             return
         self.running = True
@@ -32,11 +32,16 @@ class RobustLoopScheduler:
         except: pass
 
     def stop(self):
-        """ֹͣ"""
+        """停止"""
         self.running = False
         try:
             self.logger("[Scheduler] RobustLoopScheduler Stopping...")
         except: pass
+        # [Fix] Join thread to ensure loop exit but with timeout
+        if self._thread and self._thread.is_alive():
+             try:
+                 self._thread.join(timeout=1.0)
+             except: pass
 
     def add_job(self, func: Callable, trigger: str, **kwargs) -> Any:
         """
@@ -140,7 +145,10 @@ class RobustLoopScheduler:
                             traceback.print_exc()
 
                 # Sleep a small Tick (e.g. 0.5s) to prevent CPU spin
-                time.sleep(0.5)
+                # [Fix] Split sleep into smaller chunks to react to stop() fast
+                for _ in range(5):
+                    if not self.running: break
+                    time.sleep(0.1)
 
             except Exception as e:
                 try:
@@ -171,13 +179,25 @@ class SchedulerMixin:
         return self._safe_add_periodic_job(kwargs.get("id", "unknown"), func, kwargs.get("seconds", 60))
 
     def _safe_add_once_job(self, job_id: str, func: Callable, delay_seconds: float) -> Optional[Any]:
-        # Robust scheduler doesn support date trigger natively yet.
-        # Workaround: Add interval job that removes itself?
-        # Or just run in a thread.
+        # [Fix] Use sliced sleep to allow early exit on strategy stop
         try:
             import threading
             def _delayed_run():
-                time.sleep(delay_seconds)
+                elapsed = 0.0
+                step = 0.5
+                while elapsed < delay_seconds:
+                    # Check if strategy is destroyed (need reference to self)
+                    if hasattr(self, "my_destroyed") and getattr(self, "my_destroyed", False):
+                        return
+                    if hasattr(self, "scheduler") and hasattr(self.scheduler, "running") and not self.scheduler.running:
+                        return
+                    
+                    time.sleep(min(step, delay_seconds - elapsed))
+                    elapsed += step
+                
+                if hasattr(self, "my_destroyed") and getattr(self, "my_destroyed", False):
+                     return
+
                 try:
                     func()
                 except Exception as e:

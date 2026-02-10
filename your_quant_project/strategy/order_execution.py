@@ -36,6 +36,25 @@ class OrderExecutionMixin:
         if not hasattr(self, "_lock"):
             self._lock = threading.RLock()
 
+    def _reset_close_debug_state(self) -> None:
+        try:
+            if hasattr(self, "pending_orders"):
+                self.pending_orders.clear()
+            if hasattr(self, "chase_tasks"):
+                self.chase_tasks.clear()
+            if hasattr(self, "open_chase_tasks"):
+                self.open_chase_tasks.clear()
+            if hasattr(self, "last_open_success_time"):
+                self.last_open_success_time = {}
+            if hasattr(self, "top3_last_signature"):
+                self.top3_last_signature = None
+            if hasattr(self, "_order_fail_log_ts"):
+                self._order_fail_log_ts = {}
+            if hasattr(self, "_order_block_log_ts"):
+                self._order_block_log_ts = {}
+        except Exception:
+            pass
+
     def _place_stop_profit_order(self, record: Any) -> None:
         """放置止盈单（对价方式）"""
         if hasattr(self, "output"):
@@ -81,6 +100,10 @@ class OrderExecutionMixin:
             }
             if hasattr(self, "output"):
                  self.output(f"[开仓追单] 任务注册: {instrument_id} 目标:{target_volume} 初始单:{current_oid}")
+            
+            # [NEW] Start Dedicated Worker On-Demand
+            if hasattr(self, "start_order_execution_worker"):
+                 self.start_order_execution_worker()
 
     def check_active_chase_tasks(self) -> None:
         """检查并处理当前活跃的追单任务 (Run by Scheduler)"""
@@ -98,7 +121,6 @@ class OrderExecutionMixin:
                 try:
                     self._process_single_chase_task(key, task, tasks_to_remove)
                 except Exception as e:
-                    # self.output(f"[追单] 任务处理异常 {key}: {e}")
                     pass
                     
             for k in tasks_to_remove:
@@ -142,9 +164,20 @@ class OrderExecutionMixin:
         
         # 模拟盘可能找不到订单，给予一定的缓冲
         if not order_info:
-            if (datetime.now() - last_update).total_seconds() > 5:
-                 # 长期未找到订单，视为失败
-                 pass 
+            # [FIX] Handle persistent missing order (Zombie Prevention)
+            timeout = getattr(self.params, "chase_interval_seconds", 2)
+            # Give it a bit more time than standard timeout to appear
+            if (datetime.now() - last_update).total_seconds() > max(5, timeout * 2):
+                 self.message_output(f"[追单] 订单{curr_oid}长期未找到，视为失败，尝试重发... (重试 {retry_count + 1}/{max_retries})")
+                 # Treat as failed/canceled -> Resend
+                 new_oid = self._resend_chase_order(task, target_vol - traded_vol)
+                 if new_oid:
+                     task["current_order_id"] = new_oid
+                     task["last_update"] = datetime.now()
+                     task["retry_count"] = retry_count + 1
+                 else:
+                     # Resend failed, increment anyway to hit max_retries eventually
+                     task["retry_count"] = retry_count + 1
             return # Wait next cycle
         
         # Status Parsing (Platform dependent)
@@ -179,11 +212,17 @@ class OrderExecutionMixin:
         # 挂单中 (1, 3, 'Queueing') -> 超时撤单
         timeout = getattr(self.params, "chase_interval_seconds", 2)
         if (datetime.now() - last_update).total_seconds() > timeout:
-             self.message_output(f"[追单] 订单{curr_oid}超时，撤单重发...")
+             self.message_output(f"[追单] 订单{curr_oid}超时，撤单重发... (重试 {retry_count + 1}/{max_retries})")
              if hasattr(self, "cancel_order"):
                  self.cancel_order(curr_oid)
              # Update time to avoid repeat cancel
              task["last_update"] = datetime.now()
+             
+             # [Fix] Increment retry count here too to preventing infinite loop if cancel fails
+             # If order status update is slow, we might burn retries, but better than hanging.
+             task["retry_count"] = retry_count + 1
+             
+             # Double check: if retry reached max, next cycle will catch it at top check.
 
     def _resend_chase_order(self, task: Dict, volume: int) -> Optional[Union[str, int]]:
         """重发逻辑"""
@@ -227,6 +266,73 @@ class OrderExecutionMixin:
             return None
         except:
             return None
+
+    def start_order_execution_worker(self) -> None:
+        """启动下单/追单专用守护线程"""
+        if getattr(self, "_order_worker_running", False):
+            return
+        
+        self._order_worker_running = True
+        
+        def _worker_loop():
+            self.message_output(">>> [System] Order Execution Worker Started (Dedicated Thread)")
+            last_run = 0
+            idle_start_time = None
+            
+            while getattr(self, "_order_worker_running", False):
+                # Check lifecycle
+                if getattr(self, "my_destroyed", False):
+                    break
+                
+                # Check run/pause state
+                paused = getattr(self, "my_is_paused", False)
+                running = getattr(self, "my_is_running", False)
+                if (not running) or paused:
+                    time.sleep(1)
+                    continue
+
+                try:
+                    # High Frequency Check (100ms interval for chases)
+                    now = time.time()
+                    if now - last_run >= 0.1:
+                        self.check_active_chase_tasks()
+                        last_run = now
+                        
+                        # [Optimization] Auto-Shutdown if idle for 30s
+                        has_tasks = False
+                        if hasattr(self, "open_chase_tasks") and self.open_chase_tasks:
+                             has_tasks = True
+                        
+                        if not has_tasks:
+                             if idle_start_time is None:
+                                  idle_start_time = now
+                             elif (now - idle_start_time) > 30:
+                                  self.message_output(">>> [System] OrderWorker Idle > 30s, Auto-Shutdown.")
+                                  self._order_worker_running = False
+                                  break
+                        else:
+                             idle_start_time = None
+                    
+                    time.sleep(0.05)
+                except Exception as e:
+                    print(f"OrderWorker Error: {e}")
+                    time.sleep(1)
+            
+            self._order_worker_running = False
+            self.message_output(">>> [System] Order Execution Worker Stopped")
+
+        t = threading.Thread(target=_worker_loop, daemon=True, name="OrderExecutionWorker")
+        t.start()
+        self._order_worker_thread = t
+
+    def stop_order_execution_worker(self) -> None:
+        """停止下单专用线程"""
+        self._order_worker_running = False
+        if hasattr(self, "_order_worker_thread") and self._order_worker_thread:
+             try:
+                 # No join here to prevent blocking if needed, or short join
+                 self._order_worker_thread.join(timeout=1.0)
+             except: pass
 
     def message_output(self, msg: str):
         if hasattr(self, "output"): self.output(msg)
@@ -312,7 +418,6 @@ class OrderExecutionMixin:
             if not tick:
                 if hasattr(self, "output"):
                     self.output(f"警告：无法获取{record.instrument_id}行情，平仓推迟")
-                # self._schedule_delayed_close(position_id, reason) # Todo
                 return
 
             if str(record.direction) == "0":
@@ -359,8 +464,25 @@ class OrderExecutionMixin:
     def send_order_safe(self, instrument_info: Dict, volume: int, direction: str, remark: str, price: float = 0.0, is_close: bool = False) -> Optional[Union[str, int]]:
         """安全的下单接口 (完整逻辑迁移)"""
         try:
+            try:
+                mode = str(getattr(self.params, "output_mode", "debug")).lower()
+                if mode == "debug":
+                    mode = "close_debug"
+            except Exception:
+                mode = "close_debug"
+
+            skip_state_gate = False
+            if mode in ("open_debug", "close_debug"):
+                skip_state_gate = True
+            else:
+                try:
+                    if is_market_open_safe(self):
+                        skip_state_gate = True
+                except Exception:
+                    pass
+
             # 状态检查
-            if (not getattr(self, "my_is_running", False)) or getattr(self, "my_is_paused", False) or (getattr(self, "my_trading", True) is False) or getattr(self, "my_destroyed", False):
+            if (not skip_state_gate) and ((not getattr(self, "my_is_running", False)) or getattr(self, "my_is_paused", False) or (getattr(self, "my_trading", True) is False) or getattr(self, "my_destroyed", False)):
                 try:
                     if not hasattr(self, "_order_block_log_ts"):
                         self._order_block_log_ts = {}
@@ -422,7 +544,6 @@ class OrderExecutionMixin:
                              self.output(f"下单失败：无法获取有效价格 {instrument_id}")
                  except Exception:
                      pass
-                 return None
 
             # 映射 API 参数
             # PythonGO: direction "0"=Buy, "1"=Sell; offset "0"=Open, "1"=Close
@@ -514,19 +635,16 @@ class OrderExecutionMixin:
     ) -> Optional[Union[str, int]]:
         """底层发单函数（尽量调用真实交易API，不做状态/价格校验）"""
         
-        # 1. 模拟拦截 (Mock Execution for Debug)
-        # 即使在重构版，如果开启了 DEBUG_ENABLE_MOCK_EXECUTION 或 output_mode=debug 且无真实API连接
-        mock_mode = bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)) or bool(getattr(self.params, "test_mode", False))
-        if is_market_open_safe(self):
-            mock_mode = False
-        
-        if mock_mode:
-            import time
-            import random
-            sim_id = int(time.time()) + random.randint(1000, 99999)
-            if hasattr(self, "output"):
-                 self.output(f"[模拟下单] 拦截真实请求，返回伪造ID: {sim_id}", force=True)
-            return sim_id
+        raw_id = instrument_id
+        if hasattr(self, "get_raw_id"):
+             try:
+                 raw_id = self.get_raw_id(instrument_id)
+             except Exception:
+                 raw_id = instrument_id
+        if not raw_id:
+            raw_id = instrument_id
+
+        # 1. 仅真实下单，不做模拟拦截
 
         # 2. 真实下单 (Call super/base place_order)
         # Since this is a Mixin, we expect BaseStrategy to have insert_order or similar, 
@@ -542,8 +660,41 @@ class OrderExecutionMixin:
                     return ret.get("order_id") or ret.get("OrderID") or ret.get("order_sys_id") or ret.get("order_sys_id")
                 return ret
 
-            # Try BaseStrategy.send_order (preferred on platform)
+            # Try instance send_order first (handles dynamically injected APIs)
+            self_send = getattr(self, "send_order", None)
             super_send = getattr(super(), "send_order", None)
+            if callable(self_send) and self_send is not super_send:
+                d_map = {"0": "Buy", "1": "Sell", "buy": "Buy", "sell": "Sell"}
+                o_map = {
+                    "0": "Open",
+                    "1": "Close",
+                    "3": "CloseToday",
+                    "4": "CloseYesterday",
+                    "open": "Open",
+                    "close": "Close",
+                    "close_today": "CloseToday",
+                    "close_yesterday": "CloseYesterday",
+                }
+                d_arg = d_map.get(str(direction).lower(), "Buy")
+                o_arg = o_map.get(str(offset_flag).lower(), "Close")
+                try:
+                    ret = self_send(exchange, raw_id, int(volume), float(price), d_arg, offset_flag=o_arg, order_price_type=order_price_type)
+                    norm = _normalize_order_id(ret)
+                    if norm is not None:
+                        return norm
+                except TypeError:
+                    try:
+                        ret = self_send(exchange, raw_id, int(volume), float(price), d_arg, offset=o_arg, order_price_type=order_price_type)
+                        norm = _normalize_order_id(ret)
+                        if norm is not None:
+                            return norm
+                    except TypeError:
+                        ret = self_send(exchange, raw_id, int(volume), float(price), d_arg, o_arg, order_price_type)
+                        norm = _normalize_order_id(ret)
+                        if norm is not None:
+                            return norm
+
+            # Try BaseStrategy.send_order (preferred on platform)
             if callable(super_send):
                 d_map = {"0": "Buy", "1": "Sell", "buy": "Buy", "sell": "Sell"}
                 o_map = {
@@ -559,18 +710,20 @@ class OrderExecutionMixin:
                 d_arg = d_map.get(str(direction).lower(), "Buy")
                 o_arg = o_map.get(str(offset_flag).lower(), "Close")
                 try:
-                    ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, offset_flag=o_arg, order_price_type=order_price_type)
+                    # Prefer standard signature
+                    # BaseStrategy.send_order(exchange, instrument, volume, price, direction, offset, price_type)
+                    ret = super_send(exchange, raw_id, int(volume), float(price), d_arg, offset_flag=o_arg, order_price_type=order_price_type)
                     norm = _normalize_order_id(ret)
                     if norm is not None:
                         return norm
                 except TypeError:
                     try:
-                        ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, offset=o_arg, order_price_type=order_price_type)
+                        ret = super_send(exchange, raw_id, int(volume), float(price), d_arg, offset=o_arg, order_price_type=order_price_type)
                         norm = _normalize_order_id(ret)
                         if norm is not None:
                             return norm
                     except TypeError:
-                        ret = super_send(exchange, instrument_id, int(volume), float(price), d_arg, o_arg, order_price_type)
+                        ret = super_send(exchange, raw_id, int(volume), float(price), d_arg, o_arg, order_price_type)
                         norm = _normalize_order_id(ret)
                         if norm is not None:
                             return norm
@@ -578,7 +731,7 @@ class OrderExecutionMixin:
             # Try req_order_insert if available
             if hasattr(self, "req_order_insert"):
                 req = {
-                    "InstrumentID": instrument_id,
+                    "InstrumentID": raw_id,
                     "ExchangeID": exchange,
                     "Price": price,
                     "Volume": volume,
@@ -588,26 +741,40 @@ class OrderExecutionMixin:
                 }
                 return _normalize_order_id(self.req_order_insert(req))
 
+            # Try insert_order on instance if available
+            self_insert = getattr(self, "insert_order", None)
+            if callable(self_insert):
+                req = {
+                    "InstrumentID": raw_id,
+                    "ExchangeID": exchange,
+                    "Price": price,
+                    "Volume": volume,
+                    "Direction": direction,
+                    "OffsetFlag": offset_flag,
+                    "OrderPriceType": order_price_type
+                }
+                return _normalize_order_id(self_insert(req))
+
             # Try buy/sell helpers if BaseStrategy provides them
             if str(direction) in ["0", "buy"]:
                 if str(offset_flag) in ["0", "open"]:
                     super_buy = getattr(super(), "buy", None)
                     if callable(super_buy):
-                        return _normalize_order_id(super_buy(exchange, instrument_id, price, volume))
+                        return _normalize_order_id(super_buy(exchange, raw_id, price, volume))
                 else:
                     super_sell = getattr(super(), "sell", None)
                     if callable(super_sell):
-                        return _normalize_order_id(super_sell(exchange, instrument_id, price, volume))
+                        return _normalize_order_id(super_sell(exchange, raw_id, price, volume))
             else:
                 super_sell = getattr(super(), "sell", None)
                 if callable(super_sell):
-                    return _normalize_order_id(super_sell(exchange, instrument_id, price, volume))
+                    return _normalize_order_id(super_sell(exchange, raw_id, price, volume))
 
             # Try API direct
             api = getattr(self, "api", None)
             if api and hasattr(api, "insert_order"):
                 req = {
-                    "InstrumentID": instrument_id,
+                    "InstrumentID": raw_id,
                     "ExchangeID": exchange,
                     "Price": price,
                     "Volume": volume,
@@ -617,9 +784,44 @@ class OrderExecutionMixin:
                 }
                 return _normalize_order_id(api.insert_order(req))
 
+            # Diagnostic: report available order API hooks (throttled to avoid spam)
+            try:
+                if not hasattr(self, "_order_api_diag_ts"):
+                    self._order_api_diag_ts = 0.0
+                now_ts = time.time()
+                if now_ts - float(self._order_api_diag_ts or 0.0) >= 10.0:
+                    self._order_api_diag_ts = now_ts
+                    cand = ["send_order", "req_order_insert", "insert_order", "buy", "sell", "place_order"]
+                    avail_self = [n for n in cand if callable(getattr(self, n, None))]
+                    avail_super = [n for n in cand if callable(getattr(super(), n, None))]
+                    api_has_insert = bool(api and hasattr(api, "insert_order"))
+                    if hasattr(self, "output"):
+                        self.output(
+                            "[OrderAPI-Diag] self=%s super=%s api.insert_order=%s" % (
+                                ",".join(avail_self) or "none",
+                                ",".join(avail_super) or "none",
+                                "yes" if api_has_insert else "no",
+                            )
+                        )
+            except Exception:
+                pass
+
             # Fallback to output
             if hasattr(self, "output"):
-                self.output(f"[MOCK/DEV] 真实API未连接，调用 place_order({instrument_id}, {direction}, {offset_flag}, {volume}@{price})")
+                try:
+                    from .market_calendar import is_market_open_safe
+                    if is_market_open_safe(self):
+                        self.output(
+                            f"[ERROR] 真实API未连接，开盘期间禁止模拟下单 {instrument_id} {direction} {offset_flag} {volume}@{price}"
+                        )
+                    else:
+                        self.output(
+                            f"[DEV] 真实API未连接，未下单 {instrument_id} {direction} {offset_flag} {volume}@{price}"
+                        )
+                except Exception:
+                    self.output(
+                        f"[DEV] 真实API未连接，未下单 {instrument_id} {direction} {offset_flag} {volume}@{price}"
+                    )
             return None
 
         except Exception as e:
@@ -636,7 +838,6 @@ class OrderExecutionMixin:
                 return
 
             # 查询订单状态（需适配底层API）
-            # order_info = self.get_order(order_ref)
             # 假设未成交
             is_traded = False 
 
@@ -676,7 +877,6 @@ class OrderExecutionMixin:
         try:
             # Assuming BaseStrategy.cancel_order exists
             # Call super if possible or direct api
-            # return self.cancel_order(order_id) # Recursion risk if self.cancel_order is this method
             
             # Access underlying platform method safely
             super_cancel = getattr(super(), "cancel_order", None)
@@ -974,11 +1174,8 @@ class OrderExecutionMixin:
         exch = option_data.get("ExchangeID")
         
         # Check Available
-        # ok, msg = self._check_available_amount(account_id, est_amt)
-        # if not ok: return False, msg, None
         
         # Place Order
-        # self.send_order_safe(...)
         
         # For now, simplistic stub that calls send_order_safe
         inst_info = {"ExchangeID": exch, "InstrumentID": inst_id}
@@ -1022,153 +1219,6 @@ class OrderExecutionMixin:
         if hasattr(self, "output"):
             self.output(f"[Event:{event_type}] {details}")
         
-    def _try_execute_signal_order(self, signal: Dict[str, Any]) -> None:
-        """
-        将最高优先级信号转换为下单请求。
-        (Ported from Source Parity)
-        """
-        # 1. Check State
-        if (not getattr(self, "my_trading", True)) or getattr(self, "my_is_paused", False) or getattr(self, "my_destroyed", False):
-            # self.output("交易信号委托跳过：暂停/停止或 trading=False")
-            return
-
-        exchange = signal.get("exchange") or getattr(self.params, "exchange", "")
-        instrument_id = signal.get("future_id")
-        if not exchange or not instrument_id:
-            return
-
-        # 2. Volume Logic (Simpler per request: No min/max/split logic)
-        try:
-            volume = int(getattr(self.params, "lots", 1) or 1)
-        except Exception:
-            volume = 1
-
-        # 3. Direct Option Trade Mode
-        if signal.get("is_direct_option_trade", False):
-            target_opts = signal.get("target_option_contracts", [])
-            if not target_opts: return
-
-            # Use full volume (no 0.5 reduction)
-            opt_volume = max(1, volume)
-            
-            # self.output(f"执行直接期权交易：目标合约={target_opts}, 基础手数={volume}, 单合约手数={opt_volume}")
-            
-            for opt_id in target_opts:
-                # Price Discovery
-                price = 0.0
-                price_src = "Unknown"
-                
-                # Try Tick
-                tick = None
-                if hasattr(self, "latest_ticks"):
-                     tick = self.latest_ticks.get(opt_id) or \
-                            self.latest_ticks.get(f"{exchange}.{opt_id}") or \
-                            self.latest_ticks.get(opt_id.upper())
-                
-                if tick:
-                    p = getattr(tick, "ask_price1", 0) or getattr(tick, "AskPrice1", 0) or getattr(tick, "ask", 0)
-                    if p > 0: 
-                        price = p
-                        price_src = "Ask"
-                    else:
-                        p = getattr(tick, "last_price", 0) or getattr(tick, "last", 0)
-                        if p > 0:
-                            price = p
-                            price_src = "Last"
-                            
-                # Fallback to Kline
-                if price <= 0:
-                    if hasattr(self, "_get_kline_series"):
-                        # Need generic access or mixin dependency
-                        # Assuming mixin usage
-                        klines = self._get_kline_series(exchange, opt_id) # type: ignore
-                        if klines:
-                            # Try last non-zero close
-                            for bar in reversed(klines):
-                                c = getattr(bar, "close", 0)
-                                if c > 0:
-                                    price = c
-                                    price_src = "KlineClose"
-                                    break
-                
-                # Mock Price Injection (Strict Parity with _3.py)
-                mock_price_allowed = bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)) or bool(getattr(self.params, "test_mode", False))
-                if is_market_open_safe(self):
-                    mock_price_allowed = False
-                if (not price or price <= 0) and mock_price_allowed:
-                    price = 100.0
-                    price_src = "MockDefault"
-                    self.output(f"[收市调试] 无Tick，注入模拟价格 {price} 用于 {opt_id}", trade=True)
-
-                if price <= 0:
-                     # self.output(f"跳过期权 {opt_id}: 无有效价格")
-                     continue
-                     
-                # Cooldown Check
-                s_key = f"{exchange}|{opt_id}|0" # 0=Buy
-                if not hasattr(self, "last_open_success_time"):
-                    self.last_open_success_time = {}
-                
-                last_ts = self.last_open_success_time.get(s_key)
-                if last_ts:
-                    delta = (datetime.now() - last_ts).total_seconds()
-                    if delta < 60:
-                        self.output(f"跳过期权 {opt_id}: 冷却中 ({delta:.1f}s)", trade=True)
-                        continue
-
-                # Place Order
-                # Direction="0" (Buy), Offset="0" (Open)
-                # Using send_order_safe helper which wraps place_order
-                inst_info = {"ExchangeID": exchange, "InstrumentID": opt_id}
-                remark = f"Auto_{opt_id}_Signal"
-                
-                ref = self.send_order_safe(
-                    instrument_info=inst_info,
-                    volume=opt_volume,
-                    direction="buy", 
-                    remark=remark,
-                    price=price
-                )
-                
-                if ref:
-                    self.output(f"直接期权委托已发送: {opt_id} 买入开仓 @ {price} ({price_src}) 手数={opt_volume} 单号={ref}", trade=True)
-                    self.last_open_success_time[s_key] = datetime.now()
-                    
-                    # Register Chase Task
-                    # Prefer using PositionManager if available to keep consistent state
-                    if hasattr(self, 'position_manager') and self.position_manager and hasattr(self.position_manager, 'register_open_chase'):
-                        self.position_manager.register_open_chase(
-                            instrument_id=opt_id,
-                            exchange=exchange,
-                            direction="0", # "0" for Buy
-                            ids=[ref],
-                            target_volume=opt_volume,
-                            price=float(price)
-                        )
-                    # Fallback to local chase tasks if mixin-based without full PM
-                    elif hasattr(self, "chase_tasks"): 
-                         task = ChaseOrderTask(
-                             order_ref=ref,
-                             instrument_id=opt_id,
-                             exchange=exchange,
-                             direction="buy",
-                             offset="open",
-                             target_volume=opt_volume,
-                             original_price=price,
-                             start_time=datetime.now()
-                         )
-                         self.chase_tasks[ref] = task
-            
-            # [CRITICAL] Clear active options from result to prevent duplicate execution
-            try:
-                fid = signal.get("future_id")
-                if fid and hasattr(self, 'option_width_results') and fid in self.option_width_results:
-                     if signal.get("is_call", False):
-                          self.option_width_results[fid]["top_active_calls"] = []
-                     else:
-                          self.option_width_results[fid]["top_active_puts"] = []
-            except Exception:
-                pass
             
             return
 

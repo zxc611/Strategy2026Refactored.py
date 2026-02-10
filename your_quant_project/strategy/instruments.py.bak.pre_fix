@@ -69,10 +69,6 @@ class InstrumentLoaderMixin:
                 "SHFE_TEST": "SHFE",
                 "DCE_TEST": "DCE",
                 "CZCE_TEST": "CZCE",
-                "XSGE": "SHFE",   # [Fix] 增加常见别名
-                "XSHE": "SHFE",   # [Fix] 容错
-                "XDCE": "DCE",    # [Fix] 容错
-                "XZCE": "CZCE",   # [Fix] 容错
             }
             return alias.get(exch, exch)
         except Exception:
@@ -96,15 +92,7 @@ class InstrumentLoaderMixin:
                         return symbol
             m_three = re.match(r"^([A-Z]{1,})(\d)(\d{2})$", symbol)
             if m_three:
-                prefix, y_digit, mm_str = m_three.group(1), int(m_three.group(2)), m_three.group(3)
-                if 1 <= int(mm_str) <= 12:
-                    y_now = datetime.now().year % 100
-                    decade = (y_now // 10) * 10
-                    calc_y = decade + y_digit
-                    # 如果计算的年份比当前小超过1年（例如现在26，算出20），说明可能是下一个十年（30）
-                    if calc_y < y_now - 1:
-                        calc_y += 10
-                    return f"{prefix}{calc_y:02d}{mm_str}"
+                return symbol
             m_four = re.match(r"^([A-Z]{1,})(\d)(\d{3})$", symbol)
             if m_four:
                 prefix, y_digit, tail = m_four.group(1), int(m_four.group(2)), m_four.group(3)
@@ -117,22 +105,13 @@ class InstrumentLoaderMixin:
                         decade = max(0, decade - 10)
                     y2 = decade + y_digit
                     return f"{prefix}{y2:02d}{tail}"
-            opt_symbol = re.sub(r"[-_]", "", symbol)
-            m_opt2 = re.match(r"^([A-Z]{1,})(\d{2})(\d{2})([CP])(\d+)$", opt_symbol)
-            if m_opt2:
-                prefix = m_opt2.group(1)
-                y2 = int(m_opt2.group(2))
-                mm = m_opt2.group(3)
-                cp = m_opt2.group(4)
-                strike = m_opt2.group(5)
-                return f"{prefix}{y2:02d}{mm}{cp}{strike}"
-            m_opt1 = re.match(r"^([A-Z]{1,})(\d)(\d{2})([CP])(\d+)$", opt_symbol)
-            if m_opt1:
-                prefix = m_opt1.group(1)
-                y_digit = int(m_opt1.group(2))
-                mm = m_opt1.group(3)
-                cp = m_opt1.group(4)
-                strike = m_opt1.group(5)
+            m_opt = re.match(r"^([A-Z]{1,})(\d)(\d{2})([CP])(\d+)$", symbol)
+            if m_opt:
+                prefix = m_opt.group(1)
+                y_digit = int(m_opt.group(2))
+                mm = m_opt.group(3)
+                cp = m_opt.group(4)
+                strike = m_opt.group(5)
                 cur_y2 = datetime.now().year % 100
                 decade = (cur_y2 // 10) * 10
                 if y_digit > (cur_y2 % 10):
@@ -152,14 +131,12 @@ class InstrumentLoaderMixin:
             if "." in normalized:
                 normalized = normalized.split(".")[-1]
             normalized = re.sub(r"^(CFFEX|SHFE|DCE|CZCE|GFEX)[_\-]+", "", normalized)
-            # [Fix] 统一移除常见分隔符和空格，确保 "HO_2602" 等非标格式能归一化为 "HO2602"
-            normalized = re.sub(r"[\s_\-\.]+", "", normalized)
+            normalized = re.sub(r"[\s_]+", "", normalized)
             normalized = re.sub(r"^(CFFEX|SHFE|DCE|CZCE|GFEX)", "", normalized)
             normalized = self._expand_czce_year_month(normalized)
             return normalized
         except Exception:
-            # [Fix] 发生异常时返回原始大写字符串，防止静默吞没合约
-            return str(instrument_id).strip().upper()
+            return ""
 
     def _extract_month(self, instrument_id: str) -> Optional[int]:
         """提取合约月份（1-12）。优先识别CZCE样式（一位年+两位月）。"""
@@ -218,12 +195,11 @@ class InstrumentLoaderMixin:
             "NEAR", "THIS", "NEXT", "000", "888", "999",
         )
         has_exch_prefix = re.match(r"^(CFFEX|SHFE|DCE|CZCE|GFEX)[_\-]", raw) is not None
-        # [Fix] 移除对含下划线/连字符但无交易所前缀的代码的过度过滤 (如 HO_2602)
-        if any(tag in raw for tag in bad_tags):
+        if any(tag in raw for tag in bad_tags) or (("_" in raw or "-" in raw) and not has_exch_prefix):
             return False
-        if re.match(r"^[A-Z]{1,}[-_]?\d{2}\d{1,2}$", s):
+        if re.match(r"^[A-Z]{1,}\d{2}\d{1,2}$", s):
             return True
-        if re.match(r"^[A-Z]{1,}[-_]?\d\d{2}$", s):
+        if re.match(r"^[A-Z]{1,}\d\d{2}$", s):
             return True
         return False
 
@@ -232,26 +208,6 @@ class InstrumentLoaderMixin:
         if not instrument_id:
             return ""
         return str(instrument_id).upper().strip()
-
-    def get_raw_id(self, instrument_id: str) -> str:
-        """根据归一化ID查找原始ID (用于发单/API交互)"""
-        norm_id = instrument_id
-        try:
-            # 1. Try iterating future_instruments (Most reliable if populated)
-            if hasattr(self, "future_instruments") and self.future_instruments:
-                 for fut in self.future_instruments:
-                     if fut.get("InstrumentID") == norm_id:
-                         return fut.get("RawInstrumentID") or norm_id
-            
-            # 2. Try option_instruments
-            if hasattr(self, "option_instruments") and self.option_instruments:
-                 for opts in self.option_instruments.values():
-                     for opt in opts:
-                          if opt.get("InstrumentID") == norm_id:
-                               return opt.get("RawInstrumentID") or norm_id
-        except Exception:
-            pass
-        return norm_id
 
     def get_price_tick(self, exchange: str, instrument_id: str) -> float:
         """获取合约最小变动价位"""
@@ -269,15 +225,9 @@ class InstrumentLoaderMixin:
     def _extract_product_code(self, instrument_id: str) -> str:
         """提取期货品种代码"""
         if not instrument_id: return ""
-        try:
-            normalized = self._normalize_future_id(str(instrument_id))
-            match = re.match(r"^([A-Z]+)", normalized)
-            # [Fix] 增加简单兜底：如果归一化后无法提取，尝试直接从原始串提取
-            if not match: 
-                match = re.match(r"^([A-Z]+)", str(instrument_id).strip().upper())
-            return match.group(1).upper() if match else ""
-        except:
-             return ""
+        normalized = self._normalize_future_id(str(instrument_id))
+        match = re.match(r"^([A-Z]+)", normalized)
+        return match.group(1).upper() if match else ""
 
     def _extract_future_symbol(self, option_symbol: str) -> Optional[str]:
         """从期权代码提取期货代码，增强支持商品期权（一位品种、一位年格式、各类分隔符）"""
@@ -356,8 +306,6 @@ class InstrumentLoaderMixin:
         try:
             if obj is None:
                 return None
-            
-            raw_id = ""
             if isinstance(obj, dict):
                 inst = dict(obj)
                 try:
@@ -373,13 +321,6 @@ class InstrumentLoaderMixin:
                             inst["OptionType"] = "P"
                         else:
                             inst["OptionType"] = s
-                    
-                    raw_id = inst.get("InstrumentID", "") or inst.get("instrument_id", "")
-                    if raw_id:
-                        inst["RawInstrumentID"] = raw_id
-                        norm_id = self._normalize_future_id(raw_id)
-                        if norm_id: 
-                            inst["InstrumentID"] = norm_id
                 except Exception:
                     pass
                 return inst
@@ -425,19 +366,9 @@ class InstrumentLoaderMixin:
                     product_class = "2"
                 else:
                     product_class = "1"
-            
-            raw_inst_id = instrument_id
-            norm_inst_id = instrument_id
-            try:
-                if raw_inst_id:
-                    norm_inst_id = self._normalize_future_id(raw_inst_id) or raw_inst_id
-            except Exception:
-                pass
-
             return {
                 "ExchangeID": exchange_id,
-                "InstrumentID": norm_inst_id,
-                "RawInstrumentID": raw_inst_id,
+                "InstrumentID": instrument_id,
                 "ProductClass": product_class,
                 **({"StrikePrice": strike_price_val} if strike_price_val not in (None, "") else {}),
                 **({"OptionType": ("C" if str(option_type_val).upper() in ("C", "CALL", "1") else ("P" if str(option_type_val).upper() in ("P", "PUT", "2") else str(option_type_val).upper()))} if option_type_val not in (None, "") else {}),
@@ -445,6 +376,73 @@ class InstrumentLoaderMixin:
         except Exception:
             return None
 
+    # --- Missing Helpers Ported ---
+    
+    def _has_option_for_product(self, product_code: str) -> bool:
+        """检查是否有对应期权（兼容不同分组）"""
+        try:
+            prod = str(product_code).upper()
+            if not getattr(self, "option_instruments", None): return False
+            # 1. 直接按 Product 查找
+            if prod in self.option_instruments: return True
+            
+            # 2. 查找 future_to_option_map
+            f2o = getattr(self, "future_to_option_map", {}) or {}
+            opt_code = f2o.get(prod)
+            if opt_code and opt_code in self.option_instruments: return True
+            
+            # 3. 遍历检查键的前缀
+            # [Optimization] Performance Warning: This iterates ALL keys.
+            # Only do this if strictly necessary. 
+            # In 'OptionWidthCalculation', we call this per future.
+            # Optimization: If self.option_instruments is huge, cache this result.
+            cached = getattr(self, "_has_opt_cache", {})
+            if prod in cached: return cached[prod]
+
+            for k in self.option_instruments.keys():
+                k_up = str(k).upper()
+                if k_up.startswith(prod) or (prod in k_up): 
+                    cached[prod] = True
+                    if not hasattr(self, "_has_opt_cache"): self._has_opt_cache = {}
+                    self._has_opt_cache[prod] = True
+                    return True
+            
+            if not hasattr(self, "_has_opt_cache"): self._has_opt_cache = {}
+            self._has_opt_cache[prod] = False
+            return False
+
+            return False
+        except: return False
+
+    def _get_option_group_options(self, future_id: str) -> List[Any]:
+        """[Fix] 获取某个期货对应的期权合约列表，兼容 Mock Injection"""
+        try:
+            fut = self._normalize_future_id(future_id)
+            if not fut: return []
+            
+            opts = getattr(self, "option_instruments", {})
+            if not opts: return []
+            
+            # 1. 优先尝试直接用 future_id 查找 (Mock Injection 注入的就是这个: IF2602)
+            if fut in opts: 
+                return opts[fut]
+            if future_id in opts:
+                return opts[future_id]
+                
+            # 2. 尝试按 Product 查找 (InstrumentLoaderMixin 默认逻辑: options grouped by product)
+            prod = self._extract_product_code(fut)
+            
+            # 2.1 Direct product match
+            if prod in opts: return opts[prod]
+            
+            # 2.2 Map match (IF -> IO)
+            f2o = getattr(self, "future_to_option_map", {}) or {}
+            opt_prod = f2o.get(prod)
+            if opt_prod and opt_prod in opts:
+                return opts[opt_prod]
+            
+            return []
+        except Exception: return []
 
     def _is_symbol_current(self, symbol: str) -> bool:
         """仅依据指定月判断是否为当前合约。"""
@@ -476,14 +474,49 @@ class InstrumentLoaderMixin:
         except Exception:
             return False
 
+    def _get_next_month_id(self, future_id: str) -> Optional[str]:
+        """只从参数表读取指定下月"""
+        try:
+            future_clean = self._normalize_future_id(future_id)
+            product_code = self._extract_product_code(future_clean).upper()
+            if not product_code:
+                product_code = self._extract_product_code(future_id or "").upper()
+            
+            eff_map = self._get_effective_month_mapping()
+            candidate: Optional[str] = None
+            lst = eff_map.get(product_code)
+            
+            # 尝试通过 f2o 反向查找商品代码
+            if not lst:
+                # 假设 f2o 存在
+                f2o = getattr(self, "future_to_option_map", {})
+                for fut_code, opt_code in f2o.items():
+                    if str(opt_code).strip().upper() == product_code:
+                         lst = eff_map.get(str(fut_code).strip().upper())
+                         if lst: break
+            
+            if isinstance(lst, list) and len(lst) >= 2:
+                candidate = self._normalize_future_id((lst[1] or "").strip())
+                if candidate: return candidate
+            
+            # 格式转换尝试 (CZCE/Single)
+            if isinstance(lst, list) and len(lst) >= 2:
+                candidate = (lst[1] or "").strip().upper()
+                # 简化：直接尝试 normalize
+                alt = self._normalize_future_id(candidate)
+                if alt: return alt
+
+            # 兜底
+            nm_spec = (getattr(self.params, "next_specified_month", "") or "").strip().upper()
+            if nm_spec and nm_spec.startswith(product_code):
+                 return self._normalize_future_id(nm_spec)
+
+            return None
+        except: return None
 
     def _is_symbol_specified_or_next(self, symbol: str) -> bool:
         """带缓存判断合约是否为指定月/下月"""
         try:
-            # [Added Logic] Bypass filtering if disabled
-            if not getattr(self.params, "enable_month_filtering", True):
-                return True
-
             symbol_norm = self._normalize_future_id(symbol)
             if not symbol_norm: return False
             # 简单缓存
@@ -495,144 +528,63 @@ class InstrumentLoaderMixin:
             return res
         except: return False
 
+    def _is_symbol_current_or_next(self, symbol: str) -> bool:
+        """兼容旧命名：判断合约是否为指定月/指定下月。"""
+        return self._is_symbol_specified_or_next(symbol)
+
     def _is_symbol_specified_or_next_uncached(self, symbol_norm: str) -> bool:
         try:
             eff_map = self._get_effective_month_mapping()
-            # [Fix] 优先检查 underlying (针对期权直接传入的情况)
-            check_sym = self._extract_future_symbol(symbol_norm) or symbol_norm
-            symbol_upper = symbol_norm.upper() # Keep compatibility
-
+            symbol_upper = symbol_norm.upper()
+            
             # Simple direct match if map empty
             if not eff_map:
                 sm = (getattr(self.params, "specified_month", "") or "").strip().upper()
                 nm = (getattr(self.params, "next_specified_month", "") or "").strip().upper()
                 if not sm and not nm: return False
-                return check_sym.upper() in (sm, nm)
+                return symbol_upper in (sm, nm)
 
-            symbol_prod = self._extract_product_code(check_sym) 
-            # [Fix] Use Iterative matching like Legacy Strategy to ensure robustness
-            for product_code, month_list in eff_map.items():
-                if not isinstance(month_list, list) or len(month_list) < 2:
-                    continue
-                product_upper = str(product_code).strip().upper()
-                if symbol_prod == product_upper:
-                    specified = (month_list[0] or "").strip().upper()
-                    next_specified = (month_list[1] or "").strip().upper()
-                    # Check against the extracted future symbol (Strict Logic)
-                    check_upper = check_sym.upper()
-                    if check_upper == specified or check_upper == next_specified:
-                        return True
-                    # If product matches but month doesn't, strict filter says False
-                    if getattr(self.params, "debug_output", False):
-                         self._debug(f"[Filter-Reject] {check_upper} (Prod: {product_upper}) mismatch with map: {specified}/{next_specified}")
-                    return False
+            symbol_prod = self._extract_product_code(symbol_upper)
+            months = eff_map.get(symbol_prod)
+            if months and len(months) >= 2:
+                sm = (months[0] or "").strip().upper()
+                nm = (months[1] or "").strip().upper()
+                return symbol_upper == sm or symbol_upper == nm
             
             # Fallback global
             sm = (getattr(self.params, "specified_month", "") or "").strip().upper()
             nm = (getattr(self.params, "next_specified_month", "") or "").strip().upper()
-            return check_sym.upper() in (sm, nm)
+            return symbol_upper in (sm, nm)
         except: return False
 
     def _get_effective_month_mapping(self) -> Dict[str, List[str]]:
         """获取生效的月份映射表"""
-        # 简化版：优先 UI 参数，其次 param_table.json
+        # 简化版：优先 ParamTableMixin 的 load_param_table
         mapping = {}
-        def _parse_month_list(raw):
-            if isinstance(raw, (list, tuple)):
-                return [str(x).strip() for x in raw if str(x).strip()]
-            if isinstance(raw, str):
-                parts = re.split(r"[\s,;]+", raw.strip())
-                return [p for p in parts if p]
-            return []
-
-        def _merge_mapping_from_lists(spec_list, next_list):
-            if not spec_list or not next_list:
-                return
-            next_by_prod = {}
-            for item in next_list:
-                prod = self._extract_product_code(str(item).upper())
-                if prod:
-                    next_by_prod[prod.upper()] = item
-            for item in spec_list:
-                prod = self._extract_product_code(str(item).upper())
-                if not prod:
-                    continue
-                prod_u = prod.upper()
-                if prod_u in mapping:
-                    continue
-                nm = next_by_prod.get(prod_u)
-                if nm:
-                    mapping[prod_u] = [
-                        self._normalize_future_id(str(item)),
-                        self._normalize_future_id(str(nm)),
-                    ]
-        # 1. Start with params.month_mapping (User Overrides / CLI)
+        # 1. Start with params.month_mapping
         mm = getattr(self.params, "month_mapping", {})
-        if isinstance(mm, str):
-            try:
-                mm = json.loads(mm)
-            except Exception:
-                mm = {}
         if isinstance(mm, dict):
             for k, v in mm.items():
                 if isinstance(v, (list, tuple)) and len(v)>=2:
                     mapping[str(k).upper()] = [self._normalize_future_id(str(v[0])), self._normalize_future_id(str(v[1]))]
 
-        # 1.1 Merge from UI specified/next fields (supports multi-value)
-        spec_list = _parse_month_list(getattr(self.params, "specified_month", ""))
-        next_list = _parse_month_list(getattr(self.params, "next_specified_month", ""))
-        _merge_mapping_from_lists(spec_list, next_list)
-
         # 2. Merge from param_table.json via loaded logic
+        # 假设 ParamTableMixin 已经加载了 _param_override_cache 或者我们可以调用 self._load_param_table()
+        # 这里为了稳健调用 param_table.py 的函数 (若 Mixin 正确混入)
         loaded = None
         if hasattr(self, "_load_param_table"):
-             try: loaded = self._load_param_table() 
-             except: pass
+             loaded = self._load_param_table() # 假定返回 dict
         
         if loaded:
-            # [Fix] Priority: params > original_defaults. And DO NOT overwrite CLI args (mapping)
-            sources = [
-                loaded.get("params", {}).get("month_mapping"),
-                loaded.get("original_defaults", {}).get("month_mapping")
-            ]
-            for mm_src in sources:
-                if isinstance(mm_src, str):
-                    try: mm_src = json.loads(mm_src)
-                    except: mm_src = {}
-                if isinstance(mm_src, dict):
-                    for k, v in mm_src.items():
-                        k_upper = str(k).strip().upper()
-                        # Only add if not already present (preserve CLI priority)
-                        if k_upper not in mapping:
-                            if isinstance(v, (list, tuple)) and len(v)>=2:
-                                mapping[k_upper] = [
-                                    self._normalize_future_id(str(v[0])), 
-                                    self._normalize_future_id(str(v[1]))
-                                ]
-
-        # 2.1 Fallback: avoid empty mapping
-        # [Fix] Always load defaults if map is empty to avoid complete failure
-        if not mapping:
-            for k, v in DEFAULT_MONTH_MAPPING.items():
-                if k not in mapping:
-                    if isinstance(v, (list, tuple)) and len(v) >= 2:
-                        mapping[str(k).upper()] = [self._normalize_future_id(str(v[0])), self._normalize_future_id(str(v[1]))]
-
-        # 2.1 Fallback: avoid empty mapping when specified/next filtering is enabled
-        try:
-            filter_enabled = bool(getattr(self.params, "subscribe_only_specified_month_options", False) or
-                                  getattr(self.params, "subscribe_only_current_next_options", False) or
-                                  getattr(self.params, "subscribe_only_specified_month_futures", False) or
-                                  getattr(self.params, "subscribe_only_current_next_futures", False))
-        except Exception:
-            filter_enabled = False
-        if filter_enabled and not mapping:
-            for k, v in DEFAULT_MONTH_MAPPING.items():
-                if isinstance(v, (list, tuple)) and len(v) >= 2:
-                    mapping[str(k).upper()] = [
-                        self._normalize_future_id(str(v[0])),
-                        self._normalize_future_id(str(v[1])),
-                    ]
+            # 尝试从 loaded (dict) 中找 month_mapping
+            mm_json = loaded.get("original_defaults", {}).get("month_mapping") or loaded.get("params", {}).get("month_mapping")
+            if isinstance(mm_json, str):
+                 try: mm_json = json.loads(mm_json)
+                 except: pass
+            if isinstance(mm_json, dict):
+                 for k, v in mm_json.items():
+                      if isinstance(v, (list, tuple)) and len(v)>=2:
+                           mapping[str(k).upper()] = [self._normalize_future_id(str(v[0])), self._normalize_future_id(str(v[1]))]
         
         # 3. Fallback debug mapping
         if not mapping:
@@ -694,6 +646,41 @@ class InstrumentLoaderMixin:
                 self._debug("期权分组键已完成标准归一化")
         except Exception as e:
             self._debug(f"期权分组键归一化失败: {e}")
+
+    # [Added Helpers for Calculation Mixin]
+    def _safe_option_dict(self, option: Any) -> Optional[Dict[str, Any]]:
+        """将期权对象安全转换为 dict。"""
+        try:
+            if isinstance(option, dict):
+                return option
+            return self._to_instrument_dict(option)
+        except Exception:
+            return None
+
+    def _safe_option_id(self, option: Dict[str, Any]) -> str:
+        """安全提取期权合约ID，兼容不同字段名。"""
+        try:
+            if not option:
+                return ""
+            for key in ("InstrumentID", "instrument_id", "InstrumentId", "symbol", "Symbol"):
+                val = option.get(key)
+                if val:
+                    return str(val).strip().upper()
+        except Exception:
+            pass
+        return ""
+
+    def _safe_option_exchange(self, option: Dict[str, Any], fallback: str = "") -> str:
+        """安全提取期权交易所代码。"""
+        try:
+            if option:
+                for key in ("ExchangeID", "exchange_id", "ExchangeId", "exchange", "Exchange"):
+                    val = option.get(key)
+                    if val:
+                        return self._normalize_exchange_code(str(val))
+        except Exception:
+            pass
+        return self._normalize_exchange_code(fallback)
 
     def _get_option_type(self, option_symbol: str, option_dict: Optional[Dict[str, Any]] = None, exchange: str = "") -> Optional[str]:
         """获取期权类型（C=看涨，P=看跌）带缓存，支持多种格式"""
@@ -867,57 +854,26 @@ class InstrumentLoaderMixin:
         """按期权品种前缀+年月构建分组（如 IO2601、HO2601、M2505）。"""
         groups: Dict[str, List[Dict[str, Any]]] = {}
         try:
-            # 【修改13】扩展默认交易所白名单，包含所有可能交易的期权交易所
-            allowed_ex = {"CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"}
+            allowed_ex = {"CFFEX"}
             try:
                 extra_ex = getattr(self.params, "option_group_exchanges", None)
                 if extra_ex:
                     allowed_ex = {str(x).upper() for x in extra_ex}
+                else:
+                    allowed_ex = {"CFFEX", "INE"}
             except Exception:
-                pass  # 使用默认白名单
+                allowed_ex = {"CFFEX", "INE"}
 
             for _, options in self.option_instruments.items():
                 for opt in options:
                     exchange = str(opt.get("ExchangeID", "")).strip().upper()
-                    # [Fix] 移除交易所白名单强制过滤，允许其他交易所期权
-                    # if exchange not in allowed_ex:
-                    #     continue
-                    # [Fix] 使用归一化后的ID进行匹配，解决 "HO_2602" 等因含分隔符导致正则匹配失败的问题
-                    oid = self._normalize_future_id(str(opt.get("InstrumentID", "")))
-                    # 【修改14】增加更多合约代码匹配模式，避免断链
+                    if exchange not in allowed_ex:
+                        continue
+                    oid = str(opt.get("InstrumentID", "")).upper()
                     m = re.search(r"([A-Za-z]{1,})(\d{2})(\d{1,2})", oid)
                     if not m:
                         m2 = re.search(r"([A-Za-z]{1,})(\d)(\d{2})", oid)
                         if not m2:
-                            # 尝试匹配4位年份格式如 IO202601
-                            m3 = re.search(r"([A-Za-z]{1,})(\d{4})(\d{2})", oid)
-                            if m3:
-                                prefix = m3.group(1).upper()
-                                year_full = m3.group(2)
-                                yy = year_full[2:4]  # 取后两位年份
-                                mm = m3.group(3)
-                                group_id = f"{prefix}{yy}{mm}"
-                                groups.setdefault(group_id, []).append(opt)
-                                continue
-                            # 尝试匹配无分隔符的短格式
-                            m4 = re.search(r"([A-Za-z]+)(\d{3,4})$", oid)
-                            if m4:
-                                prefix = m4.group(1).upper()
-                                num_part = m4.group(2)
-                                if len(num_part) == 3:  # 如 IO261
-                                    yy = "0" + num_part[0]  # 年份补零
-                                    mm = num_part[1:3]
-                                elif len(num_part) == 4:  # 如 IO2601
-                                    yy = num_part[0:2]
-                                    mm = num_part[2:4]
-                                else:
-                                    continue
-                                group_id = f"{prefix}{yy}{mm}"
-                                groups.setdefault(group_id, []).append(opt)
-                                continue
-                            # 所有模式都未匹配，记录日志但不丢弃
-                            if hasattr(self, "_debug"):
-                                self._debug(f"[期权分组] 合约代码格式无法识别: {oid}")
                             continue
                         prefix = m2.group(1).upper()
                         yy = m2.group(2)
@@ -929,13 +885,8 @@ class InstrumentLoaderMixin:
                         mm = m.group(3)
                         group_id = f"{prefix}{yy}{mm}"
                     groups.setdefault(group_id, []).append(opt)
-        # 【修改15】异常时记录错误日志而非静默忽略
-        except Exception as e:
-            if hasattr(self, "_debug"):
-                self._debug(f"[期权分组] 构建分组异常: {e}")
-            else:
-                import traceback
-                print(f"[期权分组] 构建分组异常: {e}\n{traceback.format_exc()}")
+        except Exception:
+            pass
         return groups
 
     def _build_shfe_option_groups(self) -> Dict[str, List[Dict[str, Any]]]:
@@ -949,7 +900,7 @@ class InstrumentLoaderMixin:
                     if exchange != "SHFE":
                         continue
                     shfe_options_count += 1
-                    oid = self._normalize_future_id(str(opt.get("InstrumentID", "")))
+                    oid = str(opt.get("InstrumentID", "")).upper()
                     m = re.search(r"([A-Za-z]{1,2})(\d{2})(\d{1,2})", oid)
                     if m:
                         prefix = m.group(1).upper()
@@ -973,7 +924,7 @@ class InstrumentLoaderMixin:
                     if exchange != "DCE":
                         continue
                     dce_options_count += 1
-                    oid = self._normalize_future_id(str(opt.get("InstrumentID", "")))
+                    oid = str(opt.get("InstrumentID", "")).upper()
                     m = re.search(r"([A-Za-z]{1,2})(\d{2})(\d{1,2})", oid)
                     if m:
                         prefix = m.group(1).upper()
@@ -997,9 +948,8 @@ class InstrumentLoaderMixin:
                     if exchange != "CZCE":
                         continue
                     czce_options_count += 1
-                    oid = self._normalize_future_id(str(opt.get("InstrumentID", "")))
-                    # [Fix] 兼容归一化后的两位年(SR2509)或原始一位年(SR509)
-                    m = re.search(r"([A-Za-z]{1,2})(\d{1,2})(\d{2})$", oid)
+                    oid = str(opt.get("InstrumentID", "")).upper()
+                    m = re.search(r"([A-Za-z]{1,2})(\d{1})(\d{2})$", oid)
                     if m:
                         prefix = m.group(1).upper()
                         yy = m.group(2)
@@ -1252,45 +1202,9 @@ class InstrumentLoaderMixin:
                         self._params_missing_warned = True
                 except Exception:
                     pass
-            
-            # [Params-Fix] 提前重载参数
-            # 确保在计算 exchanges 和检查 market_open 之前加载正确的参数配置
-            if hasattr(self, "_load_param_table"):
-                try:
-                    # [Fix] 显式指定 force=True 以绕过15分钟节流限制，确保作为JIT入口时数据绝对最新
-                    pt_data = self._load_param_table(force=True)
-                    if isinstance(pt_data, dict):
-                        params_src = pt_data.get("params", pt_data)
-                        
-                        # [Params-Fix] 全量注入：确保 UI 参数热修改后，代码中的默认值被及时覆盖
-                        # 遍历 param_table.json 所有项并注入 self.params，防止硬编码兜底（如默认exchanges）生效
-                        injected_count = 0
-                        for k, v in params_src.items():
-                            if not k or k.startswith("_"):
-                                continue
-                            try:
-                                setattr(self.params, k, v)
-                                injected_count += 1
-                            except Exception:
-                                pass
-                        
-                        self.output(f"[Params-Fix] JIT全量重载完成，共注入 {injected_count} 项参数。")
-                        self.output(f"[Params-Fix] future_products: {getattr(self.params, 'future_products', 'N/A')}")
-                        self.output(f"[Params-Fix] exchanges: {getattr(self.params, 'exchanges', 'N/A')}")
-
-                except Exception as e:
-                    self.output(f"[Params-Fix] Early Injection Failed: {e}")
-
             # [Robust] 防止未初始化导致加载崩溃
             if not hasattr(self, "market_center"):
                 self.market_center = None
-            # 尝试确保 market_center 可用（避免 NoneType 调用）
-            try:
-                if hasattr(self, "_ensure_market_center"):
-                    self._ensure_market_center()
-            except Exception:
-                pass
-
             # 中文注释：market_center 缺失时降级为仅使用 infini，且仅告警一次
             if not hasattr(self, "_market_center_missing_warned"):
                 self._market_center_missing_warned = False
@@ -1301,104 +1215,6 @@ class InstrumentLoaderMixin:
                 market_center_available = False
             else:
                 market_center_available = True
-
-            local_infini = None
-            infini_source = "none"
-            if market_center_available:
-                mc_infini = getattr(self.market_center, "infini", None)
-                if mc_infini is not None:
-                    self.infini = mc_infini
-                    local_infini = mc_infini
-                    infini_source = "market_center.infini"
-            if local_infini is None:
-                try:
-                    pythongo = importlib.import_module("pythongo")
-                    py_infini = getattr(pythongo, "infini", None)
-                except Exception:
-                    py_infini = None
-                if py_infini is not None:
-                    self.infini = py_infini
-                    local_infini = py_infini
-                    infini_source = "pythongo.infini"
-            if local_infini is not None:
-                globals()["infini"] = local_infini
-
-            if not hasattr(self, "_infini_source_logged"):
-                self._infini_source_logged = False
-            if not self._infini_source_logged:
-                self.output(f"[诊断] infini_source={infini_source}, infini_available={local_infini is not None}")
-                self._infini_source_logged = True
-
-            if local_infini is None:
-                self.output("[错误] infini 不可用，停止合约拉取", force=True)
-                return
-
-            try:
-                from .market_calendar import is_market_open_safe
-                market_open = is_market_open_safe(self)
-            except Exception:
-                market_open = True
-
-            exchanges_raw = getattr(self.params, "exchanges", "CFFEX")
-            if isinstance(exchanges_raw, (list, tuple, set)):
-                exchanges = [self._normalize_exchange_code(str(e)) for e in exchanges_raw if str(e).strip()]
-            else:
-                exchanges = [self._normalize_exchange_code(e) for e in str(exchanges_raw).split(",") if e.strip()]
-            if not exchanges:
-                exchanges = ["CFFEX"]
-
-            now_dt = datetime.now()
-            night_dce_start = datetime.strptime("21:00", "%H:%M").time()
-            night_dce_end = datetime.strptime("23:00", "%H:%M").time()
-            night_shfe_end = datetime.strptime("02:00", "%H:%M").time()
-            in_dce_night = night_dce_start <= now_dt.time() <= night_dce_end
-            in_shfe_night = now_dt.time() >= night_dce_start or now_dt.time() <= night_shfe_end
-            allow_commodity_night = (
-                ("SHFE" in exchanges or "INE" in exchanges) and in_shfe_night
-            ) or (
-                any(exch in exchanges for exch in ("DCE", "CZCE", "GFEX")) and in_dce_night
-            )
-
-            self.output(
-                f"[诊断] market_open={market_open}, market_center_available={market_center_available}, "
-                f"infini_available={local_infini is not None}, exchanges={exchanges}, "
-                f"future_products={getattr(self.params, 'future_products', None)}, "
-                f"option_products={getattr(self.params, 'option_products', None)}, "
-                f"load_all_products={getattr(self.params, 'load_all_products', None)}"
-            )
-
-            mode = str(getattr(self.params, "output_mode", "") or "").lower()
-            if mode == "debug":
-                mode = "close_debug"
-                
-            # [Fix] 如果 mode 为空但 debug_output 为真，自动推断为 close_debug (收市调试模式)
-            if not mode and getattr(self.params, "debug_output", False):
-                mode = "close_debug"
-                self.output("[提示] 检测到 debug_output=True 且 mode 未设置，自动切换为 close_debug 模式以允许收市后拉取数据")
-            
-            is_night_window = in_shfe_night or in_dce_night
-            skip_cffex = is_night_window and ("CFFEX" in exchanges)
-            if skip_cffex and not hasattr(self, "_night_cffex_skip_logged"):
-                self.output("[提示] 夜盘时段跳过股指期货/期权")
-                self._night_cffex_skip_logged = True
-            if (not market_open) and mode != "close_debug":
-                if allow_commodity_night:
-                    pass
-                else:
-                    self.output("[提示] 非开盘且非 close_debug，跳过期货/期权拉取")
-                    return
-
-            if market_open and mode != "close_debug":
-                try:
-                    from .market_calendar import get_trading_sessions, _get_holiday_dates_from_obj
-                    now_dt = datetime.now()
-                    holidays = _get_holiday_dates_from_obj(self)
-                    for start, end in get_trading_sessions(now_dt, exchange=None, holiday_dates=holidays):
-                        if start <= now_dt <= end and (end - now_dt).total_seconds() <= 1:
-                            self.output("[提示] 临近收市最后1秒，停止拉取")
-                            return
-                except Exception:
-                    pass
             if not hasattr(self, "kline_data") or self.kline_data is None:
                 self.kline_data = {}
             if not hasattr(self, "managed_instruments") or self.managed_instruments is None:
@@ -1422,15 +1238,6 @@ class InstrumentLoaderMixin:
                 self.output("[Info] month_mapping 为空，应用 DEFAULT_MONTH_MAPPING")
                 self.params.month_mapping = DEFAULT_MONTH_MAPPING.copy()
 
-            # 期货->期权品种映射兜底，避免默认小写映射导致无效品种
-            if not getattr(self, "future_to_option_map", None):
-                self.future_to_option_map = {
-                    "IF": "IO",
-                    "IH": "HO",
-                    "IM": "MO",
-                    "IC": "EO",
-                }
-
             try:
                 mm_dbg = getattr(self.params, "month_mapping", {}) or {}
                 mm_dbg_str = json.dumps(mm_dbg, ensure_ascii=True, sort_keys=True)
@@ -1439,7 +1246,6 @@ class InstrumentLoaderMixin:
                 self.output(f"[诊断] month_mapping 输出失败: {e}")
 
             self._option_fetch_failures = set()
-
             PRODUCT_EXCHANGE_MAP = {
                 "IF": "CFFEX", "IH": "CFFEX", "IC": "CFFEX", "IM": "CFFEX",
                 "IO": "CFFEX", "HO": "CFFEX", "MO": "CFFEX", "EO": "CFFEX",
@@ -1463,21 +1269,14 @@ class InstrumentLoaderMixin:
                 "CY": "CZCE", "CJ": "CZCE", "PF": "CZCE",
             }
 
-            exchanges = list(exchanges) if isinstance(exchanges, list) else list(exchanges)
+            exchanges_str = getattr(self.params, "exchanges", "CFFEX") or "CFFEX"
             future_products_str = str(getattr(self.params, "future_products", "") or "")
             option_products_str = str(getattr(self.params, "option_products", "") or "")
             include_fut_as_opt = bool(getattr(self.params, "include_future_products_for_options", True))
             load_all = getattr(self.params, "load_all_products", True)
-            if skip_cffex and load_all:
-                self.output("[提示] 夜盘时段禁用全量拉取，避免股指合约混入")
-                load_all = False
             self.output(f"=== load_all = {load_all} ===")
 
-            if skip_cffex:
-                exchanges = [e for e in exchanges if e != "CFFEX"]
-            if not exchanges:
-                self.output("[提示] 夜盘仅商品时段，交易所列表为空，停止拉取")
-                return
+            exchanges = [self._normalize_exchange_code(e) for e in exchanges_str.split(",") if e.strip()]
             future_products = [p.strip() for p in future_products_str.split(",") if p.strip()]
             option_products = [p.strip() for p in option_products_str.split(",") if p.strip()]
 
@@ -1506,7 +1305,7 @@ class InstrumentLoaderMixin:
                     k = str(fp).strip().upper()
                     if not k:
                         continue
-                    mapped = mapping.get(k)
+                    mapped = mapping.get(k) or k.lower()
                     if mapped and mapped not in option_products and mapped not in mapped_from_future:
                         mapped_from_future.append(mapped)
                 effective_option_products = list(dict.fromkeys(option_products + mapped_from_future))
@@ -1524,16 +1323,6 @@ class InstrumentLoaderMixin:
             self._debug(f"load_all_products: {load_all}")
 
             fetched: List[dict] = []
-            seen_instrument_keys: Set[str] = set()
-            option_filter_stats: Dict[str, Dict[str, int]] = {}
-
-            def _bump_option_filter(reason: str, inst_id: str) -> None:
-                prod = self._extract_product_code(str(inst_id or "")) or "UNKNOWN"
-                bucket = option_filter_stats.get(reason)
-                if bucket is None:
-                    bucket = {}
-                    option_filter_stats[reason] = bucket
-                bucket[prod] = bucket.get(prod, 0) + 1
 
             def _collect(res: Any, label: str) -> None:
                 if res is None:
@@ -1556,10 +1345,8 @@ class InstrumentLoaderMixin:
                                 or inst.get("StrikePrice") not in (None, "")
                                 or "-C" in normalized_id
                                 or "-P" in normalized_id
-                                or re.search(r"[CP][-_]?\d", normalized_id) is not None
                             )
                             if not is_option_like:
-                                _bump_option_filter("非期权返回", inst_id)
                                 key_skip = f"{label}:{inst_id}"
                                 if key_skip not in self._non_option_return_logged:
                                     self._non_option_return_logged.add(key_skip)
@@ -1575,7 +1362,6 @@ class InstrumentLoaderMixin:
                                 filtered_norm.append(inst)
                             else:
                                 # 仅订阅指定月/下月时，非目标期权直接静默跳过以节省资源
-                                _bump_option_filter("非指定月或解析失败", inst_id)
                                 if getattr(self.params, "subscribe_only_specified_month_options", False) or \
                                    getattr(self.params, "subscribe_only_current_next_options", False):
                                     continue
@@ -1584,9 +1370,7 @@ class InstrumentLoaderMixin:
 
                         if product_class in ("1", "i", "I"):
                             handled = True
-                            if (not getattr(self.params, "subscribe_only_specified_month_futures", False)
-                                and not getattr(self.params, "subscribe_only_current_next_futures", False)) \
-                               or self._is_symbol_specified_or_next(normalized_id):
+                            if self._is_symbol_specified_or_next(normalized_id):
                                 filtered_norm.append(inst)
                             else:
                                 # 仅订阅指定月/下月时，非目标期货静默跳过以节省资源
@@ -1608,7 +1392,6 @@ class InstrumentLoaderMixin:
                             if future_symbol and self._is_symbol_specified_or_next(future_symbol.upper()):
                                 filtered_norm.append(inst)
                             else:
-                                _bump_option_filter("推断期权非指定月", inst_id)
                                 if getattr(self.params, "subscribe_only_specified_month_options", False) or \
                                    getattr(self.params, "subscribe_only_current_next_options", False):
                                     continue
@@ -1629,61 +1412,23 @@ class InstrumentLoaderMixin:
                         if not handled:
                             self._debug(f"过滤未知类型合约: {inst_id} ProductClass={product_class}")
 
-                    for inst in filtered_norm:
-                        inst_id = str(inst.get("InstrumentID", "") or "").upper()
-                        exch = self._normalize_exchange_code(str(inst.get("ExchangeID", "") or ""))
-                        prod_class = str(inst.get("ProductClass", "") or "").strip().upper()
-                        key = f"{exch}|{inst_id}|{prod_class}"
-                        if key in seen_instrument_keys:
-                            continue
-                        seen_instrument_keys.add(key)
-                        fetched.append(inst)
+                    fetched.extend(filtered_norm)
                     self._debug(f"{label} 归一化后已添加到fetched，当前fetched数量: {len(fetched)}")
                 else:
                     self._debug(f"{label} 归一化后为空")
 
             def _fetch_by_product(exchange_code: str, product_code: str, category: str) -> bool:
-                """按品种获取合约，支持大小写/别名自动重试"""
+                """按品种获取合约，若infini 返回空则回退到MarketCenter"""
                 primary_res: Any = None
-                
-                # 构建尝试列表：[(交易所, 品种代码)]
-                candidates = [(exchange_code, product_code)]
-                if str(product_code).islower():
-                    candidates.append((exchange_code, str(product_code).upper()))
-                elif str(product_code).isupper():
-                    candidates.append((exchange_code, str(product_code).lower()))
-                    
-                # 增加交易所别名尝试 (如 SHFE <-> XSGE)
-                alias_map = {"SHFE": "XSGE", "XSGE": "SHFE", "DCE": "XDCE", "XDCE": "DCE", "CZCE": "XZCE", "XZCE": "CZCE"}
-                if exchange_code in alias_map:
-                    alt_exch = alias_map[exchange_code]
-                    candidates.append((alt_exch, product_code))
-                    candidates.append((alt_exch, str(product_code).swapcase()))
-
                 try:
                     local_infini = self._get_infini()
                     if local_infini is None:
                         self._debug("infini 未初始化，跳过 infini 拉取，尝试 MarketCenter 兜底")
                     else:
-                        for exch, prod in candidates:
-                            try:
-                                res = local_infini.get_instruments_by_product(exchange=exch, product_id=prod)
-                                if res:
-                                    primary_res = res
-                                    if exch != exchange_code or prod != product_code:
-                                        self._debug(f"[Retry] 通过别名/大小写获取成功: {exch}.{prod}")
-                                    break
-                            except Exception:
-                                pass
-                                
-                        if not hasattr(self, "_empty_fetch_logged"):
-                            self._empty_fetch_logged = set()
-                        if not primary_res:
-                            # 记录最后一次失败（通常是原始key）
-                            log_key = f"{category}:{exchange_code}.{product_code}"
-                            if log_key not in self._empty_fetch_logged:
-                                self.output(f"[诊断] {exchange_code}.{product_code} 及别名尝试均无返回")
-                                self._empty_fetch_logged.add(log_key)
+                        primary_res = local_infini.get_instruments_by_product(exchange=exchange_code, product_id=product_code)
+                        if product_code == "CU" or (primary_res and len(primary_res) > 0 and str(exchange_code) == "SHFE"):
+                             debug_ids = [str(x.get("InstrumentID")) for x in primary_res[:5]] if primary_res else []
+                             self.output(f"[DEBUG_DIAGNOSE] infini.get_instruments_by_product('{exchange_code}', '{product_code}') -> len={len(primary_res) if primary_res else 0}, IDs={debug_ids}")
                         _collect(primary_res, f"获取{category} {exchange_code}.{product_code}")
                 except Exception as e:
                     self._debug(f"获取{category} {exchange_code}.{product_code} 失败: {e}")
@@ -1693,9 +1438,7 @@ class InstrumentLoaderMixin:
 
                 mc_by_prod = None
                 if market_center_available:
-                     mc = getattr(self, "market_center", None)
-                     if mc:
-                        mc_by_prod = getattr(mc, "get_instruments_by_product", None)
+                    mc_by_prod = getattr(self.market_center, "get_instruments_by_product", None)
                 
                 if callable(mc_by_prod):
                     try:
@@ -1709,9 +1452,7 @@ class InstrumentLoaderMixin:
 
                 mc_get_all = None
                 if market_center_available:
-                     mc = getattr(self, "market_center", None)
-                     if mc:
-                        mc_get_all = getattr(mc, "get_instruments", None)
+                    mc_get_all = getattr(self.market_center, "get_instruments", None)
 
                 if callable(mc_get_all):
                     try:
@@ -1754,9 +1495,7 @@ class InstrumentLoaderMixin:
                     try:
                         mc_get_all = None
                         if market_center_available:
-                             mc = getattr(self, "market_center", None)
-                             if mc:
-                                mc_get_all = getattr(mc, "get_instruments", None)
+                            mc_get_all = getattr(self.market_center, "get_instruments", None)
                         
                         if callable(mc_get_all):
                             try:
@@ -1775,27 +1514,22 @@ class InstrumentLoaderMixin:
                         all_products_for_coverage = list(dict.fromkeys(future_products + effective_option_products))
                         inst_ids_upper = [str(inst.get("InstrumentID", "")).upper() for inst in fetched if isinstance(inst, dict)]
                         missing_products = [p for p in all_products_for_coverage if not any(iid.startswith(p.upper()) for iid in inst_ids_upper)]
-                        # [Restore] 恢复硬编码基准列表，作为数据覆盖的最后一道防线
-                        # 即使参数配置有误，这些主流品种也会被尝试拉取，保证商品数据完整性
+                        # 额外策略：对于option_prod，以及日志中显示的缺失品种 (AG, AL, AU, CU, J, RB, ZN)
+                        # [Auto-Fix] 覆盖所有商品基线品种
                         target_commodities = {
                             "CU", "RB", "AL", "ZN", "AU", "AG",  # 上期所
                             "M", "Y", "A", "J", "JM", "I",       # 大商所
                             "CF", "SR", "MA", "TA"               # 郑商所
                         }
-                        
-                        all_products_for_coverage = list(dict.fromkeys(future_products + effective_option_products))
-                        inst_ids_upper = [str(inst.get("InstrumentID", "")).upper() for inst in fetched if isinstance(inst, dict)]
-                        missing_products = [p for p in all_products_for_coverage if not any(iid.startswith(p.upper()) for iid in inst_ids_upper)]
-                        
-                        # 合并 config 缺失的和硬编码基准缺失的
-                        forced_products = list(target_commodities)
+                        forced_products = [p for p in effective_option_products if p.upper() in target_commodities]
+                        self.output(f"[DEBUG] 强制补拉列表计算完成，forced_products count: {len(forced_products)}")
                         products_to_fetch = list(set(missing_products + forced_products))
                         
                         if products_to_fetch:
                             self.output(f"全量获取后，执行补拉/强制刷新品种: {products_to_fetch}")
                             for prod in products_to_fetch:
                                 target_ex = PRODUCT_EXCHANGE_MAP.get(prod.upper())
-                                if target_ex:
+                                if target_ex and target_ex in exchanges:
                                     _fetch_by_product(target_ex, prod, "补拉合约")
                                 else:
                                     for exch in exchanges:
@@ -1808,20 +1542,11 @@ class InstrumentLoaderMixin:
             if not fetched:
                 for fut_prod in future_products:
                     target_exchange = PRODUCT_EXCHANGE_MAP.get(fut_prod.upper())
-                    if skip_cffex and target_exchange == "CFFEX":
-                        if not hasattr(self, "_skip_cffex_logged"):
-                            self._skip_cffex_logged = False
-                        if not self._skip_cffex_logged:
-                            self.output("[提示] 夜盘时段跳过股指期货拉取")
-                            self._skip_cffex_logged = True
-                        continue
                     if target_exchange:
                         if target_exchange not in exchanges:
-                            # [Fix] 即使交易所不在 exchanges 列表，只要用户明确指定了品种，也尝试拉取
-                            self.output(f"[提示] 品种 {fut_prod} 的交易所 {target_exchange} 未在exchanges列表中，强制尝试拉取")
-                            _fetch_by_product(target_exchange, fut_prod, "期货合约")
-                        else:
-                            _fetch_by_product(target_exchange, fut_prod, "期货合约")
+                            self._debug(f"品种 {fut_prod} 的交易所 {target_exchange} 不在交易所列表中，跳过")
+                            continue
+                        _fetch_by_product(target_exchange, fut_prod, "期货合约")
                     else:
                         for exch in exchanges:
                             _fetch_by_product(exch, fut_prod, "期货合约")
@@ -1829,30 +1554,13 @@ class InstrumentLoaderMixin:
             self.output("=== 开始加载期权合约 ===")
             self.output(f"期权品种列表: {effective_option_products}")
             for i, opt_prod in enumerate(effective_option_products):
-                if (not market_open) and mode != "close_debug" and self._is_index_option(str(opt_prod)):
-                    self.output(f"[提示] 非开盘时段跳过指数期权品种拉取: {opt_prod}")
-                    continue
                 self.output(f"=== 开始加载期权品种 {i + 1}/{len(effective_option_products)}: {opt_prod} ===")
                 target_exchange = PRODUCT_EXCHANGE_MAP.get(opt_prod.upper())
-                if not target_exchange:
-                    f2o = getattr(self, "future_to_option_map", {}) or {}
-                    reverse_map = {str(v).upper(): str(k).upper() for k, v in f2o.items() if v}
-                    fut_code = reverse_map.get(str(opt_prod).upper())
-                    if fut_code:
-                        target_exchange = PRODUCT_EXCHANGE_MAP.get(fut_code)
                 self.output(f"  期权品种 {opt_prod} 对应的交易所: {target_exchange}")
-                if skip_cffex and target_exchange == "CFFEX":
-                    if not hasattr(self, "_skip_cffex_opt_logged"):
-                        self._skip_cffex_opt_logged = False
-                    if not self._skip_cffex_opt_logged:
-                        self.output("[提示] 夜盘时段跳过股指期权拉取")
-                        self._skip_cffex_opt_logged = True
-                    continue
                 if target_exchange:
                     if target_exchange not in exchanges:
-                         # [Fix] 显式指定期权品种也强制拉取
-                        self.output(f"[提示] 期权品种 {opt_prod} 的交易所 {target_exchange} 未在exchanges列表中，强制尝试拉取")
-                    
+                        self._debug(f"品种 {opt_prod} 的交易所 {target_exchange} 不在交易所列表中，跳过")
+                        continue
                     self.output(f"  调用 infini.get_instruments_by_product(exchange={target_exchange}, product_id={opt_prod})")
                     ok = _fetch_by_product(target_exchange, opt_prod, "期权合约")
                     if not ok:
@@ -1869,17 +1577,8 @@ class InstrumentLoaderMixin:
                 self.output(f"=== 期权品种 {opt_prod} 加载完成，当前fetched数量: {len(fetched)} ===")
             self.output("=== 期权合约加载完成 ===")
 
-            if option_filter_stats:
-                self.output(f"[统计] 期权过滤汇总: {option_filter_stats}")
-
             all_instruments = fetched or []
             self.output(f"=== 归一化前，fetched: {len(fetched) if fetched else 0} ===")
-
-            # [Debug] 最终列表检查，防止后续流程显示为 0 而不知道原因
-            if not fetched:
-                self.output(f"[诊断] 警告：合约列表为空！检查 future_products: {future_products}")
-                self.output(f"[诊断] 检查 logs 之前的 _fetch_by_product 调用是否全部失败")
-
             try:
                 _ = iter(all_instruments)
                 self.output("=== 归一化成功，all_instruments 是可迭代的 ===")
@@ -2004,7 +1703,7 @@ class InstrumentLoaderMixin:
                 if not isinstance(instrument, dict):
                     continue
 
-                product_class = str(instrument.get("ProductClass", "")).strip()
+                product_class = instrument.get("ProductClass", "")
                 product_class_counter[product_class] = product_class_counter.get(product_class, 0) + 1
                 inst_id = instrument.get("InstrumentID")
                 if not inst_id:
@@ -2088,18 +1787,11 @@ class InstrumentLoaderMixin:
                 )
                 if filter_specified_futures:
                     before_fut = len(self.future_instruments)
-                    kept = []
-                    dropped_samples = []
-                    for f in self.future_instruments:
-                        fid = str(f.get("InstrumentID", "")).upper()
-                        if self._is_symbol_specified_or_next(fid):
-                            kept.append(f)
-                        else:
-                            if len(dropped_samples) < 10: dropped_samples.append(fid)
-                    self.future_instruments = kept
+                    self.future_instruments = [
+                        f for f in self.future_instruments
+                        if self._is_symbol_specified_or_next(str(f.get("InstrumentID", "")).upper())
+                    ]
                     self._debug(f"过滤期货至指定月/指定下月: {before_fut} 到{len(self.future_instruments)}")
-                    if before_fut != len(self.future_instruments):
-                        self._debug(f"[MonthFilter] Dropped {before_fut - len(self.future_instruments)} items. Samples: {dropped_samples}")
                     allowed = {self._normalize_future_id(str(f.get("InstrumentID", ""))) for f in self.future_instruments}
                     if allowed:
                         before_opt_groups = len(self.option_instruments)
@@ -2111,38 +1803,12 @@ class InstrumentLoaderMixin:
             try:
                 if getattr(self.params, "subscribe_options", True):
                     before_fut = len(self.future_instruments)
-                    kept_opt = []
-                    dropped_opt_samples = []
-                    for f in self.future_instruments:
-                        fid = str(f.get("InstrumentID", "")).upper()
-                        prod = self._extract_product_code(fid)
-                        if self._has_option_for_product(prod):
-                            kept_opt.append(f)
-                        else:
-                             if len(dropped_opt_samples) < 10: dropped_opt_samples.append(f"{fid}({prod})")
-                             # [Fix/Relax] Start: Don't drop futures if options are missing, just warn.
-                             # This prevents "Empty Subscription Queue" if option matching fails.
-                             # We still append to kept_opt to keep the future.
-                             kept_opt.append(f) 
-                             
-                             # [Fix Incomplete] Explicitly add to 'futures_without_options'
-                             # So downstream calculation knows to skip them efficiently.
-                             if not hasattr(self, "futures_without_options") or self.futures_without_options is None:
-                                self.futures_without_options = set()
-                             norm_id = self._normalize_future_id(fid)
-                             self.futures_without_options.add(norm_id)
-                             
-                    # self.future_instruments = kept_opt  <-- Original Strict Logic
-
-                    
-                    if len(kept_opt) > before_fut: # Should be equal if we keep all
-                         # Actually, since we append to kept_opt in 'else' branch too, len(kept_opt) == before_fut.
-                         pass
-                         
-                    if len(dropped_opt_samples) > 0:
-                        self.output(f"[警告] 发现期货丢失期权链(已保留期货): {len(dropped_opt_samples)}个. 样例: {dropped_opt_samples}")
-                        self._debug(f"[HasOptionFilter] Suppressed Drop. Missing Options for: {dropped_opt_samples}")
-
+                    self.future_instruments = [
+                        f for f in self.future_instruments
+                        if self._has_option_for_product(self._extract_product_code(str(f.get("InstrumentID", ""))))
+                    ]
+                    if len(self.future_instruments) != before_fut:
+                        self._debug(f"剔除无期权链期货: {before_fut} -> {len(self.future_instruments)}")
             except Exception as e:
                 self._debug(f"剔除无期权链期货失败: {e}")
 

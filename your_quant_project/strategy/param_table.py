@@ -11,15 +11,27 @@ from typing import Any, Dict, List, Optional, Tuple
 # 参数表/映射缓存（进程级）
 _PARAM_CACHE: Dict[str, Any] = {}
 _PARAM_CACHE_META: Dict[str, Optional[float]] = {}
+_PARAM_CHECK_TIMESTAMP: Dict[str, float] = {}  # [Optimization] Check Throttle
 _MAPPING_CACHE: Dict[str, Any] = {}
 _CONTRACT_CACHE: Dict[str, bool] = {}
 
 
-def load_param_table_cached(param_table_path: str) -> Dict[str, Any]:
+def load_param_table_cached(param_table_path: str, force_check: bool = False) -> Dict[str, Any]:
     """带mtime缓存的参数表加载。"""
     try:
         if not param_table_path:
             return {}
+            
+        # [Requirement] Check at most once every 15 minutes unless forced
+        now = time.time()
+        last_check = _PARAM_CHECK_TIMESTAMP.get(param_table_path, 0)
+        if not force_check and (now - last_check < 900):
+            if param_table_path in _PARAM_CACHE:
+                return _PARAM_CACHE[param_table_path]
+                
+        # Perform mtime check
+        _PARAM_CHECK_TIMESTAMP[param_table_path] = now
+        
         mtime = None
         try:
             mtime = os.path.getmtime(param_table_path)
@@ -27,7 +39,9 @@ def load_param_table_cached(param_table_path: str) -> Dict[str, Any]:
             mtime = None
         if param_table_path in _PARAM_CACHE and _PARAM_CACHE_META.get(param_table_path) == mtime:
             cached = _PARAM_CACHE.get(param_table_path)
+            # Update check time even on cache hit so we don't check mtime again for 15 min
             return cached if isinstance(cached, dict) else {}
+            
         with open(param_table_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
@@ -41,6 +55,34 @@ def load_param_table_cached(param_table_path: str) -> Dict[str, Any]:
 
 class ParamTableMixin:
     """参数表加载/调试/编辑相关逻辑。"""
+
+    def _get_required_param_keys(self) -> set:
+        try:
+            from .params import Params
+            return set(getattr(Params, "__annotations__", {}).keys())
+        except Exception:
+            return set()
+
+    def _validate_param_table(self, overrides: Any) -> Tuple[bool, List[str]]:
+        """校验参数表格式（允许部分参数，不强制全集）"""
+        if not isinstance(overrides, dict):
+            return False, ["<not_dict>"]
+        
+        # 兼容嵌套结构
+        param_map = overrides.get("params") if isinstance(overrides.get("params"), dict) else overrides
+        
+        if not isinstance(param_map, dict):
+             return False, ["<params_not_dict>"]
+
+        # [Fix] 移除对缺失字段的强校验，允许只配置部分参数
+        # calculating missing just for info
+        required = self._get_required_param_keys()
+        missing = []
+        if required:
+            missing = sorted(required - set(param_map.keys()))
+        
+        # 只要格式正确即视为有效
+        return True, missing
 
     def output(self, msg: str, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
         # [Strict Match _3.py] 完全复刻 Strategy20260105_3.py 的 output 逻辑
@@ -130,25 +172,10 @@ class ParamTableMixin:
             pass
 
     def _resolve_param_table_path(self) -> str:
-        """解析参数表绝对路径；优先用户配置，相对路径以脚本目录为基准，最终回退同目录 param_table.json。"""
+        """固定使用策略包内的参数表路径。"""
         try:
-            raw = getattr(self.params, "param_override_table", "") or ""
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            project_dir = os.path.dirname(os.path.dirname(base_dir))
-            recovery_dir = os.path.join(project_dir, "temp_git_recovery")
-            candidates = []
-            if isinstance(raw, str) and raw.strip():
-                if os.path.isabs(raw):
-                    candidates.append(raw)
-                else:
-                    candidates.append(os.path.join(base_dir, raw))
-            candidates.append(os.path.join(base_dir, "param_table.json"))
-            candidates.append(os.path.join(recovery_dir, "param_table.json"))
-            candidates.append(os.path.join(project_dir, "param_table.json"))
-            for p in candidates:
-                if p and os.path.exists(p):
-                    return p
-            return candidates[0] if candidates else ""
+            return os.path.join(base_dir, "param_table.json")
         except Exception:
             return ""
 
@@ -187,10 +214,18 @@ class ParamTableMixin:
         except Exception:
             pass
 
-    def _load_param_table(self) -> Dict[str, Any]:
+    def _load_param_table(self, force: bool = False) -> Dict[str, Any]:
         """从参数表字段解析JSON，失败返回空表。"""
         try:
             path = self._resolve_param_table_path()
+            
+            # [Optimization] 15分钟节流检查 (除非 force=True)
+            now = time.time()
+            last_ts = _PARAM_CHECK_TIMESTAMP.get(path, 0)
+            if not force and (now - last_ts < 900) and (path in _PARAM_CACHE):
+                # 处于节流期且有缓存，直接返回，跳过后续所有IO和日志
+                return _PARAM_CACHE[path]
+
             exists = bool(path and os.path.exists(path))
             mtime = None
             if exists:
@@ -199,23 +234,47 @@ class ParamTableMixin:
                 except Exception:
                     mtime = None
             cache_hit = bool(exists and (path in _PARAM_CACHE) and (_PARAM_CACHE_META.get(path) == mtime))
-            self._log_param_table_debug(
-                f"[调试] 参数表路径: {path} | exists={exists} | cache={'hit' if cache_hit else 'miss'}",
-                path=path,
-            )
+            if not cache_hit: # 减少日志噪音，仅在未命中缓存时输出详情
+                self._log_param_table_debug(
+                    f"[调试] 参数表路径: {path} | exists={exists} | cache=miss | mtime={mtime}",
+                    path=path,
+                )
+            
             if exists:
-                try:
-                    data = load_param_table_cached(path)
-                    if isinstance(data, dict):
+                retries = 3
+                retry_delay = 0.2
+                last_error = None
+                for attempt in range(1, retries + 1):
+                    try:
+                        # 既然这里已经处于非节流逻辑，调用cached也应用 force_check=True 确保刷新时间戳
+                        data = load_param_table_cached(path, force_check=True)
+                        if isinstance(data, dict):
+                            valid, missing = self._validate_param_table(data)
+                            if valid:
+                                if not cache_hit:
+                                    self._log_param_table_debug(
+                                        f"[调试] 参数表加载/更新成功，共{len(data)}个键",
+                                        path=path,
+                                    )
+                                return data
+                            self.output(
+                                f"[参数表校验失败] 缺少字段 {missing} (尝试 {attempt}/{retries})",
+                                force=True,
+                            )
+                        else:
+                            last_error = "参数表不是字典"
+                    except Exception as e:
+                        last_error = str(e)
                         self._log_param_table_debug(
-                            f"[调试] 参数表加载成功，共{len(data)}个键",
+                            f"[调试] 参数表JSON解析失败: {e}",
                             path=path,
                         )
-                        return data
-                except Exception as e:
-                    self._log_param_table_debug(
-                        f"[调试] 参数表JSON解析失败: {e}",
-                        path=path,
+                    if attempt < retries:
+                        time.sleep(retry_delay)
+                if last_error:
+                    self.output(
+                        f"[参数表读取失败] {last_error}，已回退到默认值",
+                        force=True,
                     )
             else:
                 self._log_param_table_debug(
@@ -238,8 +297,14 @@ class ParamTableMixin:
                 if raw_key in _PARAM_CACHE:
                     cached = _PARAM_CACHE.get(raw_key)
                     if isinstance(cached, dict):
-                        return cached
+                        valid, missing = self._validate_param_table(cached)
+                        if valid:
+                            return cached
                 data = dict(raw)
+                valid, missing = self._validate_param_table(data)
+                if not valid:
+                    self.output(f"[参数表校验失败] 缺少字段 {missing}，已回退到默认值", force=True)
+                    return {}
                 _PARAM_CACHE[raw_key] = data
                 return data
             if isinstance(raw, str) and raw.strip():
@@ -248,15 +313,21 @@ class ParamTableMixin:
                     if raw_key in _PARAM_CACHE:
                         cached = _PARAM_CACHE.get(raw_key)
                         if isinstance(cached, dict):
-                            return cached
+                            valid, missing = self._validate_param_table(cached)
+                            if valid:
+                                return cached
                     data = json.loads(raw)
                     self._log_param_table_debug(
                         f"[调试] 参数表字符串解析成功，共{len(data)}个键",
                         path=path,
                     )
                     if isinstance(data, dict):
+                        valid, missing = self._validate_param_table(data)
+                        if not valid:
+                            self.output(f"[参数表校验失败] 缺少字段 {missing}，已回退到默认值", force=True)
+                            return {}
                         _PARAM_CACHE[raw_key] = data
-                    return data
+                        return data
                 except Exception as e:
                     self._log_param_table_debug(
                         f"[调试] 参数表字符串解析失败: {e}",
@@ -406,6 +477,11 @@ class ParamTableMixin:
 
             # 2. 获取当前映射 (直接使用 params.month_mapping)
             mapping = getattr(self.params, "month_mapping", {})
+            if isinstance(mapping, str):
+                try:
+                    mapping = json.loads(mapping)
+                except Exception:
+                    mapping = {}
             if not mapping or not isinstance(mapping, dict):
                 return
             

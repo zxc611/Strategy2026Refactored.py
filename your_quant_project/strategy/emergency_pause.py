@@ -10,22 +10,15 @@ class EmergencyPauseMixin:
     def install_emergency_pause_solution(self) -> None:
         """安装紧急暂停解决方案：通过网络监听等方式实现暂停"""
         try:
-            self.output("=" * 80)
-            self.output("【紧急暂停解决方案】开始安装")
-            self.output("=" * 80)
+            if getattr(self, "_emergency_pause_ready", False):
+                return
 
             self._setup_emergency_file_watch()
             self._setup_emergency_network_listener()
             self._setup_emergency_signals()
-
-            self.output("【紧急暂停解决方案】安装完成")
-            self.output("使用方法：")
-            self.output("  1. 文件方式：创建emergency_pause.flag 文件暂停，删除恢复")
-            self.output("  2. 网络方式：向 127.0.0.1:9999 发送'PAUSE' 暂停，'RESUME' 恢复")
-            self.output("=" * 80)
-
+            self._emergency_pause_ready = True
         except Exception as e:
-            self.output(f"【紧急暂停解决方案】安装失败 {e}")
+            self._debug(f"紧急暂停初始化失败: {e}")
 
     def _setup_emergency_file_watch(self) -> None:
         """通过文件监控实现暂停"""

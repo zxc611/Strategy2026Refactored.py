@@ -1,0 +1,211 @@
+{
+    "max_kline": 200,
+    "kline_request_count": 20,
+    "kline_style": "M1",
+    "subscribe_options": true,
+    "debug_output": true,
+    "diagnostic_output": true,
+    "api_key": "",
+    "infini_api_key": "",
+    "access_key": "",
+    "access_secret": "",
+    "run_profile": "full",
+    "calculation_interval": 60,
+    "kline_duration_seconds": 60,
+    "option_width_threshold": 4.0,
+    "debug_output_interval": 180,
+    "open_debug_output_interval": 60,
+    "enable_scheduler": true,
+    "use_tick_kline_generator": true,
+    "backtest_tick_mode": false,
+    "exchange": "CFFEX",
+    "future_product": "IF",
+    "option_product": "IO",
+    "auto_load_history": true,
+    "load_history_options": true,
+    "load_all_products": true,
+    "exchanges": "CFFEX,SHFE,DCE,CZCE,INE,GFEX",
+    "future_products": "IF,IH,IC,CU,AL,ZN,RB,AU,AG,M,Y,A,JM,I,CF,SR,MA,TA,J,P,L,V,PP,RU,RM,OI,SA,PF,EB,EG,PG,C,CS,JD,ZN,NI,SN,PB,SS,BC,LU,SC,WR,SI,LC",
+    "option_products": "IO,HO,MO,MA,TA,CU,RB,SR",
+    "include_future_products_for_options": false,
+    "subscription_batch_size": 20,
+    "subscription_interval": 1.0,
+    "subscription_fetch_on_subscribe": true,
+    "subscription_fetch_count": 1,
+    "subscription_fetch_for_options": false,
+    "reconnect_gap_seconds": 20,
+    "tick_stale_seconds": 15,
+    "simulation_mode": false,
+    "rate_limit_min_interval_sec": 1.0,
+    "rate_limit_per_instrument": 2,
+    "rate_limit_global_per_min": 100,
+    "rate_limit_window_sec": 60,
+    "trade_output_interval": 180,
+    "subscription_backoff_factor": 1.0,
+    "subscribe_only_current_next_options": true,
+    "subscribe_only_current_next_futures": true,
+    "enable_doc_examples": false,
+    "pause_unsubscribe_all": true,
+    "pause_force_stop_scheduler": true,
+    "pause_on_stop": false,
+    "history_minutes": 720,
+    "log_file_path": "strategy_startup.log",
+    "test_mode": true,
+    "holiday_dates": [],
+    "auto_start_after_init": false,
+    "subscribe_only_specified_month_options": true,
+    "subscribe_only_specified_month_futures": true,
+    "specified_month": "",
+    "next_specified_month": "",
+    "month_mapping": {
+        "IF": [
+            "IF2602",
+            "IF2603"
+        ],
+        "IH": [
+            "IH2602",
+            "IH2603"
+        ],
+        "IM": [
+            "IM2602",
+            "IM2603"
+        ],
+        "CU": [
+            "CU2603",
+            "CU2604"
+        ],
+        "AL": [
+            "AL2603",
+            "AL2604"
+        ],
+        "ZN": [
+            "ZN2603",
+            "ZN2604"
+        ],
+        "RB": [
+            "RB2603",
+            "RB2604"
+        ],
+        "AU": [
+            "AU2603",
+            "AU2604"
+        ],
+        "AG": [
+            "AG2603",
+            "AG2604"
+        ],
+        "M": [
+            "M2603",
+            "M2605"
+        ],
+        "Y": [
+            "Y2603",
+            "Y2605"
+        ],
+        "A": [
+            "A2603",
+            "A2605"
+        ],
+        "JM": [
+            "JM2604",
+            "JM2605"
+        ],
+        "I": [
+            "I2603",
+            "I2605"
+        ],
+        "J": [
+            "J2604",
+            "J2605"
+        ],
+        "CF": [
+            "CF2603",
+            "CF2605"
+        ],
+        "SR": [
+            "SR2603",
+            "SR2605"
+        ],
+        "MA": [
+            "MA2603",
+            "MA2605"
+        ],
+        "TA": [
+            "TA2603",
+            "TA2605"
+        ]
+    },
+    "signal_cooldown": 60,
+    "signal_cooldown_sec": 0.0,
+    "option_buy_lots_min": 1,
+    "option_buy_lots_max": 100,
+    "option_contract_multiplier": 10000,
+    "position_limit_valid_hours_max": 720,
+    "position_limit_default_valid_hours": 24,
+    "position_limit_max_ratio": 0.2,
+    "position_limit_min_amount": 1000,
+    "option_order_price_type": "2",
+    "option_order_time_condition": "3",
+    "option_order_volume_condition": "1",
+    "option_order_contingent_condition": "1",
+    "option_order_force_close_reason": "0",
+    "option_order_hedge_flag": "1",
+    "option_order_min_volume": 1,
+    "option_order_business_unit": "1",
+    "option_order_is_auto_suspend": 0,
+    "option_order_user_force_close": 0,
+    "option_order_is_swap": 0,
+    "close_take_profit_ratio": 1.5,
+    "close_overnight_check_time": "14:58",
+    "close_daycut_time": "15:58",
+    "close_max_hold_days": 3,
+    "close_overnight_loss_threshold": -0.5,
+    "close_overnight_profit_threshold": 4.0,
+    "close_max_chase_attempts": 5,
+    "close_chase_interval_seconds": 2,
+    "close_chase_task_timeout_seconds": 30,
+    "close_delayed_timeout_seconds": 30,
+    "close_delayed_max_retries": 3,
+    "close_order_price_type": "2",
+    "width_threshold": 4.0,
+    "output_mode": "debug",
+    "auto_trading_enabled": false,
+    "auto_trading": false,
+    "force_debug_on_start": true,
+    "ui_window_width": 260,
+    "ui_window_height": 240,
+    "ui_font_large": 11,
+    "ui_font_small": 10,
+    "enable_output_mode_ui": true,
+    "daily_summary_hour": 15,
+    "daily_summary_minute": 1,
+    "trade_quiet": true,
+    "print_start_snapshots": false,
+    "trade_debug_allowlist": "",
+    "debug_disable_categories": "",
+    "debug_throttle_seconds": 0.0,
+    "debug_throttle_map": {},
+    "use_param_overrides_in_debug": true,
+    "param_override_table": "",
+    "param_edit_limit_per_month": 1,
+    "backtest_params": {},
+    "ignore_otm_filter": false,
+    "allow_minimal_signal": false,
+    "min_option_width": 1,
+    "async_history_load": true,
+    "manual_trade_limit_per_half": 1,
+    "morning_afternoon_split_hour": 12,
+    "account_id": "",
+    "kline_max_age_sec": 0,
+    "signal_max_age_sec": 180,
+    "top3_rows": 3,
+    "lots_min": 1,
+    "lots_max": 100,
+    "history_load_max_workers": 2,
+    "option_sync_tolerance": 0.5,
+    "option_sync_allow_flat": true,
+    "index_option_prefixes": "",
+    "option_group_exchanges": "",
+    "czce_year_future_window": 10,
+    "czce_year_past_window": 10
+}

@@ -41,8 +41,9 @@ class ValidationMixin:
                 return False
 
             base_id = self._normalize_future_id(instrument_id)
-            if "_" in base_id:
-                base_id = base_id.split("_")[-1]
+            # [Fix] 移除对 underscore 的盲目分割，防止破坏 HO_2602 格式
+            # if "_" in base_id:
+            #    base_id = base_id.split("_")[-1]
 
             if base_id in self.future_symbol_to_exchange:
                 return True
@@ -92,13 +93,15 @@ class ValidationMixin:
         if not instrument_id:
             return ""
         try:
-            if "|" in instrument_id:
-                return instrument_id.split("|")[-1]
-            if "_" in instrument_id:
-                parts = instrument_id.split("_")
-                if len(parts) == 2 and len(parts[0]) <= 5:
+            # [Fix] 优化标准化逻辑，仅移除已知交易所前缀，保留 HO_2602 等格式
+            val = str(instrument_id).strip()
+            if "|" in val:
+                return val.split("|")[-1]
+            if "_" in val:
+                parts = val.split("_")
+                if len(parts) == 2 and parts[0].upper() in ("SHFE", "CFFEX", "DCE", "CZCE", "GFEX", "INE"):
                     return parts[1]
-            return instrument_id
+            return val
         except Exception:
             return str(instrument_id)
 

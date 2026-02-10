@@ -20,6 +20,10 @@ class TradingLogicMixin:
                 self.latest_ticks = {}
             if not hasattr(self, "last_check_date_closing"):
                 self.last_check_date_closing = None
+            if not hasattr(self, "_last_tick_arrival_ts"):
+                self._last_tick_arrival_ts = 0.0
+            if not hasattr(self, "_last_reconnect_reset_ts"):
+                self._last_reconnect_reset_ts = 0.0
         except Exception:
             pass
     
@@ -28,6 +32,12 @@ class TradingLogicMixin:
         行情处理入口。
         """
         try:
+            self._log_tick_debug(tick)
+            now_ts = time.time()
+            self._check_reconnect_and_clear_cache(now_ts)
+
+            if self._is_tick_stale(tick, now_ts):
+                return
             # 1. 保存行情快照
             # Assume self.latest_ticks exists or create it
             if not hasattr(self, "latest_ticks"):
@@ -37,14 +47,28 @@ class TradingLogicMixin:
             inst = getattr(tick, "instrument_id", "") or getattr(tick, "InstrumentID", "")
             if inst:
                 self.latest_ticks[inst] = tick
+                try:
+                    norm = self._normalize_future_id(inst)
+                    if norm and norm != inst:
+                        self.latest_ticks[norm] = tick
+                except Exception:
+                    pass
+
                 # Also store by exchange.inst? 
                 exch = getattr(tick, "exchange", "") or getattr(tick, "ExchangeID", "")
                 if exch:
                      self.latest_ticks[f"{exch}.{inst}"] = tick
+            self._last_tick_arrival_ts = now_ts
             
-            # 2. 也是K线生成器的驱动入口 (如果需要)
+            # 2. 也是K线生成器的驱动入口
+            if hasattr(self, "update_tick_data"):
+                self.update_tick_data(tick)
+
+            # (Legacy Support)
             if hasattr(self, "kline_generator") and self.kline_generator:
-                self.kline_generator.tick_to_kline(tick)
+                try:
+                    self.kline_generator.tick_to_kline(tick)
+                except Exception: pass
             
             # 3. Position Manager Live Checks (Stop Profit etc)
             if hasattr(self, "position_manager") and self.position_manager:
@@ -57,6 +81,210 @@ class TradingLogicMixin:
 
         except Exception as e:
             # self.output(f"on_tick logic error: {e}")
+            pass
+
+    def _check_reconnect_and_clear_cache(self, now_ts: float) -> None:
+        """断网/重连后清理内存缓存，避免使用过期行情。"""
+        try:
+            gap_sec = float(getattr(self.params, "reconnect_gap_seconds", 20) or 20)
+        except Exception:
+            gap_sec = 20.0
+
+        try:
+            last_ts = float(getattr(self, "_last_tick_arrival_ts", 0.0) or 0.0)
+            if last_ts <= 0:
+                return
+            if now_ts - last_ts < gap_sec:
+                return
+
+            last_reset = float(getattr(self, "_last_reconnect_reset_ts", 0.0) or 0.0)
+            if now_ts - last_reset < gap_sec:
+                return
+
+            self._clear_realtime_caches()
+            self._last_reconnect_reset_ts = now_ts
+
+            if getattr(self.params, "debug_output", False):
+                self.output("[Cache] Reconnect detected, realtime caches cleared.")
+        except Exception:
+            pass
+
+    def _clear_realtime_caches(self) -> None:
+        """清理与实时行情相关的缓存。"""
+        try:
+            if hasattr(self, "latest_ticks"):
+                self.latest_ticks = {}
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "_kline_mem_cache"):
+                with getattr(self, "_kline_cache_lock", threading.Lock()):
+                    self._kline_mem_cache.clear()
+        except Exception:
+            pass
+
+    def _is_tick_stale(self, tick: Any, now_ts: float) -> bool:
+        """过期判定：忽略时间戳明显滞后的Tick。"""
+        try:
+            max_age = float(getattr(self.params, "tick_stale_seconds", 15) or 15)
+        except Exception:
+            max_age = 15.0
+
+        try:
+            tick_ts = self._extract_tick_timestamp(tick)
+            if not tick_ts:
+                return False
+            return (now_ts - tick_ts) > max_age
+        except Exception:
+            return False
+
+    def _extract_tick_timestamp(self, tick: Any) -> Optional[float]:
+        """尽量从Tick中解析出时间戳(秒)。"""
+        try:
+            for field in ("timestamp", "recv_time", "RecvTime", "local_time", "LocalTime"):
+                val = getattr(tick, field, None)
+                ts = self._coerce_to_epoch_seconds(val)
+                if ts:
+                    return ts
+
+            update_time = getattr(tick, "UpdateTime", None) or getattr(tick, "update_time", None)
+            trading_day = getattr(tick, "TradingDay", None) or getattr(tick, "trading_day", None)
+            action_day = getattr(tick, "ActionDay", None) or getattr(tick, "action_day", None)
+            day = trading_day or action_day
+            return self._parse_tick_time(update_time, day)
+        except Exception:
+            return None
+
+    def _coerce_to_epoch_seconds(self, val: Any) -> Optional[float]:
+        try:
+            if val is None:
+                return None
+            if isinstance(val, (int, float)):
+                ts = float(val)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                return ts if ts > 0 else None
+            if isinstance(val, str):
+                val = val.strip()
+                if not val:
+                    return None
+                if val.isdigit():
+                    ts = float(val)
+                    if ts > 1e12:
+                        ts = ts / 1000.0
+                    return ts if ts > 0 else None
+                return self._parse_tick_time(val, None)
+            return None
+        except Exception:
+            return None
+
+    def _parse_tick_time(self, time_str: Any, day_str: Any) -> Optional[float]:
+        try:
+            if not time_str:
+                return None
+            t_str = str(time_str).strip()
+            if not t_str:
+                return None
+
+            day = None
+            if day_str:
+                day = str(day_str).strip()
+                if day.isdigit() and len(day) == 8:
+                    day = f"{day[0:4]}-{day[4:6]}-{day[6:8]}"
+
+            patterns = [
+                "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y%m%d %H:%M:%S",
+                "%H:%M:%S.%f",
+                "%H:%M:%S",
+            ]
+            if day:
+                candidate = f"{day} {t_str}"
+                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        dt = datetime.strptime(candidate, fmt)
+                        return dt.timestamp()
+                    except Exception:
+                        continue
+
+            for fmt in patterns:
+                try:
+                    dt = datetime.strptime(t_str, fmt)
+                    return dt.timestamp()
+                except Exception:
+                    continue
+            return None
+        except Exception:
+            return None
+
+    def _log_tick_debug(self, tick: Any) -> None:
+        """最小化输出 tick 字段与关键值，用于确认回放来源。"""
+        try:
+            if not getattr(self.params, "debug_output", False):
+                return
+        except Exception:
+            return
+
+        try:
+            now_ts = time.time()
+            last_ts = getattr(self, "_tick_debug_last_ts", 0.0)
+            if now_ts - last_ts < 10.0:
+                return
+            self._tick_debug_last_ts = now_ts
+
+            inst = getattr(tick, "instrument_id", "") or getattr(tick, "InstrumentID", "")
+            exch = getattr(tick, "exchange", "") or getattr(tick, "ExchangeID", "")
+            last_price = (
+                getattr(tick, "last_price", None)
+                or getattr(tick, "LastPrice", None)
+                or getattr(tick, "last", None)
+                or getattr(tick, "price", None)
+            )
+            ask = getattr(tick, "ask", None) or getattr(tick, "AskPrice1", None)
+            bid = getattr(tick, "bid", None) or getattr(tick, "BidPrice1", None)
+            volume = getattr(tick, "volume", None) or getattr(tick, "Volume", None)
+            update_time = (
+                getattr(tick, "UpdateTime", None)
+                or getattr(tick, "update_time", None)
+                or getattr(tick, "timestamp", None)
+            )
+            recv_time = getattr(tick, "recv_time", None) or getattr(tick, "RecvTime", None)
+            local_time = getattr(tick, "local_time", None) or getattr(tick, "LocalTime", None)
+            trading_day = getattr(tick, "TradingDay", None) or getattr(tick, "trading_day", None)
+            action_day = getattr(tick, "ActionDay", None) or getattr(tick, "action_day", None)
+            is_replay = getattr(tick, "is_replay", None) or getattr(tick, "IsReplay", None)
+            source = getattr(tick, "source", None) or getattr(tick, "Source", None)
+
+            keys = []
+            try:
+                keys = list(vars(tick).keys())
+            except Exception:
+                keys = []
+            keys_sample = ",".join(sorted(keys)[:20]) if keys else ""
+
+            self.output(
+                "[TickDiag] inst={inst} exch={exch} last={last} bid={bid} ask={ask} vol={vol} "
+                "update_time={ut} recv_time={rt} local_time={lt} trading_day={td} action_day={ad} "
+                "is_replay={ir} source={src} keys={keys}".format(
+                    inst=inst,
+                    exch=exch,
+                    last=last_price,
+                    bid=bid,
+                    ask=ask,
+                    vol=volume,
+                    ut=update_time,
+                    rt=recv_time,
+                    lt=local_time,
+                    td=trading_day,
+                    ad=action_day,
+                    ir=is_replay,
+                    src=source,
+                    keys=keys_sample,
+                )
+            )
+        except Exception:
             pass
             
     def _check_daily_closing(self, tick: Any) -> None:
@@ -103,12 +331,25 @@ class TradingLogicMixin:
 
         # Non-blocking lock check - if locked, skip this cycle
         if not self._trading_cycle_lock.acquire(blocking=False):
-             self.output("[Cycle] Previous cycle still running, skipping this trigger.")
-             return
+            self.output("[Cycle] Previous cycle still running, skipping this trigger.")
+            return
 
         try:
             # [Fix Scenario 3] Pause Check
-            if self.is_paused or not self.is_running: return
+            if self.is_paused or not self.is_running:
+                # 中文注释：强制阻断暂停/未运行状态，避免任何计算路径被绕过
+                try:
+                    now_ts = time.time()
+                    last_ts = getattr(self, "_calc_skip_log_time", 0)
+                    if now_ts - last_ts >= 60:
+                        self.output(
+                            f"[诊断] 交易循环跳过: paused={self.is_paused}, running={self.is_running}",
+                            force=True,
+                        )
+                        self._calc_skip_log_time = now_ts
+                except Exception:
+                    pass
+                return
 
             # Track last successful cycle start for watchdog checks
             self._last_trading_cycle_ts = time.time()
@@ -149,7 +390,7 @@ class TradingLogicMixin:
              return
 
         # 1. 开盘时间检查
-        if hasattr(self, "is_market_open") and not self.is_market_open():
+        if not is_market_open_safe(self):
             # self.output("非开盘时间，忽略交易信号执行")
             return
 
@@ -159,17 +400,24 @@ class TradingLogicMixin:
             max_age = int(getattr(self.params, "signal_max_age_sec", 180) or 180)
         except: max_age = 180
         
+        def _normalize_signal_ts(ts_value: Any) -> Optional[datetime]:
+            if isinstance(ts_value, datetime):
+                return ts_value
+            if isinstance(ts_value, str):
+                try:
+                    return datetime.fromisoformat(ts_value)
+                except Exception:
+                    return None
+            return None
+
         fresh_signals = []
+        missing_ts = 0
         for sig in signals:
-            ts = sig.get("timestamp")
-            # Convert str isoformat to datetime if needed
-            if isinstance(ts, str):
-                try: ts = datetime.fromisoformat(ts)
-                except: pass
-            
+            ts = _normalize_signal_ts(sig.get("timestamp"))
             if not isinstance(ts, datetime):
                 # Assume fresh if generated by us just now, but if timestamp missing...
                 # Actually our calc sets timestamp as str isoformat usually
+                missing_ts += 1
                 continue
                 
             delta = (now - ts).total_seconds()
@@ -178,6 +426,21 @@ class TradingLogicMixin:
             else:
                 pass # Expired
         
+        if missing_ts:
+            try:
+                debug_on = bool(getattr(self.params, "debug_output", False))
+            except Exception:
+                debug_on = False
+            if debug_on:
+                try:
+                    now_ts = time.time()
+                    last_ts = getattr(self, "_signal_ts_missing_log_ts", 0.0)
+                    if now_ts - last_ts >= 60.0:
+                        self._signal_ts_missing_log_ts = now_ts
+                        self.output(f"[信号丢弃] 缺失时间戳的信号数量: {missing_ts}")
+                except Exception:
+                    pass
+
         if not fresh_signals:
             return
             
@@ -250,21 +513,31 @@ class TradingLogicMixin:
 
             # 计算手数
             try:
+                # [Fix] Respect user config, remove hardcoded minimum of 5
                 volume_min = int(getattr(self.params, "lots_min", 1) or 1)
-                # [Source Parity] Force at least 5 lots for first order? Not exactly, but source had logic.
-                if volume_min < 5: volume_min = 5
+                if volume_min < 1: volume_min = 1
                 volume_max = int(getattr(self.params, "lots_max", 100) or 100)
             except Exception:
-                volume_min = 5
+                volume_min = 1
                 volume_max = 100
                 
             volume = volume_min 
             if volume > volume_max: volume = volume_max
             
-            # 拆分手数 (50% per contract)
-            opt_volume = max(1, int(volume * 0.5))
+            # 拆分手数 (50% per contract for straddle/strangle)
+            # If volume is 1, opt_volume becomes 1 (int(0.5) is 0, max(1, 0) is 1)
+            # If volume is 2, opt_volume becomes 1
+            # If volume is 3, opt_volume becomes 1
+            # If volume is 4, opt_volume becomes 2
+            # Use ceil logic or simple allocation? 
+            # Original logic: opt_volume = max(1, int(volume * 0.5))
+            # Let's keep strict splitting but allow small lots.
+            if len(target_opts) > 1:
+                opt_volume = max(1, int(volume / len(target_opts)))
+            else:
+                opt_volume = volume
             
-            self.output(f"执行直接期权交易：目标合约={target_opts}, 单合约手数={opt_volume}")
+            self.output(f"执行直接期权交易：目标合约={target_opts}, 总配置手数={volume}, 单合约分配手数={opt_volume}")
             
             if not hasattr(self, "last_open_success_time"):
                  self.last_open_success_time = {}
@@ -279,16 +552,20 @@ class TradingLogicMixin:
                          self.output(f"跳过期权 {opt_id}：冷却中 ({time_diff:.1f}s < 60s)")
                          continue
                 
-                # 2. 获取价格 (Enhanced Fallback)
+                # 2. 获取价格 (Enhanced Fallback with Retry)
                 price = self._get_execution_price_for_option(exchange, opt_id, "buy")
                 
-                # Mock Price Injection only when explicitly enabled and market is closed
-                mock_enabled = bool(getattr(self, "DEBUG_ENABLE_MOCK_EXECUTION", False)) or bool(getattr(self.params, "test_mode", False))
-                if is_market_open_safe(self):
-                    mock_enabled = False
-                if (not price or price <= 0) and mock_enabled:
-                     price = 100.0
-                     self.output(f"[调试] 注入模拟价格 {price} 用于 {opt_id}")
+                # [Fix] 如果价格无效，尝试强制重新订阅并等待快照 (Emergency Re-sub)
+                if (not price or price <= 0):
+                    self.output(f"[执行告警] 合约 {opt_id} 价格无效({price})，尝试强制补订行情并重试...")
+                    if hasattr(self, "sub_market_data"):
+                        self.sub_market_data(exchange=exchange, instrument_id=opt_id)
+                    time.sleep(1.0) # 等待行情推送
+                    price = self._get_execution_price_for_option(exchange, opt_id, "buy")
+                    if price and price > 0:
+                        self.output(f"[执行] 补订后成功获取价格: {opt_id} -> {price}")
+                
+                # No mock price injection; only trade with real price data.
 
                 if price and price > 0:
                     remark = f"Auto_{future_id}_{signal.get('signal_type')}"
@@ -304,6 +581,8 @@ class TradingLogicMixin:
                         # 4. 注册追单 (Chase)
                         if hasattr(self, "register_open_chase"):
                              self.register_open_chase(opt_id, exchange, "0", [order_id], opt_volume, price)
+                else:
+                    self.output(f"[下单异常] 从未获取到合约 {opt_id} 的有效价格(price={price})，跳过下单。请检查订阅状态。")
             
             # 全局冷却记录 (Optional backup)
             self._record_signal_time(future_id)

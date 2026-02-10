@@ -22,7 +22,7 @@ if project_root not in sys.path:
 
 # [Logic] Import Mixins from Package (Absolute Imports Preferred)
 try:
-    from your_quant_project.strategy.market_calendar import MarketCalendarMixin
+    from your_quant_project.strategy.market_calendar import MarketCalendarMixin, is_close_debug_allowed, is_market_open_safe
     from your_quant_project.strategy.param_table import ParamTableMixin
     from your_quant_project.strategy.emergency_pause import EmergencyPauseMixin
     from your_quant_project.strategy.scheduler_utils import SchedulerMixin
@@ -49,7 +49,7 @@ try:
         from ui_mixin import UIMixin
 except ImportError:
     # Fallback to relative imports if absolute fails (e.g. if package not in path)
-    from .market_calendar import MarketCalendarMixin  # type: ignore
+    from .market_calendar import MarketCalendarMixin, is_market_open_safe  # type: ignore
     from .param_table import ParamTableMixin  # type: ignore
     from .emergency_pause import EmergencyPauseMixin  # type: ignore
     from .scheduler_utils import SchedulerMixin  # type: ignore
@@ -188,8 +188,6 @@ class StrategyContainer(
 
         # [Lifecycle] Base Init
         try:
-            # We need to manually invoke DataContainer init to be safe about variables
-            DataStrategyContainer.__init__(self) 
             super().__init__()
         except Exception as e:
             self._force_log(f"super().__init__ error: {e}")
@@ -235,6 +233,15 @@ class StrategyContainer(
                 self.params.month_mapping = DEFAULT_MONTH_MAPPING.copy()
         except Exception:
             pass
+
+        # [Core] Future-to-option product mapping (avoid default lowercase fallback)
+        if not getattr(self, "future_to_option_map", None):
+            self.future_to_option_map = {
+                "IF": "IO",
+                "IH": "HO",
+                "IM": "MO",
+                "IC": "EO",
+            }
 
         # [Core] 尝试提前注入 API Key
         try:
@@ -354,7 +361,8 @@ class StrategyContainer(
         except Exception:
             pass
 
-        self.output(">>> StrategyContainer Initializing...", force=True)
+        # 中文注释：初始化开始提示
+        self.output(">>> 策略初始化中...", force=True)
         
         if hasattr(self, "_init_calculation_state"): self._init_calculation_state()
         if hasattr(self, "_init_order_execution"): self._init_order_execution()
@@ -405,7 +413,8 @@ class StrategyContainer(
         self.last_width_output_time = 0
         self._safe_add_periodic_job("width_output_task", self._check_width_ranking_output, interval_seconds=1)
 
-        self.output(">>> Initialization Complete.")
+        # 中文注释：初始化完成提示
+        self.output(">>> 初始化完成。")
 
         try:
             if getattr(self.params, "auto_start_after_init", False) and not getattr(self, "my_started", False):
@@ -419,7 +428,8 @@ class StrategyContainer(
         try:
             super().on_start()
         except: pass
-        self.output(">>> Strategy Starting...")
+        # 中文注释：启动开始提示
+        self.output(">>> 策略启动中...")
         self.my_is_running = True
         self.my_started = True
         self.my_is_paused = False
@@ -428,22 +438,41 @@ class StrategyContainer(
         
         if hasattr(self, "_load_param_table"): self._load_param_table()
 
+        # 开盘时禁止 close_debug，启动后自动切换到 trade
+        try:
+            mode = str(getattr(self.params, "output_mode", "debug")).lower()
+            if mode == "debug":
+                mode = "close_debug"
+            if mode == "close_debug" and is_market_open_safe(self):
+                self.set_output_mode("trade")
+                self.output("开盘检测：已从收市调试切换为交易模式", force=True)
+        except Exception:
+            pass
+
         try:
             if (not getattr(self, "position_manager", None)) and PositionManager:
                 self.position_manager = PositionManager(self)
         except Exception:
             pass
 
-        # [UI] Start Dashboard
-        try:
-            if getattr(self.params, "enable_output_mode_ui", True) and not (getattr(self, "_ui_running", False) or getattr(self, "_ui_creating", False)):
-                self._start_output_mode_ui()
-        except Exception as e:
-            self.output(f"Failed to start UI: {e}", force=True)
+        if hasattr(self, "_start_output_mode_ui"):
+             self._start_output_mode_ui()
+
+        # [MODIFIED] Do not auto start worker on init. Start it when orders are created.
+        # if hasattr(self, "start_order_execution_worker"):
+        #     self.start_order_execution_worker()
 
         # [ASYNC STARTUP]
         def _async_startup_task():
             try:
+                # 中文注释：异步启动前强制修正运行标记，防止订阅/计算被误判为暂停
+                try:
+                    if not getattr(self, "my_is_running", False):
+                        self.my_is_running = True
+                    if getattr(self, "my_is_paused", False):
+                        self.my_is_paused = False
+                except Exception:
+                    pass
                 # 1. Load Instruments
                 self.output(">>> [Async] Loading Instruments...")
                 if hasattr(self, "load_all_instruments"): 
@@ -498,17 +527,43 @@ class StrategyContainer(
                      self.position_manager.check_and_close_overdue_positions(days_limit=3)
             self._safe_add_periodic_job("position_check_periodic", _position_check_job, interval_seconds=60, run_async=True)
 
-            # [Fix] Async check chase tasks (Network IO)
-            self._safe_add_periodic_job("check_chase_tasks", self.check_active_chase_tasks, interval_seconds=1, run_async=True)
+            # [REMOVED] check_chase_tasks from Scheduler. 
+            # Now managed by start_order_execution_worker() (Dedicated Thread).
+            # self._safe_add_periodic_job("check_chase_tasks", self.check_active_chase_tasks, interval_seconds=1, run_async=True)
+            
             # Source parity: second timer for 14:58/15:58 checks (Time checks are fast, but callbacks might be slow)
             self._safe_add_periodic_job("second_timer", self._on_second_timer, interval_seconds=1, run_async=True)
+            # 中文注释：状态报告定时触发，避免因未触发计算而无输出
+            if hasattr(self, "_emit_status_report_if_needed"):
+                self._safe_add_periodic_job("status_report", self._emit_status_report_if_needed, interval_seconds=60, run_async=True)
+
+            # 中文注释：调度器启动自检，防止任务未真正运行
+            try:
+                if (not hasattr(self, "scheduler")) or (self.scheduler is None):
+                    self.scheduler = self._create_default_scheduler()
+                if hasattr(self.scheduler, "running") and not getattr(self.scheduler, "running"):
+                    self.scheduler.start()
+                self.output("[诊断] 调度器已启动并添加任务", force=True)
+            except Exception as e:
+                self.output(f"[诊断] 调度器启动失败: {e}", force=True)
+
+            # 中文注释：调度器启动自检，防止任务未真正运行
+            try:
+                if (not hasattr(self, "scheduler")) or (self.scheduler is None):
+                    self.scheduler = self._create_default_scheduler()
+                if hasattr(self.scheduler, "running") and not getattr(self.scheduler, "running"):
+                    self.scheduler.start()
+                self.output("[诊断] 调度器已启动并添加任务", force=True)
+            except Exception as e:
+                self.output(f"[诊断] 调度器启动失败: {e}", force=True)
 
         try:
             self._start_calc_watchdog()
         except Exception:
             pass
 
-        self.output(">>> Strategy Started (Async Startup in Progress).")
+        # 中文注释：启动完成（异步仍在进行）
+        self.output(">>> 策略已启动（异步启动进行中）。")
 
     def _start_calc_watchdog(self) -> None:
         """Fallback loop to kick off trading cycles if scheduler stops firing."""
@@ -525,6 +580,31 @@ class StrategyContainer(
                         time.sleep(1)
                         continue
 
+                    # 中文注释：看门狗内补充调度器自检，避免调度器未启动导致计算永远不触发
+                    try:
+                        if (not hasattr(self, "scheduler")) or (self.scheduler is None):
+                            self.scheduler = self._create_default_scheduler()
+                        if hasattr(self.scheduler, "running") and not getattr(self.scheduler, "running"):
+                            self.scheduler.start()
+                    except Exception:
+                        pass
+
+                    # 中文注释：看门狗内补充调度器自检，避免调度器未启动导致计算永远不触发
+                    try:
+                        if (not hasattr(self, "scheduler")) or (self.scheduler is None):
+                            self.scheduler = self._create_default_scheduler()
+                        if hasattr(self.scheduler, "running") and not getattr(self.scheduler, "running"):
+                            self.scheduler.start()
+                    except Exception:
+                        pass
+
+                    # 中文注释：独立心跳触发状态报告，避免调度器未运行导致180秒不输出
+                    try:
+                        if hasattr(self, "_emit_status_report_if_needed"):
+                            self._emit_status_report_if_needed()
+                    except Exception:
+                        pass
+
                     interval = float(getattr(self.params, "calculation_interval", 60) or 60)
                     last_ts = float(getattr(self, "_last_trading_cycle_ts", 0) or 0)
                     now_ts = time.time()
@@ -535,7 +615,17 @@ class StrategyContainer(
                         if hasattr(self, "run_trading_cycle"):
                             self.run_trading_cycle()
 
-                    time.sleep(max(1.0, interval))
+                    # [Fix] Sleep in small chunks to support fast shutdown
+                    sleep_total = max(1.0, interval)
+                    elapsed = 0.0
+                    while elapsed < sleep_total:
+                        if getattr(self, "my_destroyed", False):
+                            return
+                        # Check pausing/stop dynamically
+                        if not getattr(self, "my_is_running", False) or getattr(self, "my_is_paused", False):
+                             break 
+                        time.sleep(1.0)
+                        elapsed += 1.0
                 except Exception:
                     time.sleep(2)
 
@@ -544,6 +634,18 @@ class StrategyContainer(
     def _on_second_timer(self) -> None:
         """每秒定时器（对齐源策略规则4&5、规则3&6）"""
         try:
+            try:
+                mode = str(getattr(self.params, "output_mode", "debug")).lower()
+                if mode == "debug":
+                    mode = "close_debug"
+                if mode == "close_debug":
+                    allowed, reason = is_close_debug_allowed(self, minutes_to_open=30)
+                    if not allowed:
+                        if hasattr(self, "_exit_close_debug_mode"):
+                            self._exit_close_debug_mode(reason or "")
+            except Exception:
+                pass
+
             now = datetime.now()
             current_time = now.time()
 
@@ -631,8 +733,18 @@ class StrategyContainer(
         
         # [Lifecycle] Explicit Cleanup
         try:
+            try:
+                if getattr(self.params, "pause_unsubscribe_all", True) and hasattr(self, "unsubscribe_all"):
+                    self.unsubscribe_all()
+            except Exception:
+                pass
+
             if hasattr(self, "stop_scheduler"):
                 self.stop_scheduler()
+            
+            if hasattr(self, "stop_order_execution_worker"):
+                self.stop_order_execution_worker()
+
             # [SafePause] Thread-safe UI Cleanup
             if hasattr(self, "_ui_queue"):
                 # Signal the UI thread to destroy itself.
@@ -762,6 +874,8 @@ class StrategyContainer(
         """Timer check for periodic width ranking output"""
         try:
             current_time = time.time()
+            if not hasattr(self, "last_width_output_time"):
+                self.last_width_output_time = 0
             
             # Determine interval based on mode
             mode = str(getattr(self.params, "output_mode", "debug")).lower()
@@ -774,7 +888,13 @@ class StrategyContainer(
             else:
                 interval = getattr(self.params, "debug_output_interval", 180)
             
+            # [DebugProbe] 强制输出心跳，确认该检查函数正在运行 (每30秒一次)
+            if current_time % 30 < 1:
+                # self._force_log(f"WidthCheck Heartbeat: last={self.last_width_output_time}, iv={interval}, diff={current_time-self.last_width_output_time:.1f}")
+                pass
+
             if current_time - self.last_width_output_time >= interval:
+                self._force_log(f"Triggering Width Output. Mode={mode}")
                 self._perform_width_output()
                 self.last_width_output_time = current_time
                 
@@ -798,22 +918,20 @@ class StrategyContainer(
             items = []
             for instr, res in self.option_width_results.items():
                 if not isinstance(res, dict): continue
-                # Use stored result
-                w = res.get('width_ratio', 999)
-                if w == 999: continue
+                
+                # [Debug Probe] Print keys of the first record once to verify data structure
+                if not hasattr(self, "_report_debug_keys_printed"):
+                    self.output(f"[DEBUG_KEYS] {instr} keys: {list(res.keys())}")
+                    self._report_debug_keys_printed = True
+                
+                w = res.get('option_width', 0)
                 items.append((instr, w, res))
-            
-            # Sort by width ascending
-            items.sort(key=lambda x: x[1])
-            
+
+            items.sort(key=lambda x: x[1], reverse=True)
+
             top_n = 10
             for i, (instr, w, res) in enumerate(items[:top_n]):
-                call_mid = res.get('call_mid', 0)
-                put_mid = res.get('put_mid', 0)
-                self.output(f"Rank #{i+1:02d} {instr}: Width={w:.4f} (C={call_mid:.1f}, P={put_mid:.1f})")
-            
-            # [Requirement 4] Immediate Cleanup of large temporary output list
-            del items
+                self.output(f"Rank #{i+1:02d} {instr}: Width={w} (Sync={res.get('all_sync')})")
 
             if len(self.option_width_results) > top_n:
                 self.output(f"... and {len(self.option_width_results)-top_n} more instruments.")

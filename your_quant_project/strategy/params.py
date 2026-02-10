@@ -11,6 +11,7 @@ except ImportError:
         return default
 
 
+# 参数中文说明见 param_table.zh.md，字段保持同步。
 class Params(BaseParams):
     max_kline: int = Field(default=200, title="K线缓存长度(V17)[CLASS_MATCH]")
     kline_request_count: int = Field(default=6, title="单次请求K线数量（默认6）")
@@ -34,22 +35,34 @@ class Params(BaseParams):
     # [New Requirements 2026-02-04]
     calculation_interval: int = Field(default=60, title="策略主循环/计算触发间隔(秒) [User Required: 60s]")
     kline_duration_seconds: int = Field(default=60, title="K线时间范围(秒)，用于拉取限制和计算超时")
+    kline_max_age_sec: int = Field(default=0, title="K线时效性最大容忍秒数(0=不限制)")
+    signal_max_age_sec: int = Field(default=180, title="信号时效性最大容忍秒数")
     option_width_threshold: float = Field(default=4.0, title="期权宽度阈值，小于等于此值不交易")
     debug_output_interval: int = Field(default=180, title="收市调试状态下宽度排行输出间隔(秒)")
     open_debug_output_interval: int = Field(default=60, title="开盘调试状态下宽度排行输出间隔(秒)")
-    trade_output_interval: int = Field(default=900, title="交易状态下宽度排行输出间隔(秒)")
+    trade_output_interval: int = Field(default=180, title="交易状态下宽度排行输出间隔(秒)")
     # Note: User request wording for 8 seemed swapped, assuming logical mapping:
     # "K线时间长度" -> kline_duration_seconds (default 60s)
     # "期权宽度阀值" -> option_width_threshold (default 4)
     auto_load_history: bool = Field(default=True, title="启动后自动加载历史K线")
     load_history_options: bool = Field(default=True, title="加载历史K线时是否包含期权")
     load_all_products: bool = Field(default=False, title="是否加载全部品种（忽略产品过滤）")
-    exchanges: str = Field(default="CFFEX,SHFE,DCE,CZCE", title="交易所列表（逗号分隔）")
+    exchanges: str = Field(default="CFFEX,SHFE,DCE,CZCE,INE,GFEX", title="交易所列表（逗号分隔）")
     future_products: str = Field(default="IF,IH,IM,CU,AL,ZN,RB,AU,AG,M,Y,A,JM,I,J,CF,SR,MA,TA", title="期货品种列表（逗号分隔）")
     option_products: str = Field(default="IO", title="期权品种列表（逗号分隔）")
     include_future_products_for_options: bool = Field(default=True, title="将期货品种一并尝试作为期权品种加载（覆盖商品期权）")
     subscription_batch_size: int = Field(default=10, title="订阅批次大小")
-    subscription_interval: float = Field(default=0.2, title="订阅批次间隔(秒)")
+    subscription_interval: float = Field(default=1, title="订阅批次间隔(秒)")
+    subscription_fetch_on_subscribe: bool = Field(default=True, title="订阅后是否立即拉取K线")
+    subscription_fetch_count: int = Field(default=5, title="订阅后立即拉取K线的根数")
+    subscription_fetch_for_options: bool = Field(default=False, title="订阅后是否对期权也拉取K线")
+    simulation_mode: bool = Field(default=False, title="模拟环境开关(启用模拟价格逻辑)")
+    reconnect_gap_seconds: int = Field(default=20, title="断网/重连判定间隔(秒)")
+    tick_stale_seconds: int = Field(default=15, title="Tick过期判定秒数(秒)")
+    rate_limit_min_interval_sec: float = Field(default=1, title="最小请求间隔(秒)")
+    rate_limit_per_instrument: int = Field(default=2, title="单合约窗口请求上限")
+    rate_limit_global_per_min: int = Field(default=60, title="全局窗口请求上限")
+    rate_limit_window_sec: int = Field(default=120, title="请求限流窗口(秒)")
     subscription_backoff_factor: float = Field(default=1.0, title="订阅批次退避因子")
     subscribe_only_current_next_options: bool = Field(default=True, title="仅订阅指定月/指定下月期权（旧字段名）")
     subscribe_only_current_next_futures: bool = Field(default=True, title="仅订阅指定月/指定下月期货（旧字段名，仅限CFFEX IF/IH/IC）")
@@ -58,8 +71,10 @@ class Params(BaseParams):
     pause_force_stop_scheduler: bool = Field(default=True, title="暂停时强制停止调度器（resume时重启）")
     pause_on_stop: bool = Field(default=False, title="平台 on_stop 回调是否按暂停处理")
     history_minutes: int = Field(default=1440, title="历史K线拉取回看分钟数")
+    async_history_load: bool = Field(default=True, title="是否异步加载历史K线")
     log_file_path: str = Field(default="strategy_startup.log", title="本地日志文件路径")
     test_mode: bool = Field(default=False, title="测试模式：忽略开盘时间门控")
+    holiday_dates: str = Field(default="", title="法定节假日列表(YYYY-MM-DD,逗号/空格分隔)")
     auto_start_after_init: bool = Field(default=False, title="初始化后自动触发 on_start，避免卡在初始化状态")
     # 指定月/指定下月新增参数，兼容旧字段
     subscribe_only_specified_month_options: bool = Field(default=True, title="仅订阅指定月/指定下月期权")
@@ -68,12 +83,19 @@ class Params(BaseParams):
     next_specified_month: str = Field(default="", title="指定下月合约代码")
     month_mapping: Dict[str, Any] = Field(default_factory=dict, title="品种指定月/指定下月映射")
     # 计算与信号参数
+    ignore_otm_filter: bool = Field(default=False, title="忽略虚值过滤")
     allow_minimal_signal: bool = Field(default=False, title="允许微弱信号")
     signal_cooldown: int = Field(default=60, title="信号冷却时间(秒)")
+    signal_cooldown_sec: float = Field(default=0.0, title="信号冷却时间(秒,兼容字段)")
     lots_min: int = Field(default=1, title="手数最小值")
     width_threshold: float = Field(default=4.0, title="交易信号宽度阈值")
     debug_output_interval: int = Field(default=180, title="收市调试模式下输出间隔(秒)")
     lots_max: int = Field(default=100, title="手数最大值")
+    min_option_width: float = Field(default=1, title="期权最小宽度")
+    manual_trade_limit_per_half: int = Field(default=1, title="半日手动交易次数上限")
+    morning_afternoon_split_hour: int = Field(default=12, title="上午/下午分割小时")
+    top3_rows: int = Field(default=3, title="排行展示行数")
+    account_id: str = Field(default="", title="账户ID")
 
     # 开仓/风控参数
     option_buy_lots_min: int = Field(default=1, title="期权买入开仓最小手数")
@@ -121,6 +143,12 @@ class Params(BaseParams):
     daily_summary_minute: int = Field(default=1, title="日终汇总分钟")
     trade_quiet: bool = Field(default=True, title="交易模式下减少输出")
     print_start_snapshots: bool = Field(default=False, title="启动时打印快照")
+    option_sync_tolerance: float = Field(default=0.5, title="期权链同步容忍比例")
+    option_sync_allow_flat: bool = Field(default=True, title="允许期权链平坦同步")
+    index_option_prefixes: str = Field(default="", title="股指期权前缀列表")
+    option_group_exchanges: str = Field(default="", title="期权分组交易所列表")
+    czce_year_future_window: int = Field(default=10, title="CZCE年度期货前向窗口")
+    czce_year_past_window: int = Field(default=10, title="CZCE年度期货后向窗口")
 
     def get(self, key, default=None):
         return getattr(self, key, default)
@@ -132,3 +160,4 @@ class Params(BaseParams):
     use_param_overrides_in_debug: bool = Field(default=False, title="调试模式下使用参数覆盖")
     param_override_table: str = Field(default="", title="参数覆盖表路径")
     param_edit_limit_per_month: int = Field(default=1, title="每月参数修改次数限制")
+    backtest_params: Dict[str, Any] = Field(default_factory=dict, title="回测参数")

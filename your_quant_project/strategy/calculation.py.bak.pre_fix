@@ -628,25 +628,9 @@ class OptionWidthCalculationMixin:
                 
                 while elapsed < timeout_sec:
                     if self._is_paused_or_stopped():
-                        # 【修改1】暂停时保存已完成的任务结果，而非直接放弃（修复：初始化new_results）
-                        # 取消剩余任务，但处理已完成的任务
+                        # self.output(">>> [Logic] Paused/Stopped during calculation wait. Aborting.", force=True)
+                        # Cancel remaining futures
                         for t in tasks.keys(): t.cancel()
-                        # 从现有结果初始化，确保数据不丢失
-                        with self.data_lock:
-                            new_results = self.option_width_results.copy()
-                        for fut in done:
-                            try:
-                                res = fut.result()
-                                if res and isinstance(res, dict):
-                                    action = res.get('action')
-                                    key = res.get('key')
-                                    if action == 'update':
-                                        new_results[key] = res.get('value')
-                                    elif action == 'delete' and key in new_results:
-                                        del new_results[key]
-                            except: pass
-                        with self.data_lock:
-                            self.option_width_results = new_results
                         return
 
                     # Wait small chunk
@@ -728,12 +712,6 @@ class OptionWidthCalculationMixin:
              mode = str(getattr(self.params, "output_mode", "trade")).lower()
              if mode == "debug":
                  mode = "close_debug"
-             # 【新增】收市调试模式判断：开盘时间自动切换到trade模式
-             if mode == "close_debug":
-                 try: market_open = bool(self.is_market_open())
-                 except: market_open = False
-                 if market_open:
-                     mode = "trade"
              if mode == "open_debug":
                  interval = float(getattr(self.params, "open_debug_output_interval", 60) or 60)
              elif mode == "trade":
@@ -781,12 +759,6 @@ class OptionWidthCalculationMixin:
             mode = str(getattr(self.params, "output_mode", "debug")).lower()
             if mode == "debug":
                 mode = "close_debug"
-            # 【新增】收市调试模式判断：开盘时间自动切换到trade模式
-            if mode == "close_debug":
-                try: market_open = bool(self.is_market_open())
-                except: market_open = False
-                if market_open:
-                    mode = "trade"
         except: mode = "close_debug"
         
         # [Req 2] Log Throttling (Applied to Debug/Trade Table Output too)
@@ -848,69 +820,14 @@ class OptionWidthCalculationMixin:
             mode = str(getattr(self.params, "output_mode", "trade")).lower()
             if mode == "debug":
                 mode = "close_debug"
-            # 【新增】收市调试模式判断：开盘时间自动切换到trade模式
-            if mode == "close_debug":
-                try: market_open = bool(self.is_market_open())
-                except: market_open = False
-                if market_open:
-                    mode = "trade"
             is_debug = mode not in ("trade", "open_debug")
             forced_debug = getattr(self.params, "test_mode", False) or getattr(self.params, "diagnostic_output", False)
             if forced_debug: is_debug = True
 
-            # 【修改3】暂停时返回上次有效结果而非None，避免断链（修复：无历史结果时返回0值）
-            if (not getattr(self, "is_running", False)) or getattr(self, "is_paused", False) or getattr(self, "destroyed", False):
-                if hasattr(self, "option_width_results") and self.option_width_results:
-                    last_result = self.option_width_results.get(future_id)
-                    if last_result:
-                        return {'action': 'update', 'key': future_id, 'value': last_result}
-                # 无历史结果时返回0值结果，避免断链（修复：补充完整字段）
-                return {'action': 'update', 'key': future_id, 'value': {
-                    "exchange": exchange, "future_id": future_id, "option_width": 0,
-                    "all_sync": False, "future_rising": False, "current_price": 0,
-                    "previous_price": 0, "timestamp": datetime.now(),
-                    "specified_month_count": 0, "next_specified_month_count": 0,
-                    "total_specified_target": 0, "total_next_specified_target": 0,
-                    "total_all_om_specified": 0, "total_all_om_next_specified": 0,
-                    "has_direction_options": False,
-                    "top_active_calls": [], "top_active_puts": [],
-                }}
+            if (not getattr(self, "is_running", False)) or getattr(self, "is_paused", False) or getattr(self, "destroyed", False): return
             if (getattr(self, "trading", True) is False) and not is_debug: return
 
-            if (getattr(self, "trading", True) is False) and not is_debug: return
-
-            # [User Requirement Fix]
-            # Case 1: No Options Exist (Explicitly categorized as without options) -> SKIP (Return 0 result or None?)
-            # The user says "对于前者应当跳过" (Former should skip).
-            # If we return a neutral/0 result, it effectively skips signal generation but keeps the dashboard updated.
-            # If we return None, it might leave stale data. Let's return a safe 0-result.
-            # CHECK: Does 'futures_without_options' get populated correctly? 
-            # It seems 'futures_without_options' is assumed to be populated by InstrumentLoader.
-            if self._normalize_future_id(future_id) in getattr(self, "futures_without_options", set()):
-                # User says "Skip". We return a neutral 0-width result to ensure it doesn't trigger signals.
-                # This aligns with "Skip" for trading purposes.
-                current_price = self._get_backup_price(future_id, exchange)
-                if current_price <= 0: current_price = _FLOAT32_EPS
-                res_val = {
-                    "exchange": exchange,
-                    "future_id": future_id,
-                    "future_rising": False,
-                    "current_price": current_price,
-                    "previous_price": current_price,
-                    "specified_month_count": 0,
-                    "next_specified_month_count": 0,
-                    "total_specified_target": 0,
-                    "total_next_specified_target": 0,
-                    "total_all_om_specified": 0,
-                    "total_all_om_next_specified": 0,
-                    "option_width": 0,
-                    "all_sync": False,
-                    "has_direction_options": False,
-                    "timestamp": datetime.now(),
-                    "top_active_calls": [],
-                    "top_active_puts": [],
-                }
-                return {"action": "update", "key": future_id, "value": res_val}
+            if self._normalize_future_id(future_id) in getattr(self, "futures_without_options", set()): return
 
             key = f"{exchange}_{future_id}"
             klines = self._get_kline_series_cached(exchange, future_id)
@@ -921,33 +838,18 @@ class OptionWidthCalculationMixin:
                         klines = self._get_kline_series_cached(exchange, future_id)
                 except Exception: pass
             
-            # [User Requirement Fix] Case 2: Options Exist but K-Line Missing -> Keep & Assign Value
-            # The user says: "对于后者，将无K线赋变动值参加宽度排序不会被过滤呀？"
-            # (For the latter [No K-Line], assign a variable value to participate in width sorting so it's not filtered).
-            # Previous logic: "pass" (proceed to use 0.0 or default).
-            filtered_out_by_no_kline = False
             if len(klines) < 2:
-                # Instead of skipping or returning None, we proceed.
-                # downstream code uses klines[-1]. we need to mock or handle it.
-                # Actually, the logic below has rigorous checks like 'if len(klines) >...'.
-                # We need to ensure we don't crash and produce a result with option_width=0 (or preserved).
-                
-                # Logic enhancement: If we have no klines, we can't calculate REAL width.
-                # But we can produce a result entry so it appears in the UI/Sort (with width 0).
-                # The user asks to "assign variable value".
-                # If we assume width=0, it will be at the bottom of the list (if desc sort).
-                # If the user wants it to NOT be filtered, maybe they rely on it being present.
-                
+                # [Optimization] 无K线/K线不足时的宽容处理：视作0变动，不清理不返回，确保下一轮循环正常
                 if key not in self.kline_insufficient_logged:
+                     # Only log via debug to avoid spam
                      if is_debug and hasattr(self, "_debug"): self._debug(f"K线不足 {future_id}, 当前{len(klines)}根 (容错模式:Default 0)")
                      self.kline_insufficient_logged.add(key)
                 
-                # We do NOT return here. We let it fall through.
-                # However, we must ensure 'klines[-1]' access later doesn't crash.
-                pass 
+                # [Fix] Explicitly ensure klines list is valid for downstream logic (even if empty)
+                # Do NOT return here. Let logic proceed to price assignment below.
+                pass
             else:
                 self.kline_insufficient_logged.discard(key)
-
 
             # [CHECK-FIX] KLine Freshness Check
             try:
@@ -1028,11 +930,7 @@ class OptionWidthCalculationMixin:
             next_specified_options_count = len(next_specified_options) if next_specified_options else 0
 
             if not specified_options and not next_specified_options:
-                 # [User Check] "No Options" case
-                 # The user says: "前者(无期权)应当跳过" (Former should skip)
-                 # Previous Logic: Return 0-width result.
-                 # If we return a 0-width result, it effectively skips signal generation.
-                 # This is consistent with "Skip".
+                 # 无期权时输出 0 宽度结果，避免早退断链
                  current_price = self._get_backup_price(future_id, exchange)
                  if current_price <= 0:
                      current_price = _FLOAT32_EPS
@@ -1042,7 +940,6 @@ class OptionWidthCalculationMixin:
                      "future_rising": False,
                      "current_price": current_price,
                      "previous_price": current_price,
-
                      "specified_month_count": 0,
                      "next_specified_month_count": 0,
                      "total_specified_target": 0,
@@ -1058,26 +955,14 @@ class OptionWidthCalculationMixin:
                  }
                  return {"action": "update", "key": future_id, "value": res_val}
             
-            # [Req 2 & 3 Refactored] [User Fix: Case 2 No K-Line]
-            # "对于后者(无K线)，将无K线赋变动值参加宽度排序不会被过滤呀？"
-            # (For the latter, assign change value so it joins sorting and isn't filtered)
-            
-            # Logic: If K-Lines are missing, we default to "0 fluctuation".
-            # 0 fluctuation means width will likely be small or 0.
-            # If the user wants it to "not be filtered", implies they want to see it in the list.
-            # Returning a valid result struct (even with 0 width) ensures it appears in the UI list.
-            # The calculation below ensures we don't crash.
-            
+            # [Req 2 & 3 Refactored] 无K线时，使用备用价格（上一日LastPrice或PreClose），保持价格持续性，而非0
+            # [Reasoning] "Missing Data -> 0 fluctuation" means current_price == previous_price.
+            # 严格强制：当K线为空时，previous_price 必须强行等于 current_price，从而确保变动为0
             price_source = "none"
             if not klines or len(klines) < 1:
                 # [Fix] Explicitly handle Rate Limit Hit (klines=[]) or Missing Data
                 # Assume 0 variation => current_price = previous_price (fetched from Tick or Backup)
                 current_price = self._get_backup_price(future_id, exchange)
-                
-                # [User Requirement] "Assign variable value"
-                # If backup price is available, we use it. If not, we use EPS.
-                # So it DOES participate in sorting (as 0-width item).
-                
                 if current_price > 0:
                     price_source = "backup"
                 # 显式赋值，保证 fluctuation = 0
@@ -1090,7 +975,6 @@ class OptionWidthCalculationMixin:
                      if hasattr(self, "_debug"): self._debug(f"无K线且无备用价格 {future_id}")
                      self.kline_insufficient_logged.add(key)
             elif len(klines) == 1:
-
                 current_price = getattr(klines[-1], 'close', 0)
                 if current_price > 0:
                     price_source = "kline"
@@ -1113,21 +997,10 @@ class OptionWidthCalculationMixin:
                 # Ensure previous_price is valid. If 0 (due to bad history), use current (Fluctuation = 0).
                 if previous_price <= 0: previous_price = current_price
             
-            # [User Logic] "No Options" -> SKIP (Case 1)
-            # Implemented above (return 0-width early)
-
-            # [User Logic] "No K-Lne" -> Assign Value & Sort (Case 2)
-            # Implemented here. We fall through to default price logic.
-            # Even if len(klines) < 2, we fetch backup price and set previous=current.
-            # This results in fluctuation=0 (width=0 potentially), but a VALID result object.
-            # Valid object -> Participates in Sorting (likely at bottom).
-            # This satisfies "won't be filtered completely".
-
             # [Critical] 变动0值最终校验
             # 无论之前的逻辑如何，如果 klines 缺失，必须强制 previous_price == current_price
             if not klines or len(klines) < 2:
                 previous_price = current_price
-
 
             if current_price <= 0:
                 fallback_cur = self._get_last_nonzero_close(klines, exclude_last=False)
@@ -1326,30 +1199,7 @@ class OptionWidthCalculationMixin:
                     price_source=price_source,
                 )
             return {'action': 'update', 'key': future_id, 'value': res_val}
-        # 【修改11】异常时记录日志并返回0值结果，而非静默返回None
-        except Exception as e:
-            if hasattr(self, "_debug"):
-                self._debug(f"[期权宽度计算] 异常: {e}")
-            res_val = {
-                "exchange": exchange,
-                "future_id": future_id,
-                "option_width": 0,
-                "all_sync": False,
-                "specified_month_count": 0,
-                "next_specified_month_count": 0,
-                "total_specified_target": 0,
-                "total_next_specified_target": 0,
-                "total_all_om_specified": 0,
-                "total_all_om_next_specified": 0,
-                "current_price": 0,
-                "previous_price": 0,
-                "future_rising": False,
-                "timestamp": datetime.now(),
-                "has_direction_options": False,
-                "top_active_calls": [],
-                "top_active_puts": [],
-            }
-            return {'action': 'update', 'key': future_id, 'value': res_val}
+        except Exception: return None
 
     def _update_status_report_counters(self, kline_len: int, sync_otm_count: int) -> None:
         try:
@@ -1405,23 +1255,7 @@ class OptionWidthCalculationMixin:
             forced_debug = getattr(self.params, "test_mode", False) or getattr(self.params, "diagnostic_output", False)
             if forced_debug: is_debug = True
 
-            # 【修改6】暂停时返回上次有效结果而非None，避免断链（修复：无历史结果时返回0值）
-            if (not getattr(self, "is_running", False)) or getattr(self, "is_paused", False) or getattr(self, "destroyed", False):
-                if hasattr(self, "option_width_results") and self.option_width_results:
-                    last_result = self.option_width_results.get(group_id)
-                    if last_result:
-                        return {'action': 'update', 'key': group_id, 'value': last_result}
-                # 无历史结果时返回0值结果，避免断链（修复：补充完整字段）
-                return {'action': 'update', 'key': group_id, 'value': {
-                    "exchange": exchange, "future_id": group_id, "option_width": 0,
-                    "all_sync": False, "future_rising": False, "current_price": 0,
-                    "previous_price": 0, "timestamp": datetime.now(),
-                    "specified_month_count": 0, "next_specified_month_count": 0,
-                    "total_specified_target": 0, "total_next_specified_target": 0,
-                    "total_all_om_specified": 0, "total_all_om_next_specified": 0,
-                    "has_direction_options": False,
-                    "top_active_calls": [], "top_active_puts": [],
-                }}
+            if (not getattr(self, "is_running", False)) or getattr(self, "is_paused", False) or getattr(self, "destroyed", False): return None
             if (getattr(self, "trading", True) is False) and not is_debug: return None
 
             key = f"{exchange}_{group_id}"
@@ -1518,29 +1352,8 @@ class OptionWidthCalculationMixin:
             if t_check_start > 0:
                  limit = float(getattr(self.params, "kline_duration_seconds", 60.0))
                  if (time.time() - t_check_start) > limit:
-                     # 【修改8】超时返回当前已计算的部分结果，而非完全放弃
-                     # 注意：此时计数变量尚未定义，使用0值作为安全默认值
-                     res_val = {
-                         "exchange": exchange,
-                         "future_id": group_id,
-                         "option_width": 0,
-                         "all_sync": False,
-                         "specified_month_count": 0,
-                         "total_specified_target": 0,
-                         "next_specified_month_count": 0,
-                         "total_next_specified_target": 0,
-                         "total_all_om_specified": 0,
-                         "total_all_om_next_specified": 0,
-                         "current_price": current_price,
-                         "previous_price": previous_price,
-                         "future_rising": future_rising,
-                         "timestamp": datetime.now(),
-                         "has_both_months": False,
-                         "has_direction_options": False,
-                         "top_active_calls": [],
-                         "top_active_puts": [],
-                     }
-                     return {'action': 'update', 'key': group_id, 'value': res_val}
+                     # [Requirement 4] Cleanup on abort? Happens naturally as results not saved.
+                     return None
 
             # [Requirement 2] Re-establish local vars for timeout check
             timeout_sec = float(getattr(self.params, "kline_duration_seconds", 60.0))
@@ -1662,36 +1475,7 @@ class OptionWidthCalculationMixin:
                 del specified_options
             
             # [Requirement 2] Timeout Check during Step 2 loop
-            # 【修改9】超时返回当前已计算的部分结果（修复：直接使用简单判断，避免使用未定义的allow_minimal）
-            if (time.time() - start_time) > timeout_sec:
-                option_width = specified_count + next_specified_count
-                has_direction_options = (total_target_specified > 0 and total_target_next_specified > 0)
-                all_sync = False
-                if has_direction_options:
-                    s_ok = (specified_count == total_target_specified) if total_target_specified > 0 else True
-                    n_ok = (next_specified_count == total_target_next_specified) if total_target_next_specified > 0 else True
-                    all_sync = s_ok and n_ok
-                res_val = {
-                    "exchange": exchange,
-                    "future_id": group_id,
-                    "option_width": option_width,
-                    "all_sync": all_sync,
-                    "specified_month_count": specified_count,
-                    "total_specified_target": total_target_specified,
-                    "next_specified_month_count": next_specified_count,
-                    "total_next_specified_target": total_target_next_specified,
-                    "total_all_om_specified": total_om_specified,
-                    "total_all_om_next_specified": total_om_next_specified,
-                    "current_price": current_price,
-                    "previous_price": previous_price,
-                    "future_rising": future_rising,
-                    "timestamp": datetime.now(),
-                    "has_both_months": bool(total_target_specified > 0) or bool(total_target_next_specified > 0),
-                    "has_direction_options": has_direction_options,
-                    "top_active_calls": [],
-                    "top_active_puts": [],
-                }
-                return {'action': 'update', 'key': group_id, 'value': res_val}
+            if (time.time() - start_time) > timeout_sec: return None
 
             # Process Next Specified Options Queue
             if next_specified_options:
@@ -1737,36 +1521,7 @@ class OptionWidthCalculationMixin:
                 del next_specified_options
             
             # [Requirement 2] Timeout Check after loops
-            # 【修改10】超时返回当前已计算的部分结果（修复：重新计算必要变量，top_active使用空列表）
-            if (time.time() - start_time) > timeout_sec:
-                option_width = specified_count + next_specified_count
-                has_direction_options = (total_target_specified > 0 and total_target_next_specified > 0)
-                all_sync = False
-                if has_direction_options:
-                    s_ok = (specified_count == total_target_specified) if total_target_specified > 0 else True
-                    n_ok = (next_specified_count == total_target_next_specified) if total_target_next_specified > 0 else True
-                    all_sync = s_ok and n_ok
-                res_val = {
-                    "exchange": exchange,
-                    "future_id": group_id,
-                    "option_width": option_width,
-                    "all_sync": all_sync,
-                    "specified_month_count": specified_count,
-                    "total_specified_target": total_target_specified,
-                    "next_specified_month_count": next_specified_count,
-                    "total_next_specified_target": total_target_next_specified,
-                    "total_all_om_specified": total_om_specified,
-                    "total_all_om_next_specified": total_om_next_specified,
-                    "current_price": current_price,
-                    "previous_price": previous_price,
-                    "future_rising": future_rising,
-                    "timestamp": datetime.now(),
-                    "has_both_months": bool(total_target_specified > 0) or bool(total_target_next_specified > 0),
-                    "has_direction_options": has_direction_options,
-                    "top_active_calls": [],  # 超时情况下未计算Top2，使用空列表
-                    "top_active_puts": [],   # 超时情况下未计算Top2，使用空列表
-                }
-                return {'action': 'update', 'key': group_id, 'value': res_val}
+            if (time.time() - start_time) > timeout_sec: return None
 
             # Resolve Top 2 Active using HeapN (More efficient than full sort)
             top_active_calls = []
@@ -1817,30 +1572,7 @@ class OptionWidthCalculationMixin:
                 "top_active_puts": top_active_puts
             }
             return {'action': 'update', 'key': group_id, 'value': res_val}
-        # 【补充修改A】统一异常处理，返回0值结果而非None
-        except Exception as e:
-            if hasattr(self, "_debug"):
-                self._debug(f"[_calculate_option_width_for_option_group] 异常: {e}")
-            res_val = {
-                "exchange": exchange if 'exchange' in dir() else "",
-                "future_id": group_id if 'group_id' in dir() else "",
-                "option_width": 0,
-                "all_sync": False,
-                "specified_month_count": 0,
-                "total_specified_target": 0,
-                "next_specified_month_count": 0,
-                "total_next_specified_target": 0,
-                "total_all_om_specified": 0,
-                "total_all_om_next_specified": 0,
-                "current_price": 0,
-                "previous_price": 0,
-                "future_rising": False,
-                "timestamp": datetime.now(),
-                "has_direction_options": False,
-                "top_active_calls": [],
-                "top_active_puts": [],
-            }
-            return {'action': 'update', 'key': group_id if 'group_id' in dir() else 'unknown', 'value': res_val}
+        except Exception: return None
 
     def generate_trading_signals_optimized(self) -> List[Dict[str, Any]]:
         """优化版信号生成 - 使用 Generator 逐条处理"""
@@ -1943,12 +1675,6 @@ class OptionWidthCalculationMixin:
         mode = str(getattr(self.params, "output_mode", "trade")).lower()
         if mode == "debug":
             mode = "close_debug"
-        # 【新增】收市调试模式判断：开盘时间自动切换到trade模式
-        if mode == "close_debug":
-            try: market_open = bool(self.is_market_open())
-            except: market_open = False
-            if market_open:
-                mode = "trade"
         trade_quiet = bool(getattr(self.params, "trade_quiet", True))
 
         # [MODIFIED] Do not return early if no signals, ensuring periodical status report is printed
@@ -2364,25 +2090,9 @@ class OptionWidthCalculationMixin:
                           jit_data_used = True
                      except: pass
                  else:
-                     # 【修改12】冷却期内使用备用价格判断，而非直接返回False（修复：添加缓存大小限制防内存泄漏）
-                     try:
-                         backup_price = self._get_backup_price(opt_id, opt_exch)
-                         if backup_price > 0:
-                             # 获取历史备用价格进行比较（模拟涨跌判断）
-                             prev_backup = getattr(self, '_last_backup_prices', {}).get(opt_id, backup_price)
-                             cur_p = backup_price
-                             pre_p = prev_backup if prev_backup > 0 else cur_p
-                             # 更新历史价格缓存
-                             if not hasattr(self, '_last_backup_prices'):
-                                 self._last_backup_prices = {}
-                             # 防内存泄漏：限制缓存大小
-                             if len(self._last_backup_prices) > 10000:
-                                 self._last_backup_prices.clear()
-                             self._last_backup_prices[opt_id] = cur_p
-                             return cur_p > pre_p
-                     except:
-                         pass
-                     # 备用价格也无法获取时，才返回False
+                     # [User Req] Cooldown active -> Return False immediately.
+                     # Treated as 0 width contribution (Not Sync).
+                     # Stops useless comparison for this option, continues to next option in loop.
                      return False
 
             try:

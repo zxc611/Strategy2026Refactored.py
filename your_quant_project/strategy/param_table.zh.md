@@ -1,0 +1,184 @@
+# 参数表中文说明
+
+> 说明：JSON 本身不支持注释，因此中文说明集中在本文件。字段顺序与 param_table.json 对齐。
+
+## 全量字段（按 param_table.json 顺序）
+- max_kline：K线缓存长度
+- kline_request_count：单次请求K线数量
+- kline_style：K线周期（如 M1）
+- subscribe_options：是否订阅期权行情
+- debug_output：是否输出调试信息
+- diagnostic_output：诊断/测试输出开关
+- api_key：通用API密钥
+- infini_api_key：Infini行情密钥
+- access_key：访问密钥 AccessKey
+- access_secret：访问密钥 AccessSecret
+- run_profile：运行预设（full|lite|backtest）
+- calculation_interval：策略主循环/计算触发间隔（秒）
+- kline_duration_seconds：K线时间范围（秒）
+- option_width_threshold：期权宽度阈值（≤阈值不交易）
+- debug_output_interval：收市调试输出间隔（秒）
+- open_debug_output_interval：开盘调试输出间隔（秒）
+- enable_scheduler：是否启用定时任务
+- use_tick_kline_generator：是否启用Tick合成K线
+- backtest_tick_mode：回测模式：仅用Tick驱动K线
+- exchange：默认交易所
+- future_product：默认期货品种
+- option_product：默认期权品种
+- auto_load_history：启动后自动加载历史K线
+- load_history_options：历史K线是否包含期权
+- load_all_products：是否加载全部品种
+- exchanges：交易所列表（逗号分隔）
+- future_products：期货品种列表（逗号分隔）
+- option_products：期权品种列表（逗号分隔）
+- include_future_products_for_options：将期货品种并入期权品种
+- subscription_batch_size：订阅批次大小
+- subscription_interval：订阅批次间隔（秒）
+- subscription_fetch_on_subscribe：订阅后是否立即拉取K线
+- subscription_fetch_count：订阅后立即拉取K线的根数
+- subscription_fetch_for_options：订阅后是否对期权也拉取K线
+- reconnect_gap_seconds：断网/重连判定间隔（秒）
+- tick_stale_seconds：Tick 过期判定秒数（秒）
+- simulation_mode：模拟环境开关（仅在非开盘时启用模拟价格/K线）
+- rate_limit_min_interval_sec：最小请求间隔（秒）
+- rate_limit_per_instrument：单合约窗口请求上限
+- rate_limit_global_per_min：全局窗口请求上限
+- rate_limit_window_sec：限流窗口（秒）
+- trade_output_interval：交易状态下宽度排行输出间隔（秒）
+- subscription_backoff_factor：订阅退避因子
+- subscribe_only_current_next_options：仅订阅指定月/下月期权（旧字段）
+- subscribe_only_current_next_futures：仅订阅指定月/下月期货（旧字段）
+- enable_doc_examples：启用说明文档示例
+- pause_unsubscribe_all：暂停时退订所有行情
+- pause_force_stop_scheduler：暂停时强制停止调度器
+- pause_on_stop：on_stop 是否按暂停处理
+- history_minutes：历史K线回看分钟数
+- log_file_path：本地日志文件路径
+- test_mode：测试模式（忽略开盘时间门控）
+- holiday_dates：法定节假日列表（休市日），支持 YYYY-MM-DD 或 YYYYMMDD，可用逗号/空格分隔
+- auto_start_after_init：初始化后自动触发 on_start
+- subscribe_only_specified_month_options：仅订阅指定月/下月期权
+- subscribe_only_specified_month_futures：仅订阅指定月/下月期货
+- specified_month：指定月合约代码
+- next_specified_month：指定下月合约代码
+- month_mapping：品种指定月/指定下月映射
+- signal_cooldown：信号冷却时间（秒）
+- signal_cooldown_sec：信号冷却时间（秒）
+- option_buy_lots_min：期权买入开仓最小手数
+- option_buy_lots_max：期权买入开仓最大手数
+- option_contract_multiplier：期权合约乘数
+- position_limit_valid_hours_max：开仓资金限额最大有效小时
+- position_limit_default_valid_hours：开仓资金限额默认有效小时
+- position_limit_max_ratio：资金限额占比上限
+- position_limit_min_amount：资金限额最小金额
+- option_order_price_type：期权开仓委托价类型
+- option_order_time_condition：期权开仓时间条件
+- option_order_volume_condition：期权开仓成交量条件
+- option_order_contingent_condition：期权开仓触发条件
+- option_order_force_close_reason：期权开仓强平原因
+- option_order_hedge_flag：期权开仓投机/套保标记
+- option_order_min_volume：期权开仓最小成交量
+- option_order_business_unit：期权开仓业务单元
+- option_order_is_auto_suspend：期权开仓是否自动挂起
+- option_order_user_force_close：期权开仓是否用户强平
+- option_order_is_swap：期权开仓是否互换单
+- close_take_profit_ratio：止盈倍数
+- close_overnight_check_time：隔夜仓检查时间
+- close_daycut_time：日内平仓时间
+- close_max_hold_days：最大持仓天数
+- close_overnight_loss_threshold：隔夜亏损平仓阈值
+- close_overnight_profit_threshold：隔夜盈利平仓阈值
+- close_max_chase_attempts：追单最大次数
+- close_chase_interval_seconds：追单间隔秒数
+- close_chase_task_timeout_seconds：追单任务超时秒数
+- close_delayed_timeout_seconds：延迟平仓超时秒数
+- close_delayed_max_retries：延迟平仓最大重试次数
+- close_order_price_type：平仓委托价类型
+- width_threshold：交易信号宽度阈值
+- output_mode：输出模式（open_debug|close_debug|trade|none）
+- auto_trading_enabled：自动交易开关
+- auto_trading：自动交易开关（兼容字段）
+- force_debug_on_start：启动时强制开启调试输出
+- ui_window_width：UI 窗口宽度
+- ui_window_height：UI 窗口高度
+- ui_font_large：UI 大字体字号
+- ui_font_small：UI 小字体字号
+- enable_output_mode_ui：是否启用输出模式 UI
+- daily_summary_hour：日终汇总小时
+- daily_summary_minute：日终汇总分钟
+- trade_quiet：交易模式下减少输出
+- print_start_snapshots：启动时打印快照
+- trade_debug_allowlist：交易调试白名单
+- debug_disable_categories：禁用调试类别
+- debug_throttle_seconds：调试输出节流时间（秒）
+- debug_throttle_map：调试节流映射
+- use_param_overrides_in_debug：调试模式下使用参数覆盖
+- param_override_table：参数覆盖表路径
+- param_edit_limit_per_month：每月参数修改次数限制
+- backtest_params：回测参数区域（UI“回测参数”保存到此处）
+- ignore_otm_filter：是否忽略虚值过滤
+- allow_minimal_signal：允许微弱信号
+- min_option_width：最小期权宽度
+- async_history_load：是否异步加载历史K线
+- manual_trade_limit_per_half：半日内手动交易次数限制
+- morning_afternoon_split_hour：午间分割小时
+- account_id：账户标识
+- kline_max_age_sec：K线最大允许延迟（秒）
+- signal_max_age_sec：信号最大允许延迟（秒）
+- top3_rows：排行显示行数
+- lots_min：手数最小值
+- lots_max：手数最大值
+- history_load_max_workers：加载历史K线并发线程数
+- option_sync_tolerance：期权同步容差
+- option_sync_allow_flat：期权同步允许走平
+- index_option_prefixes：股指期权前缀扩展
+- option_group_exchanges：期权分组交易所限定
+- czce_year_future_window：CZCE 年度期货窗口
+- czce_year_past_window：CZCE 年度历史窗口
+
+## backtest_params 子字段说明（分组版）
+
+### 基础
+- backtest_params.option_buy_lots_min：回测开仓最小手数
+- backtest_params.option_buy_lots_max：回测开仓最大手数
+- backtest_params.option_contract_multiplier：回测合约乘数
+- backtest_params.position_limit_valid_hours_max：回测资金限额最大有效小时
+- backtest_params.position_limit_default_valid_hours：回测资金限额默认有效小时
+- backtest_params.position_limit_max_ratio：回测资金限额比例上限
+- backtest_params.position_limit_min_amount：回测资金限额最小金额
+
+### 订阅
+- backtest_params.subscription_batch_size：回测订阅批次大小
+- backtest_params.subscription_interval：回测订阅批次间隔（秒）
+- backtest_params.subscription_fetch_on_subscribe：回测订阅后是否立即拉取K线
+- backtest_params.subscription_fetch_count：回测订阅后拉取K线根数
+- backtest_params.subscription_fetch_for_options：回测订阅后是否对期权拉取K线
+- backtest_params.rate_limit_min_interval_sec：回测最小请求间隔（秒）
+- backtest_params.rate_limit_per_instrument：回测单合约窗口请求上限
+- backtest_params.rate_limit_global_per_min：回测全局窗口请求上限
+- backtest_params.rate_limit_window_sec：回测限流窗口（秒）
+
+### 交易
+- backtest_params.option_order_price_type：回测开仓委托价类型
+- backtest_params.option_order_time_condition：回测开仓时间条件
+- backtest_params.option_order_volume_condition：回测开仓成交量条件
+- backtest_params.option_order_contingent_condition：回测开仓触发条件
+- backtest_params.option_order_force_close_reason：回测开仓强平原因
+- backtest_params.option_order_hedge_flag：回测开仓投机/套保标记
+- backtest_params.option_order_min_volume：回测开仓最小成交量
+- backtest_params.option_order_business_unit：回测开仓业务单元
+- backtest_params.option_order_is_auto_suspend：回测开仓是否自动挂起
+- backtest_params.option_order_user_force_close：回测开仓是否用户强平
+- backtest_params.option_order_is_swap：回测开仓是否互换单
+- backtest_params.close_take_profit_ratio：回测止盈倍数
+- backtest_params.close_overnight_check_time：回测隔夜仓检查时间
+- backtest_params.close_daycut_time：回测日内平仓时间
+- backtest_params.close_max_hold_days：回测最大持仓天数
+- backtest_params.close_overnight_loss_threshold：回测隔夜亏损平仓阈值
+- backtest_params.close_overnight_profit_threshold：回测隔夜盈利平仓阈值
+- backtest_params.close_max_chase_attempts：回测追单最大次数
+- backtest_params.close_chase_interval_seconds：回测追单间隔秒数
+- backtest_params.close_chase_task_timeout_seconds：回测追单任务超时秒数
+- backtest_params.close_delayed_timeout_seconds：回测延迟平仓超时秒数
+- backtest_params.close_delayed_max_retries：回测延迟平仓最大重试次数
+- backtest_params.close_order_price_type：回测平仓委托价类型

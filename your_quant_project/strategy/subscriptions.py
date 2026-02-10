@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
 from typing import Optional, Set
 
 
@@ -37,6 +38,9 @@ class SubscriptionMixin:
             for future in self.future_instruments:
                 exchange = future.get("ExchangeID", "")
                 instrument_id = future.get("InstrumentID", "")
+                
+                raw_id = future.get("RawInstrumentID", "") or instrument_id
+                
                 if not exchange or not instrument_id:
                     continue
                 instrument_norm = self._normalize_future_id(instrument_id)
@@ -49,7 +53,7 @@ class SubscriptionMixin:
 
                 self.subscription_queue.append({
                     "exchange": exchange,
-                    "instrument_id": instrument_id,
+                    "instrument_id": raw_id,
                     "type": "future",
                 })
                 fut_included += 1
@@ -86,12 +90,21 @@ class SubscriptionMixin:
                     for option in options:
                         opt_exchange = option.get("ExchangeID", "")
                         opt_instrument = option.get("InstrumentID", "")
+                        
+                        raw_opt_id = option.get("RawInstrumentID", "") or opt_instrument
+                        
                         if not opt_exchange or not opt_instrument:
                             continue
                         opt_norm = self._normalize_future_id(str(opt_instrument))
                         if filter_specified_options and (not self._is_symbol_specified_or_next(opt_norm)):
-                            skipped_options += 1
-                            continue
+                            opt_underlying = None
+                            try:
+                                opt_underlying = self._extract_future_symbol(opt_norm)
+                            except Exception:
+                                opt_underlying = None
+                            if not opt_underlying or (not self._is_symbol_specified_or_next(opt_underlying)):
+                                skipped_options += 1
+                                continue
                         opt_key = f"{opt_exchange}_{opt_instrument}"
                         if opt_key in seen_opt_keys:
                             continue
@@ -102,7 +115,7 @@ class SubscriptionMixin:
                         global_seen_opts.add(global_key)
                         self.subscription_queue.append({
                             "exchange": opt_exchange,
-                            "instrument_id": opt_instrument,
+                            "instrument_id": raw_opt_id,
                             "type": "option",
                         })
                         included_options += 1
@@ -143,6 +156,17 @@ class SubscriptionMixin:
                 self._debug(f"期货队列统计: 包含 {fut_included} 条，过滤跳过 {fut_skipped} 条")
             if self.params.subscribe_options:
                 self._debug(f"期权队列统计: 包含 {included_options} 条，过滤跳过 {skipped_options} 条")
+
+            # 稳定排序：按交易所+合约代码顺序订阅，保持批次逻辑不变
+            try:
+                type_order = {"future": 0, "option": 1}
+                self.subscription_queue.sort(key=lambda item: (
+                    type_order.get(str(item.get("type", "")), 9),
+                    str(item.get("exchange", "")),
+                    str(item.get("instrument_id", "")),
+                ))
+            except Exception:
+                pass
 
             self._subscribe_next_batch(0)
 
@@ -200,11 +224,30 @@ class SubscriptionMixin:
         success_cnt = 0
         fail_cnt = 0
         dup_cnt = 0
+        success_by_type = {"future": 0, "option": 0}
+        fail_by_type = {"future": 0, "option": 0}
+        dup_by_type = {"future": 0, "option": 0}
         for item in batch:
             try:
+                # 中文注释：再次拦截暂停/未运行状态，防止订阅逻辑被绕过
+                if (not self.my_is_running) or self.my_is_paused or (self.my_trading is False) or getattr(self, "my_destroyed", False):
+                    try:
+                        now_ts = time.time()
+                        last_ts = getattr(self, "_subscribe_skip_log_time", 0)
+                        if now_ts - last_ts >= 60:
+                            self.output(
+                                "[诊断] 订阅跳过: paused/未运行/已销毁",
+                                force=True,
+                            )
+                            self._subscribe_skip_log_time = now_ts
+                    except Exception:
+                        pass
+                    break
+                item_type = item.get("type", "future")
                 sub_key = f"{item['exchange']}|{item['instrument_id']}"
                 if sub_key in self.subscribed_instruments:
                     dup_cnt += 1
+                    dup_by_type[item_type] = dup_by_type.get(item_type, 0) + 1
                     continue
                 self.sub_market_data(exchange=item["exchange"], instrument_id=item["instrument_id"])
                 
@@ -212,17 +255,80 @@ class SubscriptionMixin:
                 # User Requirement: "对于指定月\指定下月，应当对它们全部显式订阅或请求历史数据至少5根"
                 # This ensures that even before the first real-time tick, we have history for calculation.
                 if hasattr(self, "get_recent_m1_kline"):
-                     self.get_recent_m1_kline(item["exchange"], item["instrument_id"], count=5)
+                    try:
+                        fetch_enabled = bool(getattr(self.params, "subscription_fetch_on_subscribe", True))
+                    except Exception:
+                        fetch_enabled = True
+                    if fetch_enabled:
+                        fetch_for_options = False
+                        try:
+                            fetch_for_options = bool(getattr(self.params, "subscription_fetch_for_options", False))
+                        except Exception:
+                            fetch_for_options = False
+                        if item_type == "option" and not fetch_for_options:
+                            pass
+                        else:
+                            try:
+                                fetch_count = int(getattr(self.params, "subscription_fetch_count", 5) or 5)
+                            except Exception:
+                                fetch_count = 5
+                            fetch_count = max(1, fetch_count)
+                            self.get_recent_m1_kline(
+                                exchange=item["exchange"],
+                                instrument_id=item["instrument_id"],
+                                count=fetch_count,
+                            )
 
                 self.subscribed_instruments.add(sub_key)
                 success_cnt += 1
-                self.output(f"已订阅{item['type']}: {item['exchange']}.{item['instrument_id']}")
+                success_by_type[item_type] = success_by_type.get(item_type, 0) + 1
+                
+                # [Optimization] Log Aggregation for Options to reduce spam
+                # Only log detailed INFO for futures instantly
+                if item_type != "option":
+                    self.output(f"已订阅{item['type']}: {item['exchange']}.{item['instrument_id']}")
+                else:
+                    # Buffer option logs
+                    if not hasattr(self, "_option_sub_buffer"):
+                        self._option_sub_buffer = []
+                        self._option_sub_buffer_last_time = time.time()
+                    self._option_sub_buffer.append(f"{item['exchange']}.{item['instrument_id']}")
+                    
+                    # Flush if buffer is large or time passed
+                    should_flush = False
+                    now_ts = time.time()
+                    if (now_ts - self._option_sub_buffer_last_time) >= 60:
+                        should_flush = True
+                    elif len(self._option_sub_buffer) >= 100: # Max buffer size
+                        should_flush = True
+                        
+                    if should_flush and self._option_sub_buffer:
+                        count = len(self._option_sub_buffer)
+                        sample = self._option_sub_buffer[:3]
+                        self.output(f"已订阅期权 {count} 个 (最近60s): {sample} ...")
+                        self._option_sub_buffer = []
+                        self._option_sub_buffer_last_time = now_ts
+
             except Exception as e:
                 fail_cnt += 1
+                fail_by_type[item_type] = fail_by_type.get(item_type, 0) + 1
                 self.output(f"订阅失败 {item['exchange']}.{item['instrument_id']}: {e}")
 
+        # [Flush Final Batch] If queue empty (last batch), always flush remaining
+        if batch_index + batch_size >= len(self.subscription_queue):
+             if hasattr(self, "_option_sub_buffer") and self._option_sub_buffer:
+                 count = len(self._option_sub_buffer)
+                 sample = self._option_sub_buffer[:3]
+                 self.output(f"已订阅期权 {count} 个 (最终汇总): {sample} ...")
+                 self._option_sub_buffer = []
+
         next_batch_index = batch_index + batch_size
-        self._debug(f"订阅批次完成: 成功 {success_cnt}，失败{fail_cnt}，重复{dup_cnt}")
+        self._debug(
+            f"订阅批次完成: 成功 {success_cnt}，失败{fail_cnt}，重复{dup_cnt} | "
+            f"success(fut/opt)={success_by_type.get('future',0)}/{success_by_type.get('option',0)} "
+            f"fail(fut/opt)={fail_by_type.get('future',0)}/{fail_by_type.get('option',0)} "
+            f"dup(fut/opt)={dup_by_type.get('future',0)}/{dup_by_type.get('option',0)}"
+        )
         if job_id:
             self._remove_job_silent(job_id)
         if next_batch_index < len(self.subscription_queue):
@@ -286,7 +392,14 @@ class SubscriptionMixin:
                 False,
             )
 
-        for future in self.future_instruments:
+        sorted_futures = sorted(
+            self.future_instruments,
+            key=lambda item: (
+                str(item.get("ExchangeID", "")),
+                str(item.get("InstrumentID", "")),
+            ),
+        )
+        for future in sorted_futures:
             exchange = future.get("ExchangeID", "")
             instrument_id = future.get("InstrumentID", "")
 
@@ -331,7 +444,7 @@ class SubscriptionMixin:
                     if self._is_symbol_specified_or_next(fid_norm.upper()):
                         allowed_future_symbols.add(fid_norm.upper())
             
-            for future_symbol, options in self.option_instruments.items():
+            for future_symbol, options in sorted(self.option_instruments.items()):
                 future_symbol_norm = self._normalize_future_id(future_symbol)
                 
                 # If underlying is not allowed, skip all its options
@@ -339,7 +452,14 @@ class SubscriptionMixin:
                     option_skipped += len(options)
                     continue
                     
-                for option in options:
+                sorted_options = sorted(
+                    options,
+                    key=lambda item: (
+                        str(item.get("ExchangeID", "")),
+                        str(item.get("InstrumentID", "")),
+                    ),
+                )
+                for option in sorted_options:
                     opt_exchange = option.get("ExchangeID", "")
                     opt_instrument = option.get("InstrumentID", "")
                     if not opt_exchange or not opt_instrument:
@@ -358,8 +478,14 @@ class SubscriptionMixin:
                     # This implies valid option symbols return True for that check.
                     
                     if filter_opts and (not self._is_symbol_specified_or_next(opt_norm.upper())):
-                        option_skipped += 1
-                        continue
+                        opt_underlying = None
+                        try:
+                            opt_underlying = self._extract_future_symbol(opt_norm)
+                        except Exception:
+                            opt_underlying = None
+                        if not opt_underlying or (not self._is_symbol_specified_or_next(opt_underlying)):
+                            option_skipped += 1
+                            continue
 
                     opt_key = f"{opt_exchange}_{opt_instrument}"
                     if opt_key in seen_opt_keys:

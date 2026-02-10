@@ -62,6 +62,9 @@ class DataStrategyContainer(
         # [Core] MarketCenter Init
         self._init_market_center_safe()
         
+        # [Chain] Continue initialization chain
+        super().__init__(*args, **kwargs)
+        
     def _init_market_center_safe(self):
         """Safe initialization and patching of MarketCenter."""
         skip_core = os.getenv("PYSTRATEGY_DIAG_SKIP_CORE") == "1"
