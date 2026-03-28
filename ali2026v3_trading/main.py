@@ -60,8 +60,8 @@ if False:  # pragma: no cover
         ServiceContainer,
         ConfigService,
     )
-    from ali2026v3_trading.market_data_service import (
-        MarketDataService,
+    from ali2026v3_trading.storage import (
+        InstrumentDataManager,
         KLineData,
         TickData,
     )
@@ -75,7 +75,7 @@ __all__ = [
     "t_type_bootstrap",
     "Strategy2026",
     "ServiceContainer",
-    "MarketDataService",
+    "InstrumentDataManager",
     "KLineData",
     "TickData",
     "OrderService",
