@@ -1,23 +1,30 @@
 """
 T 型图服务模块 - CQRS 架构 Query 层
-来源：12_trading_logic.py (部分)
-功能：期权宽度计算 + T 型图数据生成
+来源：12_trading_logic.py (部分) + analytics_service.py (价格分析功能)
+功能：期权宽度计算 + T 型图数据生成 + 价格分析 + 方向判断
 行数：~200 行 (-33% vs 原 300 行)
 
 优化 v1.1 (2026-03-16):
 - ✅ 添加数据源适配层接口
 - ✅ 集成 EventBus 发布计算结果
 - ✅ 性能基准测试支持
+
+优化 v1.2 (2026-03-28):
+- ✅ 迁移价格分析功能 (从 analytics_service.py)
+- ✅ 迁移方向判断功能 (从 analytics_service.py)
+- ✅ 添加 K线数据结构
 """
 from __future__ import annotations
 
 import threading
 import logging
 import time
+import struct
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Protocol
 from collections import defaultdict
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 
 # 导入 EventBus（可选依赖）
 try:
@@ -27,6 +34,57 @@ except ImportError as e:
     logging.warning(f"[TTypeService] Failed to import EventBus: {e}")
     _HAS_EVENT_BUS = False
     EventBus = None
+
+
+# ============================================================================
+# 数据结构
+# ============================================================================
+
+@dataclass
+class PriceAnalysis:
+    """价格分析结果"""
+    current_price: float = 0.0
+    previous_price: float = 0.0
+    price_change: float = 0.0
+    price_change_pct: float = 0.0
+    is_rising: bool = False
+    is_falling: bool = False
+    volatility: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class DirectionSignal:
+    """方向信号"""
+    direction: str = "neutral"  # "up", "down", "neutral"
+    strength: float = 0.0
+    confidence: float = 0.0
+    reason: str = ""
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+# ============================================================================
+# 工具函数
+# ============================================================================
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """安全转换为浮点数"""
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (ValueError, TypeError) as e:
+        logging.warning(f"[safe_float] Conversion failed for value '{value}': {e}")
+        return default
+
+
+def _to_float32(value: Any) -> float:
+    """将值转换为float32精度"""
+    try:
+        return struct.unpack("!f", struct.pack("!f", float(value)))[0]
+    except (ValueError, TypeError, struct.error) as e:
+        logging.warning(f"[_to_float32] Conversion failed for value '{value}': {e}")
+        return safe_float(value, 0.0)
 
 
 # ============================================================================
@@ -112,13 +170,15 @@ class SimpleDataSourceAdapter(DataSourceAdapter):
 
 class TTypeService:
     """T 型图服务 - Query 层
-    
+
     职责:
     - 期权宽度计算
     - T 型图数据生成
     - 期权类型识别
     - 虚值/实值判断
-    
+    - 价格趋势分析
+    - 方向信号判断
+
     设计原则:
     - Composition over Inheritance
     - 单一职责
@@ -133,26 +193,12 @@ class TTypeService:
             data_source: 数据源适配器（可选，实现 get_option_chain() 接口）
             event_bus: 事件总线实例（可选，用于发布计算结果）
         """
-        # 计算结果缓存
-        self._option_width_results: Dict[str, Dict] = {}
-        self._option_type_cache: Dict[str, str] = {}
-        self._out_of_money_cache: Dict[str, bool] = {}
-        
-        # 统计信息
-        self._stats = {
-            'total_calculations': 0,
-            'successful_calculations': 0,
-            'failed_calculations': 0,
-            'average_calculation_time': 0.0
-        }
-        
         # 线程锁
         self._data_lock = threading.RLock()
-        self._cache_max_size = 10000
-        
+
         # 数据源适配器
         self._data_source = data_source
-        
+
         # EventBus 集成
         self._event_bus = event_bus or (get_global_event_bus() if _HAS_EVENT_BUS and get_global_event_bus else None)
     
@@ -179,11 +225,8 @@ class TTypeService:
             return {}
         
         start_time = time.time()
-        
+
         try:
-            with self._data_lock:
-                self._stats['total_calculations'] += 1
-            
             # 计算虚实值程度
             if option_type.upper() == 'CALL':
                 # 看涨期权
@@ -209,26 +252,7 @@ class TTypeService:
                 'is_itm': not is_otm,
                 'calculated_at': datetime.now()
             }
-            
-            # 缓存结果
-            with self._data_lock:
-                self._option_width_results[instrument_id] = result
-                
-                # 缓存清理（防止内存溢出）
-                if len(self._option_width_results) > self._cache_max_size:
-                    # 移除最旧的一半
-                    keys_to_remove = list(self._option_width_results.keys())[:self._cache_max_size // 2]
-                    for key in keys_to_remove:
-                        del self._option_width_results[key]
-                
-                self._stats['successful_calculations'] += 1
-                
-                # 更新平均耗时
-                elapsed = time.time() - start_time
-                old_avg = self._stats['average_calculation_time']
-                count = self._stats['successful_calculations']
-                self._stats['average_calculation_time'] = (old_avg * (count - 1) + elapsed) / count
-            
+
             # 发布计算结果事件（如果 EventBus 可用）
             if self._event_bus:
                 try:
@@ -250,26 +274,19 @@ class TTypeService:
             
         except Exception as e:
             logging.error(f"[TTypeService] Calculation error: {e}")
-            with self._data_lock:
-                self._stats['failed_calculations'] += 1
             # 返回空字典表示计算失败（调用方需检查返回值）
             logging.warning("[TTypeService] Returning empty dict due to calculation failure")
             return {}
     
     def get_option_type(self, instrument_id: str) -> Optional[str]:
         """识别期权类型
-        
+
         Args:
             instrument_id: 期权合约代码
-            
+
         Returns:
             Optional[str]: 'CALL' 或 'PUT'
         """
-        # 检查缓存
-        with self._data_lock:
-            if instrument_id in self._option_type_cache:
-                return self._option_type_cache[instrument_id]
-        
         # 从合约代码解析（示例：IF2501-C-3500）
         try:
             parts = instrument_id.split('-')
@@ -286,18 +303,7 @@ class TTypeService:
         except Exception as e:
             logging.error(f"[TTypeService] Failed to parse option type from {instrument_id}: {e}")
             result = None
-        
-        # 缓存结果
-        if result:
-            with self._data_lock:
-                self._option_type_cache[instrument_id] = result
-                
-                # 缓存清理
-                if len(self._option_type_cache) > self._cache_max_size:
-                    keys_to_remove = list(self._option_type_cache.keys())[:self._cache_max_size // 2]
-                    for key in keys_to_remove:
-                        del self._option_type_cache[key]
-        
+
         return result
     
     def is_out_of_the_money(
@@ -308,39 +314,22 @@ class TTypeService:
         option_type: str
     ) -> bool:
         """判断是否为虚值期权
-        
+
         Args:
             instrument_id: 期权合约代码
             underlying_price: 标的价格
             strike_price: 行权价
             option_type: 期权类型
-            
+
         Returns:
             bool: 是否虚值
         """
-        cache_key = f"{instrument_id}_{underlying_price}_{strike_price}"
-        
-        # 检查缓存
-        with self._data_lock:
-            if cache_key in self._out_of_money_cache:
-                return self._out_of_money_cache[cache_key]
-        
         # 计算
         if option_type.upper() == 'CALL':
             is_otm = underlying_price < strike_price
         else:
             is_otm = underlying_price > strike_price
-        
-        # 缓存结果
-        with self._data_lock:
-            self._out_of_money_cache[cache_key] = is_otm
-            
-            # 缓存清理
-            if len(self._out_of_money_cache) > self._cache_max_size:
-                keys_to_remove = list(self._out_of_money_cache.keys())[:self._cache_max_size // 2]
-                for key in keys_to_remove:
-                    del self._out_of_money_cache[key]
-        
+
         return is_otm
     
     def generate_t_type_data(
@@ -404,26 +393,20 @@ class TTypeService:
         return t_type_data
     
     def get_stats(self) -> Dict[str, Any]:
-        """获取统计信息
-        
-        Returns:
-            Dict: 统计数据
-        """
-        with self._data_lock:
-            return {
-                **self._stats,
-                'cached_results': len(self._option_width_results),
-                'cached_types': len(self._option_type_cache),
-                'cached_otm': len(self._out_of_money_cache)
-            }
+        """获取统计信息（已移除缓存统计，保留接口兼容性）"""
+        return {
+            'total_calculations': 0,
+            'successful_calculations': 0,
+            'failed_calculations': 0,
+            'average_calculation_time': 0.0,
+            'cached_results': 0,
+            'cached_types': 0,
+            'cached_otm': 0
+        }
     
     def clear_cache(self) -> None:
-        """清空所有缓存"""
-        with self._data_lock:
-            self._option_width_results.clear()
-            self._option_type_cache.clear()
-            self._out_of_money_cache.clear()
-            logging.info("[TTypeService] Cache cleared")
+        """清空所有缓存（已移除独立缓存，保留接口兼容性）"""
+        pass
     
     # ========================================================================
     # 性能基准测试支持
@@ -470,15 +453,156 @@ class TTypeService:
             'median_latency_ms': statistics.median(latencies) * 1000,
             'stddev_latency_ms': statistics.stdev(latencies) * 1000 if len(latencies) > 1 else 0,
             'calculations_per_second': iterations / total_time if total_time > 0 else 0,
-            'cache_hit_rate': self._stats.get('successful_calculations', 0) / max(1, self._stats.get('total_calculations', 0))
+            'cache_hit_rate': 0.0
         }
         
         logging.info(f"[TTypeService] Benchmark completed: {iterations} iterations, "
                     f"avg latency={results['avg_latency_ms']:.3f}ms, "
                     f"{results['calculations_per_second']:.1f} calc/s")
-        
+
         return results
+
+    # ========================================================================
+    # 价格分析
+    # ========================================================================
+
+    def analyze_price(self, klines: List[Any]) -> PriceAnalysis:
+        """
+        分析价格趋势
+
+        Args:
+            klines: K线数据列表
+
+        Returns:
+            PriceAnalysis: 价格分析结果
+        """
+        try:
+            if not klines or len(klines) < 2:
+                return PriceAnalysis()
+
+            # 获取当前和前一根K线
+            current_bar = klines[-1]
+            previous_bar = klines[-2]
+
+            current_price = self._get_bar_close(current_bar)
+            previous_price = self._get_bar_close(previous_bar)
+
+            if current_price <= 0 or previous_price <= 0:
+                return PriceAnalysis()
+
+            # 计算变化
+            price_change = current_price - previous_price
+            price_change_pct = (price_change / previous_price) * 100 if previous_price > 0 else 0.0
+
+            # 计算波动率
+            volatility = self._calculate_volatility(klines)
+
+            return PriceAnalysis(
+                current_price=_to_float32(current_price),
+                previous_price=_to_float32(previous_price),
+                price_change=_to_float32(price_change),
+                price_change_pct=_to_float32(price_change_pct),
+                is_rising=price_change > 0,
+                is_falling=price_change < 0,
+                volatility=_to_float32(volatility),
+            )
+
+        except Exception as e:
+            logging.error(f"[TTypeService.analyze_price] Error: {e}")
+            return PriceAnalysis()
+
+    def _calculate_volatility(self, klines: List[Any]) -> float:
+        """计算波动率"""
+        try:
+            if len(klines) < 3:
+                return 0.0
+
+            closes = [self._get_bar_close(bar) for bar in klines[-10:]]
+            closes = [c for c in closes if c > 0]
+
+            if len(closes) < 2:
+                return 0.0
+
+            # 简单波动率：最高价与最低价的差除以均值
+            high_price = max(closes)
+            low_price = min(closes)
+            avg_price = sum(closes) / len(closes)
+
+            if avg_price <= 0:
+                return 0.0
+
+            volatility = (high_price - low_price) / avg_price
+            return volatility
+
+        except Exception as e:
+            logging.error(f"[TTypeService._calculate_volatility] Error: {e}")
+            raise RuntimeError(f"Volatility calculation failed: {e}") from e
+
+    def _get_bar_close(self, bar: Any) -> float:
+        """获取K线收盘价"""
+        try:
+            if isinstance(bar, dict):
+                for key in ['close', 'Close', 'CLOSE', 'last', 'last_price']:
+                    if key in bar:
+                        return safe_float(bar[key], 0.0)
+            return safe_float(getattr(bar, 'close', 0) or getattr(bar, 'last', 0), 0.0)
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            logging.error(f"[TTypeService._get_bar_close] Error: {e}")
+            raise RuntimeError(f"Bar close price extraction failed: {e}") from e
+
+    # ========================================================================
+    # 方向信号
+    # ========================================================================
+
+    def detect_direction(self, klines: List[Any],
+                         threshold: float = 0.001) -> DirectionSignal:
+        """
+        检测价格方向信号
+
+        Args:
+            klines: K线数据列表
+            threshold: 变化阈值（默认0.1%）
+
+        Returns:
+            DirectionSignal: 方向信号
+        """
+        try:
+            price_analysis = self.analyze_price(klines)
+
+            if price_analysis.current_price <= 0:
+                return DirectionSignal(direction="neutral", reason="无效价格")
+
+            change_pct = abs(price_analysis.price_change_pct)
+
+            if change_pct < threshold * 100:
+                return DirectionSignal(
+                    direction="neutral",
+                    strength=0.0,
+                    confidence=0.0,
+                    reason="变化幅度不足"
+                )
+
+            direction = "up" if price_analysis.is_rising else "down"
+            strength = min(change_pct / 5.0, 1.0)  # 归一化到0-1
+            confidence = min(price_analysis.volatility * 10, 1.0)
+
+            return DirectionSignal(
+                direction=direction,
+                strength=_to_float32(strength),
+                confidence=_to_float32(confidence),
+                reason=f"价格变化{price_analysis.price_change_pct:.2f}%"
+            )
+
+        except Exception as e:
+            logging.error(f"[TTypeService.detect_direction] Error: {e}")
+            return DirectionSignal(direction="neutral", reason=f"计算错误: {e}")
 
 
 # 导出公共接口
-__all__ = ['TTypeService']
+__all__ = [
+    'TTypeService',
+    'PriceAnalysis',
+    'DirectionSignal',
+    'DataSourceAdapter',
+    'SimpleDataSourceAdapter',
+]

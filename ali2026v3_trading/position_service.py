@@ -33,7 +33,7 @@ from typing import Dict, List, Optional, Any
 
 # T-Type Service 导入（避免循环依赖）
 try:
-    from t_type_service import TTypeService
+    from .t_type_service import TTypeService
     _HAS_T_TYPE = True
 except ImportError as e:
     import logging

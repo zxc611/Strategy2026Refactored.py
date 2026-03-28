@@ -25,7 +25,7 @@ __author__ = 'Quant Trading System'
 # 导入核心组件，方便外部使用
 try:
     # Use absolute imports for package exports
-    from ali2026v3_trading.market_data_service import MarketDataService, KLineData, TickData
+    from ali2026v3_trading.storage import InstrumentDataManager
     from ali2026v3_trading.order_service import OrderService
     from ali2026v3_trading.risk_service import RiskService
     from ali2026v3_trading.params_service import ParamsService
@@ -33,4 +33,5 @@ try:
 except ImportError as e:
     # 允许部分导入失败，不影响包的加载
     import logging
+    logging.warning(f"[ali2026v3_trading] Partial import failed: {e}")
     logging.warning(f"quant_trading_system_T 型图 package partial import: {e}")

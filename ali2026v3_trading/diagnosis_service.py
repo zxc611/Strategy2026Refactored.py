@@ -737,9 +737,9 @@ def handle_import_errors(allow_failure=False, default_value=None):
     
     Example:
         @handle_import_errors(allow_failure=True, default_value=None)
-        def load_market_data_service():
-            from market_data_service import MarketDataService
-            return MarketDataService
+        def load_storage_manager():
+            from ali2026v3_trading.storage import InstrumentDataManager
+            return InstrumentDataManager
     """
     def decorator(func):
         @wraps(func)

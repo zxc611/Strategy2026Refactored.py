@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from collections import deque
 
-from ali2026v3_trading.market_data_service import is_market_open
+from ali2026v3_trading.storage import InstrumentDataManager
 
 # 基础服务类
 class BaseService:

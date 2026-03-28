@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.market_data_service import is_market_open
+from ali2026v3_trading.storage import InstrumentDataManager, is_market_open
 
 logger = logging.getLogger(__name__)
 

@@ -18,7 +18,7 @@ import weakref
 import math
 from typing import List, Dict, Optional, Any, Tuple
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from functools import wraps
 
 # ========== 重试机制装饰器 ==========
@@ -155,10 +155,14 @@ class InstrumentDataManager:
         # K 线聚合器字典：{(instrument_id, period): _KlineAggregator}
         self._aggregators: Dict[Tuple[str, str], '_KlineAggregator'] = {}
         
+        # 统一订阅管理器（新增）
+        self.subscription_manager = SubscriptionManager(self, max_retries=max_retries)
+        
         # 自动清理配置
         self._cleanup_interval = cleanup_interval
         self._cleanup_config = cleanup_config or {}
         self._cleanup_thread = None
+        self._closed = False
         
         # 初始化
         self._init_connection()
@@ -166,6 +170,8 @@ class InstrumentDataManager:
         # 归还初始连接
         self._conn_pool.release_connection(self.conn)
         self._start_async_writer()
+        if self._cleanup_interval:
+            self._start_cleanup_thread()
         
         # 列名缓存预加载（可选优化）
         self._preload_column_cache()
@@ -184,10 +190,6 @@ class InstrumentDataManager:
             conn = self._thread_local.connection
             self._conn_pool.release_connection(conn)
             del self._thread_local.connection
-        
-        # 启动自动清理线程
-        if self._cleanup_interval:
-            self._start_cleanup_thread()
 
     def _init_connection(self):
         """建立连接，启用外键约束和 WAL 模式，创建元数据表"""
@@ -233,9 +235,9 @@ class InstrumentDataManager:
                     
                 # 如果批次满了或者有新数据且队列为空，执行写入
                 if len(batch) >= self.batch_size or (batch and self._write_queue.empty()):
-                    self._flush_batch_to_db(batch)
+                    written_count = self._flush_batch_to_db(batch)
                     with self._queue_stats_lock:
-                        self._queue_stats['total_written'] += len(batch)
+                        self._queue_stats['total_written'] += written_count
                     batch.clear()
                         
             except Exception as e:
@@ -246,9 +248,9 @@ class InstrumentDataManager:
         # 退出前清空剩余数据
         if batch:
             try:
-                self._flush_batch_to_db(batch)
+                written_count = self._flush_batch_to_db(batch)
                 with self._queue_stats_lock:
-                    self._queue_stats['total_written'] += len(batch)
+                    self._queue_stats['total_written'] += written_count
             except Exception as e:
                 logging.error("[AsyncWriter] 最终刷新失败：%s", e)
         
@@ -315,12 +317,13 @@ class InstrumentDataManager:
             logging.error("[AsyncWriter] 入队失败：%s", e)
             return False
         
-    def _flush_batch_to_db(self, batch: List[Tuple[str, Any, Any]]):
-        """批量刷新到数据库。"""
+    def _flush_batch_to_db(self, batch: List[Tuple[str, Any, Any]]) -> int:
+        """批量刷新到数据库，返回成功处理的任务数。"""
         if not batch:
-            return
+            return 0
             
         conn = None
+        executed_count = 0
         try:
             conn = self._conn_pool.get_connection()
             cursor = conn.cursor()
@@ -330,12 +333,17 @@ class InstrumentDataManager:
                 if hasattr(self, func_name):
                     method = getattr(self, func_name)
                     method(cursor, *args, **kwargs)
+                    executed_count += 1
+                else:
+                    logging.warning("[AsyncWriter] 未找到写入方法：%s", func_name)
                 
             conn.commit()
+            return executed_count
         except sqlite3.Error as e:
             logging.error("[AsyncWriter] 批量写入失败：%s", e)
             if conn:
                 conn.rollback()
+            return 0
         finally:
             if conn:
                 self._conn_pool.release_connection(conn)
@@ -356,12 +364,17 @@ class InstrumentDataManager:
         
         return stats
     
-    def shutdown(self, flush: bool = True) -> None:
+    def _shutdown_impl(self, flush: bool = True) -> None:
         """
         优雅关闭：停止后台线程，可选择等待队列清空。
         Args:
             flush: True 则等待所有待处理任务完成；False 则丢弃队列中剩余任务。
         """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+
         logging.info("开始关闭...")
         self._stop_event.set()
 
@@ -554,6 +567,28 @@ class InstrumentDataManager:
                 migrated = True
             else:
                 logging.debug("option_instruments.tick_table 已存在")
+
+            cursor.execute("""
+                UPDATE option_instruments
+                SET underlying_product = product
+                WHERE underlying_product != product
+                  AND EXISTS (
+                      SELECT 1
+                      FROM option_products op
+                      WHERE op.product = option_instruments.product
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM option_products op
+                      WHERE op.product = option_instruments.underlying_product
+                  )
+            """)
+            if cursor.rowcount > 0:
+                migrated = True
+                logging.info(
+                    "正在修复 option_instruments.underlying_product 历史错误值：%d 条",
+                    cursor.rowcount,
+                )
                 
             if migrated:
                 self.conn.commit()
@@ -639,6 +674,68 @@ class InstrumentDataManager:
             'strike_price': float(match.group(4))
         }
 
+    def classify_instruments(self, instrument_ids: List[str]) -> Tuple[List[str], Dict[str, List[str]]]:
+        """
+        分类合约 ID 列表为期货和期权
+        
+        Args:
+            instrument_ids: 合约 ID 列表
+            
+        Returns:
+            Tuple[List[str], Dict[str, List[str]]]: (futures_list, options_dict)
+            - futures_list: 期货合约列表
+            - options_dict: 期权合约字典 {underlying: [option_ids]}
+        """
+        futures_list = []
+        options_dict = {}
+        
+        for inst_id in instrument_ids:
+            try:
+                # 使用精确正则解析判断是期货还是期权
+                parsed = self._parse_option_with_dash(inst_id)
+                # 是期权
+                underlying = inst_id.split('-')[0]
+                if underlying not in options_dict:
+                    options_dict[underlying] = []
+                options_dict[underlying].append(inst_id)
+            except ValueError:
+                # 不是标准期权格式，归类为期货
+                futures_list.append(inst_id)
+        
+        return futures_list, options_dict
+        
+    def infer_exchange_from_id(self, instrument_id: str) -> str:
+        """
+        从合约 ID 推断交易所（基于品种前缀）。
+            
+        Args:
+            instrument_id: 合约 ID（如 'IF2603', 'CU2406'）
+                
+        Returns:
+            str: 交易所代码（如 'CFFEX', 'SHFE'）
+        """
+        # CFFEX
+        if instrument_id.startswith(('IF', 'IH', 'IC', 'IM', 'IO', 'HO', 'MO')):
+            return 'CFFEX'
+        # SHFE
+        elif instrument_id.startswith(('CU', 'AL', 'ZN', 'RB', 'AU', 'AG', 'NI', 'SN', 'PB', 'SS', 'WR', 'SI', 'RU', 'NR', 'BC', 'LU', 'SC')):
+            return 'SHFE'
+        # DCE
+        elif instrument_id.startswith(('M', 'Y', 'A', 'JM', 'I', 'C', 'CS', 'JD', 'L', 'V', 'PP', 'EG', 'PG', 'J', 'P')):
+            return 'DCE'
+        # CZCE
+        elif instrument_id.startswith(('CF', 'SR', 'MA', 'TA', 'RM', 'OI', 'SA', 'PF', 'EB', 'LC')):
+            return 'CZCE'
+        # INE
+        elif instrument_id.startswith(('SC',)):
+            return 'INE'
+        # GFEX
+        elif instrument_id.startswith(('LC',)):
+            return 'GFEX'
+        else:
+            # 默认返回 CFFEX（中金所）
+            return 'CFFEX'
+    
     # ========== 合约信息查询（缓存优先） ==========
     def _get_instrument_info(self, instrument_id: str) -> Optional[dict]:
         """获取合约信息（优先缓存，否则查询数据库）"""
@@ -691,6 +788,105 @@ class InstrumentDataManager:
         return None
 
     # ========== 辅助方法 ==========
+    def get_active_instruments_by_product(self, product: str) -> List[str]:
+        """
+        获取指定品种的所有活跃合约
+        
+        Args:
+            product: 品种代码（如 'IF', 'IO'）
+            
+        Returns:
+            List[str]: 合约 ID 列表
+        """
+        cursor = self.conn.cursor()
+        instrument_ids = []
+        
+        # 查询期货
+        cursor.execute("""
+            SELECT instrument_id FROM futures_instruments 
+            WHERE product=? AND is_active=1
+            ORDER BY instrument_id
+        """, (product,))
+        for row in cursor.fetchall():
+            instrument_ids.append(row['instrument_id'])
+        
+        # 查询期权
+        cursor.execute("""
+            SELECT instrument_id FROM option_instruments 
+            WHERE product=? AND is_active=1
+            ORDER BY instrument_id
+        """, (product,))
+        for row in cursor.fetchall():
+            instrument_ids.append(row['instrument_id'])
+        
+        return instrument_ids
+    
+    def get_active_instruments_by_products(self, products: List[str]) -> List[str]:
+        """
+        获取多个品种的所有活跃合约
+        
+        Args:
+            products: 品种代码列表（如 ['IF', 'IH', 'IC']）
+            
+        Returns:
+            List[str]: 合约 ID 列表
+        """
+        all_instrument_ids = []
+        for product in products:
+            instrument_ids = self.get_active_instruments_by_product(product.strip())
+            all_instrument_ids.extend(instrument_ids)
+        return all_instrument_ids
+    
+    def get_current_month_contracts(self, product: str) -> List[str]:
+        """
+        获取指定品种的当月合约
+        
+        Args:
+            product: 品种代码
+            
+        Returns:
+            List[str]: 当月合约 ID 列表
+        """
+        from datetime import datetime
+        current_month = datetime.now().strftime('%y%m')
+        
+        all_instruments = self.get_active_instruments_by_product(product)
+        current_month_contracts = []
+        
+        for inst_id in all_instruments:
+            # 提取年月部分（如 IF2603 -> 2603）
+            match = re.search(r'(\d{4})', inst_id)
+            if match and match.group(1) == current_month:
+                current_month_contracts.append(inst_id)
+        
+        return current_month_contracts
+    
+    def get_next_month_contracts(self, product: str) -> List[str]:
+        """
+        获取指定品种的下月合约
+        
+        Args:
+            product: 品种代码
+            
+        Returns:
+            List[str]: 下月合约 ID 列表
+        """
+        from datetime import datetime
+        from dateutil.relativedelta import relativedelta
+        
+        next_month = (datetime.now() + relativedelta(months=1)).strftime('%y%m')
+        
+        all_instruments = self.get_active_instruments_by_product(product)
+        next_month_contracts = []
+        
+        for inst_id in all_instruments:
+            # 提取年月部分（如 IF2603 -> 2603）
+            match = re.search(r'(\d{4})', inst_id)
+            if match and match.group(1) == next_month:
+                next_month_contracts.append(inst_id)
+        
+        return next_month_contracts
+    
     def _get_next_id(self, table_prefix: str) -> int:
         """获取下一个可用的内部ID（线程安全）"""
         cursor = self.conn.cursor()
@@ -849,51 +1045,62 @@ class InstrumentDataManager:
                             # 自动注册标的期货
                             future_instrument_id = f"{prod['underlying_product']}{parsed['year_month']}"
                             logging.info("期权注册：标的期货不存在，先注册 %s", future_instrument_id)
-                            # 使用当前连接直接插入，避免递归导致的事务冲突
-                            cursor.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM futures_instruments")
-                            new_future_id = cursor.fetchone()[0]
-                            kline_future_table = f"kline_future_{new_future_id}"
-                            tick_future_table = f"tick_future_{new_future_id}"
-                            self._validate_table_name(kline_future_table)
-                            self._validate_table_name(tick_future_table)
-                            
-                            cursor.execute("""
-                                INSERT INTO futures_instruments
-                                (exchange, instrument_id, product, year_month, format, kline_table, tick_table)
-                                VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """, (exchange, future_instrument_id, prod['underlying_product'], parsed['year_month'],
-                                  prod['format_template'], kline_future_table, tick_future_table))
-                            
-                            # 创建数据表（使用同一个连接）
-                            self._validate_table_name(kline_future_table)
-                            self._validate_table_name(tick_future_table)
-                            cursor.execute(f"""
-                                CREATE TABLE IF NOT EXISTS {kline_future_table} (
-                                    timestamp DATETIME NOT NULL,
-                                    open REAL NOT NULL,
-                                    high REAL NOT NULL,
-                                    low REAL NOT NULL,
-                                    close REAL NOT NULL,
-                                    volume INTEGER NOT NULL,
-                                    open_interest INTEGER NOT NULL,
-                                    PRIMARY KEY (timestamp)
-                                ) WITHOUT ROWID
-                            """)
-                            cursor.execute(f"""
-                                CREATE TABLE IF NOT EXISTS {tick_future_table} (
-                                    timestamp DATETIME NOT NULL,
-                                    last_price REAL NOT NULL,
-                                    volume INTEGER NOT NULL,
-                                    open_interest INTEGER NOT NULL,
-                                    bid_price1 REAL,
-                                    ask_price1 REAL,
-                                    PRIMARY KEY (timestamp)
-                                ) WITHOUT ROWID
-                            """)
-                            
-                            self.conn.commit()
-                            underlying_future = future_instrument_id
-                            logging.info("自动注册标的期货：%s -> ID=%d", future_instrument_id, new_future_id)
+                                                    
+                            # ✅ 检查是否已存在 (避免并发插入)
+                            cursor.execute("SELECT id, instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
+                                           (prod['underlying_product'], parsed['year_month']))
+                            row = cursor.fetchone()
+                                                    
+                            if row:
+                                # 已存在，直接使用
+                                new_future_id = row[0]
+                                underlying_future = row[1]
+                                logging.info("标的期货已存在：%s -> ID=%d", underlying_future, new_future_id)
+                            else:
+                                # 不存在，插入新记录
+                                cursor.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM futures_instruments")
+                                new_future_id = cursor.fetchone()[0]
+                                kline_future_table = f"kline_future_{new_future_id}"
+                                tick_future_table = f"tick_future_{new_future_id}"
+                                self._validate_table_name(kline_future_table)
+                                self._validate_table_name(tick_future_table)
+                                                        
+                                cursor.execute("""
+                                    INSERT INTO futures_instruments
+                                    (exchange, instrument_id, product, year_month, format, kline_table, tick_table)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (exchange, future_instrument_id, prod['underlying_product'], parsed['year_month'],
+                                      prod['format_template'], kline_future_table, tick_future_table))
+                                                        
+                                # 创建数据表（使用同一个连接）
+                                self._validate_table_name(kline_future_table)
+                                self._validate_table_name(tick_future_table)
+                                cursor.execute(f"""
+                                    CREATE TABLE IF NOT EXISTS {kline_future_table} (
+                                        timestamp DATETIME NOT NULL,
+                                        open REAL NOT NULL,
+                                        high REAL NOT NULL,
+                                        low REAL NOT NULL,
+                                        close REAL NOT NULL,
+                                        volume INTEGER NOT NULL,
+                                        open_interest INTEGER NOT NULL,
+                                        PRIMARY KEY (timestamp)
+                                    ) WITHOUT ROWID
+                                """)
+                                cursor.execute(f"""
+                                    CREATE TABLE IF NOT EXISTS {tick_future_table} (
+                                        timestamp DATETIME NOT NULL,
+                                        last_price REAL NOT NULL,
+                                        volume INTEGER NOT NULL,
+                                        open_interest INTEGER NOT NULL,
+                                        bid_price1 REAL,
+                                        ask_price1 REAL,
+                                        PRIMARY KEY (timestamp)
+                                    ) WITHOUT ROWID
+                                """)
+                                                        
+                                underlying_future = future_instrument_id
+                                logging.info("自动注册标的期货：%s -> ID=%d", future_instrument_id, new_future_id)
                         new_id = self._get_next_id('option')
                         kline_table = f"kline_option_{new_id}"
                         tick_table = f"tick_option_{new_id}"
@@ -907,7 +1114,7 @@ class InstrumentDataManager:
                              expire_date, listing_date, kline_table, tick_table)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (exchange, instrument_id, parsed['product'], underlying_future,
-                              prod['underlying_product'], parsed['year_month'],
+                              prod['product'], parsed['year_month'],
                               parsed['option_type'], parsed['strike_price'], prod['format_template'],
                               expire_date, listing_date, kline_table, tick_table))
                         self.conn.commit()
@@ -938,9 +1145,13 @@ class InstrumentDataManager:
         订阅合约数据，返回内部ID
         :param instrument_id: 原始合约代码
         :param data_type: 'kline' 或 'tick'
-        :param kline_period: 仅当data_type='kline'时，指定周期如 '1min'
+        :param kline_period: 仅当 data_type='kline'时，指定周期如 '1min'
         """
-        internal_id = self.register_instrument(instrument_id)
+        try:
+            internal_id = self.register_instrument(instrument_id)
+        except ValueError as e:
+            logging.error("subscribe failed for %s: %s", instrument_id, e)
+            return None
         cursor = self.conn.cursor()
         cursor.execute("""
             INSERT OR IGNORE INTO subscriptions
@@ -953,7 +1164,11 @@ class InstrumentDataManager:
 
     def unsubscribe(self, instrument_id: str, data_type: Optional[str] = None):
         """取消订阅"""
-        internal_id = self.register_instrument(instrument_id)
+        try:
+            internal_id = self.register_instrument(instrument_id)
+        except ValueError as e:
+            logging.error("unsubscribe failed for %s: %s", instrument_id, e)
+            return
         cursor = self.conn.cursor()
         if data_type:
             cursor.execute("UPDATE subscriptions SET is_active=0 WHERE instrument_id=? AND data_type=?", (internal_id, data_type))
@@ -964,18 +1179,25 @@ class InstrumentDataManager:
 
     # ========== 数据写入 ==========
     def write_kline_by_id(self, instrument_id: int, kline_data: List[Dict]) -> None:
-        """通过内部ID写入K线数据"""
+        """通过内部 ID 写入 K 线数据"""
         if not kline_data:
             return
         info = self._get_info_by_id(instrument_id)
         if not info:
-            raise ValueError(f"未找到合约ID: {instrument_id}")
+            # 合约不存在时静默跳过
+            logging.debug("write_kline_by_id: instrument_id %d not found", instrument_id)
+            return
         table_name = info['kline_table']
         self._validate_table_name(table_name)
 
         cursor = self.conn.cursor()
-        values = [(k['timestamp'], k['open'], k['high'], k['low'],
-                   k['close'], k['volume'], k['open_interest']) for k in kline_data]
+        values = [(k.get('ts') or k.get('timestamp'), 
+                   k.get('open', 0.0), 
+                   k.get('high', 0.0), 
+                   k.get('low', 0.0),
+                   k.get('close', 0.0), 
+                   k.get('volume', 0), 
+                   k.get('open_interest', 0)) for k in kline_data]
         cursor.executemany(f"""
             INSERT OR REPLACE INTO {table_name}
             (timestamp, open, high, low, close, volume, open_interest)
@@ -985,29 +1207,42 @@ class InstrumentDataManager:
         logging.debug(f"写入 {len(kline_data)} 条K线到 {table_name}")
 
     def write_tick_by_id(self, instrument_id: int, tick_data: List[Dict]) -> None:
-        """通过内部ID写入Tick数据（自动判断期货/期权）"""
+        """通过内部 ID 写入 Tick 数据（自动判断期货/期权）"""
         if not tick_data:
             return
         info = self._get_info_by_id(instrument_id)
         if not info:
-            raise ValueError(f"未找到合约ID: {instrument_id}")
+            # 合约不存在时静默跳过
+            logging.debug("write_tick_by_id: instrument_id %d not found", instrument_id)
+            return
         table_name = info['tick_table']
         self._validate_table_name(table_name)
-
+    
         cursor = self.conn.cursor()
         if info['type'] == 'future':
-            values = [(t['timestamp'], t['last_price'], t['volume'], t['open_interest'],
-                       t.get('bid_price1'), t.get('ask_price1')) for t in tick_data]
+            values = [(t.get('ts') or t.get('timestamp'), 
+                       t.get('last_price', 0.0), 
+                       t.get('volume', 0), 
+                       t.get('open_interest', 0),
+                       t.get('bid_price1'), 
+                       t.get('ask_price1')) for t in tick_data]
             sql = f"""
                 INSERT OR REPLACE INTO {table_name}
                 (timestamp, last_price, volume, open_interest, bid_price1, ask_price1)
                 VALUES (?, ?, ?, ?, ?, ?)
             """
         else:
-            values = [(t['timestamp'], t['last_price'], t['volume'], t['open_interest'],
-                       t.get('bid_price1'), t.get('ask_price1'),
-                       t.get('implied_volatility'), t.get('delta'), t.get('gamma'),
-                       t.get('theta'), t.get('vega')) for t in tick_data]
+            values = [(t.get('ts') or t.get('timestamp'), 
+                       t.get('last_price', 0.0), 
+                       t.get('volume', 0), 
+                       t.get('open_interest', 0),
+                       t.get('bid_price1'), 
+                       t.get('ask_price1'),
+                       t.get('implied_volatility'), 
+                       t.get('delta'), 
+                       t.get('gamma'),
+                       t.get('theta'), 
+                       t.get('vega')) for t in tick_data]
             sql = f"""
                 INSERT OR REPLACE INTO {table_name}
                 (timestamp, last_price, volume, open_interest, bid_price1, ask_price1,
@@ -1016,15 +1251,86 @@ class InstrumentDataManager:
             """
         cursor.executemany(sql, values)
         self.conn.commit()
-        logging.debug(f"写入 {len(tick_data)} 条Tick到 {table_name}")
+        logging.debug(f"写入 {len(tick_data)} 条 Tick 到 {table_name}")
+    
+    # ========== 异步队列实现方法 ==========
+    def _save_kline_impl(self, cursor, instrument_id: int, kline_data: List[Dict], period: str = '1min') -> None:
+        """K 线数据保存实现（供异步队列使用）"""
+        if not kline_data:
+            return
+        info = self._get_info_by_id(instrument_id)
+        if not info:
+            # 合约信息不存在时静默跳过
+            logging.debug("_save_kline_impl: instrument_id %d not found, skipping", instrument_id)
+            return
+        table_name = info['kline_table']
+        self._validate_table_name(table_name)
+    
+        values = [(k.get('ts') or k.get('timestamp'), 
+                   k.get('open', 0.0), 
+                   k.get('high', 0.0), 
+                   k.get('low', 0.0),
+                   k.get('close', 0.0), 
+                   k.get('volume', 0), 
+                   k.get('open_interest', 0)) for k in kline_data]
+        cursor.executemany(f"""
+            INSERT OR REPLACE INTO {table_name}
+            (timestamp, open, high, low, close, volume, open_interest)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, values)
+    
+    def _save_tick_impl(self, cursor, instrument_id: int, tick_data: List[Dict]) -> None:
+        """Tick 数据保存实现（供异步队列使用）"""
+        if not tick_data:
+            return
+        info = self._get_info_by_id(instrument_id)
+        if not info:
+            # 合约信息不存在时静默跳过，避免抛出异常阻塞队列
+            logging.debug("_save_tick_impl: instrument_id %d not found, skipping", instrument_id)
+            return
+        table_name = info['tick_table']
+        self._validate_table_name(table_name)
+    
+        if info['type'] == 'future':
+            values = [(t.get('ts') or t.get('timestamp'), 
+                       t.get('last_price', 0.0), 
+                       t.get('volume', 0), 
+                       t.get('open_interest', 0),
+                       t.get('bid_price1'), 
+                       t.get('ask_price1')) for t in tick_data]
+            sql = f"""
+                INSERT OR REPLACE INTO {table_name}
+                (timestamp, last_price, volume, open_interest, bid_price1, ask_price1)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """
+        else:
+            values = [(t.get('ts') or t.get('timestamp'), 
+                       t.get('last_price', 0.0), 
+                       t.get('volume', 0), 
+                       t.get('open_interest', 0),
+                       t.get('bid_price1'), 
+                       t.get('ask_price1'),
+                       t.get('implied_volatility'), 
+                       t.get('delta'), 
+                       t.get('gamma'),
+                       t.get('theta'), 
+                       t.get('vega')) for t in tick_data]
+            sql = f"""
+                INSERT OR REPLACE INTO {table_name}
+                (timestamp, last_price, volume, open_interest, bid_price1, ask_price1,
+                 implied_volatility, delta, gamma, theta, vega)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        cursor.executemany(sql, values)
 
     # ========== 数据查询 ==========
     def query_kline_by_id(self, instrument_id: int, start_time: str, end_time: str,
                           limit: Optional[int] = None) -> List[Dict]:
-        """查询K线数据"""
+        """查询 K 线数据"""
         info = self._get_info_by_id(instrument_id)
         if not info:
-            raise ValueError(f"未找到合约ID: {instrument_id}")
+            logging.debug("query_kline_by_id: instrument_id %d not found", instrument_id)
+            return []
         table_name = info['kline_table']
         self._validate_table_name(table_name)
 
@@ -1042,10 +1348,11 @@ class InstrumentDataManager:
 
     def query_tick_by_id(self, instrument_id: int, start_time: str, end_time: str,
                          limit: Optional[int] = None) -> List[Dict]:
-        """查询Tick数据"""
+        """查询 Tick 数据"""
         info = self._get_info_by_id(instrument_id)
         if not info:
-            raise ValueError(f"未找到合约ID: {instrument_id}")
+            logging.debug("query_tick_by_id: instrument_id %d not found", instrument_id)
+            return []
         table_name = info['tick_table']
         self._validate_table_name(table_name)
 
@@ -1098,6 +1405,17 @@ class InstrumentDataManager:
         if not info:
             logging.warning(f"合约不存在，无法删除：{instrument_id}")
             return
+
+        if info['type'] == 'future':
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT instrument_id FROM option_instruments WHERE underlying_future=?",
+                (instrument_id,),
+            )
+            dependent_options = [row[0] for row in cursor.fetchall()]
+            for option_instrument_id in dependent_options:
+                self.delete_instrument(option_instrument_id)
+
         internal_id = info['id']
         cursor = self.conn.cursor()
         # 删除数据表
@@ -1159,11 +1477,15 @@ class InstrumentDataManager:
         if not isinstance(tick, dict):
             logging.error("save_tick 参数不是字典：%s", type(tick))
             return False
-        required = ['ts', 'instrument_id', 'last_price']
+        required = ['instrument_id', 'last_price']
         for field in required:
             if field not in tick:
                 logging.error("save_tick 缺少必要字段：%s", field)
                 return False
+        # ✅ 支持 ts 或 timestamp 字段
+        if 'ts' not in tick and 'timestamp' not in tick:
+            logging.error("save_tick 缺少时间戳字段 (ts 或 timestamp)")
+            return False
         price = tick.get('last_price')
         if price is not None and (not isinstance(price, (int, float)) or price <= 0):
             logging.error("save_tick 价格无效：%s", price)
@@ -1179,11 +1501,15 @@ class InstrumentDataManager:
         if not isinstance(kline, dict):
             logging.error("save_external_kline 参数不是字典：%s", type(kline))
             return False
-        required = ['ts', 'instrument_id', 'period', 'open', 'high', 'low', 'close']
+        required = ['instrument_id', 'period', 'open', 'high', 'low', 'close']
         for field in required:
             if field not in kline:
                 logging.error("save_external_kline 缺少必要字段：%s", field)
                 return False
+        # ✅ 支持 ts 或 timestamp 字段
+        if 'ts' not in kline and 'timestamp' not in kline:
+            logging.error("save_external_kline 缺少时间戳字段 (ts 或 timestamp)")
+            return False
         for field in ['open', 'high', 'low', 'close']:
             val = kline.get(field)
             if val is not None and (not isinstance(val, (int, float)) or val < 0):
@@ -1205,18 +1531,22 @@ class InstrumentDataManager:
         
         # 转换时间戳
         tick = tick.copy()
-        tick_ts = self._to_timestamp(tick.get('ts'))
+        tick_ts = self._to_timestamp(tick.get('timestamp') or tick.get('ts'))
         if tick_ts is None:
-            logging.error("process_tick 时间戳转换失败：%s", tick.get('ts'))
+            logging.error("process_tick 时间戳转换失败：%s", tick.get('timestamp') or tick.get('ts'))
             return
-        tick['ts'] = tick_ts
+        tick['timestamp'] = tick_ts  # ✅ 统一使用 timestamp
         instrument = tick.get('instrument_id')
         price = tick.get('last_price')
         
-        # 1. 保存 tick
-        internal_id = self.register_instrument(instrument)
-        tick_data = [tick]
-        self.write_tick_by_id(internal_id, tick_data)
+        # 1. 保存 tick（添加异常保护）
+        try:
+            internal_id = self.register_instrument(instrument)
+            tick_data = [tick]
+            self.write_tick_by_id(internal_id, tick_data)
+        except ValueError as e:
+            logging.debug("process_tick register failed for %s: %s", instrument, e)
+            return
         
         # 2. 对每个支持的周期进行处理
         current_time = tick_ts
@@ -1267,20 +1597,120 @@ class InstrumentDataManager:
         if not self._validate_kline(kline_data):
             return
         kline_data = kline_data.copy()
-        ts = self._to_timestamp(kline_data.get('ts'))
+        ts = self._to_timestamp(kline_data.get('ts') or kline_data.get('timestamp'))
         if ts is None:
-            logging.error("save_external_kline 时间戳转换失败：%s", kline_data.get('ts'))
+            logging.error("save_external_kline 时间戳转换失败：%s", kline_data.get('ts') or kline_data.get('timestamp'))
             return
         kline_data['ts'] = ts
         
-        # 写入数据库
-        internal_id = self.register_instrument(kline_data['instrument_id'])
-        self.write_kline_by_id(internal_id, [kline_data])
+        # 写入数据库（添加异常保护）
+        try:
+            internal_id = self.register_instrument(kline_data.get('instrument_id'))
+            self.write_kline_by_id(internal_id, [kline_data])
+        except ValueError as e:
+            # 合约无法识别时静默跳过
+            logging.debug("save_external_kline register failed: %s", e)
         
-        # 更新时间戳
-        key = (kline_data['instrument_id'], kline_data['period'])
+        # 更新时间戳 - ✅ 使用 .get() 安全访问
+        key = (kline_data.get('instrument_id'), kline_data.get('period'))
         with self._ext_kline_lock:
             self._last_ext_kline[key] = ts
+    
+    def load_historical_klines(self, instruments: List[str], history_minutes: int = 1440, 
+                              kline_style: str = 'M1', market_center: Any = None) -> Dict[str, int]:
+        """加载多个合约的历史K线数据
+        
+        Args:
+            instruments: 合约列表，格式为 ["EXCHANGE.INSTRUMENT_ID", ...]
+            history_minutes: 历史数据分钟数，默认1440(24小时)
+            kline_style: K线周期，默认M1
+            market_center: MarketCenter实例，用于获取历史数据
+            
+        Returns:
+            统计结果字典: {'success': 成功数量, 'failed': 失败数量, 'total_klines': 总K线数}
+        """
+        if not market_center:
+            logging.warning("[Storage] market_center 未提供，无法加载历史K线")
+            return {'success': 0, 'failed': len(instruments), 'total_klines': 0}
+        
+        from datetime import datetime, timedelta
+        import time as time_module
+        
+        end_time = datetime.now()
+        start_time = end_time - timedelta(minutes=history_minutes)
+        
+        logging.info(f"[Storage] 开始为 {len(instruments)} 个合约加载历史K线: {start_time} -> {end_time}, 周期={kline_style}")
+        
+        success_count = 0
+        failed_count = 0
+        total_klines = 0
+        
+        for instrument_str in instruments:
+            try:
+                # 解析合约字符串 (格式: EXCHANGE.INSTRUMENT_ID)
+                if '.' not in instrument_str:
+                    logging.warning(f"[Storage] 跳过无效合约格式: {instrument_str}")
+                    failed_count += 1
+                    continue
+                
+                exchange, instrument_id = instrument_str.split('.', 1)
+                
+                logging.info(f"[Storage] 加载 {exchange}.{instrument_id} 历史K线")
+                
+                # 获取历史K线数据
+                kline_data = market_center.get_kline_data(
+                    exchange=exchange,
+                    instrument_id=instrument_id,
+                    style=kline_style,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+                
+                if kline_data and len(kline_data) > 0:
+                    # 保存历史K线到storage
+                    saved_count = 0
+                    for kline in kline_data:
+                        try:
+                            kline_dict = {
+                                'timestamp': getattr(kline, 'timestamp', getattr(kline, 'ts', time_module.time())),  # ✅ 统一使用 timestamp
+                                'instrument_id': instrument_id,
+                                'exchange': exchange,
+                                'open': getattr(kline, 'open', getattr(kline, 'Open', 0.0)),
+                                'high': getattr(kline, 'high', getattr(kline, 'High', 0.0)),
+                                'low': getattr(kline, 'low', getattr(kline, 'Low', 0.0)),
+                                'close': getattr(kline, 'close', getattr(kline, 'Close', 0.0)),
+                                'volume': getattr(kline, 'volume', getattr(kline, 'Volume', 0)),
+                                'open_interest': getattr(kline, 'open_interest', getattr(kline, 'OpenInterest', 0)),
+                                'period': kline_style.lower().replace('m', 'min')  # M1 -> 1min
+                            }
+                            self.save_external_kline(kline_dict)
+                            saved_count += 1
+                        except Exception as e:
+                            logging.warning(f"[Storage] 保存K线失败 {instrument_id}: {e}")
+                    
+                    success_count += 1
+                    total_klines += saved_count
+                    logging.info(f"[Storage] ✅ {instrument_id}: 加载并保存 {saved_count} 条K线")
+                else:
+                    logging.warning(f"[Storage] ⚠️ {instrument_id}: 无历史K线数据")
+                    failed_count += 1
+                    
+            except Exception as e:
+                logging.error(f"[Storage] 加载历史K线失败 {instrument_str}: {e}")
+                failed_count += 1
+        
+        # 汇总结果
+        logging.info(
+            f"[Storage] 历史K线加载完成: "
+            f"成功={success_count}, 失败={failed_count}, "
+            f"总计K线={total_klines} 条"
+        )
+        
+        return {
+            'success': success_count,
+            'failed': failed_count,
+            'total_klines': total_klines
+        }
     
     # ========== 通用查询辅助方法 ==========
     def _get_column_names(self, table_name: str) -> List[str]:
@@ -1357,26 +1787,30 @@ class InstrumentDataManager:
             raise
     
     def batch_write_kline(self, instrument_id: str, kline_data: List[Dict], period: str = '1min') -> None:
-        """批量写入 K 线数据（优化版，直接入队）"""
+        """批量写入 K 线数据（真正使用异步队列）"""
         if not kline_data:
             return
         internal_id = self.register_instrument(instrument_id)
+        
         # 分批入队，避免单次数据过大
         chunk_size = self.batch_size
         for i in range(0, len(kline_data), chunk_size):
             chunk = kline_data[i:i+chunk_size]
-            self.write_kline_by_id(internal_id, chunk)
+            # ✅ 使用异步队列
+            self._enqueue_write('_save_kline_impl', internal_id, chunk, period)
     
     def batch_write_tick(self, instrument_id: str, tick_data: List[Dict]) -> None:
-        """批量写入 Tick 数据（优化版，直接入队）"""
+        """批量写入 Tick 数据（真正使用异步队列）"""
         if not tick_data:
             return
         internal_id = self.register_instrument(instrument_id)
+        
         # 分批入队
         chunk_size = self.batch_size
         for i in range(0, len(tick_data), chunk_size):
             chunk = tick_data[i:i+chunk_size]
-            self.write_tick_by_id(internal_id, chunk)
+            # ✅ 使用异步队列
+            self._enqueue_write('_save_tick_impl', internal_id, chunk)
     
     # ========== 高级查询 ==========
     def get_latest_kline(self, instrument_id: str, limit: int = 100) -> List[Dict]:
@@ -1684,8 +2118,13 @@ class InstrumentDataManager:
         self._validate_table_name(table_name)
         
         cursor = self.conn.cursor()
-        values = [(k['timestamp'], k['open'], k['high'], k['low'],
-                   k['close'], k['volume'], k['open_interest']) for k in kline_data]
+        values = [(k.get('ts') or k.get('timestamp'), 
+                   k.get('open', 0.0), 
+                   k.get('high', 0.0), 
+                   k.get('low', 0.0),
+                   k.get('close', 0.0), 
+                   k.get('volume', 0), 
+                   k.get('open_interest', 0)) for k in kline_data]
         cursor.executemany(f"""
             INSERT OR REPLACE INTO {table_name}
             (timestamp, open, high, low, close, volume, open_interest)
@@ -1705,9 +2144,13 @@ class InstrumentDataManager:
         self._validate_table_name(table_name)
         
         cursor = self.conn.cursor()
-        # 简化版，假设是期货 Tick
-        values = [(t['timestamp'], t['last_price'], t['volume'], t['open_interest'],
-                   t.get('bid_price1'), t.get('ask_price1')) for t in tick_data]
+        # 简化版，假设是期货 Tick - ✅ 全部改为 .get() 安全访问
+        values = [(t.get('ts') or t.get('timestamp'), 
+                   t.get('last_price', 0.0), 
+                   t.get('volume', 0), 
+                   t.get('open_interest', 0),
+                   t.get('bid_price1'), 
+                   t.get('ask_price1')) for t in tick_data]
         cursor.executemany(f"""
             INSERT OR REPLACE INTO {table_name}
             (timestamp, last_price, volume, open_interest, bid_price1, ask_price1)
@@ -1759,18 +2202,11 @@ class InstrumentDataManager:
         logging.debug("get_latest_underlying called: %s %s", underlying, expiration)
         return None
     
-    def get_option_chain_for_future(self, future_instrument_id: str) -> Dict:
-        """根据期货合约代码获取期权链（基于 instrument_id 而非 internal_id）。"""
-        info = self._get_instrument_info(future_instrument_id)
-        if not info or info['type'] != 'future':
-            raise ValueError(f"无效的期货合约：{future_instrument_id}")
-        
-        future_id = info['id']
-        return self.get_option_chain_by_future_id(future_id)
-    
     # ========== 自动清理线程 ==========
     def _start_cleanup_thread(self):
         """启动自动清理线程。"""
+        if self._cleanup_thread and self._cleanup_thread.is_alive():
+            return
         self._cleanup_thread = threading.Thread(target=self._auto_cleanup_loop, daemon=True)
         self._cleanup_thread.start()
         logging.info("[AutoCleanup] 自动清理线程已启动，间隔：%d秒", self._cleanup_interval)
@@ -1792,42 +2228,8 @@ class InstrumentDataManager:
             except Exception as e:
                 logging.error("[AutoCleanup] 清理循环异常：%s", e, exc_info=True)
     
-    # ========== 通用数据存储（异步） ==========
-    def _init_kv_store(self):
-        """初始化键值存储表"""
-        cursor = self.conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS app_kv_store (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at REAL NOT NULL
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_kv_updated_at ON app_kv_store(updated_at DESC)")
-        self.conn.commit()
-        logging.debug("KV 存储表初始化完成")
-    
-    def _save_tick_impl(self, cursor, tick: Dict[str, Any]):
-        """保存 Tick 数据的底层实现（同步）。"""
-        internal_id = self.register_instrument(tick['instrument_id'])
-        info = self._get_info_by_id(internal_id)
-        if not info:
-            logging.error("_save_tick_impl 未找到合约：%s", tick['instrument_id'])
-            return
-        
-        table_name = info['tick_table']
-        self._validate_table_name(table_name)
-        
-        values = (tick['ts'], tick['last_price'], tick.get('volume', 0),
-                  tick.get('open_interest'), tick.get('bid_price1'), tick.get('ask_price1'))
-        cursor.execute(f"""
-            INSERT OR REPLACE INTO {table_name}
-            (timestamp, last_price, volume, open_interest, bid_price1, ask_price1)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, values)
-    
     def save_tick(self, tick: Dict[str, Any]) -> None:
-        """保存原始 Tick 数据（异步）。"""
+        """保存原始 Tick 数据（异步，批量版本）。"""
         if not self._validate_tick(tick):
             return
         tick = tick.copy()
@@ -1836,12 +2238,26 @@ class InstrumentDataManager:
             logging.error("save_tick 时间戳转换失败：%s", tick.get('ts'))
             return
         tick['ts'] = ts
-        self._enqueue_write('_save_tick_impl', tick)
+        
+        # 获取合约 ID 并包装成列表，使用批量版本
+        try:
+            internal_id = self.register_instrument(tick['instrument_id'])
+            # 包装成列表，调用批量版本
+            self._enqueue_write('_save_tick_impl', internal_id, [tick])
+        except ValueError as e:
+            # 合约无法识别时静默失败
+            logging.debug("save_tick register failed: %s", e)
     
     def _save_depth_batch_impl(self, cursor, depth_list: List[Dict[str, Any]]):
         """批量保存深度行情（同步实现）。"""
         for d in depth_list:
-            internal_id = self.register_instrument(d['instrument_id'])
+            try:
+                internal_id = self.register_instrument(d['instrument_id'])
+            except ValueError as e:
+                # 合约无法识别时静默跳过，避免阻塞队列
+                logging.debug("_save_depth_batch_impl register failed: %s", e)
+                continue
+            
             info = self._get_info_by_id(internal_id)
             if not info:
                 continue
@@ -1849,10 +2265,13 @@ class InstrumentDataManager:
             table_name = info['tick_table']
             self._validate_table_name(table_name)
             
-            # 构建字段列表（根据实际数据动态调整）
+            # 构建字段列表（根据实际数据动态调整）- ✅ 全部使用 .get()
             fields = ['timestamp', 'last_price', 'volume', 'open_interest']
             placeholders = ['?', '?', '?', '?']
-            values = [d['ts'], d['last_price'], d.get('volume', 0), d.get('open_interest')]
+            values = [d.get('ts') or d.get('timestamp'), 
+                      d.get('last_price', 0.0), 
+                      d.get('volume', 0), 
+                      d.get('open_interest', 0)]
             
             # 添加 bid/ask 价格
             for i in range(1, 6):  # 5 档行情
@@ -1928,8 +2347,21 @@ class InstrumentDataManager:
     
     def _save_signal_impl(self, cursor, signal: Dict[str, Any]):
         """保存策略信号（同步实现）。"""
-        # 简化实现，实际应保存到专门的 signal 表
-        logging.debug("保存信号：%s", signal.get('signal_type'))
+        try:
+            internal_id = self.register_instrument(signal['instrument_id'])
+        except ValueError as e:
+            # 合约无法识别时静默跳过
+            logging.debug("_save_signal_impl register failed: %s", e)
+            return
+        
+        info = self._get_info_by_id(internal_id)
+        if not info:
+            logging.error("_save_signal_impl 找不到合约信息：%s", signal['instrument_id'])
+            return
+        
+        # 简化实现，保存到 kv_store
+        key = f"signal:{signal['ts']}:{signal['instrument_id']}:{signal['strategy_name']}"
+        self.save(key, signal)
     
     def save_signal(self, signal: Dict[str, Any]) -> None:
         """保存策略信号（异步）。"""
@@ -1942,18 +2374,6 @@ class InstrumentDataManager:
             return
         signal['ts'] = ts
         self._enqueue_write('_save_signal_impl', signal)
-    
-    def _save_signal_impl(self, cursor, signal: Dict[str, Any]):
-        """保存信号（同步实现）。"""
-        internal_id = self.register_instrument(signal['instrument_id'])
-        info = self._get_info_by_id(internal_id)
-        if not info:
-            logging.error("_save_signal_impl 找不到合约信息：%s", signal['instrument_id'])
-            return
-        
-        # 简化实现，保存到 kv_store
-        key = f"signal:{signal['ts']}:{signal['instrument_id']}:{signal['strategy_name']}"
-        self.save(key, signal)
     
     def _save_underlying_snapshot_impl(self, cursor, data: Dict[str, Any]):
         """保存标的物快照（同步实现）。"""
@@ -1992,7 +2412,13 @@ class InstrumentDataManager:
     def _save_option_snapshot_batch_impl(self, cursor, data_list: List[Dict[str, Any]]):
         """批量保存期权快照（同步实现）。"""
         for d in data_list:
-            internal_id = self.register_instrument(d['instrument_id'])
+            try:
+                internal_id = self.register_instrument(d['instrument_id'])
+            except ValueError as e:
+                # 合约无法识别时静默跳过
+                logging.debug("_save_option_snapshot_batch_impl register failed: %s", e)
+                continue
+            
             info = self._get_info_by_id(internal_id)
             if not info:
                 continue
@@ -2000,9 +2426,12 @@ class InstrumentDataManager:
             table_name = info['tick_table']
             self._validate_table_name(table_name)
             
-            # 期权 Tick 包含希腊字母
+            # 期权 Tick 包含希腊字母 - ✅ 全部使用 .get()
             fields = ['timestamp', 'last_price', 'volume', 'open_interest']
-            values = [d['ts'], d['last_price'], d.get('volume', 0), d.get('open_interest')]
+            values = [d.get('ts') or d.get('timestamp'), 
+                      d.get('last_price', 0.0), 
+                      d.get('volume', 0), 
+                      d.get('open_interest', 0)]
             
             # 添加 bid/ask
             if 'bid_price1' in d:
@@ -2098,8 +2527,17 @@ class InstrumentDataManager:
                             if not instrument_id:
                                 continue
                             
+                            # 使用精确正则解析判断是期货还是期权
+                            is_option = False
+                            try:
+                                parsed = self._parse_option_with_dash(instrument_id)
+                                is_option = True
+                            except ValueError:
+                                # 不是标准期权格式，可能是期货
+                                pass
+                            
                             # 判断是期货还是期权
-                            if '-' in instrument_id and ('C' in instrument_id or 'P' in instrument_id):
+                            if is_option:
                                 # 期权
                                 underlying = _inst_get(inst_info, 'underlying_future', 'UnderlyingInstr', 'underlying')
                                 if underlying:
@@ -2135,7 +2573,16 @@ class InstrumentDataManager:
                     for inst_id in configured_instruments:
                         try:
                             if isinstance(inst_id, str):
-                                if '-' in inst_id and ('C' in inst_id or 'P' in inst_id):
+                                # 使用精确正则解析判断是期货还是期权
+                                is_option = False
+                                try:
+                                    parsed = self._parse_option_with_dash(inst_id)
+                                    is_option = True
+                                except ValueError:
+                                    # 不是标准期权格式，可能是期货
+                                    pass
+                                
+                                if is_option:
                                     # 期权（简化解析）
                                     parts = inst_id.split('-')
                                     underlying = parts[0] if parts else inst_id
@@ -2204,8 +2651,16 @@ class InstrumentDataManager:
             else:
                 logging.error("无效的 condition 格式，只支持 ' AND column=value' 格式：%s", condition)
                 raise ValueError("condition 格式错误")
-            
+
         cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        )
+        if cursor.fetchone() is None:
+            logging.warning("清理跳过：表 %s 不存在", table)
+            return 0
+
         try:
             cursor.execute("BEGIN")
             cursor.execute(sql, tuple(params))
@@ -2240,11 +2695,27 @@ class InstrumentDataManager:
             return value.isoformat()
         return str(value)
 
-    def save(self, key: str, data: Any) -> bool:
+    def _save_kv_impl(self, cursor, key: str, payload: str):
+        """异步保存键值对数据的实现。"""
+        try:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO app_kv_store (key, value, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (key, payload, datetime.now().isoformat()),
+            )
+        except Exception as e:
+            logging.error(f"_save_kv_impl 保存失败 key={key}: {e}")
+            raise  # 重新抛出异常，触发重试机制
+    
+    def save(self, key: str, data: Any, async_mode: bool = True) -> bool:
         """
-        同步保存任意结构化数据到键值存储。
+        保存任意结构化数据到键值存储（默认异步，可选同步）。
+        
         :param key: 键名（字符串）
         :param data: 任意可 JSON 序列化的数据
+        :param async_mode: 是否使用异步写入，默认 True（高性能）
         :return: 是否保存成功
         """
         if not key or not isinstance(key, str):
@@ -2253,20 +2724,25 @@ class InstrumentDataManager:
 
         try:
             payload = json.dumps(data, ensure_ascii=False, default=self._json_default)
-            cursor = self.conn.cursor()
-            cursor.execute("BEGIN")
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO app_kv_store (key, value, updated_at)
-                VALUES (?, ?, ?)
-                """,
-                (key, payload, time.time())
-            )
-            self.conn.commit()
-            return True
+            
+            if async_mode:
+                # ✅ 使用异步队列（默认，高性能）
+                return self._enqueue_write('_save_kv_impl', key, payload)
+            else:
+                # ❌ 同步写入（兼容旧代码，不推荐）
+                cursor = self.conn.cursor()
+                cursor.execute("BEGIN")
+                self._save_kv_impl(cursor, key, payload)
+                self.conn.commit()
+                return True
         except Exception as e:
-            logging.error("save 失败 key=%s: %s", key, e, exc_info=True)
-            self.conn.rollback()
+            logging.error(f"save 异常：{e}")
+            if not async_mode:
+                # 同步模式下尝试回滚
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
             return False
 
     def load(self, key: str) -> Optional[Any]:
@@ -2307,28 +2783,14 @@ class InstrumentDataManager:
     # ========== 资源管理 ==========
     def close(self):
         """关闭资源（连接池、异步线程、清理线程）。"""
-        # 停止异步写入线程
-        self._stop_async_writer()
-        
-        # 停止自动清理线程
-        if self._cleanup_thread and self._cleanup_thread.is_alive():
-            self._stop_event.set()
-            self._cleanup_thread.join(timeout=5.0)
-        
-        # 关闭连接池
-        self._conn_pool.close_all()
-        logging.info("数据库资源已关闭")
+        self._shutdown_impl(flush=True)
     
     def shutdown(self, flush: bool = True):
         """
         关闭服务（storage.py 兼容接口）
         :param flush: 是否刷新队列中的数据
         """
-        if flush:
-            # 等待队列清空
-            time.sleep(0.5)
-        self.close()
-        logging.info("服务已关闭")
+        self._shutdown_impl(flush=flush)
 
     def __enter__(self):
         return self
@@ -2338,10 +2800,17 @@ class InstrumentDataManager:
 
 
 # ========== T 型图订阅管理器 ==========
-class TTypeSubscriptionManager:
+# ========== 统一订阅管理器 ==========
+class SubscriptionManager:
     """
-    T 型图订阅管理器，负责期权链的订阅管理。
-    支持：握手协议、窗口化节流、自动重连。
+    统一订阅管理器，负责所有合约（期货 + 期权）的订阅管理。
+    支持：握手协议、窗口化节流、分批订阅、自动重连。
+    
+    设计目标：
+    1. 防止平台限流（分批 + 节流）
+    2. 统一订阅接口（替代 strategy_core_service 的直接调用）
+    3. 支持期权 T 型图批量订阅
+    4. 握手协议认证
     """
     
     def __init__(self, data_manager: InstrumentDataManager, max_retries: int = 3):
@@ -2351,93 +2820,272 @@ class TTypeSubscriptionManager:
         self._lock = threading.Lock()
         self._handshake_timeout = 10.0  # 秒
         self._throttle_window = 1.0     # 秒
+        self._batch_size = 10           # 每批最多订阅的合约数
+        self._batch_delay = 0.5         # 批次间延迟（秒）
+        
+        # 防无限重试保护
+        self._retry_cooldowns: Dict[str, float] = {}  # {instrument_id: cooldown_until_timestamp}
+        self._max_cooldown = 300.0  # 最大冷却时间 5 分钟
+        self._permanent_failures: set = set()  # 永久失败的合约 ID
     
-    def subscribe_option_chain(self, underlying: str, expiration: str,
-                               strikes: List[float], option_types: List[str]) -> bool:
+    def subscribe_all_instruments(self, futures_list: List[str], 
+                                   options_dict: Dict[str, List[str]]) -> bool:
         """
-        订阅整个期权链。
-        :param underlying: 标的期货代码
-        :param expiration: 到期年月 (YYYYMM)
-        :param strikes: 行权价列表
-        :param option_types: 期权类型列表 (['C', 'P'])
-        :return: 是否订阅成功
+        全量订阅所有合约（期货 + 期权），采用分批 + 节流策略。
+        
+        Args:
+            futures_list: 期货合约列表
+            options_dict: 期权合约字典 {underlying: [option_ids]}
+            
+        Returns:
+            bool: 是否全部订阅成功
         """
-        with self._lock:
-            key = f"{underlying}_{expiration}"
-            if key in self._subscriptions:
-                logging.info("重复订阅，忽略：%s", key)
-                return True
-            
-            # 执行握手协议（简化版）
-            if not self._handshake(underlying, expiration):
-                logging.error("握手失败：%s", key)
-                return False
-            
-            # 注册所有期权合约
-            subscribed = []
-            for strike in strikes:
-                for opt_type in option_types:
-                    instrument_id = f"{underlying}{expiration}-{opt_type}-{int(strike)}"
+        total_count = len(futures_list) + sum(len(opts) for opts in options_dict.values())
+        logging.info("[SubscriptionManager] 开始全量订阅：%d 个合约", total_count)
+        
+        success_count = 0
+        failed_count = 0
+        
+        # 第 1 步：先订阅期货（快速）
+        if futures_list:
+            logging.info("[SubscriptionManager] 第 1 批：订阅 %d 个期货合约", len(futures_list))
+            for i, future_id in enumerate(futures_list):
+                if self._subscribe_single(future_id, 'tick'):
+                    success_count += 1
+                else:
+                    failed_count += 1
+                
+                # 节流控制
+                if (i + 1) % self._batch_size == 0:
+                    time.sleep(self._batch_delay)
+        
+        # 第 2 步：按 T 型图分批订阅期权（带握手协议）
+        if options_dict:
+            logging.info("[SubscriptionManager] 第 2 批：订阅 %d 个标的的期权", len(options_dict))
+            for underlying, option_ids in options_dict.items():
+                # 提取到期年月
+                if option_ids:
+                    # 从期权 ID 中提取 expiration (如 IO2406-C-4000 -> 2406)
                     try:
-                        internal_id = self.data_manager.subscribe(instrument_id, 'tick')
-                        subscribed.append(instrument_id)
-                        logging.debug("订阅期权：%s -> ID=%d", instrument_id, internal_id)
+                        expiration = option_ids[0].split('-')[0][-4:]  # 取最后 4 位年月
+                        
+                        # 执行 T 型图握手协议
+                        if not self._handshake(underlying, expiration):
+                            logging.error("[SubscriptionManager] 握手失败：%s_%s", underlying, expiration)
+                            failed_count += len(option_ids)
+                            continue
+                        
+                        # 批量订阅该标的的所有期权
+                        batch_success, batch_failed = self._subscribe_option_chain(
+                            underlying, expiration, option_ids
+                        )
+                        success_count += batch_success
+                        failed_count += batch_failed
+                        
+                        # 批次间延迟，防止限流
+                        time.sleep(self._batch_delay)
+                        
                     except Exception as e:
-                        logging.warning("订阅失败 %s: %s", instrument_id, e)
+                        logging.warning("[SubscriptionManager] 期权订阅失败 %s: %s", underlying, e)
+                        failed_count += len(option_ids)
+        
+        logging.info(
+            "[SubscriptionManager] 全量订阅完成：成功=%d, 失败=%d, 总计=%d",
+            success_count, failed_count, total_count
+        )
+        return failed_count == 0
+    
+    def _subscribe_single(self, instrument_id: str, data_type: str = 'tick') -> bool:
+        """
+        订阅单个合约（带重试 + 防无限重试保护）。
+        
+        Args:
+            instrument_id: 合约 ID
+            data_type: 数据类型 ('tick', 'kline', etc.)
             
-            self._subscriptions[key] = {
-                'underlying': underlying,
-                'expiration': expiration,
-                'strikes': strikes,
-                'option_types': option_types,
-                'subscribed': subscribed,
-                'created_at': time.time()
-            }
+        Returns:
+            bool: 是否订阅成功
+        """
+        # 检查是否为永久失败合约
+        if instrument_id in self._permanent_failures:
+            logging.debug("[SubscriptionManager] 跳过永久失败合约：%s", instrument_id)
+            return False
+        
+        # 检查是否在冷却期
+        now = time.time()
+        if instrument_id in self._retry_cooldowns:
+            cooldown_until = self._retry_cooldowns[instrument_id]
+            if now < cooldown_until:
+                remaining = cooldown_until - now
+                logging.debug(
+                    "[SubscriptionManager] 冷却期中，跳过 %s (剩余 %.1f 秒)",
+                    instrument_id, remaining
+                )
+                return False
+            else:
+                # 冷却期结束，移除记录
+                del self._retry_cooldowns[instrument_id]
+        
+        # 执行重试逻辑
+        consecutive_failures = 0
+        for attempt in range(self.max_retries):
+            try:
+                internal_id = self.data_manager.subscribe(instrument_id, data_type)
+                
+                # 检查返回值，None 表示失败
+                if internal_id is None:
+                    raise ValueError(f"subscribe returned None for {instrument_id}")
+                
+                logging.debug("[SubscriptionManager] 订阅成功：%s -> ID=%d", instrument_id, internal_id)
+                
+                # 成功后清除冷却记录
+                if instrument_id in self._retry_cooldowns:
+                    del self._retry_cooldowns[instrument_id]
+                
+                return True
+                
+            except Exception as e:
+                consecutive_failures += 1
+                logging.warning(
+                    "[SubscriptionManager] 订阅失败 %s (尝试 %d/%d): %s",
+                    instrument_id, attempt + 1, self.max_retries, e
+                )
+                
+                # 如果达到最大重试次数
+                if attempt >= self.max_retries - 1:
+                    # 计算指数退避时间：base_delay * 2^(consecutive_failures-1), 上限为_max_cooldown
+                    base_delay = 1.0
+                    exponential_delay = min(base_delay * (2 ** (consecutive_failures - 1)), self._max_cooldown)
+                    
+                    # 设置冷却期
+                    self._retry_cooldowns[instrument_id] = now + exponential_delay
+                    
+                    logging.warning(
+                        "[SubscriptionManager] 合约 %s 连续失败 %d 次，进入冷却期 %.1f 秒",
+                        instrument_id, consecutive_failures, exponential_delay
+                    )
+                    
+                    # 如果连续失败超过阈值，标记为永久失败
+                    if consecutive_failures >= 5:
+                        self._permanent_failures.add(instrument_id)
+                        logging.error(
+                            "[SubscriptionManager] 合约 %s 连续失败 %d 次，标记为永久失败",
+                            instrument_id, consecutive_failures
+                        )
+                    
+                    return False
+                
+                # 重试前递增延迟
+                time.sleep(0.1 * (attempt + 1))
+        
+        return False
+    
+    def _subscribe_option_chain(self, underlying: str, expiration: str,
+                                 option_ids: List[str]) -> Tuple[int, int]:
+        """
+        批量订阅某一期权链的所有合约。
+        
+        Args:
+            underlying: 标的代码
+            expiration: 到期年月
+            option_ids: 期权 ID 列表
             
-            logging.info("期权链订阅完成：%s (%d 个合约)", key, len(subscribed))
-            return True
+        Returns:
+            Tuple[int, int]: (成功数，失败数)
+        """
+        success_count = 0
+        failed_count = 0
+        
+        for i, option_id in enumerate(option_ids):
+            if self._subscribe_single(option_id, 'tick'):
+                success_count += 1
+            else:
+                failed_count += 1
+            
+            # 期权内部也要节流
+            if (i + 1) % self._batch_size == 0:
+                time.sleep(self._batch_delay)
+        
+        # 记录订阅信息
+        key = f"{underlying}_{expiration}"
+        self._subscriptions[key] = {
+            'underlying': underlying,
+            'expiration': expiration,
+            'option_ids': option_ids,
+            'success_count': success_count,
+            'failed_count': failed_count,
+            'created_at': time.time()
+        }
+        
+        logging.debug(
+            "[SubscriptionManager] 期权链订阅完成：%s_%s (成功=%d, 失败=%d)",
+            underlying, expiration, success_count, failed_count
+        )
+        return success_count, failed_count
     
     def _handshake(self, underlying: str, expiration: str) -> bool:
         """
         握手协议（简化实现）。
         实际应调用交易所 API 进行认证和限流控制。
+        
+        Args:
+            underlying: 标的代码
+            expiration: 到期年月
+            
+        Returns:
+            bool: 是否握手成功
         """
-        logging.debug("T 型图握手：%s %s", underlying, expiration)
+        logging.debug("[SubscriptionManager] T 型图握手：%s %s", underlying, expiration)
         # 简化实现：直接返回成功
+        # TODO: 实际应调用 platform.handshake() 或类似接口
         return True
     
-    def unsubscribe_option_chain(self, underlying: str, expiration: str) -> bool:
-        """取消订阅期权链。"""
+    def unsubscribe_all(self) -> bool:
+        """
+        取消所有订阅。
+        
+        Returns:
+            bool: 是否全部取消成功
+        """
         with self._lock:
-            key = f"{underlying}_{expiration}"
-            if key not in self._subscriptions:
-                logging.warning("未找到订阅：%s", key)
-                return False
+            success_count = 0
+            failed_count = 0
             
-            sub = self._subscriptions[key]
-            for instrument_id in sub['subscribed']:
-                try:
-                    self.data_manager.unsubscribe(instrument_id, 'tick')
-                except Exception as e:
-                    logging.warning("取消订阅失败 %s: %s", instrument_id, e)
+            for key, sub_info in list(self._subscriptions.items()):
+                option_ids = sub_info.get('option_ids', [])
+                for option_id in option_ids:
+                    try:
+                        self.data_manager.unsubscribe(option_id, 'tick')
+                        success_count += 1
+                    except Exception as e:
+                        failed_count += 1
+                        logging.warning("[SubscriptionManager] 取消订阅失败 %s: %s", option_id, e)
+                
+                del self._subscriptions[key]
             
-            del self._subscriptions[key]
-            logging.info("取消订阅：%s", key)
-            return True
+            logging.info(
+                "[SubscriptionManager] 取消订阅完成：成功=%d, 失败=%d",
+                success_count, failed_count
+            )
+            return failed_count == 0
     
-    def get_subscription_info(self, underlying: str, expiration: str) -> Optional[Dict]:
-        """获取订阅信息。"""
+    def get_subscription_stats(self) -> Dict[str, Any]:
+        """获取订阅统计信息。"""
         with self._lock:
-            key = f"{underlying}_{expiration}"
-            return self._subscriptions.get(key)
-    
-    def list_all_subscriptions(self) -> List[Dict]:
-        """列出所有订阅。"""
-        with self._lock:
-            return list(self._subscriptions.values())
+            total_options = sum(
+                len(sub_info.get('option_ids', []))
+                for sub_info in self._subscriptions.values()
+            )
+            return {
+                'total_subscriptions': len(self._subscriptions),
+                'total_option_contracts': total_options,
+                'underlyings': list(self._subscriptions.keys())
+            }
 
 
-# ========== 使用示例 ==========
+# ============================================================================
+# 连接池管理（内部使用）
+# ============================================================================
 class _ConnectionPool(object):
     """简单连接池，支持 LRU 淘汰空闲连接，线程安全。"""
     def __init__(self, db_path: str, max_connections: int = 20):
@@ -2692,134 +3340,208 @@ class _KlineAggregator(object):
                 return None
 
 
-# ========== 使用示例 ==========
 if __name__ == "__main__":
-    # 初始化（带异步队列和自动清理）
-    cleanup_config = {'tick': 30, 'kline': 90}  # Tick 保留 30 天，K 线保留 90 天
-    with InstrumentDataManager("market_data.db", async_queue_size=100000,
-                               batch_size=5000, cleanup_interval=3600,
-                               cleanup_config=cleanup_config) as mgr:
+    # 生产环境示例代码已移除 - 测试请使用独立的 test_*.py 脚本
+    print("Storage module loaded. Use test scripts for verification.")
+
+
+# ============================================================================
+# 市场时间服务（从 market_data_service.py 移入）
+# ============================================================================
+
+class MarketTimeService:
+    """市场时间服务 - 负责市场开盘状态检测和交易时间配置"""
+    
+    def __init__(self):
+        """初始化市场时间服务"""
+        self._lock = threading.RLock()
+        self._cache: Dict[str, Tuple[float, bool]] = {}  # 缓存 {exchange: (timestamp, is_open)}
         
-        # 初始化品种（模拟，实际应从配置加载）
-        cursor = mgr.conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO future_products (product, exchange, format_template, tick_size, contract_size) VALUES (?, ?, ?, ?, ?)",
-                       ("IF", "CFFEX", "YYYYMM", 0.2, 300.0))
-        cursor.execute("INSERT OR IGNORE INTO option_products (product, exchange, underlying_product, format_template, tick_size, contract_size) VALUES (?, ?, ?, ?, ?, ?)",
-                       ("IO", "CFFEX", "IF", "YYYYMM-C-XXXX", 0.2, 300.0))
-        mgr.conn.commit()
-
-        # ===== 测试基础功能 =====
-        print("\n=== 测试基础订阅和数据写入 ===")
-        future_id = mgr.subscribe("IF2603", "kline", "1min")
-        option_id = mgr.subscribe("IO2603-C-4500", "tick")
-
-        # 写入 K 线数据
-        kline_data = [
-            {"timestamp": "2026-03-01 09:30:00", "open": 4500.0, "high": 4520.0, "low": 4490.0,
-             "close": 4510.0, "volume": 10000, "open_interest": 50000}
-        ]
-        mgr.write_kline_by_id(future_id, kline_data)
-
-        # 写入 Tick 数据（期权）
-        tick_data = [
-            {"timestamp": "2026-03-01 09:30:00", "last_price": 4510.0, "volume": 100,
-             "open_interest": 50000, "bid_price1": 4505.0, "ask_price1": 4515.0,
-             "implied_volatility": 0.25, "delta": 0.5, "gamma": 0.02, "theta": -0.1, "vega": 0.3}
-        ]
-        mgr.write_tick_by_id(option_id, tick_data)
-
-        # 查询
-        klines = mgr.query_kline_by_id(future_id, "2026-03-01 00:00:00", "2026-03-02 00:00:00")
-        print("K 线结果:", klines)
-        ticks = mgr.query_tick_by_id(option_id, "2026-03-01 00:00:00", "2026-03-02 00:00:00")
-        print("Tick 结果:", ticks)
-
-        # 获取期权链
-        chain = mgr.get_option_chain_by_future_id(future_id)
-        print("期权链:", chain)
-        
-        # ===== 测试 KV 存储 =====
-        print("\n=== 测试 KV 存储 ===")
-        test_data = {
-            'counter': 100,
-            'items': ['a', 'b', 'c'],
-            'nested': {'x': 1, 'y': 2},
-            'timestamp': datetime.now()
+        # 交易所交易时段配置（支持跨午夜夜盘）
+        self._exchange_trading_sessions: Dict[str, List[Tuple[dt_time, dt_time]]] = {
+            # 中金所：无夜盘
+            'CFFEX': [
+                (dt_time(9, 0), dt_time(11, 30)),
+                (dt_time(13, 0), dt_time(15, 0)),
+            ],
+            # 上期所/大商所/能源中心/广期所：按宽窗口覆盖常见夜盘
+            'SHFE': [
+                (dt_time(9, 0), dt_time(11, 30)),
+                (dt_time(13, 30), dt_time(15, 0)),
+                (dt_time(21, 0), dt_time(2, 30)),
+            ],
+            'DCE': [
+                (dt_time(9, 0), dt_time(11, 30)),
+                (dt_time(13, 30), dt_time(15, 0)),
+                (dt_time(21, 0), dt_time(2, 30)),
+            ],
+            'INE': [
+                (dt_time(9, 0), dt_time(11, 30)),
+                (dt_time(13, 30), dt_time(15, 0)),
+                (dt_time(21, 0), dt_time(2, 30)),
+            ],
+            'GFEX': [
+                (dt_time(9, 0), dt_time(11, 30)),
+                (dt_time(13, 30), dt_time(15, 0)),
+                (dt_time(21, 0), dt_time(2, 30)),
+            ],
+            # 郑商所：夜盘通常较短，给到 23:30 的保护窗口
+            'CZCE': [
+                (dt_time(9, 0), dt_time(11, 30)),
+                (dt_time(13, 30), dt_time(15, 0)),
+                (dt_time(21, 0), dt_time(23, 30)),
+            ],
         }
-        success = mgr.save('test_state', test_data)
-        print(f"KV 保存：{'成功' if success else '失败'}")
-        loaded = mgr.load('test_state')
-        print(f"KV 加载：{loaded}")
         
-        # ===== 测试智能 Tick 处理 =====
-        print("\n=== 测试智能 Tick 处理 ===")
-        sample_tick = {
-            'ts': time.time(),
-            'instrument_id': 'IF2603',
-            'last_price': 4520.0,
-            'volume': 150,
-            'open_interest': 51000
-        }
-        mgr.process_tick(sample_tick)
-        print("智能 Tick 处理完成")
+        # 初始化时检查一次开盘状态
+        for exchange in self._exchange_trading_sessions:
+            self._check_market_status(exchange)
+
+    @staticmethod
+    def _time_in_session(current_time: dt_time, session_start: dt_time, session_end: dt_time) -> bool:
+        """判断当前时间是否落在某个交易时段内（支持跨午夜时段）。"""
+        if session_start <= session_end:
+            return session_start <= current_time < session_end
+        # 跨午夜，如 21:00-02:30
+        return current_time >= session_start or current_time < session_end
+    
+    def _check_market_status(self, exchange: str, current_time: Optional[datetime] = None) -> bool:
+        """
+        执行市场状态检查
         
-        # ===== 测试外部 K 线保存 =====
-        print("\n=== 测试外部 K 线保存 ===")
-        external_kline = {
-            'ts': time.time(),
-            'instrument_id': 'IF2603',
-            'period': '1min',
-            'open': 4520.0,
-            'high': 4530.0,
-            'low': 4515.0,
-            'close': 4525.0,
-            'volume': 200
-        }
-        mgr.save_external_kline(external_kline)
-        print("外部 K 线保存完成")
+        Args:
+            exchange: 交易所代码
+            current_time: 当前时间，默认为 None（使用当前时间）
+            
+        Returns:
+            bool: 市场是否开盘
+        """
+        now = current_time or datetime.now()
         
-        # ===== 测试异步队列统计 =====
-        print("\n=== 队列统计 ===")
-        stats = mgr.get_queue_stats()
-        print(f"队列统计：{stats}")
+        exchange = (exchange or 'CFFEX').upper()
+        sessions = self._exchange_trading_sessions.get(exchange, self._exchange_trading_sessions['CFFEX'])
+        current_time_obj = now.time()
+        weekday = now.weekday()  # Mon=0 ... Sun=6
+
+        # 周六全日关闭
+        if weekday == 5:
+            result = False
+        # 周日仅夜盘窗口可能开（中金所无夜盘）
+        elif weekday == 6:
+            result = any(
+                self._time_in_session(current_time_obj, start, end)
+                for start, end in sessions
+                if start > end
+            )
+        else:
+            # 周五 21:00 后通常不开夜盘，直接关（中金所本来也无夜盘）
+            if weekday == 4 and current_time_obj >= dt_time(21, 0):
+                result = False
+            else:
+                result = any(
+                    self._time_in_session(current_time_obj, start, end)
+                    for start, end in sessions
+                )
         
-        # ===== 测试 T 型图订阅管理器 =====
-        print("\n=== 测试 T 型图订阅管理器 ===")
-        ttype_mgr = TTypeSubscriptionManager(mgr)
-        success = ttype_mgr.subscribe_option_chain(
-            underlying='IF',
-            expiration='2603',
-            strikes=[4400, 4500, 4600],
-            option_types=['C', 'P']
-        )
-        print(f"T 型图订阅：{'成功' if success else '失败'}")
-        subscriptions = ttype_mgr.list_all_subscriptions()
-        print(f"当前订阅数：{len(subscriptions)}")
+        # 更新缓存
+        current_timestamp = now.timestamp()
+        with self._lock:
+            self._cache[exchange] = (current_timestamp, result)
         
-        print("\n所有测试完成!")
+        logging.debug(f"[MarketTimeService._check_market_status] Checked {exchange}: {result}")
+        return result
+    
+    def is_market_open(self, exchange: str = 'CFFEX', current_time: Optional[datetime] = None) -> bool:
+        """
+        检查市场是否开盘
         
-        # ===== 测试新增功能 =====
-        print("\n=== 测试 KV 存储 ===")
-        # 保存状态
-        test_data = {
-            'counter': 100,
-            'items': ['a', 'b', 'c'],
-            'nested': {'x': 1, 'y': 2},
-            'timestamp': datetime.now()
-        }
-        success = mgr.save('test_state', test_data)
-        print(f"KV 保存：{'成功' if success else '失败'}")
+        只在以下情况进行实际检查：
+        1. 服务重启时（缓存为空）
+        2. 到达开盘时间时
+        3. 到达收盘时间时
         
-        # 加载状态
-        loaded = mgr.load('test_state')
-        print(f"KV 加载：{loaded}")
-        
-        # 测试数据清理
-        print("\n=== 测试数据清理 ===")
+        Args:
+            exchange: 交易所代码
+            current_time: 当前时间，默认为 None（使用当前时间）
+            
+        Returns:
+            bool: 市场是否开盘
+        """
         try:
-            deleted = mgr.cleanup_old_data('tick', days=30)
-            print(f"清理 Tick 数据：{deleted} 条")
+            now = current_time or datetime.now()
+            current_timestamp = now.timestamp()
+            current_time_obj = now.time()
+
+            # 传入显式时间时直接实算，避免缓存污染测试/回放判断。
+            if current_time is not None:
+                return self._check_market_status(exchange, now)
+
+            # 检查缓存是否需要更新（5 秒内不重复查）
+            with self._lock:
+                if exchange in self._cache:
+                    cached_timestamp, cached_result = self._cache[exchange]
+                    if current_timestamp - cached_timestamp < 5:
+                        return cached_result
+
+            # 执行实际检查
+            return self._check_market_status(exchange, now)
         except Exception as e:
-            print(f"清理失败：{e}")
+            logging.error(f"[MarketTimeService.is_market_open] Error checking market status for {exchange}: {e}")
+            return False
+
+
+# 全局市场时间服务实例
+_market_time_service_instance = None
+_market_time_service_lock = threading.Lock()
+
+def get_market_time_service() -> MarketTimeService:
+    """获取市场时间服务实例（单例模式）"""
+    global _market_time_service_instance
+    with _market_time_service_lock:
+        if _market_time_service_instance is None:
+            _market_time_service_instance = MarketTimeService()
+        return _market_time_service_instance
+
+
+def is_market_open(exchange: str = 'CFFEX', current_time: Optional[datetime] = None) -> bool:
+    """检查市场是否开盘（便捷函数）"""
+    service = get_market_time_service()
+    return service.is_market_open(exchange, current_time)
+
+
+# ========== 全局 InstrumentDataManager 单例 ==========
+_instrument_data_manager_instance: Optional[InstrumentDataManager] = None
+_instrument_data_manager_lock = threading.Lock()
+
+
+def get_instrument_data_manager() -> InstrumentDataManager:
+    """
+    获取全局 InstrumentDataManager 单例（共享连接池）
+    
+    Returns:
+        InstrumentDataManager: 全局单例实例
+    """
+    global _instrument_data_manager_instance
+    
+    with _instrument_data_manager_lock:
+        if _instrument_data_manager_instance is None:
+            # 使用默认配置创建全局单例
+            from ali2026v3_trading.storage import _get_default_db_path
+            db_path = _get_default_db_path()
+            
+            # 创建全局单例（使用默认配置：max_connections=20, async_queue_size=100000）
+            _instrument_data_manager_instance = InstrumentDataManager(
+                db_path=db_path,
+                max_retries=3,
+                retry_delay=0.1,
+                async_queue_size=100000,
+                batch_size=5000,
+                drop_on_full=True,
+                max_connections=20,
+                cleanup_interval=3600,
+                cleanup_config={'tick': 30, 'kline': 90}
+            )
+            
+            logging.info(f"[Storage] Global InstrumentDataManager singleton initialized (db={db_path})")
         
-        print("\n所有测试完成!")
+        return _instrument_data_manager_instance

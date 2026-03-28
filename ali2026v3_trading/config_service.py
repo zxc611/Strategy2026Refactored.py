@@ -18,6 +18,7 @@ import sys
 import json
 import re
 import logging
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -92,6 +93,152 @@ class ExchangeConfig:
     })
     depth_levels: int = 5
     
+    # ========== 新增：自动生成配置 ==========
+    # 是否启用自动生成逻辑
+    enable_auto_generation: bool = True
+    
+    # 是否启用期货品种
+    enable_futures: bool = True
+    
+    # 是否启用期权品种
+    enable_options: bool = True
+    
+    # 期权品种配置 (格式：{期权品种代码：(标的期货，交易所)})
+    option_products: Dict[str, tuple] = field(default_factory=lambda: {
+        # ========== 中金所 (CFFEX) - 股指期权 ==========
+        "IO": ("IF", "CFFEX"),   # 沪深 300 股指期权
+        "HO": ("IH", "CFFEX"),   # 上证 50 股指期权
+        "MO": ("IC", "CFFEX"),   # 中证 500 股指期权
+        "EO": ("IM", "CFFEX"),   # 中证 1000 股指期权
+        
+        # ========== 上期所 (SHFE) - 商品期权 ==========
+        "CU": ("CU", "SHFE"),   # 铜期权
+        "AL": ("AL", "SHFE"),   # 铝期权
+        "ZN": ("ZN", "SHFE"),   # 锌期权
+        "AU": ("AU", "SHFE"),   # 黄金期权
+        "AG": ("AG", "SHFE"),   # 白银期权
+        "RB": ("RB", "SHFE"),   # 螺纹钢期权
+        "RU": ("RU", "SHFE"),   # 橡胶期权
+        
+        # ========== 郑商所 (CZCE) - 商品期权 ==========
+        "MA": ("MA", "CZCE"),   # 甲醇期权
+        "TA": ("TA", "CZCE"),   # PTA 期权
+        "OI": ("OI", "CZCE"),   # 菜籽油期权
+        "RM": ("RM", "CZCE"),   # 菜籽粕期权
+        "SA": ("SA", "CZCE"),   # 纯碱期权
+        "FG": ("FG", "CZCE"),   # 玻璃期权
+        "SR": ("SR", "CZCE"),   # 白糖期权
+        "CF": ("CF", "CZCE"),   # 棉花期权
+        "AP": ("AP", "CZCE"),   # 苹果期权
+        "CJ": ("CJ", "CZCE"),   # 红枣期权
+        "SF": ("SF", "CZCE"),   # 硅铁期权
+        "SM": ("SM", "CZCE"),   # 锰硅期权
+        "UR": ("UR", "CZCE"),   # 尿素期权
+        
+        # ========== 大商所 (DCE) - 商品期权 ==========
+        "M": ("M", "DCE"),     # 豆粕期权
+        "Y": ("Y", "DCE"),     # 豆油期权
+        "P": ("P", "DCE"),     # 棕榈油期权
+        "A": ("A", "DCE"),     # 黄大豆 1 号期权
+        "L": ("L", "DCE"),     # 聚乙烯期权
+        "V": ("V", "DCE"),     # 聚氯乙烯期权
+        "PP": ("PP", "DCE"),   # 聚丙烯期权
+        "EB": ("EB", "DCE"),   # 苯乙烯期权
+        "I": ("I", "DCE"),     # 铁矿石期权
+        "EG": ("EG", "DCE"),   # 乙二醇期权
+        "C": ("C", "DCE"),     # 玉米期权
+        "CS": ("CS", "DCE"),   # 玉米淀粉期权
+        
+        # ========== 能源中心 (INE) - 商品期权 ==========
+        "SC": ("SC", "INE"),   # 原油期权
+        
+        # ========== 广期所 (GFEX) - 商品期权 ==========
+        "SI": ("SI", "GFEX"),   # 工业硅期权
+        "LC": ("LC", "GFEX"),   # 碳酸锂期权
+    })
+    
+    # 期货品种开关 (格式：{品种代码：是否启用})
+    futures_switches: Dict[str, bool] = field(default_factory=lambda: {
+        # ========== 中金所 (CFFEX) ==========
+        "IF": True,   # 沪深 300 股指期货
+        "IH": True,   # 上证 50 股指期货
+        "IC": True,   # 中证 500 股指期货
+        "IM": True,   # 中证 1000 股指期货
+        "T": True,    # 10 年期国债期货
+        "TF": True,   # 5 年期国债期货
+        "TS": True,   # 2 年期国债期货
+        "TL": True,   # 30 年期国债期货
+        
+        # ========== 上期所 (SHFE) ==========
+        "CU": True,   # 铜
+        "AL": True,   # 铝
+        "ZN": True,   # 锌
+        "PB": True,   # 铅
+        "NI": True,   # 镍
+        "SN": True,   # 锡
+        "AU": True,   # 黄金
+        "AG": True,   # 白银
+        "RB": True,   # 螺纹钢
+        "HC": True,   # 热轧卷板
+        "SS": True,   # 不锈钢
+        "RU": True,   # 橡胶
+        "BU": True,   # 沥青
+        "SP": True,   # 纸浆
+        "FU": True,   # 燃油
+        "LU": True,   # 低硫燃料油
+        "WR": False,  # 线材 (不活跃)
+        
+        # ========== 郑商所 (CZCE) ==========
+        "MA": True,   # 甲醇
+        "TA": True,   # PTA
+        "PF": True,   # 短纤
+        "UR": True,   # 尿素
+        "OI": True,   # 菜籽油
+        "RM": True,   # 菜籽粕
+        "CF": True,   # 棉花
+        "SR": True,   # 白糖
+        "AP": True,   # 苹果
+        "CJ": True,   # 红枣
+        "SA": True,   # 纯碱
+        "FG": True,   # 玻璃
+        "SF": True,   # 硅铁
+        "SM": True,   # 锰硅
+        "RI": False,  # 早籼稻 (不活跃)
+        "LR": False,  # 晚籼稻 (不活跃)
+        "JR": False,  # 粳稻 (不活跃)
+        "WH": False,  # 强麦 (不活跃)
+        "PM": False,  # 普麦 (不活跃)
+        
+        # ========== 大商所 (DCE) ==========
+        "M": True,    # 豆粕
+        "Y": True,    # 豆油
+        "P": True,    # 棕榈油
+        "A": True,    # 黄大豆 1 号
+        "B": True,    # 黄大豆 2 号
+        "L": True,    # 聚乙烯 (LLDPE)
+        "V": True,    # 聚氯乙烯 (PVC)
+        "PP": True,   # 聚丙烯
+        "EB": True,   # 苯乙烯
+        "EG": True,   # 乙二醇
+        "PG": True,   # 液化石油气 (LPG)
+        "I": True,    # 铁矿石
+        "J": True,    # 焦炭
+        "JM": True,   # 焦煤
+        "C": True,    # 玉米
+        "CS": True,   # 玉米淀粉
+        "JD": True,   # 鸡蛋
+        "BB": False,  # 纤维板 (不活跃)
+        "RR": False,  # 粳米 (不活跃)
+        
+        # ========== 能源中心 (INE) ==========
+        "SC": True,   # 原油
+        "BC": True,   # 国际铜
+        
+        # ========== 广期所 (GFEX) ==========
+        "SI": True,   # 工业硅
+        "LC": True,   # 碳酸锂
+    })
+    
     def get_instruments_for_exchange(self, exchange: str) -> List[str]:
         """获取指定交易所的模拟合约"""
         return self.simulated_instruments.get(exchange, [])
@@ -102,6 +249,129 @@ class ExchangeConfig:
         for inst_list in self.simulated_instruments.values():
             instruments.extend(inst_list)
         return instruments
+    
+    # ========== 新增：期货/期权开关管理方法 ==========
+    
+    def set_future_switch(self, product_code: str, enabled: bool):
+        """
+        设置单个期货品种的开关状态
+        
+        Args:
+            product_code: 品种代码 (如 'IF', 'M')
+            enabled: True=启用，False=关闭
+        """
+        self.futures_switches[product_code] = enabled
+        logging.info(f"[Config] 期货品种开关：{product_code} = {'启用' if enabled else '关闭'}")
+    
+    def get_future_switch(self, product_code: str) -> bool:
+        """
+        获取期货品种的开关状态
+        
+        Args:
+            product_code: 品种代码
+        
+        Returns:
+            bool: 是否启用
+        """
+        return self.futures_switches.get(product_code, False)
+    
+    def get_enabled_futures(self) -> List[str]:
+        """
+        获取所有启用的期货品种列表
+        
+        Returns:
+            List[str]: 启用的品种代码列表
+        """
+        return [code for code, enabled in self.futures_switches.items() if enabled]
+    
+    def get_disabled_futures(self) -> List[str]:
+        """
+        获取所有关闭的期货品种列表
+        
+        Returns:
+            List[str]: 关闭的品种代码列表
+        """
+        return [code for code, enabled in self.futures_switches.items() if not enabled]
+    
+    def is_future_enabled(self, product_code: str) -> bool:
+        """
+        判断某个期货品种是否启用
+        
+        Args:
+            product_code: 品种代码
+        
+        Returns:
+            bool: 是否启用
+        """
+        if not self.enable_futures:
+            return False
+        return self.futures_switches.get(product_code, False)
+    
+    def should_generate_option(self, option_product: str, underlying: str) -> bool:
+        """
+        判断某个期权品种是否应该生成 (基于标的期货的开关状态)
+        
+        Args:
+            option_product: 期权品种代码
+            underlying: 标的期货品种代码
+        
+        Returns:
+            bool: 是否应该生成
+        """
+        # 全局期权开关
+        if not self.enable_options:
+            return False
+        
+        # 检查标的期货是否启用
+        if not self.is_future_enabled(underlying):
+            return False
+        
+        return True
+    
+    def get_enabled_options(self) -> List[str]:
+        """
+        获取所有启用的期权品种列表
+        
+        Returns:
+            List[str]: 启用的期权品种代码列表
+        """
+        enabled = []
+        for opt_code, (underlying, exchange) in self.option_products.items():
+            if self.is_future_enabled(underlying):
+                enabled.append(opt_code)
+        return enabled
+    
+    def get_disabled_options(self) -> List[str]:
+        """
+        获取所有关闭的期权品种列表
+        
+        Returns:
+            List[str]: 关闭的期权品种代码列表
+        """
+        disabled = []
+        for opt_code, (underlying, exchange) in self.option_products.items():
+            if not self.is_future_enabled(underlying):
+                disabled.append(opt_code)
+        return disabled
+    
+    def get_generation_config(self) -> Dict[str, Any]:
+        """
+        获取完整的生成配置信息
+        
+        Returns:
+            Dict: 配置字典
+        """
+        return {
+            'enable_auto_generation': self.enable_auto_generation,
+            'enable_futures': self.enable_futures,
+            'enable_options': self.enable_options,
+            'enabled_futures': self.get_enabled_futures(),
+            'disabled_futures': self.get_disabled_futures(),
+            'futures_count': len(self.get_enabled_futures()),
+            'enabled_options': self.get_enabled_options(),
+            'disabled_options': self.get_disabled_options(),
+            'options_count': len(self.get_enabled_options()),
+        }
 
 
 # ============================================================================
@@ -477,31 +747,35 @@ import time as _time
 import threading as _threading
 
 # ============================================================================
-# 参数缓存管理（模块级，线程安全）
+# 参数缓存管理（模块级，线程安全 + TTL 自动过期）
 # ============================================================================
 
 _param_table_cache = None
+_param_table_cache_timestamp = 0.0  # 缓存时间戳（用于 TTL 检查）
 _param_table_lock = _threading.Lock()
+CACHE_TTL = 300.0  # 5 分钟 TTL（秒）
 
 def get_cached_params() -> dict:
-    """获取缓存的参数表（线程安全 + 懒加载 + 双重检查锁定）。
+    """获取缓存的参数表（线程安全 + 懒加载 + TTL 自动过期）。
     
     Returns:
         dict: 参数表字典
     """
-    global _param_table_cache
+    global _param_table_cache, _param_table_cache_timestamp
     
-    # 第一重检查：快速路径（无锁）
-    if _param_table_cache is not None:
-        return _param_table_cache
+    now = time.time()
     
     # 使用锁防止并发加载
     with _param_table_lock:
-        # 第二重检查：获取锁后再次检查
-        if _param_table_cache is None:
-            # 懒加载：首次调用时从 DEFAULT_PARAM_TABLE 加载
-            _param_table_cache = dict(DEFAULT_PARAM_TABLE)  # 创建副本，防止意外修改
-            logging.info(f"[config_service.get_cached_params] 参数表已加载，包含 {len(_param_table_cache)} 个参数")
+        # ✅ 检查 TTL 是否过期
+        if (_param_table_cache is not None and 
+            now - _param_table_cache_timestamp < CACHE_TTL):
+            return _param_table_cache
+        
+        # 懒加载：首次调用或 TTL 过期时从 DEFAULT_PARAM_TABLE 加载
+        _param_table_cache = dict(DEFAULT_PARAM_TABLE)  # 创建副本，防止意外修改
+        _param_table_cache_timestamp = now
+        logging.info(f"[config_service.get_cached_params] 参数表已{'刷新' if _param_table_cache else '加载'}，包含 {len(_param_table_cache)} 个参数 (TTL={CACHE_TTL}s)")
         return _param_table_cache
 
 def reset_param_cache() -> None:
@@ -607,8 +881,18 @@ DEFAULT_PARAM_TABLE = {
     "auto_start_after_init": False,
     "subscribe_only_specified_month_options": True,
     "subscribe_only_specified_month_futures": True,
+    # ✅ 月份参数加载模式开关 (2026-03-27)
+    # load_month_params_in_init: 是否在初始化时加载月份参数
+    # - True: 初始化时加载月份参数 (默认值在配置中)
+    # - False: 只在查询时动态加载月份参数 (推荐)
+    "load_month_params_in_init": False,  # 默认关闭，只在查询时加载
+    # 指定月参数：specified_month
+    # 指定下月参数：next_specified_month
     "specified_month": "",
     "next_specified_month": "",
+    # 项目路径参数 (保留向后兼容)
+    "project_root": str(Path(__file__).parent.parent),
+    "workspace": str(Path(__file__).parent.parent),
     "month_mapping": {
         "IF": ["IF2602", "IF2603"],
         "IH": ["IH2602", "IH2603"],
@@ -1007,9 +1291,9 @@ def setup_logging():
         )
         
         if not has_file_handler:
-            # Use absolute path under demo directory for easy access
-            demo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            log_dir = os.path.join(demo_dir, 'auto_logs')
+            # Use absolute path for logging
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            log_dir = os.path.join(current_dir, 'logs')
             log_file = os.path.join(log_dir, 'strategy.log')
             
             # Ensure directory exists
@@ -1055,16 +1339,14 @@ def setup_logging():
 
 
 def setup_paths():
-    """Add all required paths to sys.path once.
+    """Add ali2026v3_trading directory to sys.path once.
     
     This function:
-    1. Adds demo directory
-    2. Adds ali2026v3_trading directory
-    3. Ensures paths are added only once
+    1. Adds ali2026v3_trading directory
+    2. Ensures paths are added only once
     
     Returns:
         dict: {
-            'current_dir': str,      # demo directory
             'ali2026_dir': str,      # ali2026v3_trading directory
         }
     """
@@ -1073,13 +1355,11 @@ def setup_paths():
     if _PATHS_CONFIGURED:
         return _CACHED_PATHS
     
-    # Compute paths
+    # Compute path
     current_file = os.path.abspath(__file__)
     current_dir = os.path.dirname(current_file)  # ali2026v3_trading directory
-    demo_dir = os.path.dirname(current_dir)  # demo directory
     
     paths_to_add = [
-        demo_dir,          # demo directory
         current_dir,       # ali2026v3_trading directory
     ]
     
@@ -1088,9 +1368,7 @@ def setup_paths():
             sys.path.insert(0, path)
     
     _CACHED_PATHS = {
-        'current_dir': current_dir,
         'ali2026_dir': current_dir,
-        'demo_dir': demo_dir,
     }
     
     _PATHS_CONFIGURED = True

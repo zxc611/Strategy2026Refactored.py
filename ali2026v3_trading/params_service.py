@@ -197,6 +197,39 @@ class ParamsService:
         except Exception as e:
             logging.error(f"[ParamsService.load_params] Error: {e}")
             raise RuntimeError(f"Params load failed: {e}") from e
+    
+    def force_refresh(self, path: Optional[str] = None) -> bool:
+        """
+        强制刷新参数缓存
+        
+        Args:
+            path: 指定路径，None 表示刷新所有
+            
+        Returns:
+            bool: 是否成功刷新
+        """
+        try:
+            with threading.Lock():  # 使用临时锁保护刷新操作
+                if path:
+                    # 刷新指定路径
+                    if path in self._param_cache:
+                        del self._param_cache[path]
+                    if path in self._param_cache_meta:
+                        del self._param_cache_meta[path]
+                    if path in self._param_check_timestamp:
+                        del self._param_check_timestamp[path]
+                    logging.info(f"[ParamsService.force_refresh] 强制刷新 {path}")
+                else:
+                    # 刷新全部
+                    count = len(self._param_cache)
+                    self._param_cache.clear()
+                    self._param_cache_meta.clear()
+                    self._param_check_timestamp.clear()
+                    logging.info(f"[ParamsService.force_refresh] 强制刷新全部参数 ({count}个)")
+            return True
+        except Exception as e:
+            logging.error(f"[ParamsService.force_refresh] Error: {e}")
+            return False
 
     def save_params(self, path: str, params: Dict[str, Any]) -> bool:
         """
