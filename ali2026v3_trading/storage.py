@@ -164,14 +164,23 @@ class InstrumentDataManager:
     # 传递渠道唯一：_instrument_cache/_id_cache/_product_cache代理到params_service
     @property
     def _instrument_cache(self):
-        return self._params_service._instrument_cache
+        """代理到 ParamsService 的 instrument_id -> InstrumentMeta 映射"""
+        # 构建兼容的字典接口
+        cache = {}
+        for inst_id, internal_id in self._params_service._instrument_id_to_internal_id.items():
+            meta = self._params_service._instrument_meta_by_id.get(internal_id)
+            if meta:
+                cache[inst_id] = meta
+        return cache
     
     @property
     def _id_cache(self):
-        return self._params_service._id_cache
+        """代理到 ParamsService 的 internal_id -> InstrumentMeta 映射"""
+        return self._params_service._instrument_meta_by_id
 
     @property
     def _product_cache(self):
+        """代理到 ParamsService 的 product 缓存"""
         return self._params_service._product_cache
 
 
@@ -321,8 +330,9 @@ class InstrumentDataManager:
                     if func_name == '_save_tick_impl' and args:
                         internal_id = args[0] if args else None
                         if internal_id:
-                            for inst_id, info in self._instrument_cache.items():
-                                if self._get_info_internal_id(info) == internal_id:
+                            # ✅ 传递渠道唯一：遍历 ParamsService 缓存
+                            for inst_id, meta in self._params_service._instrument_meta_by_id.items():
+                                if meta.get('internal_id') == internal_id:
                                     DiagnosisProbeManager.on_storage_enqueue(inst_id, True)
                                     break
                     
@@ -583,66 +593,31 @@ class InstrumentDataManager:
         logging.info("索引创建/检查完成")
 
     def _load_caches(self):
-        # 传递渠道唯一：缓存由params_service统一管理，不再本地独立clear
-
-        rows = self._data_service.query("SELECT internal_id, instrument_id, exchange, product, year_month FROM futures_instruments WHERE is_active=1").to_pylist()
-        for row in rows:
-            internal_id = row['internal_id']
-            # ✅ 统一使用 klines_raw 和 ticks_raw 表
-            info = self._make_instrument_info(
-                internal_id,
-                row['instrument_id'],
-                'future',
-                exchange=row.get('exchange'),
-                product=row['product'],
-                year_month=row['year_month'],
-            )
-            self._instrument_cache[row['instrument_id']] = info
-            self._id_cache[internal_id] = info
-        rows = self._data_service.query("""
-            SELECT internal_id, instrument_id, exchange, product, year_month, option_type,
-                   strike_price, underlying_future_id, underlying_product
-            FROM option_instruments
-            WHERE is_active=1
-        """).to_pylist()
-        for row in rows:
-            internal_id = row['internal_id']
-            # ✅ 统一使用 klines_raw 和 ticks_raw 表
-            info = self._make_instrument_info(
-                internal_id,
-                row['instrument_id'],
-                'option',
-                exchange=row.get('exchange'),
-                product=row['product'],
-                underlying_future_id=row.get('underlying_future_id'),
-                # ✅ Group A收口：不再传递underlying_instrument_id，只认underlying_future_id主键
-                underlying_product=row.get('underlying_product'),
-                year_month=row['year_month'],
-                option_type=row['option_type'],
-                strike_price=row['strike_price'],
-            )
-            self._instrument_cache[row['instrument_id']] = info
-            self._id_cache[internal_id] = info
-        # 传递渠道唯一：_product_cache已代理到params_service，由load_caches_from_db统一加载
-        logging.info(f"加载缓存：{len(self._instrument_cache)}个活跃合约，{len(self._product_cache)}个活跃品种")
+        """
+        加载缓存：委托给 ParamsService 统一管理
         
-        # v1吸收：ParamsService双向缓存同步
+        ✅ 传递渠道唯一：缓存由 params_service 统一管理，Storage 不再维护独立缓存
+        """
+        # 传递渠道唯一：调用 ParamsService 统一加载缓存
         try:
             self._params_service.load_caches_from_db(self._data_service)
+            logging.info(
+                f"[Storage] ParamsService 缓存加载完成: "
+                f"{len(self._params_service._instrument_id_to_internal_id)} 个合约, "
+                f"{len(self._params_service._product_cache)} 个品种"
+            )
         except Exception as e:
-            logging.warning("[Storage] ParamsService缓存同步失败: %s", e)
+            logging.error(f"[Storage] ParamsService 缓存加载失败: {e}")
+            raise
         
-        # v1吸收：加载已有internal_id到_assigned_ids
+        # v1吸收：加载已有 internal_id 到 _assigned_ids
         try:
-            for info in self._id_cache.values():
-                internal_id = self._get_info_internal_id(info)
-                if internal_id:
-                    self._assigned_ids.add(internal_id)
+            for internal_id in self._params_service._instrument_meta_by_id.keys():
+                self._assigned_ids.add(internal_id)
             if self._assigned_ids:
-                logging.info("[Storage] Loaded %d existing internal_ids",
-                            len(self._assigned_ids))
-        except Exception as id_e:
-            logging.warning("[Storage] Failed to load existing internal_ids: %s", id_e)
+                logging.info(f"[Storage] 已加载 {len(self._assigned_ids)} 个已分配 ID")
+        except Exception as e:
+            logging.warning(f"[Storage] 加载 assigned_ids 失败: {e}")
 
     # ========== 合约解析（简单直接） ==========
     # ✅ 方法唯一：_parse_future委托给SubscriptionManager.parse_future
@@ -696,16 +671,13 @@ class InstrumentDataManager:
         alias_info['internal_id'] = canonical_internal_id
         alias_info['canonical_instrument_id'] = canonical_info.get('instrument_id')
 
-        self._instrument_cache[alias_instrument_id] = alias_info
-        self._id_cache[canonical_internal_id] = canonical_info
+        # ✅ 传递渠道唯一：通过 ParamsService 统一缓存，不直接写入代理属性
         try:
             self._cache_to_params_service(alias_instrument_id, alias_info)
         except RuntimeError as exc:
             if '重复 internal_id' not in str(exc):
                 raise
-            # ✅ 传递渠道唯一：降级路径也通过property代理写入，不直接访问私有属性
-            self._instrument_cache[alias_instrument_id] = alias_info
-            self._id_cache[canonical_internal_id] = canonical_info
+            # 重复ID错误，忽略
         return canonical_internal_id
 
     @staticmethod
@@ -838,9 +810,12 @@ class InstrumentDataManager:
     
     # ========== 合约信息查询（缓存优先） ==========
     def _get_instrument_info(self, instrument_id: str) -> Optional[dict]:
-        if instrument_id in self._instrument_cache:
-            return self._instrument_cache[instrument_id] 
-        # ✅ 不再查询 kline_table/tick_table 字段（已废弃）
+        # ✅ 传递渠道唯一：通过 ParamsService 获取
+        info = self._params_service.get_instrument_meta_by_id(instrument_id)
+        if info:
+            return info
+        
+        # 缓存未命中，从数据库查询
         rows = self._q("SELECT internal_id, instrument_id FROM futures_instruments WHERE instrument_id=?", [instrument_id])
         row = rows[0] if rows else None
         if row:
@@ -849,11 +824,10 @@ class InstrumentDataManager:
                 row['instrument_id'],
                 'future',
             )
-            self._instrument_cache[instrument_id] = info
-            internal_id = self._get_info_internal_id(info)
-            if internal_id is not None:
-                self._id_cache[internal_id] = info
+            # ✅ 传递渠道唯一：通过 ParamsService 缓存
+            self._cache_to_params_service(instrument_id, info)
             return info
+        
         rows = self._q("SELECT internal_id, instrument_id FROM option_instruments WHERE instrument_id=?", [instrument_id])
         row = rows[0] if rows else None
         if row:
@@ -862,17 +836,18 @@ class InstrumentDataManager:
                 row['instrument_id'],
                 'option',
             )
-            self._instrument_cache[instrument_id] = info
-            internal_id = self._get_info_internal_id(info)
-            if internal_id is not None:
-                self._id_cache[internal_id] = info
+            # ✅ 传递渠道唯一：通过 ParamsService 缓存
+            self._cache_to_params_service(instrument_id, info)
             return info
         return None
 
     def _get_info_by_id(self, internal_id: int) -> Optional[dict]:
-        if internal_id in self._id_cache:
-            return self._id_cache[internal_id] 
-        # ✅ 不再查询 kline_table/tick_table 字段（已废弃）
+        # ✅ 传递渠道唯一：通过 ParamsService 获取
+        info = self._params_service._instrument_meta_by_id.get(internal_id)
+        if info:
+            return info
+        
+        # 缓存未命中，从数据库查询
         rows = self._q("SELECT internal_id, instrument_id, 'future' as type FROM futures_instruments WHERE internal_id=?", [internal_id])
         row = rows[0] if rows else None
         if row:
@@ -881,8 +856,11 @@ class InstrumentDataManager:
                 row['instrument_id'],
                 row['type'],
             )
-            self._id_cache[internal_id] = info
+            # ✅ 传递渠道唯一：通过 ParamsService 缓存
+            instrument_id = row['instrument_id']
+            self._cache_to_params_service(instrument_id, info)
             return info
+        
         rows = self._q("SELECT internal_id, instrument_id, 'option' as type FROM option_instruments WHERE internal_id=?", [internal_id])
         row = rows[0] if rows else None
         if row:
@@ -891,13 +869,16 @@ class InstrumentDataManager:
                 row['instrument_id'],
                 row['type'],
             )
-            self._id_cache[internal_id] = info
+            # ✅ 传递渠道唯一：通过 ParamsService 缓存
+            instrument_id = row['instrument_id']
+            self._cache_to_params_service(instrument_id, info)
             return info
         return None
 
     def get_registered_instrument_ids(self, instrument_ids: Optional[List[str]] = None) -> List[str]:
         if not instrument_ids:
-            return list(self._instrument_cache.keys())
+            # ✅ 传递渠道唯一：通过 ParamsService 获取所有合约ID
+            return list(self._params_service._instrument_id_to_internal_id.keys())
 
         registered_ids: List[str] = []
         seen = set()
@@ -907,7 +888,8 @@ class InstrumentDataManager:
                 continue
             seen.add(normalized_id)
 
-            if normalized_id in self._instrument_cache or self._get_instrument_info(normalized_id):
+            # ✅ 传递渠道唯一：通过 ParamsService 检查是否存在
+            if self._params_service.get_instrument_meta_by_id(normalized_id):
                 registered_ids.append(normalized_id)
 
         return registered_ids
@@ -962,9 +944,10 @@ class InstrumentDataManager:
         if str(exchange or 'AUTO').strip() == 'AUTO':
             exchange = self.infer_exchange_from_id(normalized_instrument_id)
 
-        # 检查缓存
-        if normalized_instrument_id in self._instrument_cache:
-            return self._get_info_internal_id(self._instrument_cache[normalized_instrument_id])
+        # ✅ 传递渠道唯一：检查 ParamsService 缓存
+        existing_meta = self._params_service.get_instrument_meta_by_id(normalized_instrument_id)
+        if existing_meta:
+            return existing_meta.get('internal_id')
 
         # 查询数据库
         info = self._get_instrument_info(normalized_instrument_id)
@@ -973,9 +956,10 @@ class InstrumentDataManager:
 
         # 注册新合约（加锁保证唯一性）
         with self._lock:
-            # 再次检查（避免重复插入）
-            if normalized_instrument_id in self._instrument_cache:
-                return self._get_info_internal_id(self._instrument_cache[normalized_instrument_id])
+            # ✅ 传递渠道唯一：再次检查 ParamsService 缓存（避免重复插入）
+            existing_meta = self._params_service.get_instrument_meta_by_id(normalized_instrument_id)
+            if existing_meta:
+                return existing_meta.get('internal_id')
             normalized_upper = str(normalized_instrument_id).strip().upper()
             rows = self._data_service.query("SELECT product, exchange, format_template FROM future_products WHERE is_active=1").to_pylist()
             for prod in rows:
@@ -1008,8 +992,7 @@ class InstrumentDataManager:
                             kline_table=kline_table,
                             tick_table=tick_table,
                         )
-                        self._instrument_cache[normalized_instrument_id] = info
-                        self._id_cache[new_id] = info
+                        # ✅ 传递渠道唯一：只通过 ParamsService 缓存，不直接写入代理属性
                         self._assigned_ids.add(new_id)  # v1吸收：跟踪已分配ID
                         self._cache_to_params_service(normalized_instrument_id, info)  # v1吸收：双向缓存同步
                         logging.info(f"注册期货合约：{normalized_instrument_id} -> ID={new_id}")
@@ -1075,8 +1058,7 @@ class InstrumentDataManager:
                             kline_table=kline_table,
                             tick_table=tick_table,
                         )
-                        self._instrument_cache[normalized_instrument_id] = info
-                        self._id_cache[new_id] = info
+                        # ✅ 传递渠道唯一：只通过 ParamsService 缓存，不直接写入代理属性
                         self._assigned_ids.add(new_id)  # v1吸收：跟踪已分配ID
                         self._cache_to_params_service(normalized_instrument_id, info)  # v1吸收：双向缓存同步
                         logging.info(f"注册期权合约：{normalized_instrument_id} -> ID={new_id}")
@@ -1229,11 +1211,11 @@ class InstrumentDataManager:
         else:
             self._data_service.query("DELETE FROM option_instruments WHERE instrument_id=?", [instrument_id], raise_on_error=True)
         # subscriptions 表已废弃，DELETE 操作已移除
-        # 清理缓存
-        if instrument_id in self._instrument_cache:
-            del self._instrument_cache[instrument_id]
-        if internal_id in self._id_cache:
-            del self._id_cache[internal_id]
+        # ✅ 传递渠道唯一：缓存由 ParamsService 管理，不支持单个删除（下次加载时自动同步）
+        # if instrument_id in self._instrument_cache:
+        #     del self._instrument_cache[instrument_id]
+        # if internal_id in self._id_cache:
+        #     del self._id_cache[internal_id]
         logging.info(f"已删除合约 {instrument_id} (ID={internal_id})")
 
     # ========== 时间戳转换工具 ==========
@@ -1359,7 +1341,10 @@ class InstrumentDataManager:
         price = tick.get('last_price')
 
         normalized_id = str(instrument or '').strip()
-        info = self._instrument_cache.get(normalized_id) or self._get_instrument_info(normalized_id)
+        # ✅ 传递渠道唯一：通过 ParamsService 获取
+        info = self._params_service.get_instrument_meta_by_id(normalized_id)
+        if info is None:
+            info = self._get_instrument_info(normalized_id)
         if info is None:
             warn_key = ('process_tick', normalized_id)
             with self._lock:
@@ -1368,7 +1353,10 @@ class InstrumentDataManager:
                     logging.info("[process_tick] 合约未预注册，尝试运行时注册：%s", normalized_id)
             try:
                 self.register_instrument(normalized_id)
-                info = self._instrument_cache.get(normalized_id) or self._get_instrument_info(normalized_id)
+                # ✅ 传递渠道唯一：通过 ParamsService 获取
+                info = self._params_service.get_instrument_meta_by_id(normalized_id)
+                if info is None:
+                    info = self._get_instrument_info(normalized_id)
             except Exception as e:
                 logging.critical("[process_tick] 运行时注册失败 %s: %s，数据将被丢弃", normalized_id, e)
             if info is None:
@@ -1439,7 +1427,10 @@ class InstrumentDataManager:
         period = kline_data.get('period') or '1min'
 
         normalized_id = str(instrument_id or '').strip()
-        info = self._instrument_cache.get(normalized_id) or self._get_instrument_info(normalized_id)
+        # ✅ 传递渠道唯一：通过 ParamsService 获取
+        info = self._params_service.get_instrument_meta_by_id(normalized_id)
+        if info is None:
+            info = self._get_instrument_info(normalized_id)
         if info is None:
             warn_key = ('save_external_kline', normalized_id)
             with self._lock:
@@ -1678,7 +1669,10 @@ class InstrumentDataManager:
                         logging.info(f"[Storage] 加载 {instrument_id} 历史 K 线")
 
                     normalized_id = str(instrument_id or '').strip()
-                    info = self._instrument_cache.get(normalized_id) or self._get_instrument_info(normalized_id)
+                    # ✅ 传递渠道唯一：通过 ParamsService 获取
+                    info = self._params_service.get_instrument_meta_by_id(normalized_id)
+                    if info is None:
+                        info = self._get_instrument_info(normalized_id)
                     if info is None:
                         warn_key = ('load_historical_klines', normalized_id)
                         with self._lock:
