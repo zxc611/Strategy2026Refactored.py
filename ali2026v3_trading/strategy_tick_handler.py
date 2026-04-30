@@ -50,7 +50,7 @@ class TickHandlerMixin:
         
         # Tick日志时间控制（30秒汇总输出）
         self._last_tick_log_time = time.time()
-        self._tick_log_interval = 30.0  # 30秒
+        self._tick_log_interval = 180.0
         
         # Tick诊断时间戳
         self._tick_debug_last_ts = 0.0
@@ -65,6 +65,14 @@ class TickHandlerMixin:
         self._tick_buffer_threshold = 50  # 累积50条tick再批量保存
         self._tick_buffer_flush_interval = 5.0  # 5秒未满也flush
         self._last_buffer_flush_time = time.time()
+        # ✅ 覆盖式快照WAL：每100条tick快照RealTimeCache到磁盘，仅保留最后状态
+        self._snapshot_path = None
+        self._snapshot_tick_count = 0
+        self._snapshot_interval = 100
+        self._raw_tick_summary_interval = 60.0
+        self._raw_tick_last_output_time = 0.0
+        self._raw_tick_accum_count = 0
+        self._raw_tick_accum_lock = threading.Lock()
         # ✅ P1#25修复：使用weakref弱引用注册atexit，避免实例方法引用阻止GC回收
         # ✅ M20 Bug #3修复：防止重复注册atexit回调
         if not hasattr(TickHandlerMixin, '_atexit_registered'):
@@ -119,8 +127,25 @@ class TickHandlerMixin:
                         self._probe_logged_instruments.add(instrument_id_raw)
                         logging.info(f"[PROBE_RAW_INSTRUMENT_ID] 平台推送原始格式: '{instrument_id_raw}' (type={type(instrument_id_raw).__name__})")
         
-        # ✅ 阶段6增强: Tick入口探针（汇总模式）+ 14个合约诊断
+        # ✅ 阶段6增强: Tick入口探针（汇总模式）+ 重点合约诊断
         if instrument_id_raw:
+            diag_on = False
+            try:
+                from ali2026v3_trading.diagnosis_service import is_monitored_contract
+                diag_on = is_monitored_contract(instrument_id_raw)
+            except Exception:
+                pass
+            if diag_on:
+                now = time.time()
+                with self._raw_tick_accum_lock:
+                    self._raw_tick_accum_count += 1
+                    if now - self._raw_tick_last_output_time >= self._raw_tick_summary_interval:
+                        logging.info(f"[RAW_TICK_ALL_SUMMARY] ticks={self._raw_tick_accum_count} "
+                                    f"sample=({instrument_id_raw} P={self._get_tick_field(tick, 'last_price', 0.0)} "
+                                    f"V={self._get_tick_field(tick, 'volume', 0)})")
+                        self._raw_tick_accum_count = 0
+                        self._raw_tick_last_output_time = now
+            
             from ali2026v3_trading.diagnosis_service import record_tick_probe, DiagnosisProbeManager
             record_tick_probe('entry', instrument_id_raw, 0.0)
             
@@ -193,29 +218,10 @@ class TickHandlerMixin:
             with self._lock:
                 tick_count_snapshot = self._tick_count
             
-            # ✅ 改为30秒汇总输出一次
             current_time = time.time()
             if current_time - self._last_tick_log_time >= self._tick_log_interval:
-                # 计算运行时长（秒）
-                start_time = self._stats.get('start_time')
-                if start_time:
-                    if isinstance(start_time, datetime):
-                        elapsed_seconds = (datetime.now() - start_time).total_seconds()
-                    else:
-                        elapsed_seconds = current_time - start_time
-                else:
-                    elapsed_seconds = 1.0
-
-                logging.info(
-                    f"[StrategyCoreService.on_tick] 📊 过去30秒处理Tick汇总："
-                    f"总计={tick_count_snapshot:,} 个 | "
-                    f"当前速率={tick_count_snapshot / max(elapsed_seconds, 1):.1f} ticks/s"
-                )
-                self._last_tick_log_time = current_time
-                        
-            # 每3分钟（约18000个Tick，假设每秒100个）输出详细汇总
-            if tick_count_snapshot % 18000 == 0 and tick_count_snapshot > 0:
                 self._output_periodic_summary()
+                self._last_tick_log_time = current_time
             
         except Exception as e:
             logging.error(f"[StrategyCoreService.on_tick] Error: {e}")
@@ -245,12 +251,26 @@ class TickHandlerMixin:
             last_price = self._get_tick_field(tick, 'last_price', 0.0)
             volume = self._get_tick_field(tick, 'volume', 0)
             
+            # ========== 分子统计：平台推送过数据的合约（在任何内部处理之前）==========
+            if instrument_id:
+                if hasattr(self, 'storage') and self.storage and hasattr(self.storage, 'subscription_manager'):
+                    sm = self.storage.subscription_manager
+                    if sm and hasattr(sm, 'record_tick_received'):
+                        sm.record_tick_received(instrument_id)
+            
             # ========== 详细日志输出（恢复原有功能） ==========
             # 1. 每10秒输出一次Tick诊断信息
             now_ts = time.time()
             
             if (now_ts - self._tick_debug_last_ts >= 10.0) and instrument_id:
-                logging.info(f"[TickDiag] inst={instrument_id} exch={exchange} price={last_price} vol={volume}")
+                diag_on = False
+                try:
+                    from ali2026v3_trading.diagnosis_service import is_monitored_contract
+                    diag_on = is_monitored_contract(instrument_id)
+                except Exception:
+                    pass
+                if diag_on:
+                    logging.info(f"[TickDiag] inst={instrument_id} exch={exchange} price={last_price} vol={volume}")
                 self._tick_debug_last_ts = now_ts
             
             # 2. 如果开启debug_output，每条Tick都记录
@@ -270,7 +290,7 @@ class TickHandlerMixin:
                 _sub_mgr = getattr(self.storage, 'subscription_manager', None)
             if _sub_mgr:
                 try:
-                    _sub_mgr.on_tick(instrument_id, last_price)
+                    _sub_mgr.on_tick(instrument_id, last_price, volume)
                     from ali2026v3_trading.diagnosis_service import record_tick_probe
                     record_tick_probe('dispatched', instrument_id, last_price)
                 except Exception as exc:
@@ -279,10 +299,10 @@ class TickHandlerMixin:
 
             if _sub_mgr and not hasattr(self, '_tick_route_confirmed'):
                 self._tick_route_confirmed = True
-                logging.info(f"[TickRoute] ✅ Tick数据成功路由到subscription_manager: {instrument_id}")
+                logging.info(f"[TickRoute] Tick数据成功路由到subscription_manager: {instrument_id}")
 
-            # ✅ 统一Tick分发入口（序号116-118修复）
-            self._dispatch_tick(tick, instrument_id, last_price, volume, exchange)
+            if not bool(getattr(self, '_historical_load_in_progress', False)):
+                self._dispatch_tick(tick, instrument_id, last_price, volume, exchange)
             
         except Exception as e:
             logging.error(f"[StrategyCoreService._process_tick] Error: {e}")
@@ -305,30 +325,27 @@ class TickHandlerMixin:
         """
         try:
             uptime = datetime.now() - self._stats['start_time'] if self._stats['start_time'] else timedelta(0)
-            uptime_str = str(uptime).split('.')[0]  # 去掉微秒
+            uptime_str = str(uptime).split('.')[0]
+            elapsed_seconds = uptime.total_seconds() if uptime else 1.0
+            tick_rate = self._stats['total_ticks'] / max(elapsed_seconds, 1)
             
-            # 获取历史K线汇总行
             kline_summary_line, historical_detail_line = "", ""
             if hasattr(self, '_get_historical_kline_summary_lines'):
                 kline_summary_line, historical_detail_line = self._get_historical_kline_summary_lines()
             
-            # 准备详细统计信息
             tick_by_type = self._stats.get('tick_by_type', {'future': 0, 'option': 0})
             tick_by_exchange = self._stats.get('tick_by_exchange', {})
             tick_by_instrument = self._stats.get('tick_by_instrument', {})
             
-            # 按交易所排序的统计
-            sorted_exchanges = sorted(tick_by_exchange.items(), key=lambda x: x[1], reverse=True)[:5]  # 只显示前5个
-            
-            # 按合约排序的统计
-            sorted_instruments = sorted(tick_by_instrument.items(), key=lambda x: x[1], reverse=True)[:10]  # 只显示前10个
+            sorted_exchanges = sorted(tick_by_exchange.items(), key=lambda x: x[1], reverse=True)[:5]
+            sorted_instruments = sorted(tick_by_instrument.items(), key=lambda x: x[1], reverse=True)[:10]
             
             summary = f"""
 {'='*80}
 【3分钟状态汇总】{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {'='*80}
 运行时长：{uptime_str}
-Tick数据：总计 {self._stats['total_ticks']:,} 个
+Tick数据：总计 {self._stats['total_ticks']:,} 个 | 速率 {tick_rate:.1f} ticks/s
   - 期货：{tick_by_type.get('future', 0):,} 个
   - 期权：{tick_by_type.get('option', 0):,} 个
 {kline_summary_line}
@@ -350,6 +367,13 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个
 {'='*80}
 """
             logging.info(summary)
+            
+            # 输出订阅成功率统计
+            if hasattr(self, 'storage') and self.storage and hasattr(self.storage, 'subscription_manager'):
+                sm = self.storage.subscription_manager
+                if sm and hasattr(sm, 'log_subscription_success_summary'):
+                    sm.log_subscription_success_summary()
+                    
         except Exception as e:
             logging.error(f"[Periodic Summary] 输出失败：{e}")
     
@@ -378,6 +402,7 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个
             if monitored_count > 0:
                 diagnose_tick_flush(buffer_size, monitored_count)
             
+            failed_ticks = []
             for tick_item in ticks_to_flush:
                 try:
                     self.storage.process_tick(tick_item)
@@ -386,20 +411,68 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个
                     if hasattr(self, '_e2e_counters'):
                         with self._lock:
                             self._e2e_counters['persisted_count'] += 1
+                    # ✅ BP-16修复：在实际写入成功后记录Saved探针
+                    from ali2026v3_trading.diagnosis_service import record_tick_probe
+                    record_tick_probe('saved', tick_item.get('instrument_id', ''), tick_item.get('last_price', 0.0))
                 except Exception as e:
                     logging.error(f"[_flush_tick_buffer] Failed to save tick: {e}")
+                    failed_ticks.append(tick_item)
+            # ✅ BP-14修复：flush失败的tick回写buffer，防止数据丢失
+            if failed_ticks:
+                with self._tick_buffer_lock:
+                    self._tick_buffer.extend(failed_ticks)
+                logging.warning(f"[_flush_tick_buffer] {len(failed_ticks)}/{buffer_size} ticks failed, written back to buffer")
+
+    def _save_tick_snapshot(self):
+        """覆盖式快照：将RealTimeCache全部tick写入磁盘，仅保留最后状态"""
+        if not self._snapshot_path:
+            try:
+                ds = getattr(self, 'data_service', None) or getattr(self.storage, '_data_service', None)
+                if ds and hasattr(ds, '_data_dir'):
+                    import os as _os
+                    self._snapshot_path = _os.path.join(ds._data_dir, 'tick_snapshot.json')
+            except Exception:
+                return
+        if not self._snapshot_path:
+            return
+        try:
+            rc = getattr(self, 'data_service', None) or getattr(self.storage, '_data_service', None)
+            rc = getattr(rc, 'realtime_cache', None) if rc else None
+            if not rc:
+                return
+            import json as _json, os as _os
+            from datetime import datetime as _dt
+            snapshot = {'timestamp': _dt.now().isoformat(), 'ticks': {}}
+            with rc._lock:
+                for sym, tick in rc._latest_ticks.items():
+                    ts = tick.get('timestamp')
+                    ts_str = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+                    snapshot['ticks'][sym] = {
+                        'p': tick.get('price', 0), 't': ts_str, 'v': tick.get('volume', 0),
+                        'b': tick.get('bid_price', 0), 'a': tick.get('ask_price', 0),
+                        'ot': tick.get('option_type'), 'sp': tick.get('strike_price'),
+                        'iid': tick.get('internal_id'),
+                    }
+            _os.makedirs(_os.path.dirname(self._snapshot_path), exist_ok=True)
+            with open(self._snapshot_path, 'w', encoding='utf-8') as f:
+                f.write(_json.dumps(snapshot, ensure_ascii=False))
+        except Exception as e:
+            logging.debug(f"[_save_tick_snapshot] error: {e}")
 
     # ✅ P1#25修复：静态方法作为atexit回调，通过弱引用访问实例
     @staticmethod
     def _atexit_flush(weak_self):
-        """atexit回调：进程退出时刷写Tick缓冲区（弱引用版）"""
+        """atexit回调：进程退出时刷写Tick缓冲区+最后一次快照"""
         self = weak_self()
         if self is None:
-            return  # 实例已被GC回收，无需flush
+            return
         try:
             if hasattr(self, '_tick_buffer') and self._tick_buffer:
                 self._flush_tick_buffer()
                 logging.info("[atexit] Tick缓冲区已刷写")
+            if hasattr(self, '_save_tick_snapshot'):
+                self._save_tick_snapshot()
+                logging.info("[atexit] Tick快照已保存")
         except Exception as e:
             logging.error(f"[atexit] Tick缓冲区刷写失败: {e}")
     
@@ -453,10 +526,6 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个
                 # ✅ P0修复方案C：Tick缓冲机制 - 累积到阈值再批量保存
                 with self._tick_buffer_lock:
                     self._tick_buffer.append(tick_data)
-                    # P0修复：e2e段5 - Tick入队计数
-                    # ✅ M20 Bug #1修复：统一使用self._lock保护e2e_counters
-                    with self._lock:
-                        self._e2e_counters['enqueued_count'] += 1
                     
                     # ✅ 环节5a: Tick缓冲状态监控（仅监控合约）
                     from ali2026v3_trading.diagnosis_service import diagnose_tick_buffer, is_monitored_contract
@@ -478,8 +547,19 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个
                         self._tick_buffer.clear()
                         self._last_buffer_flush_time = time.time()
                 
+                # ✅ 死锁修复：e2e计数移到_tick_buffer_lock外，统一锁序 _tick_buffer_lock → _lock
+                # P0修复：e2e段5 - Tick入队计数
+                with self._lock:
+                    self._e2e_counters['enqueued_count'] += 1
+                
+                # ✅ 覆盖式快照WAL：每N条tick快照RealTimeCache到磁盘
+                self._snapshot_tick_count += 1
+                if self._snapshot_tick_count % self._snapshot_interval == 0:
+                    self._save_tick_snapshot()
+                
                 # ✅ P1#23+P1#24修复：DB写入移到锁外执行，避免持锁期间阻塞新Tick
                 if should_flush:
+                    failed_ticks = []
                     for tick_item in ticks_to_flush:
                         try:
                             self.storage.process_tick(tick_item)
@@ -487,11 +567,17 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个
                             # ✅ M20 Bug #1修复：统一使用self._lock保护e2e_counters
                             with self._lock:
                                 self._e2e_counters['persisted_count'] += 1
+                            # ✅ BP-15修复：在实际写入成功后记录Saved探针
+                            from ali2026v3_trading.diagnosis_service import record_tick_probe
+                            record_tick_probe('saved', tick_item.get('instrument_id', instrument_id), tick_item.get('last_price', last_price))
                         except Exception as e:
                             logging.warning(f"[_dispatch_tick] 批量保存失败: {e}")
-                
-                from ali2026v3_trading.diagnosis_service import record_tick_probe
-                record_tick_probe('saved', instrument_id, last_price)
+                            failed_ticks.append(tick_item)
+                    # ✅ BP-14修复：flush失败的tick回写buffer，防止数据丢失
+                    if failed_ticks:
+                        with self._tick_buffer_lock:
+                            self._tick_buffer.extend(failed_ticks)
+                        logging.warning(f"[_dispatch_tick] {len(failed_ticks)}/{len(ticks_to_flush)} ticks failed, written back to buffer")
             except Exception as e:
                 from ali2026v3_trading.diagnosis_service import record_tick_probe
                 record_tick_probe('error', instrument_id, last_price, f"Storage: {e}")

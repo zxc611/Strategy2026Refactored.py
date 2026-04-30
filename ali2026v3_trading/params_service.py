@@ -158,12 +158,8 @@ class ParamsService:
         self._column_cache_lock = threading.Lock()
     
     def _normalize_id_field(self, info: Dict[str, Any]) -> Dict[str, Any]:
-        """统一ID字段标准化：兼容旧字段名id -> internal_id
-        ✅ Group A收口：id字段迁移到internal_id后删除，记录警告"""
-        if 'id' in info and 'internal_id' not in info:
-            info['internal_id'] = info.pop('id')
-            logging.debug("[ParamsService] 迁移旧id字段到internal_id: internal_id=%s", info.get('internal_id'))
-        elif 'id' in info and 'internal_id' in info:
+        """ID字段标准化：删除旧id字段（统一使用internal_id）"""
+        if 'id' in info:
             del info['id']
         return info
 
@@ -219,21 +215,6 @@ class ParamsService:
             self._instrument_meta_by_id[cid] = cached_info
             
             return cached_info
-    
-    def get_instrument_cache(self, instrument_id: str) -> Optional[Dict[str, Any]]:
-        """
-        获取合约缓存信息（惰性加载：如果缓存为空则从数据库加载）
-        
-        ⚠️  DEPRECATED: 兼容旧接口，建议使用 get_instrument_meta_by_id()
-        """
-        # P1 Bug #47修复：使用锁保护惰性加载
-        with self._lock:
-            if not self._instrument_id_to_internal_id:
-                self._lazy_load_from_db()
-            internal_id = self._instrument_id_to_internal_id.get(instrument_id)
-            if internal_id is None:
-                return None
-            return self._instrument_meta_by_id.get(internal_id)
     
     # ========================================================================
     # ✅ ID三层架构 - 新增API
@@ -298,14 +279,14 @@ class ParamsService:
         Raises:
             RuntimeError: 如果有合约加载失败
         """
-        # 确保缓存已加载
-        if not self._instrument_cache:
+        # 确保缓存已加载（使用新架构字典判断）
+        if not self._instrument_id_to_internal_id:
             self._lazy_load_from_db()
         
         failed = []
         for contract_id in contract_ids:
-            info = self._instrument_cache.get(contract_id)
-            if not info or 'internal_id' not in info:
+            iid = self._instrument_id_to_internal_id.get(contract_id)
+            if iid is None:
                 failed.append(contract_id)
         
         if failed:
@@ -341,7 +322,7 @@ class ParamsService:
                 return
             
             self.load_caches_from_db(ds)
-            logging.info("[ParamsService] 惰性加载缓存完成：%d 个合约", len(self._instrument_cache))
+            logging.info("[ParamsService] 惰性加载缓存完成：%d 个合约", len(self._instrument_id_to_internal_id))
         except Exception as e:
             logging.debug("[ParamsService] 惰性加载缓存失败: %s", e)
     
@@ -357,26 +338,35 @@ class ParamsService:
     
     def clear_instrument_cache(self) -> None:
         """
-        P2 Bug #108修复：清空合约缓存，包括新架构缓存
+        BP-9修复：原子替换模式——从DB重新加载后一次性替换，避免清空窗口期。
+        如果重新加载失败，保留旧缓存（宁用过期数据不丢数据）。
         """
         with self._lock:
-            self._instrument_cache.clear()
-            self._id_cache.clear()
-            # ✅ 清空新架构缓存
-            self._instrument_id_to_internal_id.clear()
-            self._instrument_meta_by_id.clear()
-            self._product_cache.clear()
+            old_count = len(self._instrument_meta_by_id)
+        try:
+            self.init_instrument_cache()
+            with self._lock:
+                new_count = len(self._instrument_meta_by_id)
+            logging.info("[ParamsService] 合约缓存原子替换完成: %d → %d", old_count, new_count)
+        except Exception as e:
+            logging.error("[ParamsService] 合约缓存重新加载失败，保留旧缓存: %s", e)
 
     def get_all_instrument_cache(self) -> Dict[str, Dict[str, Any]]:
-        """返回当前合约缓存的深拷贝副本。"""
+        """返回当前合约缓存的深拷贝副本（基于新架构）。"""
         import copy
-        with self._lock:  # ✅ 加锁保护
-            return copy.deepcopy(self._instrument_cache)
+        with self._lock:
+            # 从新架构构建等效的instrument_cache格式
+            result = {}
+            for instrument_id, internal_id in self._instrument_id_to_internal_id.items():
+                meta = self._instrument_meta_by_id.get(internal_id)
+                if meta:
+                    result[instrument_id] = meta
+            return copy.deepcopy(result)
 
     def get_all_instrument_ids(self) -> List[str]:
-        """返回当前缓存中的全部合约代码。"""
-        with self._lock:  # ✅ 加锁保护
-            return list(self._instrument_cache.keys())
+        """返回当前缓存中的全部合约代码（基于新架构）。"""
+        with self._lock:
+            return list(self._instrument_id_to_internal_id.keys())
     
     # ========================================================================
     # 合约列表加载与缓存（strategy_core_service.py 依赖）
@@ -402,35 +392,80 @@ class ParamsService:
                 futures_list = getattr(params, 'future_instruments', [])
                 options_dict = getattr(params, 'option_instruments', {})
             
-            # 如果source是output_files，尝试从文件加载
+            # 如果source是output_files，尝试从文件加载（带3次重试）
             if source == 'output_files':
-                # 优先尝试从 subscription_options_fixed.txt 加载（固定配置文件）
-                # 读取两个固定配置文件：期货 + 期权
-                futures_from_file = []
-                options_from_file = []
-                _fixed_config_files = [
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_futures_fixed.txt'),
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_options_fixed.txt'),
-                ]
-                for fixed_config_file in _fixed_config_files:
-                    if not os.path.exists(fixed_config_file):
-                        continue
-                    try:
-                        with open(fixed_config_file, 'r', encoding='utf-8') as f:
-                            for line in f:
-                                line = line.strip()
-                                if not line or line.startswith('#'):
-                                    continue
-                                if '.' in line:
-                                    contract = line.split('.')[-1]
-                                else:
-                                    contract = line
-                                if '-' in contract or (len(contract) > 6 and any(c in contract[6:] for c in ['C', 'P'])):
-                                    options_from_file.append(contract)
-                                else:
-                                    futures_from_file.append(contract)
-                    except Exception as e:
-                        logging.warning(f"[ParamsService] 加载固定配置文件失败: {e}")
+                # P0修复：合约配置文件加载增加3次重试机制
+                max_retries = 3
+                retry_delay = 1.0  # 每次重试间隔1秒
+                
+                for attempt in range(1, max_retries + 1):
+                    futures_from_file = []
+                    options_from_file = []
+                    _fixed_config_files = [
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_futures_fixed.txt'),
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_options_fixed.txt'),
+                    ]
+                    
+                    load_success = True
+                    for fixed_config_file in _fixed_config_files:
+                        if not os.path.exists(fixed_config_file):
+                            continue
+                        try:
+                            with open(fixed_config_file, 'r', encoding='utf-8') as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line or line.startswith('#'):
+                                        continue
+                                    if '.' in line:
+                                        contract = line.split('.')[-1]
+                                    else:
+                                        contract = line
+                                    if '-' in contract or (len(contract) > 6 and any(c in contract[6:] for c in ['C', 'P'])):
+                                        options_from_file.append(contract)
+                                    else:
+                                        futures_from_file.append(contract)
+                        except Exception as e:
+                            logging.warning(f"[ParamsService] 加载固定配置文件失败 (attempt {attempt}/{max_retries}): {e}")
+                            load_success = False
+                            break
+                    
+                    if load_success and (futures_from_file or options_from_file):
+                        if attempt > 1:
+                            logging.info(f"[ParamsService] 配置文件加载成功 (retry {attempt-1})")
+                        break
+                    elif attempt < max_retries:
+                        logging.warning(f"[ParamsService] 配置文件加载失败，{retry_delay}s后重试 ({attempt}/{max_retries})...")
+                        import time
+                        time.sleep(retry_delay)
+                    else:
+                        # P0修复：3次重试都失败，提供详细报错
+                        error_details = []
+                        for fixed_config_file in _fixed_config_files:
+                            if os.path.exists(fixed_config_file):
+                                try:
+                                    with open(fixed_config_file, 'r', encoding='utf-8') as f:
+                                        content = f.read()
+                                        error_details.append(f"  - {os.path.basename(fixed_config_file)}: exists, size={len(content)} bytes")
+                                except Exception as e:
+                                    error_details.append(f"  - {os.path.basename(fixed_config_file)}: exists but unreadable: {e}")
+                            else:
+                                error_details.append(f"  - {os.path.basename(fixed_config_file)}: NOT FOUND at {fixed_config_file}")
+                        
+                        logging.error(
+                            "[ParamsService] CRITICAL: Contract configuration loading failed after %d retries.\n"
+                            "  Possible causes:\n"
+                            "    1. Configuration files are missing or corrupted\n"
+                            "    2. File permission issues (check read access)\n"
+                            "    3. Disk I/O errors or network storage issues\n"
+                            "    4. Files being locked by another process\n"
+                            "  File status:\n"
+                            "%s\n"
+                            "  Action required:\n"
+                            "    - Verify subscription_futures_fixed.txt and subscription_options_fixed.txt exist and are valid\n"
+                            "    - Check file permissions and disk space\n"
+                            "    - Ensure no other process is locking these files",
+                            max_retries, "\n".join(error_details)
+                        )
 
                 if futures_from_file:
                     futures_list = futures_from_file
@@ -517,18 +552,13 @@ class ParamsService:
         temp_product_cache: Dict[str, Dict[str, Any]] = {}
 
         def _cache_temp_instrument_info(instrument_id: str, info: Dict[str, Any]) -> None:
-            """复用cache_instrument_info的ID标准化逻辑"""
+            """复用_normalize_id_field进行ID标准化"""
             cached_info = dict(info)
             cached_info['instrument_id'] = instrument_id
 
-            # ✅ Group A收口：统一ID标准化入口，id字段迁移到internal_id后删除
+            # ✅ 复用_normalize_id_field统一ID标准化
+            self._normalize_id_field(cached_info)
             cid = cached_info.get('internal_id')
-            if 'id' in cached_info and cid is None:
-                cid = cached_info.pop('id')
-                cached_info['internal_id'] = cid
-                logging.debug("[ParamsService] load_caches_from_db: 迁移旧id字段 internal_id=%s", cid)
-            elif 'id' in cached_info:
-                del cached_info['id']
 
             if cid is None:
                 logging.warning(

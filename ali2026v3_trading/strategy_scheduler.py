@@ -521,7 +521,7 @@ class StrategyScheduler:
                         logging.debug("[StrategyScheduler] Cache flush skipped: no realtime_cache")
                         return
                     
-                    cache_ticks = cache.drain_all_ticks()
+                    cache_ticks = cache.drain_all_ticks(clear_cache=False)
                     if not cache_ticks:
                         logging.debug("[StrategyScheduler] Cache flush skipped: no data to flush")
                         return
@@ -530,10 +530,11 @@ class StrategyScheduler:
                     inserted = data_service.batch_insert_from_cache(cache_ticks)
                     
                     if inserted > 0:
+                        cache.clear_latest_ticks()
                         cache.truncate_wal()
                         logging.info(f"[StrategyScheduler] Cache flush success: {inserted:,} records written, WAL truncated")
                     else:
-                        logging.warning(f"[StrategyScheduler] Cache flush: 0 records written, WAL not truncated")
+                        logging.warning(f"[StrategyScheduler] Cache flush: 0 records written, cache retained")
                         
                 except Exception as e:
                     if cache_ticks and cache:
@@ -563,9 +564,9 @@ class StrategyScheduler:
             logging.error(f"[StrategyScheduler] Failed to add cache flush job: {e}", exc_info=True)
     
     def register_14_contracts_diagnosis_task(self, storage=None, query_service=None) -> None:
-        """注册14合约12环节诊断定时任务
+        """注册重点合约12环节诊断定时任务
         
-        每30秒输出一次14个监控合约的12环节诊断状态，
+        每30秒输出一次重点监控合约的12环节诊断状态，
         使用汇总输出模式避免日志被CRITICAL告警淹没。
         
         Args:
@@ -573,20 +574,20 @@ class StrategyScheduler:
             query_service: QueryService实例
         """
         try:
-            from ali2026v3_trading.diagnosis_service import run_14_contracts_periodic_diagnostic
+            from ali2026v3_trading.diagnosis_service import MONITORED_CONTRACT_COUNT, run_14_contracts_periodic_diagnostic
             
             def _diagnose_job():
                 try:
                     if not self._can_run_jobs():
                         return
                     if not storage:
-                        logging.debug("[StrategyScheduler] Storage not available, skip 14 contracts diagnosis")
+                        logging.debug("[StrategyScheduler] Storage not available, skip monitored contracts diagnosis")
                         return
                     
                     # 执行12环节诊断
                     run_14_contracts_periodic_diagnostic(storage=storage, query_service=query_service)
                 except Exception as e:
-                    logging.error(f"[StrategyScheduler] 14 contracts diagnosis failed: {e}", exc_info=True)
+                    logging.error(f"[StrategyScheduler] monitored contracts diagnosis failed: {e}", exc_info=True)
             
             # 添加定时任务：每30秒执行一次
             if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):
@@ -600,10 +601,10 @@ class StrategyScheduler:
                     owner_scope='global',
                     seconds=30
                 )
-                logging.info("[StrategyScheduler] ✅ 14合约12环节诊断任务已添加 (每30秒)")
+                logging.info("[StrategyScheduler] ✅ %d合约12环节诊断任务已添加 (每30秒)", MONITORED_CONTRACT_COUNT)
             else:
                 logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
         except ImportError as e:
             logging.warning(f"[StrategyScheduler] Cannot import diagnosis_service: {e}")
         except Exception as e:
-            logging.error(f"[StrategyScheduler] Failed to add 14 contracts diagnosis job: {e}", exc_info=True)
+            logging.error(f"[StrategyScheduler] Failed to add monitored contracts diagnosis job: {e}", exc_info=True)

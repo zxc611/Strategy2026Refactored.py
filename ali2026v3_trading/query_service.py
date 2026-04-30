@@ -30,7 +30,6 @@ import time
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
-import re
 
 
 def _normalize_code(code: str) -> str:
@@ -123,6 +122,9 @@ class _KlineAggregator:
         self.period = period
         self.logger = logger or logging.getLogger(__name__)
         
+        # ✅ BP-17修复：加锁防竞态（on_tick线程与drain线程可并发调用update）
+        self._lock = threading.Lock()
+        
         # 当前 K 线状态
         self.open_price: Optional[float] = None
         self.high_price: Optional[float] = None
@@ -163,6 +165,14 @@ class _KlineAggregator:
                volume: int = 0, amount: float = 0.0,
                open_interest: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """更新 Tick 数据，返回完成的 K 线（如果有）"""
+        # ✅ BP-17修复：加锁防竞态
+        with self._lock:
+            return self._update_impl(tick_ts, price, volume, amount, open_interest)
+    
+    def _update_impl(self, tick_ts: float, price: float, 
+               volume: int = 0, amount: float = 0.0,
+               open_interest: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """update的锁内实现"""
         if self.kline_start_time is None:
             # 初始化第一根 K 线
             self.kline_start_time = (tick_ts // self.period_seconds) * self.period_seconds
@@ -220,6 +230,37 @@ class _KlineAggregator:
         self.amount = 0.0
         self.open_interest = None
         self.kline_start_time = None
+
+    def to_state_dict(self) -> Dict[str, Any]:
+        """✅ BP-17：导出聚合器状态用于持久化"""
+        if self.kline_start_time is None:
+            return None
+        return {
+            'instrument_id': self.instrument_id,
+            'period': self.period,
+            'open_price': self.open_price,
+            'high_price': self.high_price,
+            'low_price': self.low_price,
+            'close_price': self.close_price,
+            'volume': self.volume,
+            'amount': self.amount,
+            'open_interest': self.open_interest,
+            'kline_start_time': self.kline_start_time,
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: Dict[str, Any]) -> '_KlineAggregator':
+        """✅ BP-17：从持久化状态恢复聚合器"""
+        agg = cls(state.get('instrument_id', ''), state.get('period', ''), logging.getLogger(__name__))
+        agg.open_price = state.get('open_price')
+        agg.high_price = state.get('high_price')
+        agg.low_price = state.get('low_price')
+        agg.close_price = state.get('close_price')
+        agg.volume = state.get('volume', 0)
+        agg.amount = state.get('amount', 0.0)
+        agg.open_interest = state.get('open_interest')
+        agg.kline_start_time = state.get('kline_start_time')
+        return agg
 
 
 class QueryService:
@@ -416,14 +457,241 @@ class QueryService:
                 failed_count += 1
                 logging.warning("预注册合约失败 %s: %s", instrument_id, e)
 
-        return {
+        result = {
             'configured_count': len(normalized_ids),
             'registered_count': len(registered_ids),
             'missing_count': len(missing_ids),
             'created_count': created_count,
             'failed_count': failed_count,
         }
-    
+        
+        # 发布预注册完成事件
+        try:
+            from ali2026v3_trading.event_bus import get_global_event_bus
+            event_bus = get_global_event_bus()
+            if event_bus:
+                event_bus.publish('PreRegisterCompleted', result)
+                logging.info("[QueryService] 预注册完成，已发布PreRegisterCompleted事件")
+        except Exception as e:
+            logging.warning("[QueryService] 发布预注册事件失败: %s", e)
+        
+        return result
+
+    def load_and_preregister_instruments(self, storage: Any, params: Any) -> Dict[str, Any]:
+        """从合约配置文件加载合约列表并执行预注册（供on_init调用）。
+
+        设计约束：
+        1. 合约列表唯一来源：TXT配置文件，不存在任何回退机制，失败即终止初始化
+        2. 预注册同步执行，创建ID映射表是后续数据关联的前提
+        3. 重试3次快速失败：每步骤最多重试3次，3次均失败则抛RuntimeError
+        4. 完成后通知：发布InstrumentsLoadAndPreregisterCompleted事件
+
+        Args:
+            storage: InstrumentDataManager实例（strategy_core_service.storage）
+            params: 参数对象
+        """
+        import time as _time
+        MAX_RETRIES = 3
+
+        # ========== 阶段1：从TXT合约配置文件加载合约列表（重试3次） ==========
+        selected_futures_list: List[str] = []
+        selected_options_dict: Dict[str, List[str]] = {}
+        last_load_error = None
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                from ali2026v3_trading.params_service import get_params_service
+                ps = get_params_service()
+                class _TempParams:
+                    future_instruments = []
+                    option_instruments = {}
+                temp_params = _TempParams()
+                file_result = ps.load_instrument_list(temp_params, source='output_files')
+                if file_result and (file_result.get('futures_list') or file_result.get('options_dict')):
+                    selected_futures_list = self._normalize_instruments(file_result['futures_list'])
+                    selected_options_dict = self._normalize_options_dict(file_result['options_dict'])
+                    logging.info(
+                        "[Init-Load] 第%d次尝试成功: 从合约配置文件加载 %d 期货, %d 期权",
+                        attempt, len(selected_futures_list),
+                        self._count_option_contracts(selected_options_dict),
+                    )
+                    last_load_error = None
+                    break
+                else:
+                    last_load_error = f"第{attempt}次: load_instrument_list返回空结果"
+                    logging.warning("[Init-Load] %s", last_load_error)
+            except Exception as e:
+                last_load_error = f"第{attempt}次: {type(e).__name__}: {e}"
+                logging.warning("[Init-Load] 合约配置文件加载异常: %s", last_load_error)
+        else:
+            error_detail = (
+                f"合约配置文件加载经{MAX_RETRIES}次重试均失败，策略初始化终止。\n"
+                f"最后错误: {last_load_error}\n"
+                f"请检查文件是否存在且非空:\n"
+                f"  - ali2026v3_trading/subscription_futures_fixed.txt\n"
+                f"  - ali2026v3_trading/subscription_options_fixed.txt\n"
+                f"  - ensure_products_with_retry是否已在步骤1中成功执行"
+            )
+            logging.error("[Init-Load] ❌ %s", error_detail)
+            raise RuntimeError(error_detail)
+
+        if not selected_futures_list and not selected_options_dict:
+            error_detail = (
+                f"合约配置文件加载成功但规范化后为空（期货=0, 期权=0），策略初始化终止。\n"
+                f"可能原因: TXT文件内容格式错误，所有合约被_normalize过滤掉"
+            )
+            logging.error("[Init-Load] ❌ %s", error_detail)
+            raise RuntimeError(error_detail)
+
+        # ========== 补齐标的期货 ==========
+        derived_futures = self._derive_underlying_futures(selected_options_dict)
+        if derived_futures:
+            existing_futures = set(selected_futures_list)
+            added_futures = [item for item in derived_futures if item not in existing_futures]
+            if added_futures:
+                selected_futures_list.extend(added_futures)
+                logging.info("[Init-Load] 从期权清单补齐 %d 个标的期货", len(added_futures))
+
+        # 构建完整订阅列表
+        subscribe_list = list(selected_futures_list)
+        for option_ids in selected_options_dict.values():
+            subscribe_list.extend(option_ids or [])
+        seen = set()
+        subscribed_instruments = [inst for inst in subscribe_list if not (inst in seen or seen.add(inst))]
+
+        # ========== 阶段2：预注册（重试3次） ==========
+        preregister_stats = None
+        last_prereg_error = None
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            if not storage or not subscribed_instruments:
+                last_prereg_error = f"第{attempt}次: storage不可用或subscribed_instruments为空"
+                logging.warning("[PreRegister] %s", last_prereg_error)
+                continue
+            try:
+                prereg_start = _time.perf_counter()
+                logging.info("[PreRegister] 第%d次尝试: 开始预注册 %d 个合约...", attempt, len(subscribed_instruments))
+                preregister_stats = storage.ensure_registered_instruments(subscribed_instruments)
+                prereg_elapsed = _time.perf_counter() - prereg_start
+                logging.info(
+                    "[PreRegister] 第%d次尝试成功 (耗时=%.3fs): 配置=%d, 已注册=%d, 缺失=%d, 新建=%d, 失败=%d",
+                    attempt, prereg_elapsed,
+                    preregister_stats['configured_count'],
+                    preregister_stats['registered_count'],
+                    preregister_stats['missing_count'],
+                    preregister_stats['created_count'],
+                    preregister_stats['failed_count'],
+                )
+                if preregister_stats['failed_count'] > 0:
+                    logging.warning(
+                        "[PreRegister] ⚠️ 预注册完成但有 %d 个合约注册失败（将在tick到达时惰性注册）",
+                        preregister_stats['failed_count'],
+                    )
+                last_prereg_error = None
+                break
+            except Exception as prereg_e:
+                last_prereg_error = f"第{attempt}次: {type(prereg_e).__name__}: {prereg_e}"
+                logging.warning("[PreRegister] 预注册异常: %s", last_prereg_error)
+        else:
+            error_detail = (
+                f"预注册经{MAX_RETRIES}次重试均失败，策略初始化终止。\n"
+                f"合约数: {len(subscribed_instruments)}\n"
+                f"最后错误: {last_prereg_error}\n"
+                f"可能原因: storage未初始化、DB连接失败、register_instrument内部异常"
+            )
+            logging.error("[PreRegister] ❌ %s", error_detail)
+            raise RuntimeError(error_detail)
+
+        result = {
+            'futures_list': selected_futures_list,
+            'options_dict': selected_options_dict,
+            'subscribed_instruments': subscribed_instruments,
+            'source': 'output_files',
+            'preregister_stats': preregister_stats,
+        }
+
+        # ========== 完成后通知 ==========
+        try:
+            from ali2026v3_trading.event_bus import get_global_event_bus
+            event_bus = get_global_event_bus()
+            if event_bus:
+                event_data = {
+                    'futures_count': len(selected_futures_list),
+                    'options_count': self._count_option_contracts(selected_options_dict),
+                    'total_instruments': len(subscribed_instruments),
+                    'preregister_stats': preregister_stats,
+                    'source': 'output_files',
+                }
+                event_bus.publish('InstrumentsLoadAndPreregisterCompleted', event_data)
+                logging.info(
+                    "[Init-Load+PreRegister] ✅ 已发布InstrumentsLoadAndPreregisterCompleted事件: "
+                    "期货=%d, 期权=%d, 共=%d",
+                    event_data['futures_count'],
+                    event_data['options_count'],
+                    event_data['total_instruments'],
+                )
+        except Exception as event_e:
+            logging.warning("[Init-Load+PreRegister] 发布完成事件失败（不影响流程）: %s", event_e)
+
+        return result
+
+    @staticmethod
+    def _normalize_instruments(instrument_ids: List[str]) -> List[str]:
+        """去重、去空、去交易所前缀"""
+        seen = set()
+        result = []
+        for inst_id in instrument_ids or []:
+            normalized = str(inst_id or '').strip()
+            if '.' in normalized:
+                _, normalized = normalized.split('.', 1)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                result.append(normalized)
+        return result
+
+    @staticmethod
+    def _normalize_options_dict(options_dict: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        """规范化期权字典（去重、去空、去交易所前缀）"""
+        result = {}
+        for underlying, option_ids in (options_dict or {}).items():
+            normalized_underlying = str(underlying or '').strip()
+            if '.' in normalized_underlying:
+                _, normalized_underlying = normalized_underlying.split('.', 1)
+            normalized_ids = []
+            seen = set()
+            for opt_id in option_ids or []:
+                normalized_opt = str(opt_id or '').strip()
+                if '.' in normalized_opt:
+                    _, normalized_opt = normalized_opt.split('.', 1)
+                if normalized_opt and normalized_opt not in seen:
+                    seen.add(normalized_opt)
+                    normalized_ids.append(normalized_opt)
+            if normalized_underlying and normalized_ids:
+                result[normalized_underlying] = normalized_ids
+        return result
+
+    @staticmethod
+    def _count_option_contracts(options_dict: Dict[str, List[str]]) -> int:
+        """计算期权合约总数"""
+        return sum(len(v) for v in (options_dict or {}).values())
+
+    @staticmethod
+    def _derive_underlying_futures(options_dict: Dict[str, List[str]]) -> List[str]:
+        """从期权字典推导标的期货列表"""
+        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        underlying_set = set()
+        for underlying in (options_dict or {}).keys():
+            clean = str(underlying or '').strip()
+            if '.' in clean:
+                _, clean = clean.split('.', 1)
+            try:
+                parsed = SubscriptionManager.parse_future(clean)
+                if parsed.get('product') and parsed.get('year_month'):
+                    underlying_set.add(f"{parsed['product']}{parsed['year_month']}")
+            except (ValueError, Exception):
+                underlying_set.add(clean)
+        return sorted(underlying_set)
+
     # ========================================================================
     # 品种与合约查询
     # ========================================================================
@@ -449,7 +717,7 @@ class QueryService:
                 
                 futures = ds.query(
                     "SELECT instrument_id FROM futures_instruments "
-                    "WHERE product=? AND is_active=TRUE ORDER BY instrument_id",
+                    "WHERE product=? ORDER BY instrument_id",
                     [normalized_product]
                 )
                 if hasattr(futures, 'num_rows') and futures.num_rows > 0:
@@ -458,7 +726,7 @@ class QueryService:
                 
                 options = ds.query(
                     "SELECT instrument_id FROM option_instruments "
-                    "WHERE product=? AND is_active=TRUE ORDER BY instrument_id",
+                    "WHERE product=? ORDER BY instrument_id",
                     [normalized_product]
                 )
                 if hasattr(options, 'num_rows') and options.num_rows > 0:
@@ -500,10 +768,12 @@ class QueryService:
         all_instruments = self.get_active_instruments_by_product(product)
         current_month_contracts = []
         
+        # ✅ 使用 params_service 元数据获取年月，而非正则
+        from ali2026v3_trading.params_service import get_params_service
+        ps = get_params_service()
         for inst_id in all_instruments:
-            # 提取年月部分（如 IF2603 -> 2603）
-            match = re.search(r'(\d{4})', inst_id)
-            if match and match.group(1) == current_month:
+            meta = ps.get_instrument_meta_by_id(inst_id)
+            if meta and meta.get('year_month') == current_month:
                 current_month_contracts.append(inst_id)
         
         return current_month_contracts
@@ -523,10 +793,12 @@ class QueryService:
         all_instruments = self.get_active_instruments_by_product(product)
         next_month_contracts = []
         
+        # ✅ 使用 params_service 元数据获取年月，而非正则
+        from ali2026v3_trading.params_service import get_params_service
+        ps = get_params_service()
         for inst_id in all_instruments:
-            # 提取年月部分（如 IF2603 -> 2603）
-            match = re.search(r'(\d{4})', inst_id)
-            if match and match.group(1) == next_month:
+            meta = ps.get_instrument_meta_by_id(inst_id)
+            if meta and meta.get('year_month') == next_month:
                 next_month_contracts.append(inst_id)
         
         return next_month_contracts
@@ -1414,7 +1686,7 @@ class StorageMaintenanceService:
                 UPDATE futures_instruments
                 SET exchange = (
                     SELECT fp.exchange FROM future_products fp
-                    WHERE fp.product = futures_instruments.product AND fp.is_active=TRUE
+                    WHERE fp.product = futures_instruments.product
                 )
                 WHERE COALESCE(exchange, '') IN ('', 'AUTO')
                   AND product != 'LEGACY'
@@ -1435,7 +1707,7 @@ class StorageMaintenanceService:
                 UPDATE option_instruments
                 SET exchange = (
                     SELECT op.exchange FROM option_products op
-                    WHERE UPPER(op.product) = UPPER(option_instruments.product) AND op.is_active=TRUE
+                    WHERE UPPER(op.product) = UPPER(option_instruments.product)
                 )
                 WHERE COALESCE(exchange, '') IN ('', 'AUTO')
                   AND product != 'LEGACY'
@@ -1473,7 +1745,7 @@ class StorageMaintenanceService:
                     SELECT op.product
                     FROM option_products op
                     WHERE UPPER(op.product) = UPPER(option_instruments.product)
-                    ORDER BY op.is_active DESC, op.product
+                    ORDER BY op.product
                     LIMIT 1
                 )
                 WHERE EXISTS (
@@ -1550,7 +1822,7 @@ class StorageMaintenanceService:
 
             result = ds.query(
                 "SELECT product, exchange, underlying_product, format_template, is_active "
-                "FROM option_products WHERE UPPER(product)=? ORDER BY is_active DESC, product LIMIT 1",
+                "FROM option_products WHERE UPPER(product)=? ORDER BY product LIMIT 1",
                 (normalized_product,)
             )
             row = None
@@ -1675,12 +1947,14 @@ def is_symbol_current_or_next(symbol: str, params: Any) -> bool:
         if not month_mapping:
             return True
         
-        # 使用大小写不敏感的正则，不修改原始 symbol
-        match = re.match(r'^([A-Za-z]+)', symbol)
-        if not match:
+        # ✅ 使用 params_service 元数据获取品种，而非正则
+        from ali2026v3_trading.params_service import get_params_service
+        ps = get_params_service()
+        meta = ps.get_instrument_meta_by_id(symbol)
+        if not meta:
             return True
         
-        product = match.group(1).upper()
+        product = meta.get('product', '').upper()
         if product in month_mapping:
             specified_months = month_mapping[product]
             if isinstance(specified_months, (list, tuple)) and len(specified_months) >= 2:

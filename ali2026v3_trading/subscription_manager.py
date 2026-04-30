@@ -163,6 +163,25 @@ class SubscriptionManager:
         self._subscriptions: Dict[str, Dict] = {}
         self.t_type_service = None
         
+        # 订阅成功跟踪：用实际收到作为成功标准（品种维度）
+        self._subscription_success = {
+            'total_subscribed': 0,        # 分母：订阅合约总数
+            'total_products': 0,          # 分母：订阅品种总数
+            'kline_received': 0,          # 分子：收到K线的合约数
+            'tick_received': 0,           # 分子：收到Tick的合约数
+            'kline_products': set(),      # 已收到K线的品种集合（如 AU, CU, AL）
+            'tick_products': set(),       # 已收到Tick的品种集合
+            'kline_instruments': set(),   # 已收到K线的合约集合
+            'tick_instruments': set(),    # 已收到Tick的合约集合
+            'subscribed_products': set(), # 已订阅的品种集合
+            'subscribe_time': {},         # {inst_id: subscribe_timestamp}
+        }
+        self._subscription_success_lock = threading.Lock()
+        self._submgr_tick_summary_interval = 60.0
+        self._submgr_tick_last_output_time = 0.0
+        self._submgr_tick_accum_count = 0
+        self._submgr_tick_accum_lock = threading.Lock()
+        
         # 重试队列 (task_data, retry_count, next_retry_time, enqueue_time)
         self._retry_queue: deque = deque(maxlen=self._config.retry_queue_max_size)
         self._dropped_count = 0
@@ -731,47 +750,41 @@ class SubscriptionManager:
     
     @staticmethod
     def parse_option(instrument_id: str) -> Dict[str, Any]:
-        """
-        解析期权合约（两种格式都能正确解析，品种ID直通）
+        r"""
+        解析期权合约(单一正则同时匹配连字符和紧凑格式, 品种ID直通)
         
-        ✅ 修复标准：两种格式正则都能正确解析，最佳方案是调用统一的正则解析
-        实际上应该：两种格式分别用各自正则解析，品种ID直通（不进行标准化），保持原始结构
+        修复标准#125: 一种正则解析所有格式, 原样ID直通不改变格式.
+        统一正则 r'^([A-Za-z]+)(\d{3,4})-?([CP])-?(\d+(?:\.\d+)?)$'
+        同时匹配连字符格式(CU2603-C-5000)和紧凑格式(CU2603C5000).
         """
         clean_id = SubscriptionManager._strip_exchange_prefix(instrument_id)
         
-        SHFE_OPTION_PRODUCTS_LOWER = {'cu', 'al', 'zn', 'au', 'ag', 'rb', 'ru', 'hc', 'bu', 'sp', 
-                                       'ni', 'sn', 'pb', 'ss', 'wr', 'nr', 'fu', 'br'}
-        
-        # 尝试连字符格式：CU2603-C-5000
-        match = re.match(r'^([A-Za-z]+)(\d{4})-([CP])-(\d+(?:\.\d+)?)$', clean_id)
+        # 单一正则: 同时匹配连字符格式和紧凑格式
+        # - 连字符: CU2603-C-5000 (-分隔, 行权价支持小数)
+        # - 紧凑: CU2603C5000 (无分隔, 行权价仅整数)
+        # -? 使连字符可选, \d{3,4} 覆盖两种年月位数
+        match = re.match(r'^([A-Za-z]+)(\d{3,4})-?([CP])-?(\d+(?:\.\d+)?)$', clean_id)
         if match:
-            # ✅ 品种ID直通：直接使用正则提取的原始值，不进行标准化
-            return {
-                'product': match.group(1),  # 直通：保持原始大小写
-                'year_month': match.group(2),
-                'option_type': match.group(3),
-                'strike_price': float(match.group(4)),
-                'format': 'dash'
-            }
-        
-        # 尝试紧凑格式：CU2603C5000
-        match = re.match(r'^([A-Za-z]+)(\d{3,4})([CP])(\d+)$', clean_id)
-        if match:
-            # ✅ 品种ID直通：直接使用正则提取的原始值，不进行标准化
+            product = match.group(1)  # 直通: 保持原始大小写
             year_month_raw = match.group(2)
+            option_type = match.group(3)
+            strike_price = float(match.group(4))
             
-            # 归一化年月（3位转4位）- 这是必要的，因为紧凑格式的年月需要标准化
+            # 年月归一化(3位转4位, 仅紧凑格式可能出现3位)
             year_month = SubscriptionManager._normalize_option_year_month(year_month_raw)
             
+            # 格式标记: 通过原始ID中是否含-判断(不改变ID, 仅标记来源格式)
+            fmt = 'dash' if '-' in clean_id else 'compact'
+            
             return {
-                'product': match.group(1),  # 直通：保持原始大小写
+                'product': product,
                 'year_month': year_month,
-                'option_type': match.group(3),
-                'strike_price': float(match.group(4)),
-                'format': 'compact'
+                'option_type': option_type,
+                'strike_price': strike_price,
+                'format': fmt,
             }
         
-        raise ValueError(f"无法解析期权：{instrument_id}")
+        raise ValueError(f"无法解析期权: {instrument_id}")
     
     @staticmethod
     def _normalize_option_year_month(year_month_raw: str) -> str:
@@ -1050,7 +1063,7 @@ class SubscriptionManager:
                 if cached_meta is not None:
                     return cached_meta
 
-                future_info = params_service.get_id_cache(future_internal_id)
+                future_info = params_service.get_instrument_meta(future_internal_id)
                 if future_info:
                     resolved_meta = {
                         'product': str(future_info.get('product') or '').strip(),
@@ -1190,6 +1203,22 @@ class SubscriptionManager:
         
         normalized_id = self._strip_exchange_prefix(str(instrument_id).strip())
         
+        diag_on = False
+        try:
+            from ali2026v3_trading.diagnosis_service import is_monitored_contract
+            diag_on = is_monitored_contract(normalized_id)
+        except Exception:
+            pass
+        if diag_on:
+            now = time.time()
+            with self._submgr_tick_accum_lock:
+                self._submgr_tick_accum_count += 1
+                if now - self._submgr_tick_last_output_time >= self._submgr_tick_summary_interval:
+                    logging.info(f"[SUBMGR_TICK_ALL_SUMMARY] ticks={self._submgr_tick_accum_count} "
+                                f"sample=({instrument_id} -> {normalized_id} P={last_price} V={volume})")
+                    self._submgr_tick_accum_count = 0
+                    self._submgr_tick_last_output_time = now
+        
         try:
             # 优先从 ParamsService metadata 路由
             routed = False
@@ -1281,6 +1310,158 @@ class SubscriptionManager:
                 return
         except Exception as exc:
             logger.error("[SubscriptionManagerV2] Tick processing failed: %s - %s", normalized_id, exc)
+
+    # ========================================================================
+    # 订阅成功跟踪：用实际收到作为成功标准
+    # ========================================================================
+    
+    @staticmethod
+    def _extract_product(instrument_id: str) -> str:
+        """从合约ID提取品种代码
+        
+        Examples:
+            au2605C1032 -> AU
+            al2605C25200 -> AL
+            cu2605 -> CU
+            HO2605-C-2800 -> HO
+        """
+        import re
+        if not instrument_id:
+            return ''
+        # 匹配品种代码：字母前缀
+        m = re.match(r'^([A-Za-z]+)', instrument_id)
+        if m:
+            return m.group(1).upper()
+        return instrument_id[:2].upper() if len(instrument_id) >= 2 else instrument_id.upper()
+    
+    def record_subscription(self, instrument_ids: List[str]) -> None:
+        """记录订阅合约列表（分母）"""
+        with self._subscription_success_lock:
+            now = time.time()
+            products = set()
+            for inst_id in instrument_ids:
+                self._subscription_success['subscribe_time'][inst_id] = now
+                product = self._extract_product(inst_id)
+                if product:
+                    products.add(product)
+            self._subscription_success['total_subscribed'] = len(instrument_ids)
+            self._subscription_success['subscribed_products'] = products
+            self._subscription_success['total_products'] = len(products)
+    
+    def record_kline_received(self, instrument_id: str) -> None:
+        """记录收到K线（分子：平台返回过K线的合约）"""
+        with self._subscription_success_lock:
+            if instrument_id not in self._subscription_success['kline_instruments']:
+                self._subscription_success['kline_instruments'].add(instrument_id)
+                self._subscription_success['kline_received'] += 1
+                product = self._extract_product(instrument_id)
+                if product:
+                    self._subscription_success['kline_products'].add(product)
+    
+    def record_tick_received(self, instrument_id: str) -> None:
+        """记录收到Tick（分子：平台推送过Tick的合约）"""
+        with self._subscription_success_lock:
+            if instrument_id not in self._subscription_success['tick_instruments']:
+                self._subscription_success['tick_instruments'].add(instrument_id)
+                self._subscription_success['tick_received'] += 1
+                product = self._extract_product(instrument_id)
+                if product:
+                    self._subscription_success['tick_products'].add(product)
+    
+    def get_subscription_success_rate(self) -> Dict[str, Any]:
+        """获取订阅成功率统计
+        
+        Returns:
+            {
+                'total_subscribed': 分母（合约数）,
+                'total_products': 分母（品种数）,
+                'kline_received': K线分子（合约数）,
+                'tick_received': Tick分子（合约数）,
+                'kline_products': K线分子（品种数）,
+                'tick_products': Tick分子（品种数）,
+                'kline_rate': K线成功率（合约维度）,
+                'tick_rate': Tick成功率（合约维度）,
+                'kline_product_rate': K线成功率（品种维度）,
+                'tick_product_rate': Tick成功率（品种维度）,
+            }
+        """
+        with self._subscription_success_lock:
+            total = self._subscription_success['total_subscribed']
+            total_products = self._subscription_success['total_products']
+            kline_count = self._subscription_success['kline_received']
+            tick_count = self._subscription_success['tick_received']
+            kline_products = len(self._subscription_success['kline_products'])
+            tick_products = len(self._subscription_success['tick_products'])
+            
+            kline_rate = kline_count / total if total > 0 else 0.0
+            tick_rate = tick_count / total if total > 0 else 0.0
+            kline_product_rate = kline_products / total_products if total_products > 0 else 0.0
+            tick_product_rate = tick_products / total_products if total_products > 0 else 0.0
+            
+            all_subscribed = set(self._subscription_success['subscribe_time'].keys())
+            kline_missing = list(all_subscribed - self._subscription_success['kline_instruments'])
+            tick_missing = list(all_subscribed - self._subscription_success['tick_instruments'])
+            
+            kline_missing_products = list(self._subscription_success['subscribed_products'] - self._subscription_success['kline_products'])
+            tick_missing_products = list(self._subscription_success['subscribed_products'] - self._subscription_success['tick_products'])
+            
+            return {
+                'total_subscribed': total,
+                'total_products': total_products,
+                'kline_received': kline_count,
+                'tick_received': tick_count,
+                'kline_products': kline_products,
+                'tick_products': tick_products,
+                'kline_rate': kline_rate,
+                'tick_rate': tick_rate,
+                'kline_product_rate': kline_product_rate,
+                'tick_product_rate': tick_product_rate,
+                'kline_missing_count': len(kline_missing),
+                'tick_missing_count': len(tick_missing),
+                'kline_missing': kline_missing[:50],
+                'tick_missing': tick_missing[:50],
+                'kline_missing_products': kline_missing_products,
+                'tick_missing_products': tick_missing_products,
+            }
+    
+    def log_subscription_success_summary(self) -> None:
+        """输出订阅成功率摘要日志"""
+        stats = self.get_subscription_success_rate()
+        
+        logger.info("=" * 80)
+        logger.info("[订阅成功率统计] 分母=%d合约 / %d品种", stats['total_subscribed'], stats['total_products'])
+        logger.info("-" * 80)
+        
+        # 合约维度
+        logger.info(
+            "[合约维度] K线: %d/%d = %.1f%% | Tick: %d/%d = %.1f%%",
+            stats['kline_received'], stats['total_subscribed'], stats['kline_rate'] * 100,
+            stats['tick_received'], stats['total_subscribed'], stats['tick_rate'] * 100
+        )
+        
+        # 品种维度
+        logger.info(
+            "[品种维度] K线: %d/%d = %.1f%% | Tick: %d/%d = %.1f%%",
+            stats['kline_products'], stats['total_products'], stats['kline_product_rate'] * 100,
+            stats['tick_products'], stats['total_products'], stats['tick_product_rate'] * 100
+        )
+        
+        # 未收到数据的品种
+        if stats['tick_missing_products']:
+            logger.warning("[Tick未收到品种] %s", ', '.join(stats['tick_missing_products'][:20]))
+        
+        if stats['kline_missing_products']:
+            logger.warning("[K线未收到品种] %s", ', '.join(stats['kline_missing_products'][:20]))
+        
+        # 未收到数据的合约样例
+        if stats['tick_missing_count'] > 0 and stats['tick_missing']:
+            logger.warning("[Tick未收到合约] 前20个:")
+            for inst in stats['tick_missing'][:20]:
+                logger.warning(f"  {inst}")
+            if stats['tick_missing_count'] > 20:
+                logger.warning(f"  ... 还有 {stats['tick_missing_count'] - 20} 个")
+        
+        logger.info("=" * 80)
 
 
 # ========== 测试代码 ==========

@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import re
 import threading
 import logging
 import time
@@ -265,9 +264,9 @@ class OrderService(BaseService):
         try:
             from ali2026v3_trading.params_service import get_params_service
             params_svc = get_params_service()
-            # 直接使用正则提取品种代码（与 analytics_service 保持一致）
-            product_match = re.match(r'^([A-Za-z]+)', instrument_id)
-            product = product_match.group(1) if product_match else instrument_id
+            # ✅ 使用 params_service 元数据获取品种，而非正则
+            meta = params_svc.get_instrument_meta_by_id(instrument_id)
+            product = meta.get('product') if meta else instrument_id
             product_cache = params_svc.get_product_cache(product)
             if product_cache:
                 tick_size = float(product_cache.get('tick_size', 0))

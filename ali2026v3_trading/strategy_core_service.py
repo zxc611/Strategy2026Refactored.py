@@ -18,7 +18,6 @@ from __future__ import annotations
 import os
 import sys
 import inspect
-import re
 import importlib.util
 import time
 import threading
@@ -173,6 +172,7 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             'first_tick_received': 0,        # 段4: 已收到首笔Tick的合约数
             'enqueued_count': 0,             # 段5: 已入队Tick/K线数
             'persisted_count': 0,            # 段6: 已落盘Tick/K线数
+            'kline_persisted_count': 0,      # 段7: 已落盘K线数（BP-9修复）
         }
         self._e2e_first_tick_set = set()  # 记录已收到首笔Tick的合约ID
 
@@ -182,6 +182,7 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
         self._future_ids: set[str] = set()
         self._option_ids: set[str] = set()
         self._subscribed_instruments: List[str] = []
+        self._init_instruments_result: Optional[Dict[str, Any]] = None
         
         self._storage = None
         self._storage_init_error = None
@@ -293,8 +294,12 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
         
         # 根据PythonGO文档，sub_market_data(exchange, instrument_id) 使用位置参数
         if callable(sub):
+            _sub_call_counter = [0]
             def _subscribe(instrument_id: str, data_type: str = 'tick') -> None:
                 exchange = resolve_product_exchange(instrument_id)
+                _sub_call_counter[0] += 1
+                if _sub_call_counter[0] <= 10 or (exchange == 'SHFE' and 'C' in instrument_id[6:] or 'P' in instrument_id[6:]):
+                    logging.info(f"[PROBE_SUB] #{_sub_call_counter[0]} exchange={exchange} instrument_id={instrument_id}")
                 sub(exchange, instrument_id)
             self.subscribe = _subscribe
         else:
@@ -309,16 +314,8 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             self.unsubscribe = None
         
         self.get_instrument = getattr(strategy_obj, 'get_instrument', None)
-        self._platform_insert_order = _read_param(strategy_obj, 'insert_order')
-        if self._platform_insert_order is None:
-            self._platform_insert_order = _read_param(strategy_obj, 'send_order')
-            if self._platform_insert_order is not None:
-                logging.info("[bind_platform_apis] insert_order未找到，使用send_order降级")
-        self._platform_cancel_order = _read_param(strategy_obj, 'cancel_order')
-        if self._platform_cancel_order is None:
-            self._platform_cancel_order = _read_param(strategy_obj, 'cancel_order_ref')
-            if self._platform_cancel_order is not None:
-                logging.info("[bind_platform_apis] cancel_order未找到，使用cancel_order_ref降级")
+        self._platform_insert_order = _read_param(strategy_obj, 'insert_order') or _read_param(strategy_obj, 'send_order')
+        self._platform_cancel_order = _read_param(strategy_obj, 'cancel_order') or _read_param(strategy_obj, 'cancel_order_ref')
         self._platform_get_position = getattr(strategy_obj, 'get_position', None)
         self._platform_get_orders = getattr(strategy_obj, 'get_orders', None)
         # 历史K线API通过 MarketCenter.get_kline_data 获取，不是 strategy.get_kline
@@ -446,14 +443,24 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                                     try:
                                         from ali2026v3_trading.data_service import get_data_service
                                         parsed = SubscriptionManager.parse_option(inst_id)
+                                        option_product = parsed['product']
+                                        year_month = parsed['year_month']
+
+                                        # ✅ 修复：期权品种→期货品种映射（MO→IM, IO→IF, HO→IH）
+                                        # 注意：IC期货没有对应期权，EO期权尚未上市
+                                        OPTION_TO_FUTURE_MAP = {
+                                            'MO': 'IM', 'IO': 'IF', 'HO': 'IH'
+                                        }
+                                        future_product = OPTION_TO_FUTURE_MAP.get(option_product, option_product)
+
                                         rows = get_data_service().query(
                                             "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
-                                            [parsed['product'], parsed['year_month']]
+                                            [future_product, year_month]
                                         ).to_pylist()
                                         if rows:
                                             underlying = rows[0]['instrument_id']
                                         else:
-                                            logging.warning(f"[InitServices] 标的期货未注册: {parsed['product']}{parsed['year_month']}，跳过期权{inst_id}")
+                                            logging.warning(f"[InitServices] 标的期货未注册: {future_product}{year_month}（期权{option_product}{year_month}），跳过期权{inst_id}")
                                             continue
                                     except Exception as db_err:
                                         logging.warning(f"[InitServices] underlying_future_id缺失且DB查询失败: {inst_id} - {db_err}")
@@ -513,7 +520,6 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                         
                         init_count = 0
                         if hasattr(futures_df, 'iterrows'):
-                            import re
                             for _, row in futures_df.iterrows():
                                 try:
                                     instrument_id = str(row['instrument_id']).strip()
@@ -555,18 +561,16 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                         ds = get_data_service()
                         options_df = ds.query("""
                             WITH latest_option_meta AS (
-                                SELECT instrument_id, option_type, strike_price, future_instrument_id
+                                SELECT instrument_id, option_type, strike_price
                                 FROM (
                                     SELECT
                                         instrument_id,
                                         option_type,
                                         strike_price,
-                                        future_instrument_id,
                                         ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY timestamp DESC) AS rn
                                     FROM ticks_raw
                                     WHERE option_type IS NOT NULL
                                       AND strike_price IS NOT NULL
-                                      AND future_instrument_id IS NOT NULL
                                 ) t
                                 WHERE rn = 1
                             )
@@ -574,8 +578,7 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                                 lp.instrument_id,
                                 lp.last_price,
                                 meta.option_type,
-                                meta.strike_price,
-                                meta.future_instrument_id
+                                meta.strike_price
                             FROM latest_prices lp
                             INNER JOIN latest_option_meta meta
                                 ON lp.instrument_id = meta.instrument_id
@@ -585,7 +588,6 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                         
                         options_loaded = 0
                         if hasattr(options_df, 'iterrows'):
-                            import re
                             for _, row in options_df.iterrows():
                                 try:
                                     instrument_id = str(row['instrument_id']).strip()
@@ -606,6 +608,14 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                                     if not option_product or not month or strike <= 0 or price <= 0:
                                         continue
                                     
+                                    # 从期权代码解析标的期货代码
+                                    underlying_future = ''
+                                    try:
+                                        parsed_opt = SubscriptionManager.parse_option(instrument_id)
+                                        underlying_future = f"{parsed_opt['product']}{parsed_opt['year_month']}"
+                                    except Exception:
+                                        pass
+                                    
                                     self.t_type_service._width_cache.register_option(
                                         instrument_id,
                                         option_product,
@@ -613,7 +623,7 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                                         strike,
                                         opt_type,
                                         price,
-                                        str(row['future_instrument_id'] or ''),
+                                        underlying_future,
                                     )
                                     options_loaded += 1
                                 except Exception as opt_e:
@@ -803,21 +813,18 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                 # 无需额外初始化 kline_generator
                 # ===========================================================
 
-                # _futures_instruments 和 _option_instruments 已删除
-                logging.info("[Instruments] 使用 storage.py 原生订阅模式，无需预先生成合约列表")
-                
-                if self.params is not None:
-                    if isinstance(self.params, dict):
-                        self.params.setdefault('future_instruments', [])
-                        self.params.setdefault('option_instruments', {})
-                    else:
-                        setattr(self.params, 'future_instruments', getattr(self.params, 'future_instruments', []))
-                        setattr(self.params, 'option_instruments', getattr(self.params, 'option_instruments', {}))
-                
+                # ========== 步骤2: 从合约配置文件加载合约列表+预注册（必须在初始化前完成，失败即终止） ==========
+                logging.info("[Init-Step2] 从合约配置文件加载合约列表+预注册...")
+                from ali2026v3_trading.query_service import QueryService
+                _qs = QueryService(self.storage)
+                self._init_instruments_result = _qs.load_and_preregister_instruments(self.storage, self.params)
+                total_f = len(self._init_instruments_result['futures_list'])
+                total_o = _qs._count_option_contracts(self._init_instruments_result['options_dict'])
                 logging.info(
-                    f"[Instruments] 使用 storage.py 原生模式 - "
-                    f"合约数量由 storage 管理"
+                    f"[Init-Step2] ✅ 合约加载+预注册完成: 期货=%d, 期权=%d, 共=%d",
+                    total_f, total_o, len(self._init_instruments_result['subscribed_instruments']),
                 )
+                # ============================================================
                 
                 # P1-1修复：将 _init_analytics_services 从同步主链拆出，改为异步后台warmup
                 # 目标：onInit 总耗时压到 5 秒以内，analytics warmup 不阻塞 execution ready
@@ -852,21 +859,27 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                 self._stats['last_error_message'] = str(e)
                 return False
 
-    # 合约加载功能已迁移至 params_service.ParamsService
-    # 使用: params_service.load_instrument_list(), cache_instrument_list() 等方法
+    # 合约加载+预注册功能已迁移至 query_service.QueryService.load_and_preregister_instruments
 
     @staticmethod
     def _extract_contract_year_month(instrument_id: str) -> Optional[str]:
         """提取合约中的四位年月（yyMM），无法提取时返回 None。
 
-        使用 SubscriptionManager.parse_option() 正确解析 SHFE 紧凑格式期权。
+        优先使用 params_service 元数据获取年月，避免正则解析。
         """
         normalized = str(instrument_id or '').strip()
         if not normalized:
             return None
 
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        # ✅ 优先使用 params_service 元数据（自带属性）
+        from ali2026v3_trading.params_service import get_params_service
+        ps = get_params_service()
+        meta = ps.get_instrument_meta_by_id(normalized)
+        if meta and meta.get('year_month'):
+            return meta['year_month']
 
+        # 回退：使用 SubscriptionManager 解析（数据入口）
+        from ali2026v3_trading.subscription_manager import SubscriptionManager
         if SubscriptionManager.is_option(instrument_id):
             try:
                 parsed = SubscriptionManager.parse_option(instrument_id)
@@ -874,12 +887,7 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             except (ValueError, KeyError):
                 return None
 
-        base = normalized.split('-', 1)[0]
-        match = re.search(r'(\d{4})$', base)
-        if not match:
-            return None
-
-        return match.group(1)
+        return None
 
     # ========================================================================
     # 订单和持仓服务惰性初始化
@@ -1178,13 +1186,11 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             
             logging.info(f"[StrategyCoreService.on_start] Started: {self.strategy_id}")
                         
-            # ========== ✅ 新增：完整订阅流程 (2026-03-28) ==========
-            # 从配置文件读取品种，调用 storage 查询接口获取合约，完成订阅
-            # 不依赖 platform 的 instrument_list，直接从配置驱动
+            # ========== 订阅流程：使用on_init中已完成的合约加载+预注册结果 ==========
+            # on_init步骤2已保证合约加载+预注册100%成功（失败则初始化终止，on_start不会执行）
+            # on_start只负责：使用缓存结果 → 执行平台订阅
             # ============================================================
                         
-            # P0修复：从 _runtime_strategy_host 获取 params，而不是 self.params
-            # StrategyCoreService 实例没有 params 属性，必须从 Strategy2026 实例获取
             params = None
             if hasattr(self, '_runtime_strategy_host') and self._runtime_strategy_host:
                 params = getattr(self._runtime_strategy_host, 'params', None)
@@ -1192,114 +1198,27 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             if params is None:
                 logging.warning("[Subscribe] ⚠️ 无法获取 params 对象，跳过订阅")
                 return True
-                        
-            # 1. 读取配置
-            future_products_str = get_param_value(params, 'future_products', '')
-            option_products_str = get_param_value(params, 'option_products', '')
-                        
-            # 2. 解析品种列表
-            future_products = [p.strip() for p in future_products_str.split(',') if p.strip()]
-            option_products = [p.strip() for p in option_products_str.split(',') if p.strip()]
-                        
-            logging.info(f"[Subscribe] 配置品种：期货={len(future_products)} 个，期权={len(option_products)} 个")
-            if future_products:
-                logging.debug(f"[Subscribe] 期货品种：{future_products[:5]}...")
-            if option_products:
-                logging.debug(f"[Subscribe] 期权品种：{option_products[:5]}...")
-                        
-            cached_result = self._load_instruments_from_param_cache(params)
-            should_prefer_output_files = bool(get_param_value(params, 'load_all_products', False)) or \
-                str(get_param_value(params, 'run_profile', '')) == 'full'
 
-            selected_futures_list: List[str] = []
-            selected_options_dict: Dict[str, List[str]] = {}
-            selected_source = 'none'
-
-            if cached_result:
-                # ✅ 规范化期货和期权合约
-                selected_futures_list = self._normalize_cached_futures(cached_result['futures_list'])
-                selected_options_dict = self._normalize_cached_options(cached_result['options_dict'])
-                selected_source = 'params_cache'
-                logging.info(f"[Subscribe] 从参数缓存加载并规范化: {len(selected_futures_list)} 期货, {self._count_option_contracts(selected_options_dict)} 期权")
-            elif should_prefer_output_files:
-                file_result = self._load_instruments_from_output_files()
-                if file_result:
-                    # ✅ 规范化期货和期权合约
-                    selected_futures_list = self._normalize_cached_futures(file_result['futures_list'])
-                    selected_options_dict = self._normalize_cached_options(file_result['options_dict'])
-                    selected_source = 'output_files'
-                    logging.info(f"[Subscribe] 从输出文件加载并规范化: {len(selected_futures_list)} 期货, {self._count_option_contracts(selected_options_dict)} 期权")
-                    self._cache_instruments_to_params(
-                        params,
-                        selected_futures_list,
-                        selected_options_dict,
-                        selected_source,
-                    )
-
-            derived_futures = self._derive_underlying_futures_from_options(selected_options_dict)
-            if derived_futures:
-                existing_futures = set(selected_futures_list)
-                added_futures = [item for item in derived_futures if item not in existing_futures]
-                if added_futures:
-                    selected_futures_list.extend(added_futures)
-                    logging.info("[Subscribe] 从期权清单补齐 %d 个标的期货", len(added_futures))
-
-            # 3. 调用 storage 查询接口获取合约（最后回退）
-            if not selected_futures_list and not selected_options_dict and self.storage and (future_products or option_products):
-                try:
-                    all_instrument_ids = []
-                    selected_source = 'storage'
-                                
-                    # 获取期货合约
-                    if future_products:
-                        futures_from_storage = self.storage.get_active_instruments_by_products(future_products)
-                        all_instrument_ids.extend(futures_from_storage)
-                        logging.info(f"[Subscribe] 从 storage 获取到 {len(futures_from_storage)} 个期货合约")
-                                
-                    # 获取期权合约
-                    if option_products:
-                        options_from_storage = self.storage.get_active_instruments_by_products(option_products)
-                        all_instrument_ids.extend(options_from_storage)
-                        logging.info(f"[Subscribe] 从 storage 获取到 {len(options_from_storage)} 个期权合约")
-                                
-                    # 4. 分类
-                    if all_instrument_ids:
-                        from ali2026v3_trading.query_service import get_query_service
-                        qs = get_query_service()
-                        futures_list, options_dict = qs.classify_instruments(all_instrument_ids)
-                        
-                        # ✅ 规范化期货和期权合约
-                        selected_futures_list = self._normalize_cached_futures(futures_list)
-                        selected_options_dict = self._normalize_cached_options(options_dict)
-                        
-                        total_options = self._count_option_contracts(selected_options_dict)
-                        logging.info(f"[Subscribe] 从 storage 加载并规范化: {len(selected_futures_list)} 期货，{total_options} 期权")
-                except Exception as e:
-                    logging.error(f"[Subscribe] 失败：{e}")
-                    logging.exception("[Subscribe] Stack:")
+            selected_futures_list = self._init_instruments_result['futures_list']
+            selected_options_dict = self._init_instruments_result['options_dict']
+            self._subscribed_instruments = self._init_instruments_result['subscribed_instruments']
+            logging.info(
+                f"[Subscribe] 使用on_init结果: "
+                f"{len(selected_futures_list)} 期货, "
+                f"{self._count_option_contracts(selected_options_dict)} 期权, "
+                f"共 {len(self._subscribed_instruments)} 个合约"
+            )
 
             if selected_futures_list or selected_options_dict:
-                # _futures_instruments 和 _option_instruments 已删除
-                subscribe_list = list(selected_futures_list)
-                for option_ids in selected_options_dict.values():
-                    subscribe_list.extend(option_ids or [])
-
-                seen = set()
-                self._subscribed_instruments = [
-                    inst for inst in subscribe_list if not (inst in seen or seen.add(inst))
-                ]
-                # P0修复：e2e段1 - 配置合约数
+                try:
+                    from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
+                    DiagnosisProbeManager.start_contract_watch(self._subscribed_instruments)
+                except Exception as contract_watch_e:
+                    logging.warning("[ContractWatch] 启动失败: %s", contract_watch_e)
                 self._e2e_counters['configured_instruments'] = len(self._subscribed_instruments)
 
-                # P1-2修复：预注册拆到后台任务，不阻塞 onStart 主链
-                # 目标：onStart 总耗时预算 < 3s，预注册/历史补齐异步补完
-                if self.storage and self._subscribed_instruments:
-                    self._start_preregister_async(self._subscribed_instruments)
-
-                # 5. 调用 SubscriptionManager 统一订阅
-                # 显式确保 storage 已初始化
                 try:
-                    _ = self.storage  # 触发初始化
+                    _ = self.storage
                     logging.info(f"[Subscribe] storage 已就绪: {self.storage is not None}")
                 except Exception as storage_e:
                     logging.error(f"[Subscribe] storage 初始化失败: {storage_e}")
@@ -1310,21 +1229,19 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                         selected_options_dict,
                     )
                     logging.info(f"[Subscribe] ✅ 数据库登记完成：{db_count} 个合约")
-                    self._e2e_counters['preregistered_instruments'] = db_count  # P0: 六段计数器段2
+                    self._e2e_counters['preregistered_instruments'] = db_count
                     
-                    # 断点A+B修复：平台订阅不可用时重试+DEGRADED
                     if callable(self.subscribe):
                         self._start_platform_subscribe_async(self._subscribed_instruments)
                         logging.info("[Subscribe] 🚀 平台订阅已在后台启动")
-                        self._e2e_counters['platform_subscribe_called'] = len(self._subscribed_instruments)  # P0: 六段计数器段3
+                        self._e2e_counters['platform_subscribe_called'] = len(self._subscribed_instruments)
                     else:
                         logging.warning("[Subscribe] ⚠️ self.subscribe 不可调用，平台API未就绪，安排延迟重试")
                         with self._state_lock:
                             self._state = StrategyState.DEGRADED
                         def _retry_platform_subscribe():
-                            for attempt in range(1, 4):  # 最多重试3次：5s, 10s, 15s
+                            for attempt in range(1, 4):
                                 time.sleep(5.0 * attempt)
-                                # 先尝试重新绑定平台API（根因可能是bind未成功）
                                 if not getattr(self, '_api_ready', False) and hasattr(self, '_runtime_strategy_host') and self._runtime_strategy_host:
                                     try:
                                         self.bind_platform_apis(self._runtime_strategy_host)
@@ -1347,27 +1264,19 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                             daemon=True
                         ).start()
                     
-                    # ✅ 同步分表数据到 ticks_raw（用于状态计算）
-                    # 注释掉初始同步，避免阻塞启动流程
-                    # 定时任务会每分钟增量同步，无需启动时全量同步
                     logging.info(f"[SyncTicks] ⏭️ 跳过初始全量同步，依赖定时任务增量同步")
-                    # try:
-                    #     from ali2026v3_trading.data_service import DataService
-                    #     ds = DataService()
-                    #     storage_db_path = getattr(self.storage, 'db_path', None) if hasattr(self, 'storage') and self.storage else None
-                    #     synced_count = ds.sync_tick_tables_to_ticks_raw(storage_db_path=storage_db_path)
-                    #     logging.info(f"[SyncTicks] ✅ Synced {synced_count:,} tick records to ticks_raw")
-                    # except Exception as e:
-                    #     logging.error(f"[SyncTicks] Failed to sync tick tables: {e}", exc_info=True)
                 else:
                     logging.warning("[Subscribe] 无 subscription_manager")
             else:
-                self._subscribed_instruments = []
-                logging.warning("[Subscribe] 新三步链路未获取到任何合约，跳过订阅")
+                logging.warning("[Subscribe] 无合约可订阅")
 
-            # P1-2修复：历史K线加载拆到后台任务，不阻塞 onStart 主链
-            logging.info("[StrategyCoreService.on_start] 历史K线加载将异步执行...")
-            self._start_historical_kline_load_async()
+            # 历史K线加载：异步执行，不阻塞策略启动
+            auto_load = bool(get_param_value(params, 'auto_load_history', False))
+            if auto_load:
+                logging.info("[StrategyCoreService.on_start] 历史K线加载启动（异步，不阻塞）...")
+                self._start_historical_kline_load_async()
+            else:
+                logging.info("[StrategyCoreService.on_start] auto_load_history=False，跳过历史K线加载")
             
             # 发布事件
             self._publish_event('StrategyStarted', {
@@ -1379,42 +1288,8 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             
             return True
     
-    def _start_preregister_async(self, instrument_ids: List[str]) -> None:
-        """P1-2修复：预注册拆到后台任务，不阻塞 onStart 主链。
-        
-        设计约束（修改必看十原则）：
-        1. 预注册是 non-critical 操作，允许延迟完成
-        2. daemon 线程确保 stop/destroy 不会因预注册卡住
-        3. 预注册失败不影响策略运行态（合约会在 tick 到达时惰性注册）
-        4. 后续任何"为了启动成功顺便做"的动作都必须标注 critical/non-critical
-        """
-        def _preregister_worker():
-            try:
-                prereg_start = time.perf_counter()
-                logging.info("[PreRegisterAsync] 后台预注册开始: %d 个合约", len(instrument_ids))
-                prereg_stats = self.storage.ensure_registered_instruments(instrument_ids)
-                self._last_preregister_stats = prereg_stats
-                elapsed = time.perf_counter() - prereg_start
-                logging.info(
-                    "[PreRegisterAsync] 后台预注册完成 (耗时=%.3fs): "
-                    "配置=%d, 已注册=%d, 缺失=%d, 新建=%d, 失败=%d",
-                    elapsed,
-                    prereg_stats['configured_count'],
-                    prereg_stats['registered_count'],
-                    prereg_stats['missing_count'],
-                    prereg_stats['created_count'],
-                    prereg_stats['failed_count'],
-                )
-            except Exception as e:
-                logging.error(f"[PreRegisterAsync] 后台预注册失败: {e}", exc_info=True)
-
-        threading.Thread(
-            target=_preregister_worker, 
-            name=f"preregister-async[strategy:{self.strategy_id}]",
-            daemon=True
-        ).start()
-        logging.info("[PreRegisterAsync] 预注册已调度到后台线程，onStart 不再阻塞")
-
+    # _start_preregister_async 已删除：预注册已移至on_init步骤2同步执行（query_service.load_and_preregister_instruments）
+    
     def _start_historical_kline_load_async(self) -> None:
         """P1-2修复：历史K线加载拆到后台任务，不阻塞 onStart 主链。
         
@@ -1535,6 +1410,16 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             jobs_zero = False
         
         # ✅ P0-2: Phase 3 - 完成shutdown
+        try:
+            from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
+            DiagnosisProbeManager.stop_contract_watch(reason='strategy_stop')
+        except Exception as contract_watch_e:
+            logging.warning(
+                f"[StrategyCoreService.on_stop][strategy_id={self.strategy_id}]"
+                f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] "
+                f"contract_watch stop error: {contract_watch_e}"
+            )
+
         try:
             self._stop_scheduler()
         except Exception as e:
@@ -1986,13 +1871,22 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
                 
                 # 1. 先停止（统一走 on_stop 主链，确保取消订阅和后台服务关闭）
                 self.on_stop()
-                
+
+                # ✅ 修复：确保运行时服务被关闭（即使 on_stop() 因状态已 STOPPED 快速返回）
+                try:
+                    self._shutdown_runtime_services()
+                except Exception as e:
+                    logging.warning(
+                        f"[StrategyCoreService.destroy][strategy_id={self.strategy_id}]"
+                        f"[run_id={run_id}] _shutdown_runtime_services error: {e}"
+                    )
+
                 # 2. 清理调度器引用
                 self._scheduler = None
-                
+
                 # 3. 清理事件总线引用
                 self._event_bus = None
-                
+
                 # 4. 标记为已销毁
                 self._destroyed = True
                 
@@ -2179,6 +2073,9 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
             if e2e['preregistered_instruments'] == 0:
                 issues.append("E2E: 未完成任何合约预注册")
                 status = 'warning' if status == 'healthy' else status
+            if e2e['kline_persisted_count'] == 0 and uptime > 60:
+                issues.append("E2E: 运行60秒后仍无K线数据落盘")
+                status = 'warning' if status == 'healthy' else status
         
         return {
             'status': status,
@@ -2296,7 +2193,7 @@ class StrategyCoreService(HistoricalKlineMixin, TickHandlerMixin):
         self._scheduler_manager.register_cache_flush_task(data_service)
     
     def _add_14_contracts_diagnosis_job(self) -> None:
-        """添加14个监控合约诊断定时任务（委托给 StrategyScheduler）"""
+        """添加重点监控合约诊断定时任务（委托给 StrategyScheduler）"""
         storage = getattr(self, 'storage', None)
         query_service = getattr(self, 'query_service', None)
         self._scheduler_manager.register_14_contracts_diagnosis_task(storage=storage, query_service=query_service)
@@ -2434,6 +2331,18 @@ class Strategy2026(BaseStrategy, UIMixin):
         
         logging.info("[Strategy2026] 已初始化，运行时配置延迟加载")
         logging.info(f"[Strategy2026] UI 功能已集成，继承自 UIMixin")
+
+    def _log_warning(self, message: str) -> None:
+        """记录警告日志（供UIMixin使用）"""
+        logging.warning(f"[Strategy2026] {message}")
+
+    def _log_info(self, message: str) -> None:
+        """记录信息日志（供UIMixin使用）"""
+        logging.info(f"[Strategy2026] {message}")
+
+    def _log_error(self, message: str) -> None:
+        """记录错误日志（供UIMixin使用）"""
+        logging.error(f"[Strategy2026] {message}")
 
     def _ensure_runtime_config_loaded(self) -> None:
         """延迟加载参数表和运行时配置，缩短实例创建耗时。"""
@@ -2667,6 +2576,11 @@ class Strategy2026(BaseStrategy, UIMixin):
             return None
         except Exception as e:
             logging.error(f"[Strategy2026.onInit] 错误：{e}")
+            logging.info(f"[PROBE_PARAMS_MAP] exchange={getattr(self.params_map, 'exchange', 'N/A')}")
+            logging.info(f"[PROBE_PARAMS_MAP] instrument_id={getattr(self.params_map, 'instrument_id', 'N/A')}")
+            logging.info(f"[PROBE_PARAMS_MAP] exchange_list={self.exchange_list[:10] if self.exchange_list else 'empty'}")
+            logging.info(f"[PROBE_PARAMS_MAP] instrument_list={self.instrument_list[:10] if self.instrument_list else 'empty'}")
+
             logging.exception("[Strategy2026.onInit] 堆栈:")
             self._init_error = e
             self._init_pending = False
@@ -2743,6 +2657,10 @@ class Strategy2026(BaseStrategy, UIMixin):
             if _state_is(current_state, StrategyState.PAUSED) and hasattr(self.strategy_core, 'resume'):
                 result = bool(self.strategy_core.resume())
             elif _state_is(current_state, StrategyState.STOPPED):
+                # ✅ 修复：暂停后恢复需要先重置启动标志，否则onStart()的幂等保护会拦截
+                logging.info("[Strategy2026.internal_resume_strategy] 从STOPPED状态恢复，重置启动标志后调用onStart()")
+                self._start_executed = False
+                self._stop_executed = False
                 self.onStart()
                 result = bool(_state_is(getattr(self.strategy_core, '_state', None), StrategyState.RUNNING))
             else:
@@ -2757,42 +2675,38 @@ class Strategy2026(BaseStrategy, UIMixin):
 
     def onDestroy(self):
         """平台卸载/销毁回调（必须返回 None）。
-        
+
         ✅ P0-1: 移除对隐式补救路径的依赖，不再调用onStop()
         改为直接执行必要的清理步骤
+        ✅ 修复：确保无论onStop是否执行过，都能正确关闭所有链路
         """
         self._callbacks_enabled = False
         self._stop_requested = True
         logging.info("[Strategy2026.onDestroy] enter")
 
-        # ✅ P0-1: 如果尚未执行onStop，直接执行核心清理逻辑
-        # 而不是调用self.onStop()避免重复进入和幂等保护警告
+        # ✅ 修复：统一清理逻辑，无论onStop是否执行过都执行完整清理
+        # 避免onStop执行失败导致某些服务未被关闭的问题
         if not getattr(self, '_stop_executed', False):
-            logging.info("[Strategy2026.onDestroy] onStop not executed, performing cleanup directly")
+            logging.info("[Strategy2026.onDestroy] onStop not executed, performing full cleanup")
             self._stop_executed = True
-            
-            # 执行UI销毁
-            try:
-                self._destroy_output_mode_ui()
-            except Exception as e:
-                logging.warning(f"[Strategy2026.onDestroy] destroy UI failed: {e}")
-            
-            # 执行策略核心停止
-            try:
-                if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'stop'):
-                    result = self.strategy_core.stop()
-                    logging.info(f"[Strategy2026.onDestroy] strategy_core.stop() result: {result}")
-            except Exception as e:
-                logging.error(f"[Strategy2026.onDestroy] strategy_core.stop() error: {e}")
         else:
-            # onStop已执行，只需销毁UI
-            logging.info("[Strategy2026.onDestroy] onStop already executed, skipping duplicate cleanup")
-            try:
-                self._destroy_output_mode_ui()
-            except Exception as e:
-                logging.warning(f"[Strategy2026.onDestroy] destroy UI failed: {e}")
+            logging.info("[Strategy2026.onDestroy] onStop already executed, performing remaining cleanup")
 
-        # 销毁策略核心
+        # 1. 执行UI销毁（无论onStop是否执行过）
+        try:
+            self._destroy_output_mode_ui()
+        except Exception as e:
+            logging.warning(f"[Strategy2026.onDestroy] destroy UI failed: {e}")
+
+        # 2. 执行策略核心停止（无论onStop是否执行过，幂等操作）
+        try:
+            if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'stop'):
+                result = self.strategy_core.stop()
+                logging.info(f"[Strategy2026.onDestroy] strategy_core.stop() result: {result}")
+        except Exception as e:
+            logging.error(f"[Strategy2026.onDestroy] strategy_core.stop() error: {e}")
+
+        # 3. 销毁策略核心（确保_destroyed标志被设置，资源被释放）
         try:
             if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'destroy'):
                 result = self.strategy_core.destroy()
@@ -2801,13 +2715,13 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.error(f"[Strategy2026.onDestroy] strategy_core.destroy() 错误：{e}")
             logging.exception("[Strategy2026.onDestroy] strategy_core.destroy() 堆栈:")
 
-        # 释放运行时缓存
+        # 4. 释放运行时缓存
         try:
             self._release_runtime_caches()
         except Exception as e:
             logging.warning(f"[Strategy2026.onDestroy] release caches failed: {e}")
 
-        # 调用父类on_destroy
+        # 5. 调用父类on_destroy
         try:
             super_destroy = getattr(super(), 'on_destroy', None)
             if callable(super_destroy):
@@ -2816,12 +2730,12 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.error(f"[Strategy2026.onDestroy] super().on_destroy() 错误：{e}")
 
         logging.info(f"[Strategy2026.onDestroy] completed (run_id={getattr(self, '_lifecycle_run_id', 'N/A')})")
-        
+
         # ✅ P0-1: 重置标志，允许下次启动时生成新run_id
         self._start_executed = False
         self._stop_executed = False
         self._lifecycle_run_id = None
-        
+
         return None
     
     def onTick(self, tick):
@@ -2908,7 +2822,12 @@ class Strategy2026(BaseStrategy, UIMixin):
     @property
     def my_trading(self) -> bool:
         """交易状态：直接读取核心层，无副本"""
-        # 如果核心层没有_is_trading，则根据_is_running和_is_paused推断
         if hasattr(self.strategy_core, '_is_trading'):
             return getattr(self.strategy_core, '_is_trading', True)
         return getattr(self.strategy_core, '_is_running', False) and not getattr(self.strategy_core, '_is_paused', False)
+    
+    @my_trading.setter
+    def my_trading(self, value: bool) -> None:
+        """设置交易状态：直接写入核心层_is_trading"""
+        if hasattr(self.strategy_core, '_is_trading'):
+            self.strategy_core._is_trading = bool(value)

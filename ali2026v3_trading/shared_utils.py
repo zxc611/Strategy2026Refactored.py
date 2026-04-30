@@ -102,3 +102,41 @@ def extract_strike_price(instrument_id: str) -> Optional[float]:
         return float(strike) if strike is not None else None
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def normalize_year_month(year_month: str) -> str:
+    """归一化年月格式（唯一实现）
+
+    支持多种输入格式，统一输出为 YYMM 格式：
+    - '6M05' -> '2605' (6月05年 -> 26年05月)
+    - '202605' -> '2605' (完整年份)
+    - '2605' -> '2605' (已是标准格式，直通)
+
+    Args:
+        year_month: 年月字符串
+
+    Returns:
+        str: 归一化后的 YYMM 格式年月
+    """
+    year_month = str(year_month or '').strip()
+    if not year_month:
+        return ''
+
+    # 处理 '202605' -> '2605'
+    if len(year_month) == 6 and year_month.isdigit():
+        return year_month[2:]
+
+    # 处理 '6M05' -> '2605' (6月05年 -> 26年05月)
+    # 格式: [月份1-9]M[年份后两位] -> 2[月份][年份后两位]
+    # 例: '6M05' = 6月05年 -> '2605' (26年05月)
+    if len(year_month) == 4 and 'M' in year_month.upper():
+        import re
+        m = re.match(r'(\d)M(\d{2})', year_month, re.IGNORECASE)
+        if m:
+            month_digit = m.group(1)
+            year_suffix = m.group(2)
+            # 2 + 月份 + 年份后两位 = 2605
+            return f'2{month_digit}{year_suffix}'
+
+    # 已经是标准格式或其他格式，直接返回
+    return year_month

@@ -162,8 +162,8 @@ class PositionService(object):
         # 持仓数据结构：{ instrument_id: { position_id: PositionRecord } }
         self.positions: Dict[str, Dict[str, PositionRecord]] = {}
 
-        # 持仓限额配置：{ account_id: PositionLimitConfig }
-        self.limit_configs: Dict[str, PositionLimitConfig] = {}
+        # 持仓限额配置：已删除limit_configs本地存储，统一使用RiskService._position_limits
+        # ✅ 传递渠道唯一#65：RiskService为唯一限额源，本地仅从ID读取
 
         # 配置文件
         self.config_file = "option_buy_limits.json"
@@ -793,32 +793,34 @@ class PositionService(object):
                     if config.effective_until and datetime.now() > config.effective_until:
                         continue
                     
-                    self.limit_configs[account_id] = config
+                    # ✅ 传递渠道唯一#65：直接写入RiskService而非本地limit_configs
+                    if self._risk_service:
+                        self._risk_service.set_position_limit(account_id, config.limit_amount, config.effective_until)
             
             logging.info(f"[PositionService._load_position_configs] Loaded from {self.config_file}")
             
         except Exception as e:
             logging.error(f"[PositionService._load_position_configs] Error: {e}")
             with self.global_lock:
-                self.limit_configs = {}
-    
+                # ✅ 传递渠道唯一#65：加载失败时不需清空本地（已无本地存储）
+                pass
+
     def _save_position_configs(self) -> None:
-        """保存持仓限额配置"""
+        """保存持仓限额配置（从RiskService唯一源读取）"""
         try:
+            if not self._risk_service:
+                return
             save_data = {}
-            
             with self.global_lock:
-                for account_id, config in self.limit_configs.items():
-                    if not config.is_valid():
-                        continue
-                    
+                # ✅ 传递渠道唯一#65：从RiskService._position_limits读取
+                for account_id, limit_info in getattr(self._risk_service, '_position_limits', {}).items():
+                    limit_amount = limit_info.get('limit_amount', 0) if isinstance(limit_info, dict) else 0
+                    effective_until = limit_info.get('effective_until') if isinstance(limit_info, dict) else None
                     save_data[account_id] = {
-                        "limit_amount": float(config.limit_amount),
-                        "account_id": config.account_id,
-                        "effective_until": config.effective_until.strftime("%Y-%m-%d %H:%M:%S")
-                            if config.effective_until else None,
-                        "created_at": config.created_at.strftime("%Y-%m-%d %H:%M:%S")
-                            if config.created_at else None,
+                        "limit_amount": float(limit_amount),
+                        "account_id": account_id,
+                        "effective_until": effective_until.strftime("%Y-%m-%d %H:%M:%S")
+                            if effective_until else None,
                     }
             
             with open(self.config_file, "w", encoding="utf-8") as f:
@@ -837,7 +839,8 @@ class PositionService(object):
         with self.global_lock:
             total_instruments = len(self.positions)
             total_records = sum(len(v) for v in self.positions.values())
-            total_configs = len(self.limit_configs)
+            # ✅ 传递渠道唯一#65：从RiskService统计限额数
+            total_configs = len(getattr(self._risk_service, '_position_limits', {})) if self._risk_service else 0
             
             return (f"PositionService: Tracking {total_instruments} instruments, "
                     f"{total_records} positions, {total_configs} limits")

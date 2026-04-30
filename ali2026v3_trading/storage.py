@@ -42,10 +42,8 @@ def _get_default_db_path() -> str:
     return os.path.join(project_root, 'trading_data.duckdb')
 
 
-
 class InstrumentDataManager:
     
-    # ✅ VERSION MARKER - Helps identify if platform is using cached bytecode
     __version__ = "2026-03-26-FIXED-dbpath-explicit"
     
     # 安全表名正则：仅允许字母、数字、下划线，防止 SQL 注入
@@ -59,17 +57,7 @@ class InstrumentDataManager:
                  drop_on_full: bool = True, max_connections: int = 20,
                  cleanup_interval: Optional[int] = 3600,
                  cleanup_config: Optional[Dict[str, int]] = None):
-        """
-        初始化数据库连接，创建元数据表，启用 WAL 模式
-        :param db_path: SQLite 数据库文件路径，未提供时自动使用默认路径
-        :param max_retries: 数据库操作最大重试次数（处理锁超时）
-        :param retry_delay: 重试间隔（秒）
-        :param async_queue_size: 异步写入队列最大长度（默认50万，应对高峰流量）
-        :param batch_size: 批量写入分块大小
-        :param drop_on_full: 队列满时是否丢弃新数据（True）或阻塞等待（False）
-        :param cleanup_interval: 自动清理间隔（秒），None 表示不启动自动清理
-        :param cleanup_config: 清理配置，如 {'tick': 30, 'kline': 90} 表示保留天数
-        """
+        """初始化数据库连接，创建元数据表，启用WAL模式"""
         self.db_path = db_path or _get_default_db_path()
         self.max_retries = max_retries
         self.retry_delay = retry_delay
@@ -83,18 +71,14 @@ class InstrumentDataManager:
         
         self._data_service = get_data_service()
         
-        # 异步写入队列和线程（双通道）
-        # Tick通道：高优先级，实时数据
-        self._tick_queue = queue.Queue(maxsize=async_queue_size // 2)
+        # Tick队列: 1000万, K线队列: 10万
+        self._tick_queue = queue.Queue(maxsize=10000000)
         self._tick_writer_thread = None
-        # K线通道：低优先级，批量数据
-        self._kline_queue = queue.Queue(maxsize=async_queue_size)
+        self._kline_queue = queue.Queue(maxsize=100000)
         self._kline_writer_thread = None
-        # 停止信号（全局）
         self._stop_event = threading.Event()
-        self._pending_on_stop_data: list = []  # 停止时保存的余下数据
+        self._pending_on_stop_data: list = []
         
-        # 队列监控统计
         self._queue_stats = {
             'total_received': 0,
             'total_written': 0,
@@ -103,34 +87,27 @@ class InstrumentDataManager:
         }
         self._queue_stats_lock = threading.Lock()
         
-        # 列名缓存（避免重复获取）
         self._column_cache: Dict[str, List[str]] = {}
         self._column_cache_lock = threading.Lock()
         
-        # 传递渠道唯一修复：本地缓存代理到params_service，不再独立维护
-        # _instrument_cache/_id_cache/_product_cache均通过property委托给params_service
-        self._lock = threading.RLock()       # 保证线程安全
-        self._ext_kline_lock = threading.Lock()  # 外部 K 线时间戳锁
-        self._agg_lock = threading.Lock()        # K 线聚合器锁
+        self._lock = threading.RLock()
+        self._ext_kline_lock = threading.Lock()
+        self._agg_lock = threading.Lock()
+        self._db_write_lock = threading.Lock()
+        self._db_kline_write_lock = threading.Lock()
         self._runtime_missing_warned = set()
         self._platform_subscribe = None
         self._platform_unsubscribe = None
         
-        
-        # 外部 K 线最近写入时间记录：{(instrument_id, period): last_timestamp}
         self._last_ext_kline: Dict[Tuple[str, str], float] = {}
-        
-        # K 线聚合器字典：{(instrument_id, period): _KlineAggregator}
+        self._ext_kline_load_in_progress = False
         self._aggregators: Dict[Tuple[str, str], '_KlineAggregator'] = {}
         
-        # 统一订阅管理器（新增）
         self.subscription_manager = SubscriptionManager(
             self,
             SubscriptionConfig(max_retries=max_retries, retry_base_delay=retry_delay),
         )
         
-        # v1吸收：ParamsService双向缓存同步
-        # ✅ 传递渠道唯一：统一使用get_params_service()工厂函数获取单例，禁止直接实例化
         from ali2026v3_trading.params_service import get_params_service
         self._params_service = get_params_service()
         try:
@@ -139,33 +116,27 @@ class InstrumentDataManager:
             logging.warning(f"[Storage] ParamsService缓存初始化失败: {e}")
         self._maintenance_service = StorageMaintenanceService(self)
         
-        # v1吸收：已分配ID集合（用于_load_caches中加载已有internal_id）
         self._assigned_ids = set()
         
-        # 自动清理配置
         self._cleanup_interval = cleanup_interval
         self._cleanup_config = cleanup_config or {}
         self._cleanup_thread = None
         self._closed = False
         
-        # 初始化（元数据表和品种配置已由 DataService 和 StrategyCoreService.on_init() 完成）
         self._migrate_legacy_schema()
         self._create_indexes()
         self._init_kv_store()
         self._maintenance_service.run_startup_checks()
         self._load_caches()
+        self._restore_aggregator_states()
         self._start_async_writer()
         if self._cleanup_interval:
             self._start_cleanup_thread()
-        
-        # 列名缓存预加载（可选优化）
         self._preload_column_cache()
     
-    # 传递渠道唯一：_instrument_cache/_id_cache/_product_cache代理到params_service
     @property
     def _instrument_cache(self):
-        """代理到 ParamsService 的 instrument_id -> InstrumentMeta 映射"""
-        # 构建兼容的字典接口
+        """代理到ParamsService的instrument_id映射"""
         cache = {}
         for inst_id, internal_id in self._params_service._instrument_id_to_internal_id.items():
             meta = self._params_service._instrument_meta_by_id.get(internal_id)
@@ -175,12 +146,12 @@ class InstrumentDataManager:
     
     @property
     def _id_cache(self):
-        """代理到 ParamsService 的 internal_id -> InstrumentMeta 映射"""
+        """代理到ParamsService的internal_id映射"""
         return self._params_service._instrument_meta_by_id
 
     @property
     def _product_cache(self):
-        """代理到 ParamsService 的 product 缓存"""
+        """代理到ParamsService的product缓存"""
         return self._params_service._product_cache
 
 
@@ -213,24 +184,42 @@ class InstrumentDataManager:
         self._platform_unsubscribe = unsubscribe_func
         logging.info("[Storage] 平台订阅API已绑定")
         
-    # ========== 异步写入队列核心 ==========
     def _start_async_writer(self):
+        # BP-2修复：恢复停机时未写入的数据
+        if self._pending_on_stop_data:
+            recovered = len(self._pending_on_stop_data)
+            for task in self._pending_on_stop_data:
+                try:
+                    func_name = task[0]
+                    is_tick = func_name.startswith('_save_tick') or func_name.startswith('_save_depth') or func_name.startswith('_save_option') or func_name.startswith('_save_underlying')
+                    target_queue = self._tick_queue if is_tick else self._kline_queue
+                    target_queue.put_nowait(task)
+                except queue.Full:
+                    logging.warning("[AsyncWriter] 恢复停机数据时队列满，丢弃: %s", task[0] if task else '?')
+                    break
+            self._pending_on_stop_data.clear()
+            logging.info("[AsyncWriter] 恢复停机数据 %d 条", recovered)
+
+        # ✅ BP-3：daemon=False + atexit确保安全关闭
         self._tick_writer_thread = threading.Thread(
             target=self._async_writer_loop,
-            args=(self._tick_queue, 5, "TickWriter"),
+            args=(self._tick_queue, 1000, "TickWriter"),
             name="TickWriter",
-            daemon=True
+            daemon=False
         )
         self._tick_writer_thread.start()
         
         self._kline_writer_thread = threading.Thread(
             target=self._async_writer_loop,
-            args=(self._kline_queue, 20, "KlineWriter"),
+            args=(self._kline_queue, 200, "KlineWriter"),
             name="KlineWriter",
-            daemon=True
+            daemon=False
         )
         self._kline_writer_thread.start()
-        logging.info("[AsyncWriter] 双通道后台写入线程已启动 (Tick+Kline)")
+        
+        import atexit
+        atexit.register(self._shutdown_impl, flush=True)
+        logging.info("[AsyncWriter] 双通道写入线程已启动(daemon=False)")
         
     def _stop_async_writer(self):
         self._stop_event.set()
@@ -289,11 +278,16 @@ class InstrumentDataManager:
                     with self._queue_stats_lock:
                         self._queue_stats['total_written'] += written_count
                     batch.clear()
+                    self._batch_retry_count = 0
                         
             except Exception as e:
                 logging.error("[AsyncWriter][%s] 写入异常：%s", name, e, exc_info=True)
-                if batch:
+                self._batch_retry_count = getattr(self, '_batch_retry_count', 0) + 1
+                if self._batch_retry_count > 3:
+                    lost_count = len(batch)
+                    logging.critical("[DATA_LOSS][%s] batch重试超限，丢弃%d条数据", name, lost_count)
                     batch.clear()
+                    self._batch_retry_count = 0
         
         # 停止信号已收到：保存 batch 和队列余下数据到内存
         remaining = list(batch)
@@ -310,67 +304,47 @@ class InstrumentDataManager:
         if self._stop_event.is_set():
             logging.warning("写入线程已停止，拒绝新任务：%s", func_name)
             return False
-        
-        # ✅ 更新统计
         with self._queue_stats_lock:
             self._queue_stats['total_received'] += 1
         
         task = (func_name, args, kwargs)
         
-        # 双通道分发
-        is_tick = func_name.startswith('_save_tick') or func_name.startswith('_save_depth') or func_name.startswith('_save_option') or func_name.startswith('_save_underlying')
+        is_tick = func_name.startswith(('_save_tick', '_save_depth', '_save_option', '_save_underlying'))
         target_queue = self._tick_queue if is_tick else self._kline_queue
         
         try:
-            if self.drop_on_full:
-                try:
-                    target_queue.put_nowait(task)
-                    
-                    # ✅ 环节6: Storage入队探针（仅监控合约）
-                    if func_name == '_save_tick_impl' and args:
-                        internal_id = args[0] if args else None
-                        if internal_id:
-                            # ✅ 传递渠道唯一：遍历 ParamsService 缓存
-                            for inst_id, meta in self._params_service._instrument_meta_by_id.items():
-                                if meta.get('internal_id') == internal_id:
-                                    DiagnosisProbeManager.on_storage_enqueue(inst_id, True)
-                                    break
-                    
-                    # ✅ 监控队列使用率
-                    queue_size = target_queue.qsize()
-                    max_size = target_queue.maxsize
-                    fill_rate = queue_size / max_size * 100
-                    
-                    with self._queue_stats_lock:
-                        if queue_size > self._queue_stats['max_queue_size_seen']:
-                            self._queue_stats['max_queue_size_seen'] = queue_size
-                    
-                    if fill_rate > 80:
-                        logging.warning(
-                            f"⚠️ 队列使用率超过 80%: {fill_rate:.1f}% ({queue_size}/{max_size}) - "
-                            f"通道：{'Tick' if is_tick else 'Kline'}，方法：{func_name}"
-                        )
-                    elif fill_rate > 50:
-                        if queue_size % 100 == 0:
-                            logging.info(f"📊 队列使用率：{fill_rate:.1f}% ({queue_size}/{max_size})")
-                    
-                    return True
-                except queue.Full:
-                    with self._queue_stats_lock:
-                        self._queue_stats['drops_count'] += 1
-                    logging.critical("🚨 [DATA_LOSS] 写入队列已满，数据被丢弃！累计丢弃=%d, 通道=%s, 方法=%s",
-                                     self._queue_stats['drops_count'], 'Tick' if is_tick else 'Kline', func_name)
-                    return False
-            else:
-                try:
-                    target_queue.put(task, block=True, timeout=1)
-                    return True
-                except queue.Full:
-                    with self._queue_stats_lock:
-                        self._queue_stats['drops_count'] += 1
-                    logging.critical("🚨 [DATA_LOSS] 写入队列已满，等待超时！累计丢弃=%d, 通道=%s, 方法=%s",
-                                     self._queue_stats['drops_count'], 'Tick' if is_tick else 'Kline', func_name)
-                    return False
+            # ✅ BP-1：反压机制——先短暂阻塞等待队列腾出空间，超时才丢弃
+            try:
+                target_queue.put(task, block=True, timeout=0.5)
+                
+                if func_name == '_save_tick_impl' and args:
+                    internal_id = args[0] if args else None
+                    if internal_id:
+                        for inst_id, meta in self._params_service._instrument_meta_by_id.items():
+                            if meta.get('internal_id') == internal_id:
+                                DiagnosisProbeManager.on_storage_enqueue(inst_id, True)
+                                break
+                
+                queue_size = target_queue.qsize()
+                max_size = target_queue.maxsize
+                fill_rate = queue_size / max_size * 100
+                
+                with self._queue_stats_lock:
+                    if queue_size > self._queue_stats['max_queue_size_seen']:
+                        self._queue_stats['max_queue_size_seen'] = queue_size
+                
+                if fill_rate > 80:
+                    logging.warning("队列使用率 %.1f%% (%d/%d) 通道=%s 方法=%s",
+                                    fill_rate, queue_size, max_size,
+                                    'Tick' if is_tick else 'Kline', func_name)
+                
+                return True
+            except queue.Full:
+                with self._queue_stats_lock:
+                    self._queue_stats['drops_count'] += 1
+                logging.critical("[DATA_LOSS] 队列满(反压0.5s后仍满) 累计丢弃=%d 通道=%s 方法=%s",
+                                 self._queue_stats['drops_count'], 'Tick' if is_tick else 'Kline', func_name)
+                return False
         except Exception as e:
             logging.error("[AsyncWriter] 入队失败：%s", e)
             return False
@@ -379,21 +353,52 @@ class InstrumentDataManager:
         if not batch:
             return 0
 
-        try:
-            merged_tasks = self._data_service.merge_tick_task_batch(batch, info_callback=self._get_info_by_id)
-            executed_count = 0
-            for func_name, args, kwargs in merged_tasks:
-                if hasattr(self, func_name):
-                    method = getattr(self, func_name)
-                    method(*args, **kwargs)
-                    executed_count += 1
-                else:
-                    logging.warning("[AsyncWriter] 未找到写入方法：%s", func_name)
+        max_sub_batch = 50
+        if len(batch) <= max_sub_batch:
+            return self._flush_sub_batch(batch)
+        executed_total = 0
+        is_kline = any(fn.startswith('_save_kline') for fn, _, _ in batch)
+        for i in range(0, len(batch), max_sub_batch):
+            sub = batch[i:i + max_sub_batch]
+            count = self._flush_sub_batch(sub)
+            if count is not None:
+                executed_total += count
+            if is_kline and i + max_sub_batch < len(batch):
+                time.sleep(0.01)
+        return executed_total
 
-            return executed_count
-        except Exception as e:
-            logging.error("[AsyncWriter] 数据库错误：%s", e, exc_info=True)
-            return None
+    def _flush_sub_batch(self, batch: List[Tuple[str, Any, Any]]) -> Optional[int]:
+        if not batch:
+            return 0
+
+        is_kline_batch = any(fn.startswith('_save_kline') for fn, _, _ in batch)
+        write_lock = self._db_kline_write_lock if is_kline_batch else self._db_write_lock
+
+        with write_lock:
+            try:
+                merged_tasks = self._data_service.merge_tick_task_batch(batch, info_callback=self._get_info_by_id)
+                if not merged_tasks:
+                    logging.warning("[AsyncWriter] merge返回空结果，原batch有%d条", len(batch))
+                    return 0
+                executed_count = 0
+                for func_name, args, kwargs in merged_tasks:
+                    if hasattr(self, func_name):
+                        method = getattr(self, func_name)
+                        method(*args, **kwargs)
+                        executed_count += 1
+                    else:
+                        logging.warning("[AsyncWriter] 未找到写入方法：%s", func_name)
+
+                return executed_count
+            except Exception as e:
+                logging.error("[AsyncWriter] 数据库错误：%s", e, exc_info=True)
+                for task in batch:
+                    try:
+                        self._pending_on_stop_data.append(task)
+                    except Exception:
+                        break
+                logging.critical("[DATA_LOSS] _flush_batch_to_db异常，%d条数据已暂存到_pending_on_stop_data", len(batch))
+                return len(batch)
 
     def _wait_for_queue_capacity(self, max_fill_rate: float = 60.0, timeout_sec: float = 30.0, source: str = 'runtime') -> bool:
         deadline = time.time() + max(0.1, float(timeout_sec or 0.1))
@@ -452,6 +457,25 @@ class InstrumentDataManager:
         logging.info("开始关闭...")
         self._stop_event.set()
 
+        # BP-4修复：主动排空队列到DB
+        if flush:
+            drained = 0
+            deadline = time.time() + 30.0
+            for q, qname in [(self._tick_queue, 'Tick'), (self._kline_queue, 'Kline')]:
+                while not q.empty() and time.time() < deadline:
+                    try:
+                        task = q.get_nowait()
+                        func_name, args, kwargs = task
+                        if hasattr(self, func_name):
+                            getattr(self, func_name)(*args, **kwargs)
+                            drained += 1
+                    except (queue.Empty, Exception) as e:
+                        if not isinstance(e, queue.Empty):
+                            logging.warning("[Shutdown] drain失败: %s", e)
+                        break
+            if drained > 0:
+                logging.info("[Shutdown] drain写入 %d 条剩余数据到DB", drained)
+
         if not flush:
             for q in [self._kline_queue, self._tick_queue]:
                 while not q.empty():
@@ -467,28 +491,61 @@ class InstrumentDataManager:
                 if thread.is_alive():
                     logging.warning("%s 未能在规定时间内停止", name)
         
-        remaining_tick = self._tick_queue.qsize() if self._tick_queue else 0
-        remaining_kline = self._kline_queue.qsize() if self._kline_queue else 0
-        remaining = remaining_tick + remaining_kline
+        remaining = self._tick_queue.qsize() + self._kline_queue.qsize()
         if remaining > 0:
-            logging.error("关闭时仍有 %d 个任务未完成 (Tick=%d, Kline=%d)，可能丢失数据", remaining, remaining_tick, remaining_kline)
+            logging.error("关闭时仍有 %d 个任务未完成，可能丢失数据", remaining)
         
-        # ✅ 输出最终统计
         with self._queue_stats_lock:
             stats = self._queue_stats.copy()
-        
-        logging.info(
-            f"📊 队列统计汇总：接收={stats['total_received']:,}, "
-            f"写入={stats['total_written']:,}, "
-            f"丢弃={stats['drops_count']:,}, "
-            f"峰值使用={stats['max_queue_size_seen']:,}"
-        )
+        logging.info("队列统计: 接收=%d 写入=%d 丢弃=%d 峰值=%d",
+                     stats['total_received'], stats['total_written'],
+                     stats['drops_count'], stats['max_queue_size_seen'])
 
-        # 停止清理线程
+        # ✅ BP-17：关闭前持久化K线聚合器状态
+        if flush and self._aggregators:
+            self._save_aggregator_states()
+
         if self._cleanup_thread and self._cleanup_thread.is_alive():
             self._cleanup_thread.join(timeout=2)
 
         logging.info("关闭完成")
+
+    def _save_aggregator_states(self):
+        """✅ BP-17：持久化K线聚合器状态到KV store"""
+        try:
+            states = {}
+            with self._agg_lock:
+                for (instrument, period), agg in self._aggregators.items():
+                    state = agg.to_state_dict()
+                    if state:
+                        states[f"{instrument}:{period}"] = state
+            if states:
+                self.save('kline_aggregator_states', states, async_mode=False)
+                logging.info("[BP-17] 已持久化 %d 个K线聚合器状态", len(states))
+        except Exception as e:
+            logging.warning("[BP-17] K线聚合器状态持久化失败: %s", e)
+
+    def _restore_aggregator_states(self):
+        """✅ BP-17：从KV store恢复K线聚合器状态"""
+        try:
+            states = self.load('kline_aggregator_states')
+            if not states:
+                return
+            restored = 0
+            with self._agg_lock:
+                for key, state in states.items():
+                    instrument = state.get('instrument_id', '')
+                    period = state.get('period', '')
+                    if not instrument or not period:
+                        continue
+                    agg_key = (instrument, period)
+                    if agg_key not in self._aggregators:
+                        self._aggregators[agg_key] = _KlineAggregator.from_state_dict(state)
+                        restored += 1
+            if restored > 0:
+                logging.info("[BP-17] 已恢复 %d 个K线聚合器状态", restored)
+        except Exception as e:
+            logging.warning("[BP-17] K线聚合器状态恢复失败: %s", e)
 
     def _execute_with_retry(self, func, *args, **kwargs):
         for attempt in range(self.max_retries):
@@ -513,7 +570,6 @@ class InstrumentDataManager:
                 migrated = True
 
 
-
             rows = self._data_service.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'option_instruments'").to_pylist()
             option_columns = [row['column_name'] for row in rows]
 
@@ -523,7 +579,6 @@ class InstrumentDataManager:
                 self._data_service.query("UPDATE option_instruments SET internal_id=id WHERE internal_id IS NULL", raise_on_error=True)
                 migrated = True
 
-            # ✅ Group A收口：不再添加underlying_instrument_id列，只认underlying_future_id主键
             # if 'underlying_instrument_id' not in option_columns:
             #     logging.info("正在迁移 option_instruments 表：添加 underlying_instrument_id 列...")
             #     self._data_service.query("ALTER TABLE option_instruments ADD COLUMN underlying_instrument_id TEXT", raise_on_error=True)
@@ -535,7 +590,6 @@ class InstrumentDataManager:
                 migrated = True
 
 
-            # ✅ Group A收口：已移除underlying_future字段，不再需要基于字符串的迁移
             # 历史数据应该已经迁移完成，新数据直接使用underlying_future_id
             # 注释掉基于字符串的迁移逻辑，因为underlying_future字段已不存在
             # self._data_service.query("""
@@ -546,7 +600,6 @@ class InstrumentDataManager:
             #       AND fi.instrument_id = oi.underlying_future
             # """, raise_on_error=True)
 
-            # ✅ subscriptions 表已废弃，相关迁移代码已移除
 
             self._data_service.query("""
                 UPDATE option_instruments
@@ -593,24 +646,16 @@ class InstrumentDataManager:
         logging.info("索引创建/检查完成")
 
     def _load_caches(self):
-        """
-        加载缓存：委托给 ParamsService 统一管理
-        
-        ✅ 传递渠道唯一：缓存由 params_service 统一管理，Storage 不再维护独立缓存
-        """
-        # 传递渠道唯一：调用 ParamsService 统一加载缓存
+        """加载缓存：委托给ParamsService统一管理"""
         try:
             self._params_service.load_caches_from_db(self._data_service)
-            logging.info(
-                f"[Storage] ParamsService 缓存加载完成: "
-                f"{len(self._params_service._instrument_id_to_internal_id)} 个合约, "
-                f"{len(self._params_service._product_cache)} 个品种"
-            )
+            logging.info("[Storage] ParamsService缓存加载完成: %d个合约, %d个品种",
+                         len(self._params_service._instrument_id_to_internal_id),
+                         len(self._params_service._product_cache))
         except Exception as e:
-            logging.error(f"[Storage] ParamsService 缓存加载失败: {e}")
+            logging.error("[Storage] ParamsService缓存加载失败: %s", e)
             raise
         
-        # v1吸收：加载已有 internal_id 到 _assigned_ids
         try:
             for internal_id in self._params_service._instrument_meta_by_id.keys():
                 self._assigned_ids.add(internal_id)
@@ -619,16 +664,12 @@ class InstrumentDataManager:
         except Exception as e:
             logging.warning(f"[Storage] 加载 assigned_ids 失败: {e}")
 
-    # ========== 合约解析（简单直接） ==========
-    # ✅ 方法唯一：_parse_future委托给SubscriptionManager.parse_future
     def _parse_future(self, instrument_id: str) -> Dict[str, Any]:
         return SubscriptionManager.parse_future(instrument_id)
 
     def _parse_option_with_dash(self, instrument_id: str) -> Dict[str, Any]:
         return SubscriptionManager.parse_option(instrument_id)
 
-
-    # ========== v1吸收：运行时注册辅助 + 入队辅助 + 通用查询 + 连接管理 ==========
 
     def _cache_to_params_service(self, instrument_id: str, info: Dict[str, Any]) -> Dict[str, Any]:
         return self._params_service.cache_instrument_info(instrument_id, info)
@@ -642,7 +683,6 @@ class InstrumentDataManager:
     ) -> Dict[str, Any]:
         info = {
             'internal_id': internal_id,
-            # ✅ Group A收口：删除id别名，新代码必须使用internal_id
             'instrument_id': instrument_id,
             'type': instrument_type,
         }
@@ -653,7 +693,6 @@ class InstrumentDataManager:
     def _get_info_internal_id(info: Optional[Dict[str, Any]]) -> Optional[int]:
         if not info:
             return None
-        # ID直通：只使用internal_id，不再回退id字段
         internal_id = info.get('internal_id')
         return int(internal_id) if internal_id is not None else None
 
@@ -671,7 +710,6 @@ class InstrumentDataManager:
         alias_info['internal_id'] = canonical_internal_id
         alias_info['canonical_instrument_id'] = canonical_info.get('instrument_id')
 
-        # ✅ 传递渠道唯一：通过 ParamsService 统一缓存，不直接写入代理属性
         try:
             self._cache_to_params_service(alias_instrument_id, alias_info)
         except RuntimeError as exc:
@@ -720,7 +758,6 @@ class InstrumentDataManager:
         if info:
             return info
 
-        # ✅ Group A收口：不再使用大小写不敏感查找和紧凑格式回退，强制使用规范化合约ID
         self._warn_runtime_unregistered(normalized_id, source)
         return None
 
@@ -770,7 +807,6 @@ class InstrumentDataManager:
     def close_connection(self):
         pass
 
-    # ========== V3原有：交易所推断 ==========
 
     def infer_exchange_from_id(self, instrument_id: str) -> str:
         normalized_id = str(instrument_id or '').strip()
@@ -808,41 +844,26 @@ class InstrumentDataManager:
             return list(result)
         return []
     
-    # ========== 合约信息查询（缓存优先） ==========
     def _get_instrument_info(self, instrument_id: str) -> Optional[dict]:
-        # ✅ 传递渠道唯一：通过 ParamsService 获取
         info = self._params_service.get_instrument_meta_by_id(instrument_id)
         if info:
             return info
         
         # 缓存未命中，从数据库查询
         rows = self._q("SELECT internal_id, instrument_id FROM futures_instruments WHERE instrument_id=?", [instrument_id])
-        row = rows[0] if rows else None
-        if row:
-            info = self._make_instrument_info(
-                row['internal_id'],
-                row['instrument_id'],
-                'future',
-            )
-            # ✅ 传递渠道唯一：通过 ParamsService 缓存
+        if rows:
+            info = self._make_instrument_info(rows[0]['internal_id'], rows[0]['instrument_id'], 'future')
             self._cache_to_params_service(instrument_id, info)
             return info
         
         rows = self._q("SELECT internal_id, instrument_id FROM option_instruments WHERE instrument_id=?", [instrument_id])
-        row = rows[0] if rows else None
-        if row:
-            info = self._make_instrument_info(
-                row['internal_id'],
-                row['instrument_id'],
-                'option',
-            )
-            # ✅ 传递渠道唯一：通过 ParamsService 缓存
+        if rows:
+            info = self._make_instrument_info(rows[0]['internal_id'], rows[0]['instrument_id'], 'option')
             self._cache_to_params_service(instrument_id, info)
             return info
         return None
 
     def _get_info_by_id(self, internal_id: int) -> Optional[dict]:
-        # ✅ 传递渠道唯一：通过 ParamsService 获取
         info = self._params_service._instrument_meta_by_id.get(internal_id)
         if info:
             return info
@@ -856,7 +877,6 @@ class InstrumentDataManager:
                 row['instrument_id'],
                 row['type'],
             )
-            # ✅ 传递渠道唯一：通过 ParamsService 缓存
             instrument_id = row['instrument_id']
             self._cache_to_params_service(instrument_id, info)
             return info
@@ -869,7 +889,6 @@ class InstrumentDataManager:
                 row['instrument_id'],
                 row['type'],
             )
-            # ✅ 传递渠道唯一：通过 ParamsService 缓存
             instrument_id = row['instrument_id']
             self._cache_to_params_service(instrument_id, info)
             return info
@@ -877,7 +896,6 @@ class InstrumentDataManager:
 
     def get_registered_instrument_ids(self, instrument_ids: Optional[List[str]] = None) -> List[str]:
         if not instrument_ids:
-            # ✅ 传递渠道唯一：通过 ParamsService 获取所有合约ID
             return list(self._params_service._instrument_id_to_internal_id.keys())
 
         registered_ids: List[str] = []
@@ -888,7 +906,6 @@ class InstrumentDataManager:
                 continue
             seen.add(normalized_id)
 
-            # ✅ 传递渠道唯一：通过 ParamsService 检查是否存在
             if self._params_service.get_instrument_meta_by_id(normalized_id):
                 registered_ids.append(normalized_id)
 
@@ -899,41 +916,21 @@ class InstrumentDataManager:
 
         return QueryService(self).ensure_registered_instruments(instrument_ids)
 
-    # ========== 辅助方法 ==========
 
     
     def _get_next_id(self) -> int:
-        """从全局序列获取下一个 internal_id。
-        
-        委托 StorageMaintenanceService.reserve_next_global_id()。
-        """
+        """从全局序列获取下一个internal_id"""
         if self._maintenance_service is not None:
             return self._maintenance_service.reserve_next_global_id()
 
-        raise RuntimeError(
-            "[Storage] _maintenance_service is None, cannot reserve global ID. "
-            "StorageMaintenanceService must be initialized before registering instruments."
-        )
+        raise RuntimeError("[Storage] _maintenance_service is None, cannot reserve global ID")
 
     def _create_future_tables_by_id(self, instrument_id: int):
-        # ⚠️ DEPRECATED: 已迁移到统一表 klines_raw
-        # 此方法不再使用，保留仅为向后兼容
-        logging.warning(
-            f"_create_future_tables_by_id is deprecated (instrument_id={instrument_id}). "
-            "K-line data now uses unified table 'klines_raw'."
-        )
-        # 不再创建分表
+        logging.warning("_create_future_tables_by_id is deprecated, using unified klines_raw")
 
     def _create_option_tables_by_id(self, instrument_id: int):
-        # ⚠️ DEPRECATED: 已迁移到统一表 klines_raw
-        # 此方法不再使用，保留仅为向后兼容
-        logging.warning(
-            f"_create_option_tables_by_id is deprecated (instrument_id={instrument_id}). "
-            "K-line data now uses unified table 'klines_raw'."
-        )
-        # 不再创建分表
+        logging.warning("_create_option_tables_by_id is deprecated, using unified klines_raw")
 
-    # ========== 核心：合约注册 ==========
     def register_instrument(self, instrument_id: str, exchange: str = "AUTO",
                             expire_date: Optional[str] = None,
                             listing_date: Optional[str] = None) -> int:
@@ -944,7 +941,6 @@ class InstrumentDataManager:
         if str(exchange or 'AUTO').strip() == 'AUTO':
             exchange = self.infer_exchange_from_id(normalized_instrument_id)
 
-        # ✅ 传递渠道唯一：检查 ParamsService 缓存
         existing_meta = self._params_service.get_instrument_meta_by_id(normalized_instrument_id)
         if existing_meta:
             return existing_meta.get('internal_id')
@@ -956,7 +952,6 @@ class InstrumentDataManager:
 
         # 注册新合约（加锁保证唯一性）
         with self._lock:
-            # ✅ 传递渠道唯一：再次检查 ParamsService 缓存（避免重复插入）
             existing_meta = self._params_service.get_instrument_meta_by_id(normalized_instrument_id)
             if existing_meta:
                 return existing_meta.get('internal_id')
@@ -992,12 +987,10 @@ class InstrumentDataManager:
                             kline_table=kline_table,
                             tick_table=tick_table,
                         )
-                        # ✅ 传递渠道唯一：只通过 ParamsService 缓存，不直接写入代理属性
                         self._assigned_ids.add(new_id)  # v1吸收：跟踪已分配ID
                         self._cache_to_params_service(normalized_instrument_id, info)  # v1吸收：双向缓存同步
                         logging.info(f"注册期货合约：{normalized_instrument_id} -> ID={new_id}")
                         
-                        # ✅ 环节2-3: 注册和ID转换探针
                         # DiagnosisProbeManager already imported at module level
                         DiagnosisProbeManager.on_register(normalized_instrument_id, 'storage_register', new_id, 'future')
                         
@@ -1018,7 +1011,6 @@ class InstrumentDataManager:
                                        [prod['underlying_product'], parsed['year_month']]).to_pylist()
                         row = rows[0] if rows else None
                         if not row:
-                            # ✅ ID直通原则：标的期货未注册，报错并要求上游先注册
                             expected_future_id = f"{prod['underlying_product']}{parsed['year_month']}"
                             logging.error(
                                 f"[Storage] 标的期货未注册，无法注册期权 {normalized_instrument_id}。"
@@ -1058,12 +1050,10 @@ class InstrumentDataManager:
                             kline_table=kline_table,
                             tick_table=tick_table,
                         )
-                        # ✅ 传递渠道唯一：只通过 ParamsService 缓存，不直接写入代理属性
                         self._assigned_ids.add(new_id)  # v1吸收：跟踪已分配ID
                         self._cache_to_params_service(normalized_instrument_id, info)  # v1吸收：双向缓存同步
                         logging.info(f"注册期权合约：{normalized_instrument_id} -> ID={new_id}")
                         
-                        # ✅ 环节2-3: 注册和ID转换探针
                         # DiagnosisProbeManager already imported at module level
                         DiagnosisProbeManager.on_register(normalized_instrument_id, 'storage_register', new_id, 'option')
                         
@@ -1075,7 +1065,6 @@ class InstrumentDataManager:
                             future_parsed = self._parse_future(normalized_instrument_id)
                             underlying_prod = str(prod.get('underlying_product') or '').strip()
                             if underlying_prod and future_parsed.get('year_month'):
-                                # ✅ ID直通：从数据库查询已注册的期货合约，不自行构造
                                 rows = self._data_service.query(
                                     "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
                                     [underlying_prod, future_parsed['year_month']]
@@ -1097,13 +1086,28 @@ class InstrumentDataManager:
 
             raise ValueError(f"无法识别合约品种：{normalized_instrument_id}")
 
-    # ========== 订阅管理 ==========
 
+    def _check_info_or_skip(self, internal_id: int, caller: str, extra: str = '') -> Optional[Dict]:
+        """检查info是否存在，不存在则记录跳过日志并返回None"""
+        info = self._get_info_by_id(internal_id)
+        if not info:
+            with self._queue_stats_lock:
+                self._queue_stats['save_skip_count'] = self._queue_stats.get('save_skip_count', 0) + 1
+            warn_key = (f'{caller}_skip', internal_id)
+            with self._lock:
+                if warn_key not in self._runtime_missing_warned:
+                    self._runtime_missing_warned.add(warn_key)
+                    logging.warning("[DATA_LOSS] %s: internal_id %d not found, skipping %s", caller, internal_id, extra)
+            return None
+        return info
 
-    # ========== 异步队列实现方法 ==========
     def _save_kline_impl(self, internal_id: int, instrument_type: str, kline_data: List[Dict], period: str = '1min') -> None:
         kline_rows = kline_data
         if not kline_rows:
+            return
+
+        info = self._check_info_or_skip(internal_id, '_save_kline_impl', f'{len(kline_rows)} klines(period={period})')
+        if not info:
             return
 
         normalized_klines = []
@@ -1114,6 +1118,7 @@ class InstrumentDataManager:
             normalized_klines.append({
                 'internal_id': internal_id,
                 'instrument_type': instrument_type,
+                'period': period,
                 'timestamp': datetime.fromtimestamp(ts),
                 'open': row.get('open', 0.0),
                 'high': row.get('high', 0.0),
@@ -1128,26 +1133,22 @@ class InstrumentDataManager:
             self._data_service.batch_insert_klines(normalized_klines)
 
     def _save_tick_impl(self, internal_id: int, instrument_type: str, tick_data) -> None:
-        info = self._get_info_by_id(internal_id)
+        info = self._check_info_or_skip(internal_id, '_save_tick_impl', 'tick')
         if not info:
-            logging.debug("_save_tick_impl: internal_id %d not found, skipping", internal_id)
             return
 
         instrument_id = info.get('instrument_id')
         if not instrument_id:
-            logging.debug("_save_tick_impl: internal_id %d missing instrument_id, skipping", internal_id)
+            logging.warning("[DATA_LOSS] _save_tick_impl: internal_id %d missing instrument_id, skipping", internal_id)
             return
 
         self._data_service.batch_insert_ticks(tick_data, instrument_id)
 
-    # ========== 数据查询 ==========
-    # ========== 关联查询 ==========
     def get_option_chain_by_future_id(self, future_id: int) -> Dict:
         info = self._get_info_by_id(future_id)
         if not info or info['type'] != 'future':
             raise ValueError(f"无效的期货ID: {future_id}")
         future_instrument = info.get('instrument_id')
-        # 从缓存或数据库获取 instrument_id
         if not future_instrument:
             rows = self._data_service.query("SELECT instrument_id FROM futures_instruments WHERE internal_id=?", [future_id]).to_pylist()
             row = rows[0] if rows else None
@@ -1178,7 +1179,6 @@ class InstrumentDataManager:
             'options': normalized_options
         }
 
-    # ========== 清理 ==========
     def delete_instrument(self, instrument_id: str) -> None:
         info = self._get_instrument_info(instrument_id)
         if not info:
@@ -1211,14 +1211,12 @@ class InstrumentDataManager:
         else:
             self._data_service.query("DELETE FROM option_instruments WHERE instrument_id=?", [instrument_id], raise_on_error=True)
         # subscriptions 表已废弃，DELETE 操作已移除
-        # ✅ 传递渠道唯一：缓存由 ParamsService 管理，不支持单个删除（下次加载时自动同步）
         # if instrument_id in self._instrument_cache:
         #     del self._instrument_cache[instrument_id]
         # if internal_id in self._id_cache:
         #     del self._id_cache[internal_id]
         logging.info(f"已删除合约 {instrument_id} (ID={internal_id})")
 
-    # ========== 时间戳转换工具 ==========
     @staticmethod
     def _to_timestamp(ts) -> Optional[float]:
         if ts is None:
@@ -1247,7 +1245,6 @@ class InstrumentDataManager:
             return None
         return result
     
-    # ========== 数据验证 ==========
     def _validate_tick(self, tick: Dict[str, Any]) -> bool:
         if not isinstance(tick, dict):
             logging.error("save_tick 参数不是字典：%s", type(tick))
@@ -1266,7 +1263,8 @@ class InstrumentDataManager:
         if ts_value is None:
             logging.error("save_tick 缺少时间戳字段 (ts、timestamp 或 UpdateTime)")
             return False
-        if not isinstance(last_price, (int, float)) or last_price <= 0:
+        # ✅ BP-18修复：允许last_price=0（盘前/集合竞价阶段price可为0）
+        if not isinstance(last_price, (int, float)) or last_price < 0:
             logging.error("save_tick 价格无效：%s", last_price)
             return False
         volume = tick.get('volume', tick.get('Volume', 0))
@@ -1295,7 +1293,6 @@ class InstrumentDataManager:
                 return False
         return True
     
-    # ========== 智能 Tick 处理 ==========
     # 方法唯一修复：统一字段映射表，_normalize_tick_fields只做一次遍历
     _TICK_FIELD_ALIASES = {
         'InstrumentID': 'instrument_id',
@@ -1329,7 +1326,6 @@ class InstrumentDataManager:
         if not self._validate_tick(tick):
             return
         
-        # ✅ 标准化字段名
         tick = self._normalize_tick_fields(tick)
         
         tick_ts = self._to_timestamp(tick.get('ts'))
@@ -1341,7 +1337,6 @@ class InstrumentDataManager:
         price = tick.get('last_price')
 
         normalized_id = str(instrument or '').strip()
-        # ✅ 传递渠道唯一：通过 ParamsService 获取
         info = self._params_service.get_instrument_meta_by_id(normalized_id)
         if info is None:
             info = self._get_instrument_info(normalized_id)
@@ -1353,7 +1348,6 @@ class InstrumentDataManager:
                     logging.info("[process_tick] 合约未预注册，尝试运行时注册：%s", normalized_id)
             try:
                 self.register_instrument(normalized_id)
-                # ✅ 传递渠道唯一：通过 ParamsService 获取
                 info = self._params_service.get_instrument_meta_by_id(normalized_id)
                 if info is None:
                     info = self._get_instrument_info(normalized_id)
@@ -1397,6 +1391,8 @@ class InstrumentDataManager:
                                   instrument, period, completed_ts)
     
     def _is_ext_kline_missing(self, instrument: str, period: str, current_time: float) -> bool:
+        if self._ext_kline_load_in_progress:
+            return False
         key = (instrument, period)
         with self._ext_kline_lock:
             last_time = self._last_ext_kline.get(key)
@@ -1427,7 +1423,6 @@ class InstrumentDataManager:
         period = kline_data.get('period') or '1min'
 
         normalized_id = str(instrument_id or '').strip()
-        # ✅ 传递渠道唯一：通过 ParamsService 获取
         info = self._params_service.get_instrument_meta_by_id(normalized_id)
         if info is None:
             info = self._get_instrument_info(normalized_id)
@@ -1478,7 +1473,9 @@ class InstrumentDataManager:
         else:
             period_minutes = 1
 
-        return max(1, int(history_minutes / period_minutes))
+        # ✅ BP-0A修复：PythonGO平台count参数：负值=历史数据，正值=未来数据
+        # 返回负值确保请求历史K线而非未来数据
+        return -max(1, int(history_minutes / period_minutes))
 
     @staticmethod
     def _normalize_kline_period(kline_style: str) -> str:
@@ -1553,6 +1550,10 @@ class InstrumentDataManager:
                     _log_probe_once('before', call_name)
                     try:
                         result = call()
+                        # ✅ BP-0B修复：空列表视为无效结果，跳过继续尝试下一个签名
+                        if isinstance(result, (list, tuple)) and len(result) == 0:
+                            logging.debug("[Storage] get_kline_data %s 返回空列表，跳过", call_name)
+                            continue
                         _log_probe_once('after', call_name)
                         return result
                     except (TypeError, AttributeError) as exc:
@@ -1669,7 +1670,6 @@ class InstrumentDataManager:
                         logging.info(f"[Storage] 加载 {instrument_id} 历史 K 线")
 
                     normalized_id = str(instrument_id or '').strip()
-                    # ✅ 传递渠道唯一：通过 ParamsService 获取
                     info = self._params_service.get_instrument_meta_by_id(normalized_id)
                     if info is None:
                         info = self._get_instrument_info(normalized_id)
@@ -1813,7 +1813,6 @@ class InstrumentDataManager:
             'queue_written_delta': queue_written_delta,
         }
     
-    # ========== 通用查询辅助方法 ==========
     
     def get_option_chain_for_future(self, future_instrument_id: str) -> Dict:
         """
@@ -1830,7 +1829,6 @@ class InstrumentDataManager:
         qs = get_query_service()
         return qs.get_option_chain_for_future(future_instrument_id)
     
-    # ========== 批量操作 ==========
     def batch_add_future_instruments(self, instruments: List[Dict]) -> None:
         try:
             for inst in instruments:
@@ -1897,7 +1895,6 @@ class InstrumentDataManager:
             chunk = tick_data[i:i+chunk_size]
             self._enqueue_write('_save_tick_impl', internal_id, instrument_type, chunk)
     
-    # ========== 高级查询 ==========
     def _preload_column_cache(self):
         common_tables = [
             'futures_instruments', 'option_instruments',
@@ -1928,10 +1925,8 @@ class InstrumentDataManager:
             return []
     
     
-    # ========== 数据导出 ==========
 
     
-    # ========== 底层写入方法（storage.py 兼容） ==========
     def write_kline_to_table(self, table_name: str, kline_data: List[Dict]) -> None:
         if not kline_data:
             return
@@ -1971,7 +1966,6 @@ class InstrumentDataManager:
                    t.get('ask_price1')], raise_on_error=True)
         logging.debug(f"写入 {len(tick_data)} 条 Tick 到 {table_name}")
     
-    # ========== Query Methods (storage.py compatible) ==========
     def query_kline(self, instrument_id: str, start_time: str, end_time: str,
                     limit: Optional[int] = None) -> List[Dict]:
         internal_id = self.register_instrument(instrument_id)
@@ -1983,7 +1977,6 @@ class InstrumentDataManager:
         return self.query_tick_by_id(internal_id, start_time, end_time, limit)
     
     def get_option_chain(self, ts: float, underlying: str, expiration: str) -> List[Dict[str, Any]]:
-        # ✅ ID直通：从数据库查询已注册的期货合约，不自行构造
         try:
             rows = self._data_service.query(
                 "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
@@ -2007,7 +2000,6 @@ class InstrumentDataManager:
         logging.debug("get_latest_underlying called: %s %s", underlying, expiration)
         return None
     
-    # ========== 自动清理线程 ==========
     def _start_cleanup_thread(self):
         if self._cleanup_thread and self._cleanup_thread.is_alive():
             return
@@ -2287,7 +2279,6 @@ class InstrumentDataManager:
         if valid_list:
             self._enqueue_write('_save_option_snapshot_batch_impl', valid_list)
     
-    # ========== 数据源加载（完整版） ==========
     @staticmethod
     def load_all_instruments(strategy_instance=None, params=None, logger=None):
         import logging as stdlib_logging
@@ -2397,12 +2388,10 @@ class InstrumentDataManager:
             logger.error("load_all_instruments 异常：%s", e)
             return [], {}
 
-    # ========== 事务管理 ==========
     def cleanup_old_data(self, table: str, days: int, condition: str = "") -> int:
         if days <= 0:
             return 0
             
-        # 白名单验证表名，防止 SQL 注入
         allowed_tables = {
             'tick', 'kline', 'depth_market', 'underlying_snapshot',
             'option_snapshot', 'strategy_signals', 'external_klines'
@@ -2411,10 +2400,8 @@ class InstrumentDataManager:
             logging.error("无效的表名（不在白名单中）：%s", table)
             raise ValueError(f"表名 '{table}' 不在允许列表中")
             
-        # 计算截止时间戳（秒）
         cutoff = time.time() - days * 86400
             
-        # 参数化查询，防止 SQL 注入
         sql = f"DELETE FROM {table} WHERE ts < ?"
         params = [cutoff]
             
@@ -2454,7 +2441,6 @@ class InstrumentDataManager:
             logging.error("清理数据失败：%s", e)
             return 0
 
-    # ========== 通用状态持久化（KV 存储） ==========
     def _init_kv_store(self):
         self._data_service.query("""
             CREATE TABLE IF NOT EXISTS app_kv_store (
@@ -2526,7 +2512,6 @@ class InstrumentDataManager:
         except Exception as e:
             raise
 
-    # ========== 资源管理 ==========
     def close(self):
         self._shutdown_impl(flush=True)
 
@@ -2550,12 +2535,12 @@ def get_instrument_data_manager() -> InstrumentDataManager:
             from ali2026v3_trading.storage import _get_default_db_path
             db_path = _get_default_db_path()
             
-            # 创建全局单例（使用默认配置：max_connections=20, async_queue_size=500000）
+            # 创建全局单例（Tick队列1000万，K线队列10万）
             _instrument_data_manager_instance = InstrumentDataManager(
                 db_path=db_path,
                 max_retries=3,
                 retry_delay=0.1,
-                async_queue_size=500000,
+                async_queue_size=500000,  # 保留参数但不再使用，队列容量已在__init__中硬编码
                 batch_size=5000,
                 drop_on_full=True,
                 cleanup_interval=3600,

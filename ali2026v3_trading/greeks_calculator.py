@@ -30,7 +30,6 @@
 """
 
 import math
-import re
 import threading
 import time
 import logging

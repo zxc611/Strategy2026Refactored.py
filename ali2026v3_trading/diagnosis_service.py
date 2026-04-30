@@ -860,11 +860,12 @@ def record_tick_probe(stage: str, instrument_id: str, price: float, error_msg: O
 
 
 # ============================================================================
-# 14个重点监控合约诊断模块
+# 重点监控合约诊断模块
 # ============================================================================
 
-# 14个监控合约定义（7期货+7期权）
-# 根据实盘交易标准格式配置（参考：期权代码映射表和行权价范围）
+# 监控合约定义。
+# 在原有7期货+7期权基础上，补充商品期权额外监测节点，覆盖更多已确认存在的strike。
+# 根据实盘标准格式配置（参考：期权代码映射表、启动日志和OptionStatus样本）
 MONITORED_CONTRACTS = {
     # 期货（7个）
     'IH2605': {'exchange': 'CFFEX', 'name': '上证50股指期货', 'type': 'future'},
@@ -885,16 +886,40 @@ MONITORED_CONTRACTS = {
     'au2605C1000': {'underlying': 'au2605', 'exchange': 'SHFE', 'name': '黄金看涨1000', 'type': 'option'},  # 行权价范围：560-1744
     'al2605C24000': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看涨24000', 'type': 'option'},  # 行权价范围：18900-29400
     'zn2605C26000': {'underlying': 'zn2605', 'exchange': 'SHFE', 'name': '锌看涨26000', 'type': 'option'},  # 行权价范围：19200-30000
+
+    # 商品期权扩展监测节点：优先选取日志中已出现或已核验存在的strike
+    'cu2605C104000': {'underlying': 'cu2605', 'exchange': 'SHFE', 'name': '铜看涨104000', 'type': 'option'},
+    'au2605C1032': {'underlying': 'au2605', 'exchange': 'SHFE', 'name': '黄金看涨1032', 'type': 'option'},
+    'al2605C22600': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看涨22600', 'type': 'option'},
+    'al2605C25200': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看涨25200', 'type': 'option'},
+    'al2605C26200': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看涨26200', 'type': 'option'},
+    'zn2605C20000': {'underlying': 'zn2605', 'exchange': 'SHFE', 'name': '锌看涨20000', 'type': 'option'},
 }
 
 MONITORED_CONTRACT_SET = set(MONITORED_CONTRACTS.keys())
+MONITORED_CONTRACT_COUNT = len(MONITORED_CONTRACTS)
+MONITORED_DIAG_LABEL = f'{MONITORED_CONTRACT_COUNT}合约诊断'
 _PARSE_TRACE_KEYS: deque = deque(maxlen=10000)
 _PARSE_TRACE_LOCK = threading.RLock()
 
 
 def is_monitored_contract(instrument_id: str) -> bool:
-    """判断是否为监控合约"""
-    return instrument_id in MONITORED_CONTRACT_SET
+    """判断是否为监控合约 - 受diagnostic_output全局开关控制
+    trade模式(diagnostic_output=False): 关闭所有诊断探针，消除日志洪水
+    交易调试模式(diagnostic_output=True): 启用诊断探针(60s汇总节流)
+    """
+    try:
+        from ali2026v3_trading.config_service import get_cached_params
+        cached_params = get_cached_params()
+        if cached_params and isinstance(cached_params, dict):
+            strategy = cached_params.get('strategy')
+            if strategy:
+                params = getattr(strategy, 'params', None)
+                if params:
+                    return bool(getattr(params, 'diagnostic_output', False))
+        return False
+    except Exception:
+        return False
 
 
 def get_contract_info(instrument_id: str) -> Optional[Dict[str, Any]]:
@@ -1148,14 +1173,36 @@ def diagnose_id_lookup(instrument_id: str, internal_id: int, instrument_type: st
     logging.debug(f"[PROBE_ID_LOOKUP] {instrument_id} -> InternalID={internal_id} | Type={instrument_type}")
 
 
+_TICK_ENTRY_SUMMARY_INTERVAL = 60.0
+_tick_entry_last_output_time = 0.0
+_tick_entry_accum = {'count': 0, 'contracts': set(), 'last_price': 0.0, 'last_vol': 0}
+_tick_entry_accum_lock = threading.Lock()
+
+
 def diagnose_tick_entry(instrument_id: str, price: float, volume: int,
                        open_interest: float, contract_type: str) -> None:
-    """环节4: Tick入口诊断"""
+    """环节4: Tick入口诊断 - 60s汇总节流模式
+    trade模式: is_monitored_contract()返回False，直接跳过
+    交易调试模式: 60秒汇总一次输出，避免每tick一条INFO洪水
+    """
     if not is_monitored_contract(instrument_id):
         return
-    
-    logging.info(f"[PROBE_TICK_ENTRY] Contract={instrument_id} | Type={contract_type} | "
-                f"Price={price} | Vol={volume} | OI={open_interest}")
+    global _tick_entry_last_output_time
+    now = time.time()
+    with _tick_entry_accum_lock:
+        _tick_entry_accum['count'] += 1
+        _tick_entry_accum['contracts'].add(instrument_id)
+        _tick_entry_accum['last_price'] = price
+        _tick_entry_accum['last_vol'] = volume
+        if now - _tick_entry_last_output_time >= _TICK_ENTRY_SUMMARY_INTERVAL:
+            count = _tick_entry_accum['count']
+            n_contracts = len(_tick_entry_accum['contracts'])
+            logging.info(f"[PROBE_TICK_ENTRY_SUMMARY] "
+                        f"ticks={count} contracts={n_contracts} "
+                        f"sample=({instrument_id} {contract_type} P={price} V={volume} OI={open_interest})")
+            _tick_entry_accum['count'] = 0
+            _tick_entry_accum['contracts'].clear()
+            _tick_entry_last_output_time = now
 
 
 def diagnose_tick_buffer(buffer_size: int, threshold: int, fill_rate: float) -> None:
@@ -1236,6 +1283,7 @@ class DiagnosisProbeManager:
     def on_tick_entry(instrument_id: str, price: float, volume: int, open_interest: float, contract_type: str):
         """环节4: Tick入口探针"""
         diagnose_tick_entry(instrument_id, price, volume, open_interest, contract_type)
+        DiagnosisProbeManager.record_contract_tick(instrument_id, price, volume, open_interest, contract_type)
     
     @staticmethod
     def on_storage_enqueue(instrument_id: str, success: bool, reason: str = None):
@@ -1261,6 +1309,215 @@ class DiagnosisProbeManager:
     _startup_lock = threading.RLock()
     _startup_seq = 0
     _startup_run: Optional[Dict[str, Any]] = None
+    _contract_watch_lock = threading.RLock()
+    _contract_watch_run: Optional[Dict[str, Any]] = None
+    _contract_watch_thread: Optional[threading.Thread] = None
+    _contract_watch_stop = threading.Event()
+
+    @classmethod
+    def start_contract_watch(
+        cls,
+        subscribed_instruments: Optional[List[str]] = None,
+        timeout_seconds: float = 30.0,
+        summary_interval_seconds: float = 10.0,
+        label: str = MONITORED_DIAG_LABEL,
+    ) -> Dict[str, Any]:
+        """启动重点合约订阅后到包观察器。"""
+        watch_targets = []
+        subscribed_set = set(str(item).strip() for item in (subscribed_instruments or []) if str(item).strip())
+
+        for instrument_id, info in MONITORED_CONTRACTS.items():
+            watch_targets.append({
+                'instrument_id': instrument_id,
+                'exchange': info.get('exchange', ''),
+                'type': info.get('type', 'unknown'),
+                'underlying': info.get('underlying', ''),
+                'name': info.get('name', instrument_id),
+                'in_subscribe_list': instrument_id in subscribed_set,
+                'watch_started_at': time.time(),
+                'first_tick_at': None,
+                'last_tick_at': None,
+                'first_price': None,
+                'last_price': None,
+                'tick_count': 0,
+            })
+
+        run = {
+            'run_id': f"contract-watch-{int(time.time())}",
+            'label': label,
+            'started_at': time.time(),
+            'started_wall': datetime.now().isoformat(),
+            'timeout_seconds': float(timeout_seconds),
+            'summary_interval_seconds': max(1.0, float(summary_interval_seconds)),
+            'contracts': {item['instrument_id']: item for item in watch_targets},
+            'finished': False,
+        }
+
+        with cls._contract_watch_lock:
+            cls._contract_watch_run = run
+            cls._contract_watch_stop.clear()
+
+        logging.info("=" * 80)
+        logging.info(
+            "[ContractWatch] 启动 %s | run=%s | total=%d | in_subscribe_list=%d | timeout=%.1fs | interval=%.1fs",
+            label,
+            run['run_id'],
+            len(run['contracts']),
+            sum(1 for item in watch_targets if item['in_subscribe_list']),
+            run['timeout_seconds'],
+            run['summary_interval_seconds'],
+        )
+        for item in watch_targets:
+            logging.info(
+                "[ContractWatch] target=%s | type=%s | exchange=%s | underlying=%s | in_subscribe_list=%s | name=%s",
+                item['instrument_id'],
+                item['type'],
+                item['exchange'],
+                item['underlying'] or '-',
+                'Y' if item['in_subscribe_list'] else 'N',
+                item['name'],
+            )
+        logging.info("=" * 80)
+
+        def _watch_loop() -> None:
+            last_emit = 0.0
+            while not cls._contract_watch_stop.wait(1.0):
+                current_run = cls._get_contract_watch_run()
+                if current_run is None:
+                    return
+                now = time.time()
+                if now - last_emit >= current_run['summary_interval_seconds']:
+                    cls.emit_contract_watch_summary(reason='periodic')
+                    last_emit = now
+                if now - current_run['started_at'] >= current_run['timeout_seconds']:
+                    cls.emit_contract_watch_summary(reason='timeout', final=True)
+                    return
+
+        thread = threading.Thread(
+            target=_watch_loop,
+            name='ContractWatchSummary',
+            daemon=True,
+        )
+        with cls._contract_watch_lock:
+            cls._contract_watch_thread = thread
+        thread.start()
+        logging.info(
+            "[ContractWatch] START_CONFIRMED run=%s thread=%s alive=%s timeout=%.1fs interval=%.1fs subscribed_targets=%d total_targets=%d",
+            run['run_id'],
+            thread.name,
+            thread.is_alive(),
+            run['timeout_seconds'],
+            run['summary_interval_seconds'],
+            sum(1 for item in watch_targets if item['in_subscribe_list']),
+            len(watch_targets),
+        )
+        return run
+
+    @classmethod
+    def _get_contract_watch_run(cls) -> Optional[Dict[str, Any]]:
+        with cls._contract_watch_lock:
+            return cls._contract_watch_run
+
+    @classmethod
+    def record_contract_tick(
+        cls,
+        instrument_id: str,
+        price: float,
+        volume: int,
+        open_interest: float,
+        contract_type: str,
+    ) -> None:
+        """记录重点合约真实到包。"""
+        instrument = str(instrument_id or '').strip()
+        if not instrument:
+            return
+
+        with cls._contract_watch_lock:
+            run = cls._contract_watch_run
+            if run is None or run.get('finished'):
+                return
+            state = run['contracts'].get(instrument)
+            if state is None:
+                return
+
+            now = time.time()
+            first_tick = state['first_tick_at'] is None
+            state['tick_count'] += 1
+            state['last_tick_at'] = now
+            state['last_price'] = price
+            if first_tick:
+                state['first_tick_at'] = now
+                state['first_price'] = price
+
+        if first_tick:
+            elapsed = now - run['started_at']
+            logging.info(
+                "[ContractWatch] FIRST_TICK run=%s contract=%s type=%s price=%s vol=%s oi=%s elapsed=%.3fs",
+                run['run_id'], instrument, contract_type, price, volume, open_interest, elapsed,
+            )
+
+    @classmethod
+    def emit_contract_watch_summary(cls, reason: str, final: bool = False) -> None:
+        """输出重点合约订阅后到包汇总。"""
+        with cls._contract_watch_lock:
+            run = cls._contract_watch_run
+            if run is None:
+                return
+
+            now = time.time()
+            total = len(run['contracts'])
+            in_subscribe = [item for item in run['contracts'].values() if item['in_subscribe_list']]
+            first_tick = [item for item in run['contracts'].values() if item['first_tick_at'] is not None]
+            no_tick = [item for item in run['contracts'].values() if item['in_subscribe_list'] and item['first_tick_at'] is None]
+            not_subscribed = [item for item in run['contracts'].values() if not item['in_subscribe_list']]
+            elapsed = now - run['started_at']
+
+            if final:
+                run['finished'] = True
+                cls._contract_watch_stop.set()
+
+        logging.info("-" * 80)
+        logging.info(
+            "[ContractWatch] summary run=%s reason=%s final=%s elapsed=%.3fs total=%d in_subscribe=%d first_tick=%d no_tick=%d not_subscribed=%d",
+            run['run_id'], reason, final, elapsed, total, len(in_subscribe), len(first_tick), len(no_tick), len(not_subscribed),
+        )
+
+        for item in sorted(first_tick, key=lambda current: current['first_tick_at'] or 0.0):
+            first_elapsed = (item['first_tick_at'] or now) - run['started_at']
+            last_elapsed = (item['last_tick_at'] or now) - run['started_at']
+            logging.info(
+                "[ContractWatch] OK contract=%s type=%s ticks=%d first=%.3fs last=%.3fs first_price=%s last_price=%s",
+                item['instrument_id'], item['type'], item['tick_count'], first_elapsed, last_elapsed, item['first_price'], item['last_price'],
+            )
+
+        for item in no_tick:
+            logging.warning(
+                "[ContractWatch] NO_TICK contract=%s type=%s waited=%.3fs name=%s",
+                item['instrument_id'], item['type'], elapsed, item['name'],
+            )
+
+        for item in not_subscribed:
+            logging.warning(
+                "[ContractWatch] NOT_IN_SUBSCRIBE_LIST contract=%s type=%s name=%s",
+                item['instrument_id'], item['type'], item['name'],
+            )
+
+        logging.info("-" * 80)
+
+    @classmethod
+    def stop_contract_watch(cls, reason: str = 'stop') -> None:
+        """停止重点合约观察器，并输出最终汇总。"""
+        run = cls._get_contract_watch_run()
+        if run is None:
+            logging.warning("[ContractWatch] STOP_REQUEST reason=%s but no active run", reason)
+            return
+        logging.info(
+            "[ContractWatch] STOP_REQUEST run=%s reason=%s finished=%s",
+            run.get('run_id', '-'),
+            reason,
+            run.get('finished', False),
+        )
+        cls.emit_contract_watch_summary(reason=reason, final=True)
 
     @classmethod
     def begin_startup_timeline(cls, source: str, strategy_id: str = None, reset: bool = False) -> str:
@@ -1428,6 +1685,189 @@ class DiagnosisProbeManager:
                     event['elapsed'], event['name'],
                 )
 
+    @staticmethod
+    def diagnose_subscribe_api_return(strategy_core, test_contracts: list = None) -> Dict[str, Any]:
+        """诊断订阅API返回值 - 检查 sub_market_data 对不同期权的实际返回
+        
+        Args:
+            strategy_core: 策略核心服务实例
+            test_contracts: 测试合约列表，格式为 [(exchange, instrument_id, desc), ...]
+            
+        Returns:
+            Dict: 诊断结果字典
+        """
+        if test_contracts is None:
+            test_contracts = [
+                ('SHFE', 'al2605C25200', 'AL期权-有tick'),
+                ('SHFE', 'au2605C1032', 'AU期权-无tick'),
+                ('SHFE', 'cu2605C104000', 'CU期权-无tick'),
+                ('SHFE', 'zn2605C20000', 'ZN期权-无tick'),
+            ]
+        
+        results = {
+            'timestamp': datetime.now().isoformat(),
+            'contracts': {},
+            'summary': {'total': 0, 'success': 0, 'failed': 0, 'no_return': 0}
+        }
+        
+        logging.info("=" * 80)
+        logging.info("[SubscribeReturnDiag] 开始诊断 sub_market_data 返回值")
+        logging.info("=" * 80)
+        
+        sub_api = getattr(strategy_core, '_runtime_strategy_host', None)
+        if sub_api is None:
+            sub_api = strategy_core
+        
+        sub_method = getattr(sub_api, 'sub_market_data', None)
+        if not callable(sub_method):
+            logging.error("[SubscribeReturnDiag] sub_market_data 方法不可用")
+            results['error'] = 'sub_market_data not callable'
+            return results
+        
+        for exchange, inst_id, desc in test_contracts:
+            results['summary']['total'] += 1
+            contract_result = {
+                'exchange': exchange,
+                'instrument_id': inst_id,
+                'desc': desc,
+                'return_value': None,
+                'return_type': None,
+                'exception': None,
+                'status': 'unknown'
+            }
+            
+            try:
+                ret = sub_method(exchange, inst_id)
+                contract_result['return_value'] = str(ret)
+                contract_result['return_type'] = type(ret).__name__
+                
+                if ret is None:
+                    contract_result['status'] = 'no_return'
+                    results['summary']['no_return'] += 1
+                    logging.warning(
+                        f"[SubscribeReturnDiag] {inst_id} ({desc}): "
+                        f"返回值=None, 可能被忽略"
+                    )
+                elif ret is False:
+                    contract_result['status'] = 'failed'
+                    results['summary']['failed'] += 1
+                    logging.error(
+                        f"[SubscribeReturnDiag] {inst_id} ({desc}): "
+                        f"返回值=False, 订阅失败"
+                    )
+                elif ret is True:
+                    contract_result['status'] = 'success'
+                    results['summary']['success'] += 1
+                    logging.info(
+                        f"[SubscribeReturnDiag] {inst_id} ({desc}): "
+                        f"返回值=True, 订阅成功"
+                    )
+                else:
+                    contract_result['status'] = 'other'
+                    logging.info(
+                        f"[SubscribeReturnDiag] {inst_id} ({desc}): "
+                        f"返回值={ret}, 类型={type(ret).__name__}"
+                    )
+                    
+            except Exception as e:
+                contract_result['exception'] = str(e)
+                contract_result['status'] = 'exception'
+                results['summary']['failed'] += 1
+                logging.error(
+                    f"[SubscribeReturnDiag] {inst_id} ({desc}): "
+                    f"异常={e}"
+                )
+            
+            results['contracts'][inst_id] = contract_result
+        
+        logging.info("-" * 80)
+        logging.info(
+            f"[SubscribeReturnDiag] 汇总: "
+            f"total={results['summary']['total']}, "
+            f"success={results['summary']['success']}, "
+            f"failed={results['summary']['failed']}, "
+            f"no_return={results['summary']['no_return']}"
+        )
+        logging.info("=" * 80)
+        
+        return results
+
+    @staticmethod
+    def diagnose_option_metadata_diff(strategy_core) -> Dict[str, Any]:
+        """诊断期权元数据差异 - 对比有tick和无tick期权的元数据字段
+        
+        Args:
+            strategy_core: 策略核心服务实例
+            
+        Returns:
+            Dict: 诊断结果字典
+        """
+        from ali2026v3_trading.params_service import get_params_service
+        
+        ps = get_params_service()
+        
+        test_contracts = [
+            ('al2605C25200', 'AL期权-有tick'),
+            ('au2605C1032', 'AU期权-无tick'),
+            ('cu2605C104000', 'CU期权-无tick'),
+            ('zn2605C20000', 'ZN期权-无tick'),
+            ('HO2605-C-2800', 'HO指数期权-有tick'),
+        ]
+        
+        results = {
+            'timestamp': datetime.now().isoformat(),
+            'contracts': {},
+            'diff_fields': {}
+        }
+        
+        logging.info("=" * 80)
+        logging.info("[OptionMetaDiff] 开始诊断期权元数据差异")
+        logging.info("=" * 80)
+        
+        all_fields = set()
+        for inst_id, desc in test_contracts:
+            meta = ps.get_instrument_meta_by_id(inst_id)
+            if meta:
+                all_fields.update(meta.keys())
+        
+        key_fields = [
+            'exchange', 'product', 'product_type', 'instrument_type',
+            'price_tick', 'multiplier', 'trading_hours', 
+            'underlying_symbol', 'underlying_id',
+            'min_price_tick', 'contract_size', 'delivery_month',
+            'option_type', 'strike_price', 'expiration_date'
+        ]
+        
+        key_fields = [f for f in key_fields if f in all_fields]
+        
+        logging.info(f"[OptionMetaDiff] 关键字段: {key_fields}")
+        logging.info("-" * 80)
+        
+        header = f"{'合约':<20} {'描述':<15}"
+        for f in key_fields[:8]:
+            header += f" {f[:12]:<12}"
+        logging.info(header)
+        logging.info("-" * 120)
+        
+        for inst_id, desc in test_contracts:
+            meta = ps.get_instrument_meta_by_id(inst_id)
+            
+            row = f"{inst_id:<20} {desc:<15}"
+            for f in key_fields[:8]:
+                v = meta.get(f, 'N/A') if meta else 'N/A'
+                row += f" {str(v)[:12]:<12}"
+            logging.info(row)
+            
+            results['contracts'][inst_id] = {
+                'desc': desc,
+                'meta': meta,
+                'found': meta is not None
+            }
+        
+        logging.info("=" * 80)
+        
+        return results
+
 
 def _get_runtime_state():
     """获取运行时状态，异常时返回安全默认值
@@ -1457,13 +1897,140 @@ def _get_runtime_state():
             or runtime_subscribed
         )
     except Exception as exc:
-        logging.debug(f"[14合约诊断] 获取运行时状态失败: {exc}")
+        logging.debug(f"[{MONITORED_DIAG_LABEL}] 获取运行时状态失败: {exc}")
 
     return runtime_strategy, runtime_core, runtime_subscribed, historical_in_progress, startup_ready
 
 
+def _emit_periodic_resource_ownership_snapshot(runtime_core) -> None:
+    """输出一次周期诊断资源快照，避免在每个监控合约上重复扫描线程。"""
+    strategy_id = getattr(runtime_core, 'strategy_id', 'unknown') if runtime_core else 'unknown'
+    run_id = getattr(runtime_core, '_lifecycle_run_id', 'N/A') if runtime_core else 'N/A'
+    phase = 'periodic-diagnosis'
+
+    allowed_prefixes = (
+        'Main', 'Thread-', 'APScheduler', 'ThreadPoolExecutor',
+        'Storage-AsyncWriter[shared-service]', 'Storage-Cleanup[shared-service]',
+        'SubAsyncWriter[shared-service]', 'SubRetry[shared-service]', 'SubCleanup[shared-service]',
+        'TTypeService-Preload[shared-service]', 'onStop-worker',
+    )
+
+    threads = threading.enumerate()
+    strategy_threads = []
+    shared_threads = []
+    system_threads = []
+
+    for thread_obj in threads:
+        name = thread_obj.name or ''
+        if '[shared-service]' in name:
+            shared_threads.append(name)
+        elif any(name.startswith(prefix) for prefix in allowed_prefixes):
+            system_threads.append(name)
+        elif 'strategy' in name.lower() or strategy_id in name:
+            strategy_threads.append(name)
+        elif name and not name.startswith('Main'):
+            system_threads.append(name)
+
+    logging.info(
+        f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}][phase={phase}]"
+        f"[source_type=resource-ownership] "
+        f"Thread scan: total={len(threads)}, shared-service={len(shared_threads)}, "
+        f"strategy-instance={len(strategy_threads)}, system={len(system_threads)}"
+    )
+
+    if shared_threads:
+        for name in shared_threads:
+            logging.info(
+                f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
+                f"[run_id={run_id}][source_type=resource-ownership] "
+                f"Thread alive: {name} (expected: continues after strategy stop)"
+            )
+
+    if strategy_threads:
+        for name in strategy_threads:
+            logging.warning(
+                f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
+                f"[run_id={run_id}][source_type=resource-ownership] "
+                f"⚠️ LEAKED thread: {name} (expected: should be gone after strategy stop)"
+            )
+    else:
+        logging.info(
+            f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
+            f"[run_id={run_id}][source_type=resource-ownership] "
+            f"✅ No strategy-instance threads leaked"
+        )
+
+    scheduler_mgr = getattr(runtime_core, '_scheduler_manager', None) if runtime_core else None
+    if scheduler_mgr and hasattr(scheduler_mgr, 'get_jobs_by_owner'):
+        try:
+            remaining_jobs = scheduler_mgr.get_jobs_by_owner(strategy_id)
+            if remaining_jobs:
+                job_ids = [job['job_id'] for job in remaining_jobs]
+                logging.warning(
+                    f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
+                    f"[run_id={run_id}][source_type=strategy-job] "
+                    f"⚠️ LEAKED scheduler jobs: {job_ids}"
+                )
+            else:
+                logging.info(
+                    f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
+                    f"[run_id={run_id}][source_type=strategy-job] "
+                    f"✅ No strategy-instance scheduler jobs leaked"
+                )
+        except Exception as exc:
+            logging.debug(
+                f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
+                f"[source_type=resource-ownership] Scheduler diagnosis error: {exc}"
+            )
+
+    storage_obj = getattr(runtime_core, '_storage', None) if runtime_core else None
+    if storage_obj and hasattr(storage_obj, 'get_queue_stats'):
+        try:
+            qstats = storage_obj.get_queue_stats()
+            qsize = qstats.get('current_queue_size', 0)
+            if qsize > 0:
+                logging.info(
+                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
+                    f"[run_id={run_id}][source_type=shared-queue-drain] "
+                    f"Storage queue backlog: {qsize} tasks (expected: drain continues)"
+                )
+            else:
+                logging.info(
+                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
+                    f"[run_id={run_id}][source_type=shared-queue-drain] "
+                    f"✅ Storage queue empty"
+                )
+        except Exception as exc:
+            logging.debug(
+                f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
+                f"[source_type=resource-ownership] Storage queue diagnosis error: {exc}"
+            )
+
+    event_bus = getattr(runtime_core, '_event_bus', None) if runtime_core else None
+    if event_bus and hasattr(event_bus, '_pending_events'):
+        try:
+            pending = getattr(event_bus, '_pending_events', 0)
+            if pending > 0:
+                logging.info(
+                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
+                    f"[run_id={run_id}][source_type=event-tail] "
+                    f"EventBus pending callbacks: {pending} (expected: drain in progress)"
+                )
+            else:
+                logging.info(
+                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
+                    f"[run_id={run_id}][source_type=event-tail] "
+                    f"✅ EventBus pending callbacks empty"
+                )
+        except Exception as exc:
+            logging.debug(
+                f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
+                f"[source_type=resource-ownership] EventBus diagnosis error: {exc}"
+            )
+
+
 def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> None:
-    """周期性诊断：每30秒检查14个合约状态（汇总输出模式）
+    """周期性诊断：每30秒检查重点监控合约状态（汇总输出模式）
     
     成功合约：只列名单
     失败合约：详细列出原因
@@ -1475,169 +2042,39 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
     - 环节1-8: 原有诊断节点（订阅、注册、ID转换、Tick入口等）
     """
     logging.info("\n" + "="*100)
-    logging.info("📊 [14合约诊断] 开始检查")
+    logging.info("📊 [%s] 开始检查", MONITORED_DIAG_LABEL)
     logging.info("="*100)
 
     runtime_strategy, runtime_core, runtime_subscribed, historical_in_progress, startup_ready = _get_runtime_state()
 
     if historical_in_progress:
         logging.info(
-            "[14合约诊断] 历史K线加载进行中，跳过本轮以避免启动期误报: subscribed=%d",
+            "[%s] 历史K线加载进行中，跳过本轮以避免启动期误报: subscribed=%%d" % MONITORED_DIAG_LABEL,
             len(runtime_subscribed),
         )
         logging.info("="*100)
         return
 
     if runtime_strategy is not None and not startup_ready:
-        logging.info("[14合约诊断] 启动桥接尚未完成，跳过本轮以避免初始化误报")
+        logging.info("[%s] 启动桥接尚未完成，跳过本轮以避免初始化误报", MONITORED_DIAG_LABEL)
         logging.info("="*100)
         return
-    
-    for contract, info in MONITORED_CONTRACTS.items():
-        """输出资源所有权表，扫描线程列表并断言strategy-instance级线程已消失"""
-        import threading as _threading
 
-        strategy_id = getattr(runtime_core, 'strategy_id', 'unknown') if runtime_core else 'unknown'
-        run_id = getattr(runtime_core, '_lifecycle_run_id', 'N/A') if runtime_core else 'N/A'
-        phase = 'periodic-diagnosis'
-
-        ALLOWED_PREFIXES = (
-            'Main', 'Thread-', 'APScheduler', 'ThreadPoolExecutor',
-            'Storage-AsyncWriter[shared-service]', 'Storage-Cleanup[shared-service]',
-            'SubAsyncWriter[shared-service]', 'SubRetry[shared-service]', 'SubCleanup[shared-service]',
-            'TTypeService-Preload[shared-service]', 'onStop-worker',
-        )
-
-        threads = _threading.enumerate()
-        strategy_threads = []
-        shared_threads = []
-        system_threads = []
-
-        for t in threads:
-            name = t.name or ''
-            if '[shared-service]' in name:
-                shared_threads.append(name)
-            elif any(name.startswith(p) for p in ALLOWED_PREFIXES):
-                system_threads.append(name)
-            elif 'strategy' in name.lower() or strategy_id in name:
-                strategy_threads.append(name)
-            elif name and not name.startswith('Main'):
-                system_threads.append(name)
-
-        logging.info(
-            f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}][phase={phase}]"
-            f"[source_type=resource-ownership] "
-            f"Thread scan: total={len(threads)}, shared-service={len(shared_threads)}, "
-            f"strategy-instance={len(strategy_threads)}, system={len(system_threads)}"
-        )
-
-        if shared_threads:
-            for name in shared_threads:
-                logging.info(
-                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=resource-ownership] "
-                    f"Thread alive: {name} (expected: continues after strategy stop)"
-                )
-
-        if strategy_threads:
-            for name in strategy_threads:
-                logging.warning(
-                    f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=resource-ownership] "
-                    f"⚠️ LEAKED thread: {name} (expected: should be gone after strategy stop)"
-                )
-        else:
-            logging.info(
-                f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                f"[run_id={run_id}][source_type=resource-ownership] "
-                f"✅ No strategy-instance threads leaked"
-            )
-
-        # 扩展诊断 - scheduler jobs, storage queue, event_bus pending events
-        # 1. Scheduler jobs
-        scheduler_mgr = getattr(runtime_core, '_scheduler_manager', None) if runtime_core else None
-        if scheduler_mgr and hasattr(scheduler_mgr, 'get_jobs_by_owner'):
-            try:
-                remaining_jobs = scheduler_mgr.get_jobs_by_owner(strategy_id)
-                if remaining_jobs:
-                    job_ids = [j['job_id'] for j in remaining_jobs]
-                    logging.warning(
-                        f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                        f"[run_id={run_id}][source_type=strategy-job] "
-                        f"⚠️ LEAKED scheduler jobs: {job_ids}"
-                    )
-                else:
-                    logging.info(
-                        f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                        f"[run_id={run_id}][source_type=strategy-job] "
-                        f"✅ No strategy-instance scheduler jobs leaked"
-                    )
-            except Exception as e:
-                logging.debug(
-                    f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                    f"[source_type=resource-ownership] Scheduler diagnosis error: {e}"
-                )
-
-        # 2. Storage queue stats
-        storage_obj = getattr(runtime_core, '_storage', None) if runtime_core else None
-        if storage_obj and hasattr(storage_obj, 'get_queue_stats'):
-            try:
-                qstats = storage_obj.get_queue_stats()
-                qsize = qstats.get('current_queue_size', 0)
-                if qsize > 0:
-                    logging.info(
-                        f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                        f"[run_id={run_id}][source_type=shared-queue-drain] "
-                        f"Storage queue backlog: {qsize} tasks (expected: drain continues)"
-                    )
-                else:
-                    logging.info(
-                        f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                        f"[run_id={run_id}][source_type=shared-queue-drain] "
-                        f"✅ Storage queue empty"
-                    )
-            except Exception as e:
-                logging.debug(
-                    f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                    f"[source_type=resource-ownership] Storage queue diagnosis error: {e}"
-                )
-
-        # 3. Event bus pending callbacks
-        event_bus = getattr(runtime_core, '_event_bus', None) if runtime_core else None
-        if event_bus and hasattr(event_bus, '_pending_events'):
-            try:
-                pending = getattr(event_bus, '_pending_events', 0)
-                if pending > 0:
-                    logging.info(
-                        f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                        f"[run_id={run_id}][source_type=event-tail] "
-                        f"EventBus pending callbacks: {pending} (expected: drain in progress)"
-                    )
-                else:
-                    logging.info(
-                        f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                        f"[run_id={run_id}][source_type=event-tail] "
-                        f"✅ EventBus pending callbacks empty"
-                    )
-            except Exception as e:
-                logging.debug(
-                    f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                    f"[source_type=resource-ownership] EventBus diagnosis error: {e}"
-                )
+    _emit_periodic_resource_ownership_snapshot(runtime_core)
 
     # 重新获取运行时状态（因为前面的诊断可能修改了状态）
     runtime_strategy, runtime_core, runtime_subscribed, historical_in_progress, startup_ready = _get_runtime_state()
 
     if historical_in_progress:
         logging.info(
-            "[14合约诊断] 历史K线加载进行中，跳过本轮以避免启动期误报: subscribed=%d",
+            "[%s] 历史K线加载进行中，跳过本轮以避免启动期误报: subscribed=%%d" % MONITORED_DIAG_LABEL,
             len(runtime_subscribed),
         )
         logging.info("="*100)
         return
 
     if runtime_strategy is not None and not startup_ready:
-        logging.info("[14合约诊断] 启动桥接尚未完成，跳过本轮以避免初始化误报")
+        logging.info("[%s] 启动桥接尚未完成，跳过本轮以避免初始化误报", MONITORED_DIAG_LABEL)
         logging.info("="*100)
         return
     
@@ -1901,7 +2338,7 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
             logging.warning(f"  {reason} ({len(contracts)}个): {', '.join(contracts[:5])}{'...' if len(contracts) > 5 else ''}")
         
         # 输出12环节状态汇总（只显示有异常的环节）
-        logging.warning(f"\n  [14Diagnosis] 📊 12环节状态汇总:")
+        logging.warning(f"\n  [{MONITORED_CONTRACT_COUNT}Diagnosis] 📊 12环节状态汇总:")
         环节_stats = {
             '1-Config': sum(1 for f in failed_contracts if not f.get('exists_in_file', False)),
             '2-Memory': sum(1 for f in failed_contracts if not f.get('loaded_in_memory', False)),

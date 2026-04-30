@@ -17,15 +17,21 @@ import os
 import sys
 import json
 import copy
-import re
 import logging
 import time
 import threading
 from logging.handlers import RotatingFileHandler
+try:
+    from concurrent_log_handler import ConcurrentRotatingFileHandler
+    _HAS_CONCURRENT_HANDLER = True
+except ImportError:
+    _HAS_CONCURRENT_HANDLER = False
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+
+from ali2026v3_trading.shared_utils import normalize_year_month
 
 
 # ============================================================================
@@ -409,7 +415,7 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
     机制2 - 硬断言替代warning：underlying_future_id 为 NULL 则初始化失败
     机制3 - 删除回填SQL：不再需要 underlying_product + year_month 的字符串匹配回填
     """
-    import re as _re, logging, time
+    import logging, time
     base_dir = os.path.dirname(os.path.abspath(__file__))
     futures_file = os.path.join(base_dir, 'subscription_futures_fixed.txt')
     options_file = os.path.join(base_dir, 'subscription_options_fixed.txt')
@@ -1231,14 +1237,8 @@ def make_platform_future_id(product: str, year_month: str) -> str:
     if not product or not year_month:
         return ''
     
-    # 归一化year_month: 支持 '202605' -> '2605', '6M05' -> '2605'
-    if len(year_month) == 6 and year_month.isdigit():
-        year_month = year_month[2:]  # '202605' -> '2605'
-    elif len(year_month) == 4 and 'M' in year_month.upper():
-        # '6M05' -> '2605'
-        m = re.match(r'(\d)M(\d{2})', year_month, re.IGNORECASE)
-        if m:
-            year_month = f'{m.group(1)}{m.group(2)}'
+    # ✅ 委托shared_utils.normalize_year_month处理年月归一化
+    year_month = normalize_year_month(year_month)
     
     return f'{product}{year_month}'
 
@@ -1249,7 +1249,6 @@ def make_platform_future_id(product: str, year_month: str) -> str:
 
 def _load_default_products_from_config() -> Dict[str, str]:
     """从配置文件加载默认品种列表（回退路径）"""
-    import re as _re
     base_dir = os.path.dirname(os.path.abspath(__file__))
     futures_file = os.path.join(base_dir, 'subscription_futures_fixed.txt')
     options_file = os.path.join(base_dir, 'subscription_options_fixed.txt')
@@ -1345,8 +1344,9 @@ DEFAULT_PARAM_TABLE = {
     "history_minutes": 1440,
     "history_load_batch_size": 200,
     "history_load_max_batch_size": 50,
-    "history_load_batch_delay_sec": 0.05,
-    "history_load_request_delay_sec": 0.03,
+    # 降低压力：batch_delay从0.05s增加到0.2s，request_delay从0.03s增加到0.1s
+    "history_load_batch_delay_sec": 0.2,
+    "history_load_request_delay_sec": 0.1,
     "log_file_path": "strategy_startup.log",
     "test_mode": False,
     "auto_start_after_init": False,
@@ -1784,13 +1784,26 @@ def setup_logging():
             if log_dir and not os.path.exists(log_dir):
                 os.makedirs(log_dir, exist_ok=True)
             
-            file_handler = RotatingFileHandler(
-                log_file,
-                maxBytes=10*1024*1024,  # 10MB
-                backupCount=3,
-                encoding='utf-8',
-                delay=False  # 立即打开文件，而不是等到第一次写入
-            )
+            # Use ConcurrentRotatingFileHandler for multi-process safety
+            if _HAS_CONCURRENT_HANDLER:
+                file_handler = ConcurrentRotatingFileHandler(
+                    log_file,
+                    maxBytes=50*1024*1024,  # 50MB
+                    backupCount=5,
+                    encoding='utf-8',
+                    delay=False,
+                    use_gzip=False
+                )
+                logging.info('[config_service] Using ConcurrentRotatingFileHandler for multi-process safety')
+            else:
+                file_handler = RotatingFileHandler(
+                    log_file,
+                    maxBytes=50*1024*1024,  # 50MB
+                    backupCount=5,
+                    encoding='utf-8',
+                    delay=False  # 立即打开文件，而不是等到第一次写入
+                )
+                logging.warning('[config_service] Using RotatingFileHandler (not multi-process safe)')
             file_handler.setLevel(logging.DEBUG)
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)

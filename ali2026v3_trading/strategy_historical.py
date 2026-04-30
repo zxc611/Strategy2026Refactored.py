@@ -19,10 +19,10 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.config_service import resolve_product_exchange
 from ali2026v3_trading.analytics_service import safe_int, safe_float
 
 
@@ -35,6 +35,7 @@ def load_historical_klines_with_stop(
     batch_size: Optional[int] = None,
     inter_batch_delay_sec: float = 0.0,
     request_delay_sec: float = 0.0,
+    max_workers: int = 5,
     progress_callback=None,
     stop_check=None,
 ) -> Dict[str, int]:
@@ -72,6 +73,7 @@ def load_historical_klines_with_stop(
     failed_count = 0
     total_klines = 0
     fetched_klines = 0
+    kline_success_instruments = []  # 分子：平台返回K线的合约列表
     normalized_period = storage._normalize_kline_period(kline_style)
     effective_batch_size = max(1, int(batch_size or len(instruments) or 1))
     total_batches = (len(instruments) + effective_batch_size - 1) // effective_batch_size if instruments else 0
@@ -84,25 +86,24 @@ def load_historical_klines_with_stop(
         batch_instruments = instruments[start:start + effective_batch_size]
         batch_enqueued_klines = 0
         logging.info(
-            "[Storage] 历史K线批次 %d/%d 开始: batch_size=%d, request_delay=%.3fs, inter_batch_delay=%.3fs",
-            batch_index, total_batches, len(batch_instruments), request_delay_sec, inter_batch_delay_sec,
+            "[Storage] 历史K线批次 %d/%d 开始: batch_size=%d, max_workers=%d, request_delay=%.3fs, inter_batch_delay=%.3fs",
+            batch_index, total_batches, len(batch_instruments), max_workers, request_delay_sec, inter_batch_delay_sec,
         )
 
-        for instrument_index, instrument_str in enumerate(batch_instruments, start=1):
-            if _should_stop():
-                logging.info("[Storage] 历史K线加载收到停止信号，合约循环退出")
-                break
+        # 线程安全计数器和结果收集
+        _counter_lock = threading.Lock()
+        _stopped = [False]  # 使用列表包装以便在嵌套函数中修改
+
+        def _load_single(instrument_str: str) -> Optional[Dict[str, Any]]:
+            """单个合约的历史K线加载（线程安全）"""
+            if _stopped[0] or _should_stop():
+                return None
             try:
                 if '.' in instrument_str:
                     exchange, instrument_id = instrument_str.split('.', 1)
                 else:
                     exchange = None
                     instrument_id = instrument_str
-
-                if exchange:
-                    logging.info(f"[Storage] 加载 {exchange}.{instrument_id} 历史 K 线")
-                else:
-                    logging.info(f"[Storage] 加载 {instrument_id} 历史 K 线")
 
                 normalized_id = str(instrument_id or '').strip()
                 info = storage._get_instrument_info(normalized_id)
@@ -112,8 +113,7 @@ def load_historical_klines_with_stop(
                         if warn_key not in storage._runtime_missing_warned:
                             storage._runtime_missing_warned.add(warn_key)
                             logging.warning("[load_historical_klines] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
-                    failed_count += 1
-                    continue
+                    return {'failed': True}
 
                 if not exchange:
                     exchange = storage.infer_exchange_from_id(instrument_id)
@@ -122,12 +122,10 @@ def load_historical_klines_with_stop(
                     resolved_provider, exchange, instrument_id, kline_style, history_minutes, start_time, end_time,
                 )
 
-                if _should_stop():
-                    logging.info("[Storage] 历史K线加载在API调用后收到停止信号，跳过当前合约")
-                    break
+                if _stopped[0] or _should_stop():
+                    return None
 
                 if kline_data and len(kline_data) > 0:
-                    fetched_klines += len(kline_data)
                     normalized_klines = []
                     for kline in kline_data:
                         try:
@@ -150,8 +148,7 @@ def load_historical_klines_with_stop(
                             logging.warning(f"[Storage] 保存K线失败 {instrument_id}: {exc}")
 
                     if not normalized_klines:
-                        failed_count += 1
-                        continue
+                        return {'failed': True, 'instrument_id': instrument_id}
 
                     storage._wait_for_queue_capacity(
                         max_fill_rate=60.0,
@@ -163,8 +160,7 @@ def load_historical_klines_with_stop(
                     instrument_type = info.get('type', 'future')
                     enqueue_failed = False
                     for chunk_start in range(0, len(normalized_klines), storage.batch_size):
-                        if _should_stop():
-                            logging.info("[Storage] 历史K线加载在入队阶段收到停止信号")
+                        if _stopped[0] or _should_stop():
                             enqueue_failed = True
                             break
                         chunk = normalized_klines[chunk_start:chunk_start + storage.batch_size]
@@ -174,28 +170,68 @@ def load_historical_klines_with_stop(
 
                     if enqueue_failed:
                         logging.warning(f"[Storage] ⚠️ {instrument_id}: 历史K线入队失败")
-                        failed_count += 1
-                        continue
+                        return {'failed': True, 'instrument_id': instrument_id}
 
                     with storage._ext_kline_lock:
                         storage._last_ext_kline[(instrument_id, normalized_period)] = normalized_klines[-1]['ts']
 
                     saved_count = len(normalized_klines)
-                    success_count += 1
-                    total_klines += saved_count
-                    batch_enqueued_klines += saved_count
                     logging.info(f"[Storage] ✅ {instrument_id}: 已批量入队 {saved_count} 条K线")
+                    return {
+                        'success': True,
+                        'instrument_id': instrument_id,
+                        'fetched': len(kline_data),
+                        'enqueued': saved_count,
+                    }
                 else:
                     logging.warning(f"[Storage] ⚠️ {instrument_id}: 无历史K线数据")
-                    failed_count += 1
+                    return {'failed': True, 'instrument_id': instrument_id, 'reason': 'no_data'}
             except Exception as exc:
                 logging.error(f"[Storage] 加载历史K线失败 {instrument_str}: {exc}")
-                failed_count += 1
+                return {'failed': True, 'instrument_id': instrument_str, 'error': str(exc)}
 
-            if request_delay_sec > 0 and instrument_index < len(batch_instruments):
-                if _should_stop() or storage._stop_event.wait(request_delay_sec):
-                    logging.info("[Storage] 历史K线加载在请求间隔中断")
+        # 使用线程池并行加载批次内合约
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"hkl-batch{batch_index}") as executor:
+                futures = {executor.submit(_load_single, inst): inst for inst in batch_instruments}
+                for future in as_completed(futures):
+                    if _should_stop():
+                        _stopped[0] = True
+                        break
+                    result = future.result()
+                    if result is None:
+                        continue
+                    if result.get('success'):
+                        with _counter_lock:
+                            success_count += 1
+                            fetched_klines += result['fetched']
+                            total_klines += result['enqueued']
+                            batch_enqueued_klines += result['enqueued']
+                            kline_success_instruments.append(result['instrument_id'])
+                    elif result.get('failed'):
+                        with _counter_lock:
+                            failed_count += 1
+        else:
+            # 单线程模式（max_workers=1），保持原有串行逻辑
+            for instrument_str in batch_instruments:
+                if _should_stop():
                     break
+                result = _load_single(instrument_str)
+                if result is None:
+                    continue
+                if result.get('success'):
+                    success_count += 1
+                    fetched_klines += result['fetched']
+                    total_klines += result['enqueued']
+                    batch_enqueued_klines += result['enqueued']
+                    kline_success_instruments.append(result['instrument_id'])
+                elif result.get('failed'):
+                    failed_count += 1
+                # request_delay 仅在串行模式下生效
+                if request_delay_sec > 0:
+                    if _should_stop() or storage._stop_event.wait(request_delay_sec):
+                        logging.info("[Storage] 历史K线加载在请求间隔中断")
+                        break
 
         logging.info(
             "[Storage] 历史K线批次 %d/%d 完成: success=%d, failed=%d, fetched_klines=%d, enqueued_klines=%d",
@@ -237,6 +273,7 @@ def load_historical_klines_with_stop(
         'persisted_klines': queue_written_delta,
         'queue_received_delta': queue_received_delta,
         'queue_written_delta': queue_written_delta,
+        'kline_instruments': kline_success_instruments,  # 分子：平台返回K线的合约列表
     }
 
 
@@ -267,6 +304,11 @@ class HistoricalKlineMixin:
         self._historical_loader_thread: Optional[threading.Thread] = None
         self._historical_loader_lock = threading.Lock()
         self._background_threads: List[threading.Thread] = []
+        
+        # Provider重试状态（BP-1/2/3/6修复）
+        self._historical_load_retry_count = 0
+        self._historical_load_max_retries = 3
+        self._historical_provider_retry_delays = [10.0, 30.0, 60.0]
         
         # 诊断标志
         self._hkl_diag_emitted = False
@@ -308,7 +350,7 @@ class HistoricalKlineMixin:
         """构建历史K线合约列表
         
         Returns:
-            List[str]: 带交易所前缀的合约代码列表
+            List[str]: 无交易所前缀的合约代码列表（与on_init预注册格式一致）
         """
         subscribed = list(getattr(self, '_subscribed_instruments', []) or [])
         if not subscribed:
@@ -319,14 +361,12 @@ class HistoricalKlineMixin:
             logging.warning(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] Filtered by month: min={min_year_month}, removed={removed_by_month}")
 
         include_options = bool(_get_param_value(self.params, 'load_history_options', True))
-        instruments: List[str] = []
-        seen: set = set()
         from ali2026v3_trading.subscription_manager import SubscriptionManager
         future_count = 0
         option_count = 0
+        instruments: List[str] = []
 
         for instrument_id in subscribed:
-            # 统一使用 SubscriptionManager.is_option 判断（单一数据源）
             is_option = SubscriptionManager.is_option(instrument_id)
             if is_option:
                 option_count += 1
@@ -335,11 +375,7 @@ class HistoricalKlineMixin:
 
             if not include_options and is_option:
                 continue
-            exchange = resolve_product_exchange(instrument_id)
-            instrument_code = f"{exchange}.{instrument_id}"
-            if instrument_code not in seen:
-                seen.add(instrument_code)
-                instruments.append(instrument_code)
+            instruments.append(instrument_id)
 
         logging.info(
             "[HKL][strategy_id=%s][owner_scope=strategy-instance][source_type=historical-loader] "
@@ -431,6 +467,7 @@ class HistoricalKlineMixin:
         configured_batch_size = max(1, int(_get_param_value(self.params, 'history_load_batch_size', 200) or 200))
         max_batch_size = max(1, int(_get_param_value(self.params, 'history_load_max_batch_size', 50) or 50))
         batch_size = min(configured_batch_size, max_batch_size)
+        # 降低压力：batch_delay从0.05s增加到0.2s，request_delay从0.03s增加到0.1s
         batch_delay = max(0.0, safe_float(_get_param_value(self.params, 'history_load_batch_delay_sec', 0.2)))
         request_delay = max(
             0.0,
@@ -438,7 +475,7 @@ class HistoricalKlineMixin:
                 _get_param_value(
                     self.params,
                     'history_load_request_delay_sec',
-                    max(0.03, min(batch_delay, 0.1)),
+                    max(0.1, min(batch_delay, 0.15)),  # 默认0.1s，最大不超过batch_delay和0.15s
                 )
                 or 0.0
             ),
@@ -478,24 +515,88 @@ class HistoricalKlineMixin:
             ),
         )
         
-        self._historical_kline_result = dict(result or {})
-        self._historical_kline_progress = dict(result or {})
+        with self._historical_loader_lock:
+            self._historical_kline_result = dict(result or {})
+            self._historical_kline_progress = dict(result or {})
         # P1修复：消费enqueued_klines/persisted_klines，兼容旧字段total_klines
         enqueued = safe_int(result.get('enqueued_klines', 0) or result.get('total_klines', 0))
         persisted = safe_int(result.get('persisted_klines', 0))
+        
+        # 记录收到K线的合约（分子）
+        kline_instruments = result.get('kline_instruments', []) if result else []
+        if kline_instruments:
+            if hasattr(self, 'storage') and self.storage and hasattr(self.storage, 'subscription_manager'):
+                sm = self.storage.subscription_manager
+                if sm and hasattr(sm, 'record_kline_received'):
+                    for inst_id in kline_instruments:
+                        sm.record_kline_received(inst_id)
+        
         with self._historical_loader_lock:
             self._stats['total_klines'] = self._stats.get('total_klines', 0) + enqueued
             self._stats['total_enqueued_klines'] = self._stats.get('total_enqueued_klines', 0) + enqueued
             self._stats['total_persisted_klines'] = self._stats.get('total_persisted_klines', 0) + persisted
-        logging.info(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] " f"Done: success={result.get('success', 0)}, failed={result.get('failed', 0)}, " f"enqueued={enqueued}, persisted={persisted}")
+        if hasattr(self, '_e2e_counters') and persisted > 0:
+            with self._lock:
+                self._e2e_counters['kline_persisted_count'] += persisted
+        logging.info(
+            "[HKL][strategy_id=%s][owner_scope=strategy-instance][source_type=historical-loader] "
+            "Done: success=%d, failed=%d, enqueued=%d, persisted=%d",
+            self.strategy_id,
+            result.get('success', 0),
+            result.get('failed', 0),
+            enqueued,
+            persisted,
+        )
+        
+        # 通知历史K线加载完成
+        self._notify_historical_kline_loaded(result or {})
+    
+    def _notify_historical_kline_loaded(self, result: Dict[str, Any]) -> None:
+        """历史K线加载完成通知
+        
+        发布 HistoricalKlineLoaded 事件，通知策略核心及外部系统历史数据已就绪。
+        使历史K线加载线程在完成后及时通知，避免策略核心只能在tick回调中被动检查。
+        """
+        success = result.get('success', 0)
+        failed = result.get('failed', 0)
+        total_klines = result.get('enqueued_klines', 0) or result.get('total_klines', 0)
+        persisted = result.get('persisted_klines', 0)
+        kline_instruments = result.get('kline_instruments', [])
+        
+        logging.info(
+            "[HKL][strategy_id=%s][owner_scope=strategy-instance][source_type=historical-loader] "
+            "Historical kline load complete notification: success=%d, failed=%d, klines=%d, persisted=%d, instruments=%d",
+            self.strategy_id, success, failed, total_klines, persisted,
+            len(kline_instruments) if kline_instruments else 0,
+        )
+        
+        # 发布事件通知
+        try:
+            if hasattr(self, '_publish_event') and callable(self._publish_event):
+                self._publish_event('HistoricalKlineLoaded', {
+                    'success': success,
+                    'failed': failed,
+                    'total_klines': total_klines,
+                    'persisted_klines': persisted,
+                    'kline_instruments_count': len(kline_instruments) if kline_instruments else 0,
+                })
+        except Exception as e:
+            logging.debug(
+                "[HKL][strategy_id=%s] Failed to publish HistoricalKlineLoaded event: %s",
+                self.strategy_id, e,
+            )
     
     # ========== 启动控制 ==========
     
-    def _start_historical_kline_load(self) -> None:
+    def _start_historical_kline_load(self, blocking: bool = False) -> None:
         """启动历史K线加载
         
         检查配置和条件，决定是否启动加载任务。
-        支持同步和异步两种模式。
+        支持异步和阻塞两种模式。
+        
+        Args:
+            blocking: 若为True，启动加载线程后阻塞等待完成。
+                     用于 on_start 初始化阶段，确保历史数据就绪后才继续。
         """
         auto_load = bool(_get_param_value(self.params, 'auto_load_history', False))
         if not auto_load:
@@ -509,12 +610,40 @@ class HistoricalKlineMixin:
 
         provider, provider_source = self._resolve_historical_provider()
         if provider is None:
-            logging.warning(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] Provider not ready, will retry later")
+            with self._historical_loader_lock:
+                if self._historical_load_retry_count < self._historical_load_max_retries:
+                    delay = self._historical_provider_retry_delays[
+                        min(self._historical_load_retry_count, len(self._historical_provider_retry_delays) - 1)
+                    ]
+                    self._historical_load_retry_count += 1
+                    retry_remaining = self._historical_load_max_retries - self._historical_load_retry_count
+                    logging.warning(
+                        f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
+                        f"[source_type=historical-loader] Provider not ready, scheduling retry "
+                        f"{self._historical_load_retry_count}/{self._historical_load_max_retries} "
+                        f"in {delay:.0f}s (remaining={retry_remaining})"
+                    )
+                    def _retry_after_delay():
+                        time.sleep(delay)
+                        try:
+                            self._start_historical_kline_load()
+                        except Exception as e:
+                            logging.error(f"[HKL] Provider retry failed: {e}", exc_info=True)
+                    t = threading.Thread(target=_retry_after_delay, name=f"hkl-retry-{self.strategy_id}", daemon=True)
+                    self._background_threads.append(t)
+                    t.start()
+                else:
+                    logging.error(
+                        f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
+                        f"[source_type=historical-loader] Provider not ready after {self._historical_load_max_retries} retries, giving up"
+                    )
             return
 
         with self._historical_loader_lock:
             if self._historical_load_started and self._historical_kline_result is not None:
-                return
+                result = self._historical_kline_result
+                if result.get('success', 0) > 0 or result.get('total_klines', 0) > 0:
+                    return
             # P1 Bug #28修复：所有状态修改都在锁内，保证一致性
             self._historical_load_started = True
             self._historical_load_in_progress = True
@@ -523,65 +652,71 @@ class HistoricalKlineMixin:
             self._historical_stop_flag = False  # P1 Bug #29修复：添加停止标志
 
         def _runner() -> None:
+            _instruments = instruments
             try:
-                # 等待合约注册（最多30秒）
-                max_wait, waited = 30, 0
-                while waited < max_wait:
-                    # P1 Bug #29修复：检查停止标志，提前退出
-                    with self._historical_loader_lock:
-                        if self._historical_stop_flag:
-                            logging.info(
-                                "[HKL][strategy_id=%s][owner_scope=strategy-instance]"
-                                "[source_type=historical-loader] Stopped by stop flag during registration wait",
-                                self.strategy_id
-                            )
-                            return
-                    
-                    if hasattr(self, 'storage') and self.storage:
-                        try:
-                            registered = len(self.storage.get_registered_instrument_ids() or [])
-                        except Exception:
-                            registered = 0
-                    else:
-                        registered = 0
-                    
-                    if registered >= len(instruments):
-                        break
-                    
-                    if waited % 5 == 0:
-                        logging.info(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] " f"Waiting for registration... {registered}/{len(instruments)} ({waited}s)")
-                    
-                    time.sleep(1)
-                    waited += 1
+                if hasattr(self, 'storage') and self.storage:
+                    self.storage._ext_kline_load_in_progress = True
                 
-                if waited >= max_wait:
-                    logging.warning(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] " f"Registration timeout ({waited}s), force start")
+                # 预注册已在on_init步骤2中同步完成（_load_and_preregister_instruments），
+                # 失败则初始化终止，on_start和历史K线加载不会执行。
+                # 此处只做信任性日志，不重复注册。
+                logging.info(
+                    "[HKL][strategy_id=%s] 预注册已由on_init保证完成，直接加载历史K线: %d 个合约",
+                    self.strategy_id, len(_instruments)
+                )
                 
-                self._load_historical_klines_once(instruments, provider, provider_source)
+                self._load_historical_klines_once(_instruments, provider, provider_source)
             except Exception as e:
                 logging.error(
                     f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
                     f"[source_type=historical-loader] Load failed: {e}", exc_info=True
                 )
+                with self._historical_loader_lock:
+                    if self._historical_load_retry_count < self._historical_load_max_retries:
+                        self._historical_load_started = False
+                        logging.info(
+                            "[HKL][strategy_id=%s] Load failed, will allow retry (%d/%d)",
+                            self.strategy_id, self._historical_load_retry_count, self._historical_load_max_retries
+                        )
             finally:
-                # P1 Bug #28修复：状态修改在锁内
                 with self._historical_loader_lock:
                     self._historical_load_in_progress = False
                     self._historical_kline_progress = None
                 if hasattr(self, 'storage') and self.storage:
+                    self.storage._ext_kline_load_in_progress = False
                     try:
                         self.storage.close_connection()
                     except Exception:
                         pass
 
-        if bool(_get_param_value(self.params, 'async_history_load', True)):
-            thread = threading.Thread(target=_runner, name=f"hkl-{self.strategy_id}", daemon=True)
-            self._historical_loader_thread = thread
-            thread.start()
-            logging.info(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] Async loader started")
-        else:
-            self._historical_loader_thread = None
-            _runner()
+        thread = threading.Thread(target=_runner, name=f"hkl-{self.strategy_id}", daemon=True)
+        self._historical_loader_thread = thread
+        thread.start()
+        logging.info(
+            "[HKL][strategy_id=%s][owner_scope=strategy-instance][source_type=historical-loader] "
+            "Loader thread started (blocking=%s)",
+            self.strategy_id, blocking,
+        )
+        
+        if blocking:
+            logging.info(
+                "[HKL][strategy_id=%s][owner_scope=strategy-instance][source_type=historical-loader] "
+                "Blocking until load completes (max 300s)...",
+                self.strategy_id,
+            )
+            thread.join(timeout=300.0)
+            if thread.is_alive():
+                logging.warning(
+                    "[HKL][strategy_id=%s] Historical K-line load still running after 300s, "
+                    "proceeding non-blocking (load continues in background)",
+                    self.strategy_id,
+                )
+            else:
+                logging.info(
+                    "[HKL][strategy_id=%s][owner_scope=strategy-instance][source_type=historical-loader] "
+                    "Load completed, resuming initialization.",
+                    self.strategy_id,
+                )
     
     # ========== 状态管理 ==========
     
@@ -627,6 +762,7 @@ class HistoricalKlineMixin:
             self._historical_stop_flag = False
             self._historical_load_started = False
             self._historical_loader_thread = None
+            self._historical_load_retry_count = 0
     
     # ========== Tick入口诊断 ==========
     
@@ -677,15 +813,30 @@ class HistoricalKlineMixin:
             )
     
     def _check_and_start_historical_load_on_tick(self) -> None:
-        """在Tick回调中检查并启动历史K线加载
+        """在Tick回调中检查并启动历史K线加载（无锁快速路径优化）
         
-        P1-2修复：如果尚未启动，异步触发加载流程，避免在tick回调线程中同步执行耗时K线加载。
-        正常情况下 on_start 已通过 _start_historical_kline_load_async 启动了后台加载，
-        此方法仅作为兜底：如果后台加载失败或尚未完成，在tick回调中异步补启。
+        快速路径：_historical_load_started=True且加载已完成→直接return（无锁）
+        慢速路径：需要重试→加锁检查→异步启动
         """
+        if self._historical_load_started and self._historical_kline_result is not None:
+            return
+        if self._historical_load_in_progress:
+            return
         with self._historical_loader_lock:
             if self._historical_load_started:
-                return
+                if self._historical_kline_result is not None:
+                    result = self._historical_kline_result
+                    if result.get('success', 0) > 0 or result.get('total_klines', 0) > 0:
+                        return
+                if self._historical_load_retry_count >= self._historical_load_max_retries:
+                    return
+                if self._historical_load_in_progress:
+                    return
+                logging.info(
+                    "[HKL][strategy_id=%s] Previous load failed, allowing tick-triggered retry (%d/%d)",
+                    self.strategy_id, self._historical_load_retry_count, self._historical_load_max_retries
+                )
+                self._historical_load_started = False
             self._historical_load_started = True
 
         # 异步启动，不在tick回调线程中同步执行

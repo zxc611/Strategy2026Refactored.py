@@ -43,12 +43,8 @@ from ali2026v3_trading.strategy_core_service import StrategyState
 # 枚举定义
 # ============================================================================
 
-# ✅ 统一为PauseState，删除StrategyState（与strategy_core_service保持一致由该模块自行维护）
-class PauseState(Enum):
-    """暂停状态（唯一状态枚举）"""
-    RUNNING = auto()
-    PAUSED = auto()
-    STOPPED = auto()
+# ✅ 接口唯一#51：删除PauseState（仅3状态），统一使用StrategyState（7状态，齐全）
+# PauseState已删除，PauseManager改为使用StrategyState
 
 
 class PauseReason(Enum):
@@ -264,7 +260,7 @@ class PauseManager:
     """暂停管理器"""
     
     def __init__(self):
-        self._state = PauseState.RUNNING
+        self._state = StrategyState.RUNNING
         self._lock = threading.RLock()
         self._pause_info: Optional[PauseInfo] = None
         
@@ -276,19 +272,19 @@ class PauseManager:
     def is_paused(self) -> bool:
         """是否已暂停"""
         with self._lock:
-            return self._state == PauseState.PAUSED
+            return self._state == StrategyState.PAUSED
     
     @property
     def is_running(self) -> bool:
         """是否运行中"""
         with self._lock:
-            return self._state == PauseState.RUNNING
+            return self._state == StrategyState.RUNNING
     
     @property
     def is_stopped(self) -> bool:
         """是否已停止"""
         with self._lock:
-            return self._state == PauseState.STOPPED
+            return self._state == StrategyState.STOPPED
     
     def pause(self, reason: PauseReason = PauseReason.MANUAL, message: str = "", duration_seconds: Optional[float] = None) -> bool:
         """
@@ -303,11 +299,11 @@ class PauseManager:
             bool: 是否成功暂停
         """
         with self._lock:
-            if self._state == PauseState.PAUSED:
+            if self._state == StrategyState.PAUSED:
                 logging.warning("[PauseManager.pause] Already paused")
                 return False
             
-            self._state = PauseState.PAUSED
+            self._state = StrategyState.PAUSED
             self._pause_info = PauseInfo(
                 reason=reason,
                 message=message,
@@ -329,11 +325,11 @@ class PauseManager:
             bool: 是否成功恢复
         """
         with self._lock:
-            if self._state != PauseState.PAUSED:
+            if self._state != StrategyState.PAUSED:
                 logging.warning("[PauseManager.resume] Not paused")
                 return False
             
-            self._state = PauseState.RUNNING
+            self._state = StrategyState.RUNNING
             self._pause_info = None
             
             logging.info("[PauseManager.resume] Resumed")
@@ -346,7 +342,7 @@ class PauseManager:
     def stop(self) -> None:
         """停止"""
         with self._lock:
-            self._state = PauseState.STOPPED
+            self._state = StrategyState.STOPPED
             self._pause_info = PauseInfo(PauseReason.MANUAL, "Stopped")
             
             logging.info("[PauseManager.stop] Stopped")
@@ -646,7 +642,6 @@ class InstanceManager:
 # ============================================================================
 
 __all__ = [
-    'PauseState',
     'PauseReason',
     'PauseInfo',
     'PauseManager',

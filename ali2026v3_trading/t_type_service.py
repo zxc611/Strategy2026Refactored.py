@@ -19,7 +19,6 @@ T 型图服务模块 - CQRS 架构 Query 层
 """
 from __future__ import annotations
 
-import re
 import threading
 import logging
 import struct
@@ -278,7 +277,7 @@ class WidthStrengthCache:
         # ✅ 统一从ParamsService查询（唯一权威源）
         try:
             ps = get_params_service()
-            iid = ps.resolve_internal_id(normalized)
+            iid = ps.get_internal_id(normalized)
             if iid is not None:
                 # 回填本地缓存（仅加速，不作为数据源）
                 self._instrument_id_to_internal_id[normalized] = iid
@@ -295,7 +294,7 @@ class WidthStrengthCache:
         if underlying_future_id is None or underlying_future_id == '':
             return ''
         try:
-            future_info = get_params_service().get_id_cache(int(underlying_future_id))
+            future_info = get_params_service().get_instrument_meta(int(underlying_future_id))
             if future_info:
                 return str(future_info.get('product', '')).upper()
         except Exception:
@@ -334,7 +333,7 @@ class WidthStrengthCache:
         params_service = get_params_service()
 
         if internal_id is not None:
-            meta = params_service.get_id_cache(int(internal_id))
+            meta = params_service.get_instrument_meta(int(internal_id))
             if meta:
                 option_product = str(meta.get('product') or '').upper()
 
@@ -388,7 +387,7 @@ class WidthStrengthCache:
         """通过 future_internal_id 获取标的期货最新价，彻底替代 underlying_symbol 字符串回退。"""
         if underlying_future_id in (None, ''):
             return None
-        future_info = get_params_service().get_id_cache(int(underlying_future_id))
+        future_info = get_params_service().get_instrument_meta(int(underlying_future_id))
         if not future_info:
             return None
         future_instrument_id = future_info.get('instrument_id')
@@ -571,7 +570,7 @@ class WidthStrengthCache:
         """
         with self._lock:
             # ✅ 从 id_cache 获取 product 和 month
-            info = get_params_service().get_id_cache(future_internal_id)
+            info = get_params_service().get_instrument_meta(future_internal_id)
             if not info:
                 logging.warning(f"[WidthStrengthCache] Unknown future_internal_id: {future_internal_id}")
                 return
@@ -688,7 +687,7 @@ class WidthStrengthCache:
         """
         with self._lock:
             # ✅ 从 id_cache 获取 product 和 month
-            info = get_params_service().get_id_cache(future_internal_id)
+            info = get_params_service().get_instrument_meta(future_internal_id)
             if not info:
                 logging.warning(f"[WidthStrengthCache] Unknown future_internal_id: {future_internal_id}")
                 return
@@ -716,7 +715,7 @@ class WidthStrengthCache:
 
     def on_future_instrument_tick(self, future_internal_id: int, price: float):
         """✅ 按期货 internal_id 更新价格，ID语义主入口。"""
-        info = get_params_service().get_id_cache(future_internal_id)
+        info = get_params_service().get_instrument_meta(future_internal_id)
         if not info:
             logging.warning(f"[TType] Unknown future internal_id: {future_internal_id}")
             return
@@ -828,7 +827,7 @@ class WidthStrengthCache:
             future_internal_id: 期货合约 internal_id（主键）
         """
         # ✅ 从 id_cache 获取 product
-        info = get_params_service().get_id_cache(future_internal_id)
+        info = get_params_service().get_instrument_meta(future_internal_id)
         if not info:
             logging.warning(f"[WidthStrengthCache] Unknown future_internal_id: {future_internal_id}")
             return
@@ -899,7 +898,7 @@ class WidthStrengthCache:
         """
         with self._lock:
             # ✅ 从 id_cache 获取 product
-            info = get_params_service().get_id_cache(future_internal_id)
+            info = get_params_service().get_instrument_meta(future_internal_id)
             if not info:
                 logging.warning(f"[WidthStrengthCache] Unknown future_internal_id: {future_internal_id}")
                 return {'correct_rise': 0, 'wrong_rise': 0, 'correct_fall': 0, 'wrong_fall': 0, 'other': 0}
@@ -940,7 +939,7 @@ class WidthStrengthCache:
             List[str]: 月份列表
         """
         # ✅ 从 id_cache 获取 product
-        info = get_params_service().get_id_cache(future_internal_id)
+        info = get_params_service().get_instrument_meta(future_internal_id)
         if not info:
             logging.warning(f"[WidthStrengthCache] Unknown future_internal_id: {future_internal_id}")
             return []
@@ -962,7 +961,7 @@ class WidthStrengthCache:
         """
         with self._lock:
             # ✅ 从 id_cache 获取 product
-            info = get_params_service().get_id_cache(future_internal_id)
+            info = get_params_service().get_instrument_meta(future_internal_id)
             if not info:
                 logging.warning(f"[WidthStrengthCache] Unknown future_internal_id: {future_internal_id}")
                 return 0
@@ -1025,7 +1024,7 @@ class WidthStrengthCache:
         with self._lock:
             # ✅ 如果指定了 future_internal_id，获取其 product；否则遍历所有 future_internal_id
             if future_internal_id:
-                info = get_params_service().get_id_cache(future_internal_id)
+                info = get_params_service().get_instrument_meta(future_internal_id)
                 if not info:
                     logging.warning(f"[WidthStrengthCache] Unknown future_internal_id: {future_internal_id}")
                     return
@@ -1036,7 +1035,7 @@ class WidthStrengthCache:
             
             for fid in futures_to_diagnose:
                 # ✅ 从 id_cache 获取 product 用于显示
-                info = get_params_service().get_id_cache(fid)
+                info = get_params_service().get_instrument_meta(fid)
                 if not info:
                     logging.warning(f"[WidthStrengthCache] Cannot resolve product for future_internal_id={fid}")
                     continue
@@ -1141,7 +1140,7 @@ class WidthStrengthCache:
             opt_type: CALL/PUT
         """
         try:
-            future_info = get_params_service().get_id_cache(future_internal_id)
+            future_info = get_params_service().get_instrument_meta(future_internal_id)
             if not future_info:
                 logging.warning(f"[_update_sort_bucket] Unknown future_internal_id: {future_internal_id}")
                 return
@@ -1327,7 +1326,7 @@ class WidthStrengthCache:
                     continue
                     
                 # ✅ 从 id_cache 获取 product
-                fp_info = get_params_service().get_id_cache(fid)
+                fp_info = get_params_service().get_instrument_meta(fid)
                 if not fp_info:
                     continue
                 
@@ -1352,7 +1351,7 @@ class WidthStrengthCache:
                 except Exception:
                     pos_svc = None
                 
-                if not get_params_service().get_id_cache(fid):
+                if not get_params_service().get_instrument_meta(fid):
                     continue
                 
                 future_rising = self._future_rising.get(fid, False)
@@ -1699,7 +1698,7 @@ class TTypeService:
                     }
                 
                 # ✅ 从 id_cache 获取 product
-                info = get_params_service().get_id_cache(underlying_future_id)
+                info = get_params_service().get_instrument_meta(underlying_future_id)
                 product = str(info.get('product', '')).upper() if info else ''
                 
                 return {
@@ -1862,9 +1861,14 @@ class TTypeService:
                 )
 
                 # ✅ 统一验证：确保所有期货合约已加载
-                future_ids = [str(row['instrument_id']) for _, row in futures_df.iterrows() 
-                             if re.match(r'^[A-Za-z]+\d{3,4}$', str(row['instrument_id']))]
+                # 使用 params_service 验证合约类型，而非正则匹配
                 ps = get_params_service()
+                future_ids = []
+                for _, row in futures_df.iterrows():
+                    inst_id = str(row['instrument_id'])
+                    meta = ps.get_instrument_meta_by_id(inst_id)
+                    if meta and meta.get('type') == 'future':
+                        future_ids.append(inst_id)
                 ps.validate_contracts_loaded(future_ids, "future")
 
                 with DiagnosisProbeManager.startup_step("TTypeService._preload_from_db.futures_loop"):
@@ -1873,19 +1877,18 @@ class TTypeService:
                             logging.info("[TTypeService] Preload canceled during futures loop")
                             return
                         instrument_id = str(row['instrument_id'])
-                        # ✅ 使用正则解析而非_parse_future_contract
-                        match = re.match(r'^([A-Za-z]+)(\d{3,4})$', instrument_id)
-                        if not match:
+                        
+                        # ✅ 使用 params_service 元数据解析，而非正则
+                        future_info = ps.get_instrument_meta_by_id(instrument_id)
+                        if not future_info or future_info.get('type') != 'future':
                             continue
-                        product = match.group(1).upper()
-                        month = match.group(2)
+                        
+                        product = future_info.get('product', '').upper()
+                        month = future_info.get('year_month', '')
                         price = float(row['last_price']) if row['last_price'] is not None else 0.0
                         if not product or not month or price <= 0:
                             continue
                         
-                        # ✅ 从 params_service 获取 future_internal_id（已通过验证，必定存在）
-                        ps = get_params_service()
-                        future_info = ps.get_instrument_meta_by_id(instrument_id)
                         future_internal_id = int(future_info['internal_id'])
                         self._width_cache.register_future(future_internal_id, price, month)
                         futures_loaded += 1
@@ -1919,7 +1922,6 @@ class TTypeService:
                         lp.last_price
                     FROM option_instruments oi
                     LEFT JOIN latest_prices lp ON oi.instrument_id = lp.instrument_id
-                    WHERE oi.is_active = 1
                     ORDER BY oi.instrument_id
                     """,
                     arrow=False,

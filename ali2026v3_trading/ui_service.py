@@ -190,15 +190,22 @@ class UIMixin:
                             pass
                         return
                     
-                    setattr(self.params, "debug_output", False)
+                    setattr(self.params, "debug_output", True)
                     setattr(self.params, "run_profile", "full")
                     setattr(self.params, "backtest_tick_mode", False)
-                    setattr(self.params, "diagnostic_output", False)
+                    setattr(self.params, "diagnostic_output", True)
                     setattr(self.params, "test_mode", False)
                     resumed = self._call_method_by_priority(['internal_resume_strategy', 'resume_strategy'])
                     if resumed:
                         self.my_trading = True
-                        self.set_output_mode("trade")
+                    self.set_output_mode("open_debug")
+                    self._refresh_output_mode_ui_styles()
+                    try:
+                        root = getattr(self, '_ui_root', None)
+                        if root:
+                            root.update_idletasks()
+                    except Exception:
+                        pass
                 except Exception as e:
                     self._log_error(f"切换调试模式失败: {e}")
             
@@ -229,17 +236,22 @@ class UIMixin:
                         resumed = bool(self.resume_strategy())
                     if resumed:
                         self.my_trading = True
-                        self.set_output_mode("close_debug")
+                    self.set_output_mode("close_debug")
+                    self._refresh_output_mode_ui_styles()
+                    try:
+                        root = getattr(self, '_ui_root', None)
+                        if root:
+                            root.update_idletasks()
+                    except Exception:
+                        pass
                 except Exception as e:
                     self._log_error(f"收市调试切换失败: {e}")
             
             def _to_trade():
                 try:
-                    # ✅ 修复：收盘时间不能切换到交易模式（无法实际交易）
                     if not is_market_open():
                         error_msg = "收盘时间内不能切换到交易模式（无法实际交易）"
                         self._log_error(error_msg)
-                        # ✅ 关键修复：显示错误提示对话框
                         try:
                             import tkinter as tk
                             from tkinter import messagebox
@@ -254,11 +266,19 @@ class UIMixin:
                     setattr(self.params, "debug_output", False)
                     setattr(self.params, "diagnostic_output", False)
                     setattr(self.params, "test_mode", False)
-                    self.my_trading = True  # ✅ 修复：设置交易标志，确保实际交易功能启用
-                    self.auto_trading_enabled = getattr(self, "auto_trading_enabled", False)  # ✅ 保持自动交易状态
+                    setattr(self.params, "run_profile", "full")
+                    setattr(self.params, "backtest_tick_mode", False)
+                    self.my_trading = True
+                    self.auto_trading_enabled = getattr(self, "auto_trading_enabled", False)
+                    resumed = self._call_method_by_priority(['internal_resume_strategy', 'resume_strategy'])
                     self.set_output_mode("trade")
-                    # ✅ 关键修复：立即刷新UI样式
                     self._refresh_output_mode_ui_styles()
+                    try:
+                        root = getattr(self, '_ui_root', None)
+                        if root:
+                            root.update_idletasks()
+                    except Exception:
+                        pass
                 except Exception as e:
                     self._log_error(f"切换交易模式失败: {e}")
 
@@ -394,8 +414,8 @@ class UIMixin:
                 def _ui_mainloop_thread():
                     try:
                         import tkinter as tk
-                        # ✅ M21 Bug #4修复：非主线程不直接创建Tk，通过queue调度到主线程
-                        # 这里只处理queue消息，不创建root
+                        # ✅ 修复：非主线程直接创建Tk并运行mainloop
+                        # 在某些平台上，Tkinter可以在非主线程运行
                         root = None
                         setattr(cls, "_ui_global_root", None)
                         
@@ -416,48 +436,72 @@ class UIMixin:
                                                 root = tk.Tk()
                                                 root.withdraw()  # 隐藏主窗口
                                                 setattr(cls, "_ui_global_root", root)
-                                            except Exception:
+                                                self._log_info("UI线程中Tk root创建成功")
+                                            except Exception as e:
+                                                self._log_error(f"UI线程中Tk root创建失败: {e}")
                                                 root = None
                                         if root:
                                             self._create_ui_in_main_thread(root)
                                     elif action == "destroy":
                                         if root:
-                                            root.destroy()
+                                            try:
+                                                root.destroy()
+                                            except:
+                                                pass
                                         should_continue = False
+                                        self._ui_running = False
+                                        setattr(cls, "_ui_global_running", False)
                             except queue.Empty:
                                 pass
                             except Exception as e:
                                 self._log_error(f"处理UI队列失败: {e}")
                             finally:
                                 if should_continue and root:
-                                    root.after(100, _process_ui_queue)
+                                    try:
+                                        root.after(100, _process_ui_queue)
+                                    except:
+                                        pass
+                        
+                        # 立即处理一次队列，检查是否有create_ui消息
+                        _process_ui_queue()
                         
                         if root:
                             root.after(100, _process_ui_queue)
+                            self._log_info("UI线程进入mainloop")
                             root.mainloop()
+                            self._log_info("UI线程mainloop已退出")
                         else:
                             # root创建失败，使用简单轮询模式
+                            self._log_warning("Tk root创建失败，使用轮询模式")
                             import time as _time
-                            while not self._ui_queue.empty():
-                                _process_ui_queue()
+                            poll_count = 0
+                            while poll_count < 300:  # 最多轮询30秒
+                                if not self._ui_queue.empty():
+                                    _process_ui_queue()
                                 _time.sleep(0.1)
+                                poll_count += 1
                     except Exception as e:
                         self._log_error(f"UI主循环线程异常: {e}")
+                        import traceback
+                        self._log_error(traceback.format_exc())
                     finally:
-                        # ✅ M21 Bug #5修复：显式销毁窗口
+                        # 显式销毁窗口
                         try:
                             if 'root' in locals() and root:
                                 root.destroy()
                         except:
                             pass
                         setattr(cls, "_ui_mainloop_started", False)
+                        self._ui_running = False
+                        setattr(cls, "_ui_global_running", False)
                 
-                # ✅ M21 Bug #5修复：daemon=False，确保UI资源正确释放
+                # daemon=False，确保UI资源正确释放
                 t = _threading.Thread(target=_ui_mainloop_thread, daemon=False, name="UIMainLoop")
                 t.start()
+                self._log_info("UI主循环线程已启动")
             return
         
-        # 在主线程中，直接创建UI
+        # 在主线程中，直接创建UI（非阻塞方式）
         try:
             import tkinter as tk
             root = tk.Tk()
@@ -466,7 +510,7 @@ class UIMixin:
             # 调用UI创建方法
             self._create_ui_in_main_thread(root)
             
-            # 队列消费者（处理其他消息）
+            # 队列消费者（处理其他消息）- 使用after代替mainloop避免阻塞
             def _process_queue():
                 should_continue = True
                 try:
@@ -517,7 +561,10 @@ class UIMixin:
                             self._log_error(f"调度队列处理失败: {e}")
             
             root.after(100, _process_queue)
-            root.mainloop()
+            # ✅ 修复：不调用root.mainloop()阻塞，让平台主循环继续执行
+            # 使用update()让UI立即显示
+            root.update()
+            self._log_info("UI界面已创建（非阻塞模式）")
             
         except Exception as e:
             self._log_error(f"输出模式界面异常: {e}")
@@ -596,7 +643,10 @@ class UIMixin:
             if m == "close_debug":
                 setattr(self.params, "debug_output", True)
                 setattr(self.params, "diagnostic_output", True)
-            elif m == "open_debug" or m == "trade":
+            elif m == "open_debug":
+                setattr(self.params, "debug_output", True)
+                setattr(self.params, "diagnostic_output", True)
+            elif m == "trade":
                 setattr(self.params, "debug_output", False)
                 setattr(self.params, "diagnostic_output", False)
             try:

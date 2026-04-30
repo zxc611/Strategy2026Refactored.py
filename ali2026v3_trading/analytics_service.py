@@ -22,7 +22,6 @@ analytics_service.py - 分析服务
 
 from __future__ import annotations
 
-import re
 import struct
 import logging
 import threading
@@ -598,23 +597,37 @@ class AnalyticsService:
         return extract_product_code(symbol)
 
     # 期货->期权品种静态映射（与 t_type_service._option_to_future_product 互逆）
-    _FUTURE_TO_OPTION_MAP: Dict[str, str] = {'IF': 'IO', 'IH': 'HO', 'IC': 'MO', 'IM': 'EO'}
+    _FUTURE_TO_OPTION_MAP: Dict[str, str] = {'IF': 'IO', 'IH': 'HO', 'IM': 'MO'}
+    # 注意：IC期货没有对应期权，EO期权尚未上市
 
     def _to_option_group_id(self, future_symbol: str) -> str:
         """将期货月份ID映射为期权分组ID，如 IF2604 -> IO2604。
         
-        使用静态映射表，不再依赖已删除的 self.future_to_option_map。
+        使用静态映射表，优先使用 params_service 元数据。
         """
         norm = normalize_instrument_id(future_symbol)
-        match = re.match(r"^([A-Za-z]+)(\d{3,4})$", norm)
-        if not match:
-            return norm
-        product = match.group(1)
-        suffix = match.group(2)
-        option_product = self._FUTURE_TO_OPTION_MAP.get(product, "")
-        if not option_product:
-            return norm
-        return f"{option_product}{suffix}"
+        
+        # ✅ 优先使用 params_service 元数据（自带属性）
+        from ali2026v3_trading.params_service import get_params_service
+        ps = get_params_service()
+        meta = ps.get_instrument_meta_by_id(norm)
+        if meta:
+            product = meta.get('product', '')
+            suffix = meta.get('year_month', '')
+            if product and suffix:
+                option_product = self._FUTURE_TO_OPTION_MAP.get(product, "")
+                if option_product:
+                    return f"{option_product}{suffix}"
+        
+        # 回退：使用字符串解析（数据入口）
+        from ali2026v3_trading.shared_utils import extract_product_code
+        product = extract_product_code(norm)
+        suffix = norm[len(product):] if product else ''
+        if product and suffix:
+            option_product = self._FUTURE_TO_OPTION_MAP.get(product, "")
+            if option_product:
+                return f"{option_product}{suffix}"
+        return norm
 
     def _get_month_bucket(self, symbol: str) -> Optional[str]:
         """判断合约属于指定月还是下月。支持期货ID和期权分组ID。
