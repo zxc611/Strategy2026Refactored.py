@@ -171,47 +171,33 @@ class RiskService:
     # ========================================================================
 
     def check_before_trade(self, signal: Dict[str, Any]) -> RiskCheckResponse:
-        """
-        交易前风控检查（主入口）
-
-        Args:
-            signal: 信号字典，包含 symbol, exchange, is_valid 等
-
-        Returns:
-            RiskCheckResponse: 检查结果
-        """
         try:
-            # 1. 策略状态检查
-            status_result = self._check_strategy_status()
-            if status_result.is_block:
-                return self._record_result(status_result)
+            with self._lock:
+                status_result = self._check_strategy_status()
+                if status_result.is_block:
+                    return self._record_result(status_result)
 
-            # 2. 信号有效性检查
-            if not signal.get("is_valid", True):
-                return self._record_result(
-                    RiskCheckResponse.block_result("signal_invalid", "信号无效")
-                )
+                if not signal.get("is_valid", True):
+                    return self._record_result(
+                        RiskCheckResponse.block_result("signal_invalid", "信号无效")
+                    )
 
-            # 3. 限频检查
-            symbol = signal.get("symbol", "")
-            rate_result = self._check_rate_limit(symbol)
-            if rate_result.is_block:
-                return self._record_result(rate_result)
+                symbol = signal.get("symbol", "")
+                rate_result = self._check_rate_limit(symbol)
+                if rate_result.is_block:
+                    return self._record_result(rate_result)
 
-            # 4. 持仓限额检查
-            account_id = signal.get("account_id", "default")
-            amount = signal.get("amount", 0)
-            limit_result = self._check_position_limit(account_id, amount)
-            if limit_result.is_block:
-                return self._record_result(limit_result)
+                account_id = signal.get("account_id", "default")
+                amount = signal.get("amount", 0)
+                limit_result = self._check_position_limit(account_id, amount)
+                if limit_result.is_block:
+                    return self._record_result(limit_result)
 
-            # 5. 风险比率检查
-            risk_result = self._check_risk_ratio(signal)
-            if risk_result.is_block:
-                return self._record_result(risk_result)
+                risk_result = self._check_risk_ratio(signal)
+                if risk_result.is_block:
+                    return self._record_result(risk_result)
 
-            # 记录信号时间
-            self._record_signal_time(symbol)
+                self._record_signal_time(symbol)
 
             return self._record_result(RiskCheckResponse.pass_result("风控检查通过"))
 
@@ -347,10 +333,30 @@ class RiskService:
 
             limit = self._position_limits[account_id]
 
-            if limit is not None and limit.limit_amount < required_amount:
+            current_exposure = 0.0
+            if self.position_manager is not None:
+                try:
+                    import copy as _copy
+                    positions_raw = getattr(self.position_manager, "positions", {})
+                    positions = _copy.deepcopy(positions_raw) if positions_raw else {}
+                    for inst_map in positions.values():
+                        for pos in inst_map.values():
+                            vol = getattr(pos, "volume", 0)
+                            price = getattr(pos, "open_price", 0)
+                            current_exposure += abs(vol) * price
+                except Exception as e:
+                    # ✅ P0修复：限额检查异常时返回WARNING而非静默跳过
+                    logging.warning(f"[RiskService._check_position_limit] Failed to calculate exposure: {e}")
+                    return RiskCheckResponse.block_result(
+                        "position_calculation_error",
+                        f"持仓计算异常: {e}",
+                        RiskLevel.WARNING
+                    )
+
+            if limit is not None and limit.limit_amount < (current_exposure + required_amount):
                 return RiskCheckResponse.block_result(
                     "position_limit_exceeded",
-                    f"持仓限额不足: 需要 {required_amount:.2f}, 限额 {limit.limit_amount:.2f}",
+                    f"持仓限额不足: 当前{current_exposure:.2f}+需要{required_amount:.2f}={current_exposure + required_amount:.2f}, 限额 {limit.limit_amount:.2f}",
                     RiskLevel.HIGH
                 )
 
@@ -369,11 +375,16 @@ class RiskService:
             logging.warning("[RiskService.set_position_limit] PositionService not available")
 
     def get_position_limit(self, account_id: str) -> Optional[PositionLimit]:
-        """获取持仓限额"""
-        with self._lock:
-            limit = self._position_limits.get(account_id)
-            if limit and limit.is_valid():
-                return limit
+        """获取持仓限额 - ✅ P1修复：统一数据源，委托给PositionService"""
+        # ✅ 统一为PositionService入口
+        if self.position_manager and hasattr(self.position_manager, 'get_position_limit'):
+            return self.position_manager.get_position_limit(account_id)
+        else:
+            logging.warning("[RiskService.get_position_limit] PositionService not available, using fallback")
+            with self._lock:
+                limit = self._position_limits.get(account_id)
+                if limit and limit.is_valid():
+                    return limit
             return None
 
     # ========================================================================
@@ -403,10 +414,14 @@ class RiskService:
             if self.position_manager is None:
                 return RiskMetrics()
 
-            # 获取持仓信息
-            # M22-Bug1修复：使用copy.deepcopy避免嵌套dict并发修改
+            # ✅ P1修复：将deepcopy移到锁外，减少持锁时间
+            # 先读取引用，再在锁外执行deepcopy
             positions_raw = getattr(self.position_manager, "positions", {})
+            
+            # 在锁外执行deepcopy，避免长时间持锁
+            import copy
             positions = copy.deepcopy(positions_raw) if positions_raw else {}
+            
             total_exposure = 0.0
             max_position = 0.0
             count = 0

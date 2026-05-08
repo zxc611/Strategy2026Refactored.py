@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.analytics_service import safe_int, safe_float
+from ali2026v3_trading.shared_utils import safe_int, safe_float
 
 
 def load_historical_klines_with_stop(
@@ -35,14 +35,14 @@ def load_historical_klines_with_stop(
     batch_size: Optional[int] = None,
     inter_batch_delay_sec: float = 0.0,
     request_delay_sec: float = 0.0,
-    max_workers: int = 5,
+    max_workers: int = 4,
     progress_callback=None,
     stop_check=None,
 ) -> Dict[str, int]:
     """在历史加载 mixin 内实现可取消加载，避免继续扩张 storage.py。"""
     resolved_provider, provider_type = storage._resolve_kline_provider(market_center)
     if not resolved_provider:
-        logging.warning("[Storage] 历史K线提供者不可用，无法加载历史K线")
+        logging.debug("[Storage] 历史K线提供者不可用，无法加载历史K线")
         return {
             'success': 0,
             'failed': len(instruments),
@@ -169,7 +169,7 @@ def load_historical_klines_with_stop(
                             break
 
                     if enqueue_failed:
-                        logging.warning(f"[Storage] ⚠️ {instrument_id}: 历史K线入队失败")
+                        logging.warning(f"[Storage] {instrument_id}: 历史K线入队失败")
                         return {'failed': True, 'instrument_id': instrument_id}
 
                     with storage._ext_kline_lock:
@@ -184,7 +184,7 @@ def load_historical_klines_with_stop(
                         'enqueued': saved_count,
                     }
                 else:
-                    logging.warning(f"[Storage] ⚠️ {instrument_id}: 无历史K线数据")
+                    logging.info(f"[Storage] {instrument_id}: 无历史K线数据")
                     return {'failed': True, 'instrument_id': instrument_id, 'reason': 'no_data'}
             except Exception as exc:
                 logging.error(f"[Storage] 加载历史K线失败 {instrument_str}: {exc}")
@@ -303,6 +303,8 @@ class HistoricalKlineMixin:
         self._historical_load_started = False
         self._historical_loader_thread: Optional[threading.Thread] = None
         self._historical_loader_lock = threading.Lock()
+        # ✅ P1修复：添加_background_threads专用锁，避免并发append/clear竞态
+        self._background_threads_lock = threading.Lock()
         self._background_threads: List[threading.Thread] = []
         
         # Provider重试状态（BP-1/2/3/6修复）
@@ -393,27 +395,27 @@ class HistoricalKlineMixin:
     # ========== 提供者解析 ==========
     
     def _resolve_historical_provider(self) -> tuple:
-        """解析历史数据提供者
-        
-        按优先级尝试获取市场中心或策略实例：
-        1. params.market_center
-        2. strategy.market_center
-        3. runtime_market_center
-        4. runtime_host提取
-        5. get_kline方法包装
-        6. fallback方案
-        
+        """解析历史数据提供者（6级降级链路，按优先级逐级尝试）
+
+        降级链路（优先级从高到低）:
+          Level 1: params.market_center — 策略参数显式注入
+          Level 2: strategy.market_center / strategy.get_kline_data — 策略实例提供
+          Level 3: _runtime_market_center — 运行时缓存的市场中心
+          Level 4: _runtime_strategy_host提取 — 从宿主策略提取市场中心或get_kline_data
+          Level 5: self.get_kline方法包装 — 自身方法包装为Provider
+          Level 6: _get_fallback_market_center() — 最终降级方案
+
         Returns:
-            tuple: (provider, provider_source) 提供者和来源标识
+            tuple: (provider, provider_source) 提供者和来源标识（'params'/'strategy'/'runtime'/'runtime_host'/'get_kline'/'fallback'/'unavailable'）
         """
         params = getattr(self, 'params', None)
         
-        # 1. 优先使用params.market_center
+        # Level 1: 优先使用params.market_center（显式注入，最高优先级）
         runtime_market_center = _get_param_value(params, 'market_center')
         if runtime_market_center is not None:
             return runtime_market_center, 'params'
         
-        # 2. 尝试strategy.market_center
+        # Level 2: 尝试strategy.market_center（策略实例提供）
         runtime_strategy = _get_param_value(params, 'strategy')
         if runtime_strategy is not None:
             strategy_mc = getattr(runtime_strategy, 'market_center', None)
@@ -422,11 +424,11 @@ class HistoricalKlineMixin:
             if callable(getattr(runtime_strategy, 'get_kline_data', None)) or callable(getattr(runtime_strategy, 'get_kline', None)):
                 return runtime_strategy, 'strategy'
         
-        # 3. 使用运行时市场中心
+        # Level 3: 使用运行时缓存的市场中心
         if hasattr(self, '_runtime_market_center') and self._runtime_market_center is not None:
             return self._runtime_market_center, 'runtime'
         
-        # 4. 尝试从runtime_host提取
+        # Level 4: 尝试从runtime_host提取（宿主策略）
         if hasattr(self, '_runtime_strategy_host'):
             runtime_host = self._runtime_strategy_host
             if runtime_host is not None:
@@ -437,13 +439,13 @@ class HistoricalKlineMixin:
                 if callable(getattr(runtime_host, 'get_kline_data', None)) or callable(getattr(runtime_host, 'get_kline', None)):
                     return runtime_host, 'runtime_host'
         
-        # 5. 使用get_kline方法
+        # Level 5: 使用自身get_kline方法包装为Provider
         if callable(getattr(self, 'get_kline', None)):
             class _Provider:
                 def __init__(self, fn): self.get_kline = fn
             return _Provider(self.get_kline), 'get_kline'
         
-        # 6. 备用方案
+        # Level 6: 最终降级方案
         fallback = self._get_fallback_market_center()
         if fallback is not None:
             if hasattr(self, '_runtime_market_center'):
@@ -467,6 +469,7 @@ class HistoricalKlineMixin:
         configured_batch_size = max(1, int(_get_param_value(self.params, 'history_load_batch_size', 200) or 200))
         max_batch_size = max(1, int(_get_param_value(self.params, 'history_load_max_batch_size', 50) or 50))
         batch_size = min(configured_batch_size, max_batch_size)
+        max_workers = max(1, int(_get_param_value(self.params, 'history_load_max_workers', 4) or 4))
         # 降低压力：batch_delay从0.05s增加到0.2s，request_delay从0.03s增加到0.1s
         batch_delay = max(0.0, safe_float(_get_param_value(self.params, 'history_load_batch_delay_sec', 0.2)))
         request_delay = max(
@@ -506,6 +509,7 @@ class HistoricalKlineMixin:
             batch_size=batch_size,
             inter_batch_delay_sec=batch_delay,
             request_delay_sec=request_delay,
+            max_workers=max_workers,
             progress_callback=_on_progress,
             stop_check=lambda: bool(
                 getattr(self, '_historical_stop_flag', False)
@@ -630,7 +634,9 @@ class HistoricalKlineMixin:
                         except Exception as e:
                             logging.error(f"[HKL] Provider retry failed: {e}", exc_info=True)
                     t = threading.Thread(target=_retry_after_delay, name=f"hkl-retry-{self.strategy_id}", daemon=True)
-                    self._background_threads.append(t)
+                    # ✅ P1修复：加锁保护_background_threads.append
+                    with self._background_threads_lock:
+                        self._background_threads.append(t)
                     t.start()
                 else:
                     logging.error(
@@ -655,8 +661,8 @@ class HistoricalKlineMixin:
             _instruments = instruments
             try:
                 if hasattr(self, 'storage') and self.storage:
-                    self.storage._ext_kline_load_in_progress = True
-                
+                    with self.storage._ext_kline_lock:
+                        self.storage._ext_kline_load_in_progress = True
                 # 预注册已在on_init步骤2中同步完成（_load_and_preregister_instruments），
                 # 失败则初始化终止，on_start和历史K线加载不会执行。
                 # 此处只做信任性日志，不重复注册。
@@ -683,14 +689,17 @@ class HistoricalKlineMixin:
                     self._historical_load_in_progress = False
                     self._historical_kline_progress = None
                 if hasattr(self, 'storage') and self.storage:
-                    self.storage._ext_kline_load_in_progress = False
+                    with self.storage._ext_kline_lock:
+                        self.storage._ext_kline_load_in_progress = False
                     try:
                         self.storage.close_connection()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"[{self.strategy_id}] Failed to close connection: {e}")
 
         thread = threading.Thread(target=_runner, name=f"hkl-{self.strategy_id}", daemon=True)
         self._historical_loader_thread = thread
+        with self._background_threads_lock:
+            self._background_threads.append(thread)
         thread.start()
         logging.info(
             "[HKL][strategy_id=%s][owner_scope=strategy-instance][source_type=historical-loader] "
@@ -730,28 +739,39 @@ class HistoricalKlineMixin:
         if loader_thread and loader_thread.is_alive():
             logging.info(
                 f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
-                f"[source_type=historical-loader] Waiting for loader thread to exit (max 5s)"
+                f"[source_type=historical-loader] Waiting for loader thread to exit (max 10s)"
             )
-            deadline = time.time() + 5.0
+            deadline = time.time() + 10.0
             while loader_thread.is_alive() and time.time() < deadline:
-                loader_thread.join(timeout=0.2)
+                loader_thread.join(timeout=0.5)
 
             if loader_thread.is_alive():
                 logging.warning(
                     f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
-                    f"[source_type=historical-loader] ⚠️ Loader thread still alive after 5s"
+                    f"[source_type=historical-loader] Loader thread still alive after 10s (daemon=True, will exit with process)"
                 )
             else:
                 logging.info(
                     f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
-                    f"[source_type=historical-loader] ✅ Loader thread exited"
+                    f"[source_type=historical-loader] Loader thread exited cleanly"
                 )
 
-        # join所有后台线程
-        for t in self._background_threads:
+        with self._background_threads_lock:
+            threads_to_join = list(self._background_threads)
+            self._background_threads.clear()
+        
+        alive_threads = []
+        for t in threads_to_join:
             if t.is_alive():
-                t.join(timeout=2.0)
-        self._background_threads.clear()
+                t.join(timeout=3.0)
+                if t.is_alive():
+                    alive_threads.append(t.name)
+        
+        if alive_threads:
+            logging.info(
+                f"[HKL][strategy_id={self.strategy_id}] {len(alive_threads)} daemon threads still alive "
+                f"after join timeout (will exit with process): {alive_threads[:5]}"
+            )
     
     def _reset_historical_state_for_restart(self) -> None:
         """重置历史K线状态以支持重启
@@ -813,16 +833,17 @@ class HistoricalKlineMixin:
             )
     
     def _check_and_start_historical_load_on_tick(self) -> None:
-        """在Tick回调中检查并启动历史K线加载（无锁快速路径优化）
+        """✅ P1修复：在Tick回调中检查并启动历史K线加载（消除无锁快速路径竞态）
         
-        快速路径：_historical_load_started=True且加载已完成→直接return（无锁）
-        慢速路径：需要重试→加锁检查→异步启动
+        所有状态读取都在锁内完成，避免数据可见性问题
         """
-        if self._historical_load_started and self._historical_kline_result is not None:
-            return
-        if self._historical_load_in_progress:
-            return
         with self._historical_loader_lock:
+            # ✅ P1修复：在锁内读取所有状态，消除TOCTOU竞态
+            if self._historical_load_started and self._historical_kline_result is not None:
+                return
+            if self._historical_load_in_progress:
+                return
+            
             if self._historical_load_started:
                 if self._historical_kline_result is not None:
                     result = self._historical_kline_result
@@ -856,7 +877,9 @@ class HistoricalKlineMixin:
             name=f"kline-load-tick-fallback-{self.strategy_id}",
             daemon=True
         )
-        self._background_threads.append(t)
+        # ✅ P1修复：加锁保护_background_threads.append
+        with self._background_threads_lock:
+            self._background_threads.append(t)
         t.start()
     
     # ========== 周期性汇总 ==========

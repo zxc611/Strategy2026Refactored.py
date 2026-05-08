@@ -531,7 +531,7 @@ class StrategyScheduler:
                     
                     if inserted > 0:
                         cache.clear_latest_ticks()
-                        cache.truncate_wal()
+                        data_service.truncate_wal()
                         logging.info(f"[StrategyScheduler] Cache flush success: {inserted:,} records written, WAL truncated")
                     else:
                         logging.warning(f"[StrategyScheduler] Cache flush: 0 records written, cache retained")

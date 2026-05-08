@@ -25,14 +25,12 @@ _LAZY_IMPORTS = {
     't_type_bootstrap': 't_type_bootstrap',
     'Strategy2026': 'ali2026v3_trading.strategy_core_service',
     'ServiceContainer': 'ali2026v3_trading.config_service',
-    'InstrumentDataManager': 'ali2026v3_trading.storage',
-    'KLineData': 'ali2026v3_trading.storage',
-    'TickData': 'ali2026v3_trading.storage',
+    'InstrumentDataManager': 'ali2026v3_trading',
     'OrderService': 'ali2026v3_trading.order_service',
     'RiskService': 'ali2026v3_trading.risk_service',
     'ParamsService': 'ali2026v3_trading.params_service',
     'StrategyCore': 'ali2026v3_trading.strategy_core_service',
-    'StrategyState': 'ali2026v3_trading.strategy_core_service',
+    'StrategyState': 'ali2026v3_trading.strategy_lifecycle_mixin',
     'ConfigService': 'ali2026v3_trading.config_service',
 }
 

@@ -198,8 +198,6 @@ class PositionService(object):
             if val is not None and val != '':
                 return val
         return default
-
-        logging.info("[PositionService] Initialized")
     
     def _get_instrument_lock(self, instrument_id: str) -> threading.RLock:
         """获取合约的锁
@@ -310,19 +308,20 @@ class PositionService(object):
 
             until = datetime.now() + timedelta(hours=valid_hours)
 
-            # ✅ 以RiskService为唯一限额源，本地仅缓存读取
-            # 注意：避免循环依赖，不委托给RiskService.set_position_limit（它会回调position_manager）
-            # 而是直接更新RiskService内部的_position_limits字典
+            # ✅ P0修复：通过RiskService公共API设置限额，避免穿透封装
             if self._risk_service is not None:
-                with self._risk_service._lock:
-                    from ali2026v3_trading.risk_service import PositionLimit
-                    self._risk_service._position_limits[account_id] = PositionLimit(
+                try:
+                    # 使用RiskService的公共方法设置限额
+                    self._risk_service.set_position_limit(
                         account_id=account_id,
                         limit_amount=limit_amount,
                         effective_until=until
                     )
-                logging.info(f"[PositionService.set_position_limit] Updated RiskService._position_limits for {account_id}")
-                return True
+                    logging.info(f"[PositionService.set_position_limit] Set limit via RiskService API for {account_id}")
+                    return True
+                except Exception as e:
+                    logging.error(f"[PositionService.set_position_limit] Failed to set limit via RiskService: {e}")
+                    return False
             else:
                 logging.warning("[PositionService.set_position_limit] RiskService not available, skip setting limit")
                 return False
@@ -415,8 +414,9 @@ class PositionService(object):
                 result = self._risk_service._check_position_limit(account_id, required_amount)
                 return result.is_pass
             else:
-                logging.warning("[PositionService.check_position_limit] RiskService not available, default allow")
-                return True  # RiskService不可用时默认允许
+                # ✅ P0修复：RiskService不可用时应阻断而非默认允许（fail-safe原则）
+                logging.error("[PositionService.check_position_limit] RiskService not available, BLOCKING position check (fail-safe)")
+                return False  # RiskService不可用时阻断，遵循fail-safe原则
 
         except Exception as e:
             logging.error(f"[PositionService.check_position_limit] Error: {e}")
@@ -496,7 +496,8 @@ class PositionService(object):
             if instrument_id not in self.positions:
                 self.positions[instrument_id] = {}
             
-            pos_id = f"{instrument_id}_{int(datetime.now().timestamp()*1000)}"
+            import uuid as _uuid
+            pos_id = f"{instrument_id}_{int(datetime.now().timestamp()*1000)}_{_uuid.uuid4().hex[:6]}"
             
             direction_str = "long" if volume > 0 else "short"
             p_type = "long" if volume > 0 else "short"
@@ -509,7 +510,9 @@ class PositionService(object):
                 ps = get_params_service()
                 tp_ratio = ps.get_float('close_take_profit_ratio', 1.5)
                 sl_ratio = ps.get_float('close_stop_loss_ratio', 0.5)
-            except Exception:
+            except Exception as e:
+                # ✅ P1修复：添加告警日志
+                logging.warning(f"[PositionService._trigger_close_position] Failed to get TP/SL ratio from ParamsService, using defaults: {e}")
                 tp_ratio = 1.5
                 sl_ratio = 0.5
             if price > 0:
@@ -641,8 +644,8 @@ class PositionService(object):
                             price = tick.get('bid_price' if direction == 'SELL' else 'ask_price', 0.0)
                             if price <= 0:
                                 price = tick.get('price', 0.0)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.debug(f"[PositionService._trigger_close_position] Failed to get opponent price from cache: {e}")
                 
                 # 无对手价，用最新价±tick_size
                 if price <= 0:
@@ -653,13 +656,16 @@ class PositionService(object):
                             ds = get_data_service()
                             if ds and ds.realtime_cache:
                                 base = ds.realtime_cache.get_latest_price(record.instrument_id) or 0.0
-                        except Exception:
+                        except Exception as e:
+                            logging.debug(f"[PositionService._trigger_close_position] Failed to get latest price: {e}")
                             pass
                     if base > 0:
                         try:
                             from ali2026v3_trading.params_service import get_params_service
                             tick_size = get_params_service().get_float('tick_size', 1.0)
-                        except Exception:
+                        except Exception as e:
+                            # ✅ P1修复：添加告警日志
+                            logging.warning(f"[PositionService._trigger_close_position] Failed to get tick_size, using default 1.0: {e}")
                             tick_size = 1.0
                         price = base - tick_size if direction == 'SELL' else base + tick_size
                     else:
@@ -676,11 +682,11 @@ class PositionService(object):
                 )
                 if order_id:
                     record._closing = True
+                    need_retry = False
                     logging.info("[PositionService._trigger_close_position] %s for %s vol=%d price=%.2f", reason, record.instrument_id, abs(record.volume), price)
                 else:
-                    # ✅ #87修复：平仓下单失败时重试（指数退避，最多3次）
+                    record._closing = True
                     logging.warning("[PositionService._trigger_close_position] 平仓下单失败: %s, 将重试", record.instrument_id)
-                    # ✅ 释放锁后sleep，避免阻塞同合约其他操作
                     need_retry = True
             except Exception as e:
                 logging.error("[PositionService._trigger_close_position] Error: %s", e)
@@ -688,9 +694,17 @@ class PositionService(object):
         
         # ✅ 在锁外执行重试逻辑
         if need_retry:
+            self._schedule_close_retry(record, price)
+
+    def _schedule_close_retry(self, record, price: float) -> None:
+        """非阻塞延迟重试平仓（替代time.sleep阻塞）"""
+        import threading as _threading
+
+        def _retry_worker():
             import time as _time
+            retry_success = False
             for _retry in range(1, 4):
-                _time.sleep(0.1 * (2 ** (_retry - 1)))  # 0.1s, 0.2s, 0.4s
+                _time.sleep(0.1 * (2 ** (_retry - 1)))
                 try:
                     from ali2026v3_trading.order_service import get_order_service
                     order_svc = get_order_service()
@@ -706,10 +720,18 @@ class PositionService(object):
                     if order_id:
                         with self._get_instrument_lock(record.instrument_id):
                             record._closing = True
-                        logging.info("[PositionService._trigger_close_position] 重试第%d次成功: %s", _retry, record.instrument_id)
+                        logging.info("[PositionService] retry %d succeeded: %s", _retry, record.instrument_id)
+                        retry_success = True
                         break
                 except Exception as retry_e:
-                    logging.warning("[PositionService._trigger_close_position] 重试第%d次异常: %s", _retry, retry_e)
+                    logging.warning("[PositionService] retry %d failed: %s", _retry, retry_e)
+            if not retry_success:
+                with self._get_instrument_lock(record.instrument_id):
+                    record._closing = False
+                logging.error("[PositionService] all retries failed, reset _closing: %s", record.instrument_id)
+
+        t = _threading.Thread(target=_retry_worker, daemon=True, name=f"pos_retry_{record.instrument_id}")
+        t.start()
 
     def check_all_positions(self) -> None:
         now = datetime.now()
@@ -814,8 +836,16 @@ class PositionService(object):
             with self.global_lock:
                 # ✅ 传递渠道唯一#65：从RiskService._position_limits读取
                 for account_id, limit_info in getattr(self._risk_service, '_position_limits', {}).items():
-                    limit_amount = limit_info.get('limit_amount', 0) if isinstance(limit_info, dict) else 0
-                    effective_until = limit_info.get('effective_until') if isinstance(limit_info, dict) else None
+                    from ali2026v3_trading.risk_service import PositionLimit
+                    if isinstance(limit_info, PositionLimit):
+                        limit_amount = limit_info.limit_amount
+                        effective_until = limit_info.effective_until
+                    elif isinstance(limit_info, dict):
+                        limit_amount = limit_info.get('limit_amount', 0)
+                        effective_until = limit_info.get('effective_until')
+                    else:
+                        limit_amount = 0
+                        effective_until = None
                     save_data[account_id] = {
                         "limit_amount": float(limit_amount),
                         "account_id": account_id,

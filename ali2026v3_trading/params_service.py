@@ -334,22 +334,46 @@ class ParamsService:
     
     def get_product_cache(self, product: str) -> Optional[Dict[str, Any]]:
         """获取品种信息"""
-        return self._product_cache.get(product)
+        with self._lock:
+            return self._product_cache.get(product)
     
     def clear_instrument_cache(self) -> None:
         """
-        BP-9修复：原子替换模式——从DB重新加载后一次性替换，避免清空窗口期。
+        BP-9修复：原子替换模式——先构建新缓存，再一次性替换，避免清空窗口期。
         如果重新加载失败，保留旧缓存（宁用过期数据不丢数据）。
         """
         with self._lock:
-            old_count = len(self._instrument_meta_by_id)
+            old_id_map = dict(self._instrument_id_to_internal_id)
+            old_meta_map = dict(self._instrument_meta_by_id)
+            old_product_cache = dict(self._product_cache)
+
         try:
-            self.init_instrument_cache()
+            self._rebuild_instrument_cache()
             with self._lock:
                 new_count = len(self._instrument_meta_by_id)
-            logging.info("[ParamsService] 合约缓存原子替换完成: %d → %d", old_count, new_count)
+            logging.info("[ParamsService] 合约缓存原子替换完成: %d → %d", len(old_meta_map), new_count)
         except Exception as e:
+            with self._lock:
+                self._instrument_id_to_internal_id = old_id_map
+                self._instrument_meta_by_id = old_meta_map
+                self._product_cache = old_product_cache
             logging.error("[ParamsService] 合约缓存重新加载失败，保留旧缓存: %s", e)
+
+    def _rebuild_instrument_cache(self) -> None:
+        """构建全新的合约缓存并原子替换（内部方法，复用load_caches_from_db）"""
+        try:
+            from ali2026v3_trading.data_service import get_data_service
+            ds = get_data_service()
+            if ds is None:
+                logging.warning("[ParamsService] DataService不可用，跳过缓存重建")
+                return
+            if not hasattr(ds, '_get_connection'):
+                logging.warning("[ParamsService] DataService实例不完整，跳过缓存重建")
+                return
+            self.load_caches_from_db(ds)
+        except Exception as e:
+            logging.error("[ParamsService] 缓存重建失败: %s", e)
+            raise
 
     def get_all_instrument_cache(self) -> Dict[str, Dict[str, Any]]:
         """返回当前合约缓存的深拷贝副本（基于新架构）。"""
@@ -398,9 +422,13 @@ class ParamsService:
                 max_retries = 3
                 retry_delay = 1.0  # 每次重试间隔1秒
                 
+                futures_metadata = {}
+                options_metadata = {}
                 for attempt in range(1, max_retries + 1):
                     futures_from_file = []
                     options_from_file = []
+                    _futures_meta = {}
+                    _options_meta = {}
                     _fixed_config_files = [
                         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_futures_fixed.txt'),
                         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_options_fixed.txt'),
@@ -411,25 +439,56 @@ class ParamsService:
                         if not os.path.exists(fixed_config_file):
                             continue
                         try:
+                            is_futures_file = 'futures' in os.path.basename(fixed_config_file)
                             with open(fixed_config_file, 'r', encoding='utf-8') as f:
                                 for line in f:
                                     line = line.strip()
                                     if not line or line.startswith('#'):
                                         continue
-                                    if '.' in line:
-                                        contract = line.split('.')[-1]
+                                    parts = line.split('|')
+                                    contract_part = parts[0]
+                                    if '.' in contract_part:
+                                        contract = contract_part.split('.', 1)[1]
                                     else:
-                                        contract = line
-                                    if '-' in contract or (len(contract) > 6 and any(c in contract[6:] for c in ['C', 'P'])):
-                                        options_from_file.append(contract)
-                                    else:
+                                        contract = contract_part
+                                    if is_futures_file:
                                         futures_from_file.append(contract)
+                                        internal_id = int(parts[1]) if len(parts) > 1 else None
+                                        product = parts[2] if len(parts) > 2 else None
+                                        year_month = parts[3] if len(parts) > 3 else None
+                                        if internal_id is not None:
+                                            _futures_meta[contract] = {
+                                                'internal_id': internal_id,
+                                                'product': product,
+                                                'year_month': year_month,
+                                            }
+                                    else:
+                                        options_from_file.append(contract)
+                                        internal_id = int(parts[1]) if len(parts) > 1 else None
+                                        underlying_future_id = int(parts[2]) if len(parts) > 2 else None
+                                        product = parts[3] if len(parts) > 3 else None
+                                        underlying_product = parts[4] if len(parts) > 4 else None
+                                        year_month = parts[5] if len(parts) > 5 else None
+                                        option_type = parts[6] if len(parts) > 6 else None
+                                        strike_price = float(parts[7]) if len(parts) > 7 else None
+                                        if internal_id is not None:
+                                            _options_meta[contract] = {
+                                                'internal_id': internal_id,
+                                                'underlying_future_id': underlying_future_id,
+                                                'product': product,
+                                                'underlying_product': underlying_product,
+                                                'year_month': year_month,
+                                                'option_type': option_type,
+                                                'strike_price': strike_price,
+                                            }
                         except Exception as e:
                             logging.warning(f"[ParamsService] 加载固定配置文件失败 (attempt {attempt}/{max_retries}): {e}")
                             load_success = False
                             break
                     
                     if load_success and (futures_from_file or options_from_file):
+                        futures_metadata = _futures_meta
+                        options_metadata = _options_meta
                         if attempt > 1:
                             logging.info(f"[ParamsService] 配置文件加载成功 (retry {attempt-1})")
                         break
@@ -438,7 +497,6 @@ class ParamsService:
                         import time
                         time.sleep(retry_delay)
                     else:
-                        # P0修复：3次重试都失败，提供详细报错
                         error_details = []
                         for fixed_config_file in _fixed_config_files:
                             if os.path.exists(fixed_config_file):
@@ -453,11 +511,6 @@ class ParamsService:
                         
                         logging.error(
                             "[ParamsService] CRITICAL: Contract configuration loading failed after %d retries.\n"
-                            "  Possible causes:\n"
-                            "    1. Configuration files are missing or corrupted\n"
-                            "    2. File permission issues (check read access)\n"
-                            "    3. Disk I/O errors or network storage issues\n"
-                            "    4. Files being locked by another process\n"
                             "  File status:\n"
                             "%s\n"
                             "  Action required:\n"
@@ -470,10 +523,8 @@ class ParamsService:
                 if futures_from_file:
                     futures_list = futures_from_file
                 if options_from_file:
-                    # 将期权列表转换为字典格式（按品种分组）
                     options_dict = {}
                     for opt in options_from_file:
-                        # 提取品种代码（前2-3个字符）
                         product = ''.join([c for c in opt if c.isalpha()])[:2]
                         if product:
                             if product not in options_dict:
@@ -497,12 +548,26 @@ class ParamsService:
             if futures_list or options_dict:
                 return {
                     'futures_list': list(futures_list) if futures_list else [],
-                    'options_dict': dict(options_dict) if options_dict else {}
+                    'options_dict': dict(options_dict) if options_dict else {},
+                    'futures_metadata': futures_metadata,
+                    'options_metadata': options_metadata,
                 }
-            return None
+            logging.error(
+                "[ParamsService.load_instrument_list] No instruments loaded "
+                "(futures=%d, options=%d, source=%s)",
+                len(futures_list), len(options_dict), source
+            )
+            raise ValueError(
+                f"[ParamsService.load_instrument_list] No instruments loaded "
+                f"(futures={len(futures_list)}, options={len(options_dict)}, source={source})"
+            )
+        except ValueError:
+            raise
         except Exception as e:
-            logging.warning(f"[ParamsService.load_instrument_list] Error: {e}")
-            return None
+            logging.error(f"[ParamsService.load_instrument_list] Error: {e}")
+            raise RuntimeError(
+                f"[ParamsService.load_instrument_list] Failed to load instrument list: {e}"
+            ) from e
     
     def cache_instrument_list(self, params: Any, futures_list: List[str], 
                               options_dict: Dict[str, List[str]], source: str = 'param_cache') -> None:
@@ -596,16 +661,23 @@ class ParamsService:
         # ✅ 步骤1：加载所有期货合约（无任何过滤）
         futures_loaded = 0
         try:
-            futures_rows = _rows(ds.query("SELECT internal_id, instrument_id, product, exchange, year_month FROM futures_instruments"))
+            futures_rows = _rows(ds.query("SELECT internal_id, instrument_id, product, exchange, year_month, product_code, shard_key FROM futures_instruments"))
             
             for row in futures_rows:
                 try:
+                    product_code = row.get('product_code') or row['product'].lower()
+                    shard_key = row.get('shard_key')
+                    if shard_key is None:
+                        from ali2026v3_trading.shared_utils import ShardRouter
+                        shard_key = ShardRouter._deterministic_hash(product_code)
                     info = {
                         'internal_id': row['internal_id'],
                         'type': 'future',
                         'product': row['product'],
                         'exchange': row['exchange'],
                         'year_month': row['year_month'],
+                        'product_code': product_code,
+                        'shard_key': shard_key,
                     }
                     _cache_temp_instrument_info(row['instrument_id'], info)
                     futures_loaded += 1
@@ -620,20 +692,27 @@ class ParamsService:
         # ✅ 步骤2：加载所有期权合约（无任何过滤）
         options_loaded = 0
         try:
-            options_rows = _rows(ds.query("SELECT internal_id, instrument_id, product, exchange, underlying_future_id, underlying_product, year_month, option_type, strike_price FROM option_instruments"))
+            options_rows = _rows(ds.query("SELECT internal_id, instrument_id, product, exchange, underlying_future_id, underlying_product, year_month, option_type, strike_price, product_code, shard_key FROM option_instruments"))
             
             for row in options_rows:
                 try:
+                    product_code = row.get('product_code') or row['product'].lower()
+                    shard_key = row.get('shard_key')
+                    if shard_key is None:
+                        from ali2026v3_trading.shared_utils import ShardRouter
+                        shard_key = ShardRouter._deterministic_hash(product_code)
                     info = {
                         'internal_id': row['internal_id'],
                         'type': 'option',
                         'product': row['product'],
                         'exchange': row['exchange'],
-                        'underlying_future_id': row['underlying_future_id'],  # ✅ ID 直通：使用 INTEGER 类型
+                        'underlying_future_id': row['underlying_future_id'],
                         'underlying_product': row['underlying_product'],
                         'year_month': row['year_month'],
                         'option_type': row['option_type'],
                         'strike_price': row['strike_price'],
+                        'product_code': product_code,
+                        'shard_key': shard_key,
                     }
                     _cache_temp_instrument_info(row['instrument_id'], info)
                     options_loaded += 1
@@ -1126,17 +1205,23 @@ def get_params_service() -> ParamsService:
     
     Returns:
         ParamsService: 全局参数服务实例
+        
+    Raises:
+        RuntimeError: 如果单例初始化失败
     """
     global _params_service_instance
     
-    # P2 Bug #107修复：使用模块级锁（已在import时创建），消除竞态条件
     with _params_service_lock:
         if _params_service_instance is None:
-            _params_service_instance = ParamsService()
+            instance = ParamsService()
             try:
-                _params_service_instance.init_instrument_cache()
+                instance.init_instrument_cache()
             except Exception as e:
-                logging.error(f"[ParamsService] 单例初始化失败: {e}，将使用不完整实例")
+                logging.error(f"[ParamsService] 单例初始化失败: {e}")
+                raise RuntimeError(
+                    f"[ParamsService] 单例初始化失败，合约缓存不可用: {e}"
+                ) from e
+            _params_service_instance = instance
         return _params_service_instance
 
 

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.analytics_service import safe_float, normalize_instrument_id
+from ali2026v3_trading.shared_utils import safe_float, normalize_instrument_id
 
 import pyarrow as pa
 
@@ -84,7 +84,8 @@ def inst_get(inst: Any, *keys: str, default: Any = '') -> Any:
     for k in keys:
         try:
             val = getattr(inst, k, None)
-        except Exception:
+        except (AttributeError, TypeError) as e:
+            logger.debug(f"[SubscriptionManagerV2] Failed to get attribute {k}: {e}")
             val = None
         if val not in (None, ''):
             return val
@@ -132,9 +133,7 @@ class SubscriptionConfig:
     # 监控
     enable_stats: bool = True                     # 启用统计信息
     stats_report_interval: float = 60.0           # 统计报告间隔(秒)
-    
-    # ✅ 增量注册开关（防止全量读取）
-    enable_auto_registration: bool = False        # metadata miss时自动注册合约（默认关闭）
+
 
 
 # ========== 企业级订阅管理器 ==========
@@ -156,6 +155,7 @@ class SubscriptionManager:
         
         # 线程安全锁
         self._lock = threading.RLock()
+        self._tick_lock = threading.RLock()
         self._retry_lock = threading.Lock()
         self._wal_lock = threading.Lock()
         
@@ -204,7 +204,7 @@ class SubscriptionManager:
         
         # 初始化
         self._init_wal()
-        self._start_background_threads()
+        self._bg_threads_started = False
         atexit.register(self._atexit_cleanup)
         
         logger.info(
@@ -303,16 +303,29 @@ class SubscriptionManager:
                                         logger.error("[SubscriptionManagerV2] Retry queue full during WAL recovery, dropping recovered task")
                                         self._dropped_count += 1
                                         self._check_alert()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"[SubscriptionManagerV2] Failed to process WAL record: {e}")
             
             logger.info("[SubscriptionManagerV2] Recovered %d subscription tasks from WAL", recovered)
             
-            # 恢复后重命名文件
+            # 恢复后重命名文件（如果失败则保留原文件）
             try:
-                os.rename(self._config.wal_path, self._config.wal_path + ".recovered")
-            except Exception:
-                pass
+                # Windows上可能因文件锁定导致重命名失败，尝试多种方式
+                recovered_path = self._config.wal_path + ".recovered"
+                if os.path.exists(recovered_path):
+                    try:
+                        os.remove(recovered_path)
+                    except Exception:
+                        pass
+                os.rename(self._config.wal_path, recovered_path)
+            except OSError as e:
+                # Windows上文件锁定时重命名失败是常见情况，不影响功能
+                if e.winerror == 32:  # ERROR_SHARING_VIOLATION
+                    logger.warning(f"[SubscriptionManagerV2] WAL file locked by another process, skipping rename")
+                else:
+                    logger.warning(f"[SubscriptionManagerV2] WAL rename failed: {e}")
+            except Exception as e:
+                logger.warning(f"[SubscriptionManagerV2] WAL rename failed: {e}")
         except Exception as e:
             logger.error("[SubscriptionManagerV2] WAL recovery failed: %s", e)
     
@@ -332,8 +345,15 @@ class SubscriptionManager:
     # 后台线程管理
     # ========================================================================
     
+    def start(self):
+        """显式启动后台线程（构造函数不再自动启动）"""
+        self._start_background_threads()
+
     def _start_background_threads(self):
         """启动后台线程"""
+        if self._bg_threads_started:
+            return
+        self._bg_threads_started = True
         # 异步WAL写入线程
         if self._config.enable_wal:
             self._stop_async.clear()
@@ -466,8 +486,8 @@ class SubscriptionManager:
                 self._wal_file.flush()
                 self._wal_file.close()
                 self._wal_file = None
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[SubscriptionManagerV2] Operation failed: {e}", exc_info=True)
         
         logger.info("[SubscriptionManagerV2] Closed")
     
@@ -668,21 +688,27 @@ class SubscriptionManager:
     # ========================================================================
     
     def _check_alert(self):
-        """检查是否触发告警"""
+        """检查是否触发告警（✅ P1修复：加锁保护共享计数器）"""
         if not self._config.alert_callback:
             return
         
+        # ✅ 加锁读取共享计数器
+        with self._lock:
+            dropped_count = self._dropped_count
+            total_failures = self._total_failures
+            total_subscriptions = self._total_subscriptions
+        
         # 检查绝对失败数
-        if (self._dropped_count - self._last_alert_count) >= self._config.alert_threshold:
+        if (dropped_count - self._last_alert_count) >= self._config.alert_threshold:
             self._config.alert_callback(
-                self._dropped_count,
-                f"Subscription dropped tasks threshold exceeded: {self._dropped_count}"
+                dropped_count,
+                f"Subscription dropped tasks threshold exceeded: {dropped_count}"
             )
-            self._last_alert_count = self._dropped_count
+            self._last_alert_count = dropped_count
         
         # 检查失败率
-        if self._total_subscriptions > 0:
-            failure_rate = self._total_failures / self._total_subscriptions
+        if total_subscriptions > 0:
+            failure_rate = total_failures / total_subscriptions
             if failure_rate > self._config.failure_rate_threshold:
                 self._config.alert_callback(
                     int(failure_rate * 100),
@@ -1001,9 +1027,6 @@ class SubscriptionManager:
             success_count, self._total_failures, total_count, elapsed
         )
         
-        # 自动注册到TType
-        if options_dict and self.t_type_service:
-            self._auto_register_options_to_ttype(options_dict)
         
         return total_count
     
@@ -1033,116 +1056,9 @@ class SubscriptionManager:
             return False
     
     def _handshake(self, underlying: str, expiration: str) -> bool:
-        """握手协议 (简化版)"""
-        logger.debug("[SubscriptionManagerV2] Handshake skipped (platform module not implemented)")
+        """握手协议 (未实现 - 返回True以兼容现有调用方)"""
+        logger.debug("[SubscriptionManagerV2] Handshake not implemented for %s/%s", underlying, expiration)
         return True
-    
-    def _auto_register_options_to_ttype(self, options_dict: Dict[str, List[str]]) -> None:
-        """自动注册期权到TType，优先从 metadata 获取字段，传 internal_id"""
-        try:
-            from ali2026v3_trading.params_service import get_params_service
-            from ali2026v3_trading.data_service import get_latest_price
-            from ali2026v3_trading.data_service import get_data_service
-            
-            params_service = get_params_service()
-            data_service = get_data_service()
-            registered = 0
-            failed = 0
-            future_meta_cache: Dict[int, Dict[str, str]] = {}
-
-            def resolve_future_metadata(underlying_future_id: Any) -> Dict[str, str]:
-                if underlying_future_id in (None, ''):
-                    return {}
-
-                try:
-                    future_internal_id = int(underlying_future_id)
-                except (TypeError, ValueError):
-                    return {}
-
-                cached_meta = future_meta_cache.get(future_internal_id)
-                if cached_meta is not None:
-                    return cached_meta
-
-                future_info = params_service.get_instrument_meta(future_internal_id)
-                if future_info:
-                    resolved_meta = {
-                        'product': str(future_info.get('product') or '').strip(),
-                    }
-                    future_meta_cache[future_internal_id] = resolved_meta
-                    return resolved_meta
-
-                rows = data_service.query(
-                    "SELECT product FROM futures_instruments WHERE internal_id = ?",
-                    [future_internal_id],
-                ).to_pylist()
-                resolved_meta = {
-                    'product': str(rows[0]['product']).strip() if rows else '',
-                }
-                future_meta_cache[future_internal_id] = resolved_meta
-                return resolved_meta
-            
-            for product, instrument_ids in options_dict.items():
-                for instrument_id in instrument_ids:
-                    try:
-                        clean_id = self._strip_exchange_prefix(instrument_id)
-                        
-                        # ✅ Group A收口：优先使用规范化clean_id查找，不再双键大小写回退
-                        meta = params_service.get_instrument_meta_by_id(clean_id)
-                        if not meta and clean_id != instrument_id:
-                            meta = params_service.get_instrument_meta_by_id(instrument_id)
-                        internal_id = None
-                        if meta:
-                            # ✅ Group A收口：只认internal_id，不允许从id回退
-                            internal_id = meta.get('internal_id')
-                            prod = normalize_instrument_id(meta.get('product'))
-                            month = normalize_instrument_id(meta.get('year_month'))
-                            option_type_raw = normalize_instrument_id(meta.get('option_type'))
-                            strike_price = safe_float(meta.get('strike_price'))
-                            underlying_future_id = meta.get('underlying_future_id')
-                        else:
-                            # ✅ Group A收口：metadata miss时不再parse_option推导，记录警告并跳过
-                            logging.warning(f"[SubscriptionManager] Metadata miss for {clean_id}, skipping registration")
-                            continue
-                        
-                        # 规范化 option_type（使用辅助函数）
-                        option_type_upper = option_type_raw.upper() if option_type_raw else ''
-                        if not prod or not month or option_type_upper not in ('C', 'P', 'CALL', 'PUT') or strike_price <= 0:
-                            continue
-                        
-                        if option_type_upper in ('C', 'CALL'):
-                            opt_type_normalized = 'CALL'
-                        else:
-                            opt_type_normalized = 'PUT'
-                        
-                        future_meta = resolve_future_metadata(underlying_future_id)
-                        if not future_meta:
-                            logging.warning(f"[SubscriptionManager] underlying_future_id missing or unresolved for {clean_id}, skipping registration")
-                            continue
-                        
-                        initial_price = get_latest_price(instrument_id) or 0.0
-                        
-                        self.t_type_service.register_option_contract(
-                            instrument_id=clean_id,
-                            underlying_product=prod,
-                            month=month,
-                            strike_price=strike_price,
-                            option_type=opt_type_normalized,
-                            initial_price=float(initial_price),
-                            underlying_future_id=int(underlying_future_id),
-                            internal_id=internal_id,
-                        )
-                        registered += 1
-                    except Exception as e:
-                        failed += 1
-                        logger.debug("[SubscriptionManagerV2] Register failed: %s - %s", instrument_id, e)
-            
-            if registered > 0 or failed > 0:
-                logger.info(
-                    "[SubscriptionManagerV2] Auto-registered %d options to TType, failed=%d",
-                    registered, failed
-                )
-        except Exception as e:
-            logger.error("[SubscriptionManagerV2] Auto-register failed: %s", e, exc_info=True)
     
     # ========================================================================
     # 查询接口
@@ -1201,6 +1117,13 @@ class SubscriptionManager:
         if not instrument_id or last_price in (None, ''):
             return
         
+        with self._tick_lock:
+            if not self._bg_threads_started:
+                self._start_background_threads()
+            return self._on_tick_impl(instrument_id, last_price, volume)
+
+    def _on_tick_impl(self, instrument_id: str, last_price: float, volume: float = 0) -> None:
+        """on_tick内部实现（在_tick_lock内执行）"""
         normalized_id = self._strip_exchange_prefix(str(instrument_id).strip())
         
         diag_on = False
@@ -1208,7 +1131,7 @@ class SubscriptionManager:
             from ali2026v3_trading.diagnosis_service import is_monitored_contract
             diag_on = is_monitored_contract(normalized_id)
         except Exception:
-            pass
+            logger.debug(f"[SubscriptionManagerV2] Failed to check monitored contract for {normalized_id}")
         if diag_on:
             now = time.time()
             with self._submgr_tick_accum_lock:
@@ -1232,63 +1155,37 @@ class SubscriptionManager:
                 if meta:
                     inst_type = meta.get('type', '')
                     internal_id = meta.get('internal_id')
-                    if inst_type == 'option' and self.t_type_service:
-                        self.t_type_service.on_option_tick(normalized_id, float(last_price), volume)
+                    # ✅ P0修复：原子引用t_type_service，避免并发替换导致None引用
+                    tts = self.t_type_service
+                    if inst_type == 'option' and tts:
+                        tts.on_option_tick(normalized_id, float(last_price), volume)
                         routed = True
-                    elif inst_type == 'future' and self.t_type_service:
+                    elif inst_type == 'future' and tts:
                         # ✅ 两ID原则：传递 internal_id 而非 instrument_id
                         if internal_id is not None:
-                            self.t_type_service.on_future_instrument_tick(int(internal_id), float(last_price))
+                            tts.on_future_instrument_tick(int(internal_id), float(last_price))
                         else:
                             logging.warning(f"[SubMgr] Missing internal_id for future {normalized_id}")
                         routed = True
-            except Exception:
-                pass
+            except Exception as e:
+                err_key = str(e)
+                if not hasattr(self, '_op_error_circuit'):
+                    self._op_error_circuit = {}
+                now = time.time()
+                if err_key not in self._op_error_circuit:
+                    self._op_error_circuit[err_key] = {'count': 0, 'first_seen': now, 'last_logged': 0}
+                self._op_error_circuit[err_key]['count'] += 1
+                if self._op_error_circuit[err_key]['count'] <= 3 or now - self._op_error_circuit[err_key]['last_logged'] > 300:
+                    logger.error(f"[SubscriptionManagerV2] Operation failed: {e}", exc_info=True)
+                    self._op_error_circuit[err_key]['last_logged'] = now
+                elif self._op_error_circuit[err_key]['count'] % 1000 == 0:
+                    logger.warning(f"[SubscriptionManagerV2] Operation failed '{err_key}' suppressed (count={self._op_error_circuit[err_key]['count']})")
             
-            # ✅ 序号121修复：metadata miss时触发增量注册，从根因解决数据丢失问题
+            # metadata miss：配置文件未覆盖的合约tick，记录告警，不做回退路由
+            # 设计约束：合约配置文件是订阅唯一来源，无增量注册/降级路由回退
             if not routed:
-                # ✅ 参数化开关：默认关闭，防止全量读取
-                if self._config.enable_auto_registration:
-                    try:
-                        # 利用Storage的增量注册机制自动注册合约（期货/期权均可）
-                        from ali2026v3_trading.storage import get_storage
-                        storage = get_storage()
-                        
-                        # 尝试注册合约（会自动匹配产品模板、解析格式、生成ID、创建表）
-                        internal_id = storage.register_instrument(normalized_id)
-                        
-                        if internal_id and internal_id > 0:
-                            # 注册成功，重新获取metadata并路由
-                            meta = ps.get_instrument_meta_by_id(normalized_id)
-                            if meta:
-                                inst_type = meta.get('type', '')
-                                if inst_type == 'option' and self.t_type_service:
-                                    self.t_type_service.on_option_tick(normalized_id, float(last_price), volume)
-                                    routed = True
-                                    logger.info(f"[SubMgr] Auto-registered option and processed: {normalized_id}")
-                                elif inst_type == 'future' and self.t_type_service:
-                                    self.t_type_service.on_future_instrument_tick(int(internal_id), float(last_price))
-                                    routed = True
-                                    logger.info(f"[SubMgr] Auto-registered future and processed: {normalized_id}")
-                            else:
-                                logger.warning(
-                                    f"[SubMgr] Registration succeeded but metadata cache miss for: {normalized_id}. "
-                                    f"This should not happen."
-                                )
-                        else:
-                            # 注册失败（如标的期货未注册等）
-                            logger.debug(
-                                f"[SubMgr] Auto-registration failed for {normalized_id} (returned {internal_id}). "
-                                f"Contract may be invalid or underlying future not registered."
-                            )
-                            
-                    except Exception as e:
-                        # 注册异常（如无法识别的合约格式）
-                        logger.debug(f"[SubMgr] Auto-registration exception for {normalized_id}: {e}")
-                
-                # 如果自动注册也失败，才记录警告
-                if not routed:
-                    # 检查是否已记录过该合约的警告（deque无O(1)查找，改用线性检查）
+                should_warn = False
+                with self._lock:
                     already_warned = False
                     for item in self._missing_metadata_warnings:
                         if item == normalized_id:
@@ -1298,15 +1195,18 @@ class SubscriptionManager:
                     if not already_warned:
                         if len(self._missing_metadata_warnings) < self._missing_metadata_warning_limit:
                             self._missing_metadata_warnings.append(normalized_id)
-                            logger.warning(
-                                "[SubscriptionManagerV2] Contract metadata not found for: %s. "
-                                "Please ensure contract is properly registered.", normalized_id
-                            )
-                        else:
-                            logger.debug(
-                                "[SubscriptionManagerV2] Contract metadata not found for: %s (suppressed, "
-                                "too many unique missing contracts)", normalized_id
-                            )
+                            should_warn = True
+                    
+                    if should_warn:
+                        logger.warning(
+                            "[SubscriptionManagerV2] Contract metadata not found for: %s. "
+                            "Please ensure contract is properly registered.", normalized_id
+                        )
+                    else:
+                        logger.debug(
+                            "[SubscriptionManagerV2] Contract metadata not found for: %s (suppressed, "
+                            "too many unique missing contracts)", normalized_id
+                        )
                 return
         except Exception as exc:
             logger.error("[SubscriptionManagerV2] Tick processing failed: %s - %s", normalized_id, exc)

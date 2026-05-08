@@ -56,6 +56,7 @@ class SignalService:
         
         # 冷却时间管理（存储信号时刻，非冷却结束时刻）
         self._cooldown_times: Dict[str, float] = {}
+        self._cooldown_durations: Dict[str, float] = {}
         self._last_cleanup = time.time()
         self._cleanup_interval = 300  # 5分钟清理一次
         
@@ -109,7 +110,8 @@ class SignalService:
             
             # 冷却检查
             effective_cooldown = cooldown_seconds if cooldown_seconds is not None else self._default_cooldown_seconds
-            if self._is_in_cooldown(instrument_id, effective_cooldown):
+            cooldown_key = f"{instrument_id}_{signal_type}" if signal_type else instrument_id
+            if self._is_in_cooldown(cooldown_key, effective_cooldown):
                 self._stats['filtered_signals'] += 1
                 logging.debug(f"[SignalService] Signal filtered (cooldown): {instrument_id} {signal_type}")
                 return None
@@ -132,7 +134,7 @@ class SignalService:
             self._signal_history.append(signal)
             
             # 更新冷却时间
-            self._cooldown_times[instrument_id] = time.time()
+            self._cooldown_times[cooldown_key] = time.time()
             
             # 更新统计
             self._stats['emitted_signals'] += 1
@@ -158,20 +160,11 @@ class SignalService:
         
         return signal
     
-    def _is_in_cooldown(self, instrument_id: str, cooldown_seconds: float) -> bool:
-        """检查是否在冷却时间内
-        
-        Args:
-            instrument_id: 合约代码
-            cooldown_seconds: 冷却时长
-            
-        Returns:
-            bool: 是否在冷却中
-        """
-        last_signal_time = self._cooldown_times.get(instrument_id, 0)
+    def _is_in_cooldown(self, cooldown_key: str, cooldown_seconds: float) -> bool:
+        last_signal_time = self._cooldown_times.get(cooldown_key, 0)
+        effective_cooldown = self._cooldown_durations.get(cooldown_key, cooldown_seconds)
         elapsed = time.time() - last_signal_time
-        
-        return elapsed < cooldown_seconds
+        return elapsed < effective_cooldown
     
     def get_signal_history(
         self,
@@ -198,28 +191,20 @@ class SignalService:
     def set_cooldown(
         self,
         instrument_id: str,
-        cooldown_seconds: float
+        cooldown_seconds: float,
+        signal_type: str = ''
     ) -> None:
-        """设置特定合约的冷却时间
-        
-        Args:
-            instrument_id: 合约代码
-            cooldown_seconds: 冷却时长（秒）
-        """
+        cooldown_key = f"{instrument_id}_{signal_type}" if signal_type else instrument_id
         with self._lock:
-            # 存储信号时刻（相对时间），而非冷却结束时刻（绝对时间）
-            self._cooldown_times[instrument_id] = time.time()
-            logging.info(f"[SignalService] Cooldown set for {instrument_id}: {cooldown_seconds}s")
+            self._cooldown_times[cooldown_key] = time.time()
+            self._cooldown_durations[cooldown_key] = cooldown_seconds
+            logging.info(f"[SignalService] Cooldown set for {cooldown_key}: {cooldown_seconds}s")
     
     def clear_cooldown(self, instrument_id: str) -> None:
-        """清除特定合约的冷却时间
-        
-        Args:
-            instrument_id: 合约代码
-        """
         with self._lock:
             if instrument_id in self._cooldown_times:
                 del self._cooldown_times[instrument_id]
+                self._cooldown_durations.pop(instrument_id, None)
                 logging.debug(f"[SignalService] Cooldown cleared for {instrument_id}")
     
     def reset_signal_history(self) -> None:
@@ -313,6 +298,7 @@ class SignalService:
                           if now - v > self._default_cooldown_seconds]
                 for k in expired:
                     del self._cooldown_times[k]
+                    self._cooldown_durations.pop(k, None)
                 if expired:
                     logging.debug(f"[SignalService] 清理{len(expired)}个过期冷却条目")
             return {

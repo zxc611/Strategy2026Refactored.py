@@ -5,7 +5,7 @@ from collections import deque, defaultdict
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.analytics_service import RingBuffer
+from ali2026v3_trading.shared_utils import RingBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ class ProductMicroData:
     def _linear_trend_slope(points: List[Tuple[float, float]]) -> float:
         """
         计算一组点 (x, y) 的线性回归斜率
-        优化：使用Welford算法增量计算，减少数值误差
+        使用归一化时间戳 + 批量均值法，O(n)复杂度
         """
         n = len(points)
         if n < 2:
@@ -282,6 +282,33 @@ class ProductMicroData:
             if total == 0:
                 return 0.0
             return (bid_weighted - ask_weighted) / total
+
+    # ========================================================================
+    # 订单流失衡指数 (OFI - Order Flow Imbalance)
+    # ========================================================================
+    def calc_ofi(self, lookback_seconds: int = 60) -> float:
+        with self._lock:
+            buy_vol = 0.0
+            sell_vol = 0.0
+            now = time.time()
+            cutoff = now - lookback_seconds
+
+            for ts, _price, volume, direction in self._trades:
+                if ts >= cutoff:
+                    if direction == 'buy':
+                        buy_vol += volume
+                    else:
+                        sell_vol += volume
+
+            total = buy_vol + sell_vol
+            if total == 0:
+                return 0.0
+            return (buy_vol - sell_vol) / total
+
+    def calc_multi_timeframe_ofi(self, timeframes: List[int] = None) -> Dict[int, float]:
+        if timeframes is None:
+            timeframes = [10, 30, 60, 300]
+        return {tf: self.calc_ofi(lookback_seconds=tf) for tf in timeframes}
 
     # ========================================================================
     # 锚定VWAP（带LRU淘汰）
@@ -479,6 +506,16 @@ class ProductMicroData:
                         score += cvd_change * 1.0
                         reasons.append(f"CVD change rate={cvd_change:.2f}")
 
+                # 6. 订单流失衡指数 OFI（±1.5分，基于逐笔成交买方/卖方力量对比）
+                ofi_10s = self.calc_ofi(lookback_seconds=10)
+                ofi_60s = self.calc_ofi(lookback_seconds=60)
+                details['ofi_10s'] = ofi_10s
+                details['ofi_60s'] = ofi_60s
+                ofi_weighted = ofi_10s * 0.6 + ofi_60s * 0.4
+                ofi_score = ofi_weighted * 1.5
+                score += ofi_score
+                reasons.append(f"OFI(10s)={ofi_10s:.2f}, OFI(60s)={ofi_60s:.2f}")
+
                 # 限制分数范围 -10..10
                 final_score = max(-10.0, min(10.0, score))
 
@@ -634,6 +671,20 @@ class MicrostructureAnalyzer:
             if not data:
                 return 0.0
             return data.calc_instant_imbalance(depth_levels)
+
+    def get_ofi(self, product: str, lookback_seconds: int = 60) -> float:
+        with self._lock:
+            data = self._products.get(product)
+            if not data:
+                return 0.0
+            return data.calc_ofi(lookback_seconds)
+
+    def get_multi_timeframe_ofi(self, product: str, timeframes: List[int] = None) -> Dict[int, float]:
+        with self._lock:
+            data = self._products.get(product)
+            if not data:
+                return {}
+            return data.calc_multi_timeframe_ofi(timeframes)
 
     def get_footprint(self, product: str, period: str = '1min') -> List[FootprintBar]:
         with self._lock:

@@ -118,7 +118,8 @@ class SchedulerService:
         self._logger = logger_func or print
         self._jobs: Dict[str, JobInfo] = {}
         self._once_jobs: Dict[str, OnceJobInfo] = {}
-        self._running = False
+        # ✅ P1修复：使用threading.Event替代bool标志，消除竞态
+        self._running_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
         self._active_threads: Dict[str, threading.Thread] = {}
@@ -138,11 +139,11 @@ class SchedulerService:
     def start(self) -> bool:
         """启动调度器"""
         with self._lock:
-            if self._running:
+            if self._running_event.is_set():
                 self._log("[Scheduler] Already running")
                 return False
 
-            self._running = True
+            self._running_event.set()
             self._thread = threading.Thread(
                 target=self._master_loop,
                 daemon=True,
@@ -154,7 +155,8 @@ class SchedulerService:
 
     def stop(self) -> None:
         """停止调度器"""
-        self._running = False
+        # ✅ P1修复：使用Event.clear()替代直接赋值，线程安全
+        self._running_event.clear()
         self._log("[Scheduler] Stopping...")
 
         # 取消所有一次性任务
@@ -173,7 +175,7 @@ class SchedulerService:
 
     def is_running(self) -> bool:
         """检查是否运行中"""
-        return self._running
+        return self._running_event.is_set()
 
     # ========================================================================
     # 任务管理
@@ -316,7 +318,7 @@ class SchedulerService:
             # 使用Event.wait实现精确等待，可被提前中断
             if not stop_event.wait(timeout=delay):
                 # 超时后执行任务（未被取消）
-                if self._running and not job_info.cancelled:
+                if self._running_event.is_set() and not job_info.cancelled:
                     try:
                         func()
                     except Exception as e:
@@ -344,7 +346,7 @@ class SchedulerService:
 
     def _master_loop(self) -> None:
         """主调度循环"""
-        while self._running:
+        while self._running_event.is_set():
             try:
                 now = time.time()
 
@@ -367,7 +369,7 @@ class SchedulerService:
 
                 # 分段休眠，快速响应停止
                 for _ in range(int(self._tick_interval * 10)):
-                    if not self._running:
+                    if not self._running_event.is_set():
                         break
                     time.sleep(0.1)
 
@@ -418,9 +420,12 @@ class SchedulerService:
 
         result_container = {'error': None, 'done': False}
 
+        cancel_event = threading.Event()
+
         def _run():
             try:
-                job.func()
+                if not cancel_event.is_set():
+                    job.func()
             except Exception as e:
                 logging.error(f"[Scheduler] Job {job.job_id} execution error: {e}")
                 result_container['error'] = e
@@ -428,14 +433,21 @@ class SchedulerService:
                 result_container['done'] = True
 
         thread = threading.Thread(target=_run, daemon=True, name=f"JobWorker_{job.job_id}")
-        self._active_threads[job.job_id] = thread
+        # ✅ P1修复：加锁保护_active_threads写入，避免并发竞态
+        with self._lock:
+            self._active_threads[job.job_id] = thread
         thread.start()
 
         # 等待超时
         thread.join(timeout=job.timeout)
 
         if not result_container['done']:
-            logging.warning(f"[Scheduler] Job {job.job_id} timeout after {job.timeout}s")
+            logging.warning(f"[Scheduler] Job {job.job_id} timeout after {job.timeout}s, setting cancel event")
+            cancel_event.set()
+            with self._lock:
+                self._active_threads.pop(job.job_id, None)
+            # 注意：若job.func()已进入执行，cancel_event无法中断（Python线程模型限制）
+            # daemon=True保证进程退出时清理；调用方应确保func()内部可响应外部取消
             raise TimeoutError(f"Job {job.job_id} exceeded timeout of {job.timeout}s")
 
         if result_container['error']:
@@ -472,7 +484,7 @@ class SchedulerService:
         with self._lock:
             return {
                 'service_name': 'SchedulerService',  # ✅ ID唯一：统一标识服务来源
-                "running": self._running,
+                "running": self._running_event.is_set(),
                 "total_jobs": len(self._jobs),
                 "once_jobs": len(self._once_jobs),
                 "active_threads": len([t for t in self._active_threads.values() if t.is_alive()]),

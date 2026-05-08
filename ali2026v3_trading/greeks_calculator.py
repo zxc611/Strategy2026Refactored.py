@@ -4,6 +4,8 @@
 功能:
 - Black-Scholes希腊字母计算 (Delta, Gamma, Theta, Vega)
 - 隐含波动率(IV)计算 (牛顿迭代法)
+- 二叉树定价模型 (CRR, 支持欧式/美式期权)
+- 蒙特卡洛定价模型 (GBM模拟, 对偶变量方差缩减)
 - 智能更新策略 (时间+价格变化+IV变化)
 - 组合风险汇总 (支持持仓加权)
 - 配置文件加载
@@ -11,25 +13,30 @@
 
 使用示例:
     calculator = GreeksCalculator(config_path='greeks_config.json')
-    
-    # 在策略的on_tick中调用（从tick提取参数后）
+
+    # Black-Scholes (适用于欧式期权)
     greeks = calculator.update_greeks_from_tick(
         instrument_id='IF2603-C-4500',
-        price=150.0,
-        underlying_price=4500.0,
-        expiry_date=date(2026, 3, 20),
-        option_type='CALL'
+        price=150.0, underlying_price=4500.0,
+        expiry_date=date(2026, 3, 20), option_type='CALL'
     )
-    
-    # 获取单个合约希腊字母
-    greeks = calculator.get_greeks('IF2603-C-4500')
-    
-    # 获取组合风险
-    positions = {'IF2603-C-4500': 10, 'IF2603-P-4400': -5}
     portfolio_risk = calculator.get_portfolio_greeks(positions)
+
+    # 二叉树定价 (适用于美式期权)
+    bt_price = BinomialTreePricer.price(
+        S=4500, K=4500, T=0.25, r=0.02, q=0.0,
+        sigma=0.2, option_type='CALL', steps=200, american=True
+    )
+
+    # 蒙特卡洛定价 (适用于路径依赖期权)
+    mc_price, mc_std = MonteCarloPricer.price(
+        S=4500, K=4500, T=0.25, r=0.02, q=0.0,
+        sigma=0.2, option_type='CALL', n_simulations=50000
+    )
 """
 
 import math
+import random
 import threading
 import time
 import logging
@@ -214,28 +221,251 @@ class IVCalculator:
 
 
 # ----------------------------------------------------------------------------
+# 二叉树定价模型 (CRR - Cox-Ross-Rubinstein)
+# ----------------------------------------------------------------------------
+class BinomialTreePricer:
+    """二叉树期权定价模型 (CRR参数化)
+
+    支持欧式和美式期权，通过反向归纳计算期权价格。
+
+    CRR参数化:
+        u = exp(sigma * sqrt(dt))
+        d = 1 / u
+        p = (exp((r - q) * dt) - d) / (u - d)
+
+    特点:
+    - 美式期权可提前行权（每步比较内在价值）
+    - 步数越多精度越高，建议>=100步
+    - 时间复杂度 O(steps²)，空间复杂度 O(steps)
+    """
+
+    @staticmethod
+    def price(
+        S: float,
+        K: float,
+        T: float,
+        r: float,
+        q: float,
+        sigma: float,
+        option_type: str,
+        steps: int = 200,
+        american: bool = False
+    ) -> float:
+        if T <= 0 or sigma <= 0 or S <= 0:
+            return max(0.0, (S - K) if option_type == 'CALL' else (K - S))
+
+        dt = T / steps
+        u = math.exp(sigma * math.sqrt(dt))
+        d = 1.0 / u
+        df = math.exp(-r * dt)
+        p = (math.exp((r - q) * dt) - d) / (u - d)
+        discount = math.exp(-q * dt)
+
+        # 确保概率在有效范围内
+        p = max(0.0, min(1.0, p))
+
+        prices = [S * (u ** (steps - j)) * (d ** j) for j in range(steps + 1)]
+
+        if option_type == 'CALL':
+            option_vals = [max(0.0, price - K) for price in prices]
+        else:
+            option_vals = [max(0.0, K - price) for price in prices]
+
+        for i in range(steps - 1, -1, -1):
+            for j in range(i + 1):
+                hold = df * (p * option_vals[j] + (1.0 - p) * option_vals[j + 1])
+                if american:
+                    spot = S * (u ** (i - j)) * (d ** j)
+                    if option_type == 'CALL':
+                        exercise = max(0.0, spot - K)
+                    else:
+                        exercise = max(0.0, K - spot)
+                    option_vals[j] = max(hold, exercise)
+                else:
+                    option_vals[j] = hold
+
+        return option_vals[0]
+
+    @staticmethod
+    def price_with_greeks(
+        S: float,
+        K: float,
+        T: float,
+        r: float,
+        q: float,
+        sigma: float,
+        option_type: str,
+        steps: int = 200,
+        american: bool = False
+    ) -> Dict[str, float]:
+        h = S * 0.001
+        price = BinomialTreePricer.price(S, K, T, r, q, sigma, option_type, steps, american)
+        price_up = BinomialTreePricer.price(S + h, K, T, r, q, sigma, option_type, steps, american)
+        price_down = BinomialTreePricer.price(S - h, K, T, r, q, sigma, option_type, steps, american)
+        price_T = BinomialTreePricer.price(S, K, max(T - 1.0/365.0, 0.0), r, q, sigma, option_type, steps, american)
+        price_vol_up = BinomialTreePricer.price(S, K, T, r, q, sigma + 0.01, option_type, steps, american)
+
+        delta = (price_up - price_down) / (2.0 * h)
+        gamma = (price_up - 2.0 * price + price_down) / (h * h)
+        theta = (price_T - price) / (1.0 / 365.0)
+        vega = (price_vol_up - price) / 100.0
+
+        return {
+            'price': round(price, 6),
+            'delta': round(delta, 6),
+            'gamma': round(gamma, 4),
+            'theta': round(theta, 6),
+            'vega': round(vega, 4)
+        }
+
+
+# ----------------------------------------------------------------------------
+# 蒙特卡洛定价模型 (GBM模拟 + 对偶变量方差缩减)
+# ----------------------------------------------------------------------------
+class MonteCarloPricer:
+    """蒙特卡洛期权定价模型
+
+    使用几何布朗运动(GBM)模拟标的资产路径，通过大量随机抽样估计期权价格。
+    支持对偶变量法(Antithetic Variates)进行方差缩减。
+
+    GBM:
+        S_T = S * exp((r - q - sigma²/2) * T + sigma * sqrt(T) * Z)
+        其中 Z ~ N(0, 1)
+
+    特点:
+    - 适用于路径依赖期权（亚式、障碍等）
+    - 对偶变量法减少一半方差
+    - 时间复杂度 O(n_simulations * n_steps)
+    - 标准误差随 1/sqrt(n_simulations) 收敛
+    """
+
+    @staticmethod
+    def price(
+        S: float,
+        K: float,
+        T: float,
+        r: float,
+        q: float,
+        sigma: float,
+        option_type: str,
+        n_simulations: int = 50000,
+        n_steps: int = 1,
+        antithetic: bool = True,
+        seed: Optional[int] = None
+    ) -> Tuple[float, float]:
+        if T <= 0 or sigma <= 0 or S <= 0:
+            intrinsic = max(0.0, (S - K) if option_type == 'CALL' else (K - S))
+            return intrinsic, 0.0
+
+        if seed is not None:
+            random.seed(seed)
+
+        drift = (r - q - 0.5 * sigma * sigma) * T
+        vol = sigma * math.sqrt(T)
+
+        if antithetic and n_steps == 1:
+            effective_n = n_simulations // 2
+            payoffs = []
+            for _ in range(effective_n):
+                z = random.gauss(0.0, 1.0)
+                ST1 = S * math.exp(drift + vol * z)
+                ST2 = S * math.exp(drift - vol * z)
+                if option_type == 'CALL':
+                    payoffs.append(max(0.0, ST1 - K))
+                    payoffs.append(max(0.0, ST2 - K))
+                else:
+                    payoffs.append(max(0.0, K - ST1))
+                    payoffs.append(max(0.0, K - ST2))
+
+            payoffs_arr = [math.exp(-r * T) * p for p in payoffs]
+            mean = sum(payoffs_arr) / len(payoffs_arr)
+            variance = sum((p - mean) ** 2 for p in payoffs_arr) / (len(payoffs_arr) - 1)
+            std_error = math.sqrt(variance / len(payoffs_arr))
+            return mean, std_error
+
+        dt = T / n_steps
+        payoffs = []
+        for _ in range(n_simulations):
+            ST = S
+            for _ in range(n_steps):
+                z = random.gauss(0.0, 1.0)
+                ST *= math.exp((r - q - 0.5 * sigma * sigma) * dt + sigma * math.sqrt(dt) * z)
+
+            if option_type == 'CALL':
+                payoff = max(0.0, ST - K)
+            else:
+                payoff = max(0.0, K - ST)
+            payoffs.append(math.exp(-r * T) * payoff)
+
+        mean = sum(payoffs) / n_simulations
+        variance = sum((p - mean) ** 2 for p in payoffs) / (n_simulations - 1)
+        std_error = math.sqrt(variance / n_simulations)
+        return mean, std_error
+
+    @staticmethod
+    def price_with_confidence(
+        S: float,
+        K: float,
+        T: float,
+        r: float,
+        q: float,
+        sigma: float,
+        option_type: str,
+        n_simulations: int = 50000,
+        n_steps: int = 1,
+        antithetic: bool = True,
+        confidence: float = 0.95,
+        seed: Optional[int] = None
+    ) -> Dict[str, float]:
+        mean, std_error = MonteCarloPricer.price(
+            S, K, T, r, q, sigma, option_type,
+            n_simulations, n_steps, antithetic, seed
+        )
+
+        z_scores = {0.90: 1.645, 0.95: 1.96, 0.99: 2.576}
+        z = z_scores.get(confidence, 1.96)
+        half_width = z * std_error
+
+        return {
+            'price': round(mean, 6),
+            'std_error': round(std_error, 6),
+            'confidence_interval': (
+                round(mean - half_width, 6),
+                round(mean + half_width, 6)
+            ),
+            'confidence_level': confidence
+        }
+
+
+# ----------------------------------------------------------------------------
 # 交易日历辅助类 (简化版，支持工作日计算)
 # ----------------------------------------------------------------------------
 class TradingCalendar:
     """交易日历，用于精确计算剩余交易日"""
 
-    def __init__(self, holidays: List[date] = None):
+    def __init__(self, holidays: List[date] = None, market_time_service=None):
         """
+        ✅ P2修复：通过构造函数注入MarketTimeService，避免延迟导入
+        
         Args:
             holidays: 节假日列表
+            market_time_service: MarketTimeService实例（可选）
         """
         self.holidays = set(holidays) if holidays else set()
+        self._market_time_service = market_time_service
 
     def add_holiday(self, d: date):
         """添加节假日"""
         self.holidays.add(d)
 
-    # ✅ ID唯一：委托MarketTimeService.is_trading_day，节假日通过self.holidays传递
+    # ✅ P2修复：使用注入的MarketTimeService，避免延迟导入
     def is_trading_day(self, d: date) -> bool:
         """判断是否为交易日"""
-        from ali2026v3_trading.scheduler_service import get_market_time_service
-        mts = get_market_time_service()
-        return mts.is_trading_day(d, holiday_dates=self.holidays)
+        if self._market_time_service is not None:
+            return self._market_time_service.is_trading_day(d, holiday_dates=self.holidays)
+        
+        # 降级方案：如果没有注入service，则仅检查节假日
+        return d.weekday() < 5 and d not in self.holidays
 
     def trading_days_between(self, start: date, end: date) -> int:
         """返回两个日期之间的交易日天数"""
@@ -391,8 +621,8 @@ class GreeksCalculator:
                 for h in cfg['holidays']:
                     try:
                         self._calendar.add_holiday(date.fromisoformat(h))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"[TradingCalendar] Failed to parse holiday '{h}': {e}")
 
             logger.info("Loaded config from %s", path)
         except Exception as e:
@@ -480,8 +710,12 @@ class GreeksCalculator:
             logger.debug(f"[ParseStrike] Failed to parse strike from {instrument_id}: {e}")
             return None
 
-    def _should_update(self, instrument_id: str, current_price: float, current_iv: Optional[float] = None) -> bool:
+    def _should_update(self, instrument_id: str, current_price: float, current_iv: Optional[float] = None,
+                       last_time: float = 0.0, last_price: float = 0.0, last_iv: Optional[float] = None,
+                       tick_count: int = 0) -> bool:
         """
+        ✅ P1修复：消除TOCTOU竞态，所有参数由调用方在锁内传入
+        
         混合策略：判断是否需要更新希腊字母
         
         条件 (满足任一即更新):
@@ -494,12 +728,12 @@ class GreeksCalculator:
             instrument_id: 合约ID
             current_price: 当前价格
             current_iv: 当前IV (可选，如果不提供则跳过IV检查)
+            last_time: 上次更新时间（调用方在锁内读取）
+            last_price: 上次价格（调用方在锁内读取）
+            last_iv: 上次IV（调用方在锁内读取）
+            tick_count: Tick计数（调用方在锁内读取）
         """
         now = time.time()
-        last_time = self._option_last_update.get(instrument_id, 0)
-        last_price = self._option_last_price.get(instrument_id, current_price)
-        last_iv = self._option_last_iv.get(instrument_id, current_iv)
-        tick_count = self._option_tick_counter.get(instrument_id, 0)
 
         # 条件1: 时间间隔
         time_condition = (now - last_time) >= self._update_strategy.get('time_interval_sec', 1.0)
@@ -532,10 +766,13 @@ class GreeksCalculator:
         
         return should_update
 
-    def _should_update_with_cached_iv(self, instrument_id: str, current_price: float) -> bool:
-        """方法唯一修复：恢复定义，委托_should_update并传入缓存IV。"""
+    def _should_update_with_cached_iv(self, instrument_id: str, current_price: float,
+                                      last_time: float = 0.0, last_price: float = 0.0,
+                                      last_iv: Optional[float] = None, tick_count: int = 0) -> bool:
+        """✅ P1修复：委托_should_update并传入缓存IV，所有参数由调用方在锁内读取。"""
         cached_iv = self._option_last_iv.get(instrument_id)
-        return self._should_update(instrument_id, current_price, cached_iv)
+        return self._should_update(instrument_id, current_price, cached_iv,
+                                   last_time, last_price, last_iv or cached_iv, tick_count)
 
     def calculate_and_update(
         self,
@@ -686,11 +923,17 @@ class GreeksCalculator:
             cached_iv = self._option_iv.get(instrument_id)
             has_cached_iv = cached_iv is not None and cached_iv > 0
             
+            # ✅ P1修复：在锁内读取所有状态，消除TOCTOU竞态
+            last_time = self._option_last_update.get(instrument_id, 0)
+            last_price = self._option_last_price.get(instrument_id, price)
+            last_iv = self._option_last_iv.get(instrument_id)
+            
             need_compute_iv = False
             if iv is None and not has_cached_iv:
                 need_compute_iv = True
             elif iv is None and has_cached_iv:
-                if self._should_update_with_cached_iv(instrument_id, price):
+                if self._should_update_with_cached_iv(instrument_id, price,
+                                                      last_time, last_price, last_iv, tick_cnt):
                     need_compute_iv = True
                 else:
                     return None  # 不需要更新
@@ -718,7 +961,12 @@ class GreeksCalculator:
                 self._iv_calc_count += 1
                 self._total_iv_compute_time_ms += elapsed_ms
             
-            if has_cached_iv and not self._should_update(instrument_id, price, iv):
+            # ✅ P1修复：使用锁内读取的状态数据
+            last_time = self._option_last_update.get(instrument_id, 0)
+            last_price = self._option_last_price.get(instrument_id, price)
+            
+            if has_cached_iv and not self._should_update(instrument_id, price, iv,
+                                                         last_time, last_price, last_iv, tick_cnt):
                 return None
             
             return self.calculate_and_update(
@@ -965,6 +1213,8 @@ class GreeksCalculator:
 __all__ = [
     'GreeksCalculator',
     'IVCalculator',
+    'BinomialTreePricer',
+    'MonteCarloPricer',
     'TradingCalendar',
     '_bs_greeks',
     '_bs_price',

@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 
 from ali2026v3_trading.scheduler_service import is_market_open
-from ali2026v3_trading.storage import InstrumentDataManager
+from ali2026v3_trading import InstrumentDataManager
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,8 @@ def safe_getattr_int(obj: Any, attr: str, default: int = 0, min_val: int = 0) ->
         if isinstance(val, int):
             return max(val, min_val)
         return max(int(val), min_val)
-    except Exception:
+    except (ValueError, TypeError) as e:
+        # 类型转换失败时返回默认值
         return default
 
 
@@ -71,6 +72,14 @@ class UIMixin:
         import threading
         if UIService._ui_lock is None:
             UIService._ui_lock = threading.Lock()
+    
+    @classmethod
+    def _get_ui_lock(cls):
+        """获取UI锁（确保线程安全）"""
+        if cls._ui_lock is None:
+            import threading
+            cls._ui_lock = threading.Lock()
+        return cls._ui_lock
     
     # UI状态（✅ M21 Bug #3修复：添加锁保护）
     _ui_lock: Any = None  # threading.Lock
@@ -105,12 +114,13 @@ class UIMixin:
             try:
                 root.attributes('-topmost', True)
                 root.after(200, lambda: root.attributes('-topmost', False))
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_error(f"设置窗口置顶失败: {e}")
             try:
                 w = safe_getattr_int(self.params, "ui_window_width", 320, 320)
                 h = safe_getattr_int(self.params, "ui_window_height", 310, 310)
-            except Exception:
+            except Exception as e:
+                self._log_error(f"读取UI窗口尺寸失败: {e}")
                 w, h = 320, 310
             root.geometry(f"{w}x{h}")
             
@@ -186,8 +196,8 @@ class UIMixin:
                                 messagebox.showwarning("操作禁止", error_msg, parent=self._ui_root)
                             else:
                                 messagebox.showwarning("操作禁止", error_msg)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self._log_error(f"显示错误对话框失败: {e}")
                         return
                     
                     setattr(self.params, "debug_output", True)
@@ -204,8 +214,8 @@ class UIMixin:
                         root = getattr(self, '_ui_root', None)
                         if root:
                             root.update_idletasks()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._log_error(f"更新UI任务失败: {e}")
                 except Exception as e:
                     self._log_error(f"切换调试模式失败: {e}")
             
@@ -222,8 +232,8 @@ class UIMixin:
                                 messagebox.showwarning("操作禁止", error_msg, parent=self._ui_root)
                             else:
                                 messagebox.showwarning("操作禁止", error_msg)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self._log_error(f"显示错误对话框失败: {e}")
                         return
                     
                     setattr(self.params, "debug_output", True)
@@ -242,8 +252,8 @@ class UIMixin:
                         root = getattr(self, '_ui_root', None)
                         if root:
                             root.update_idletasks()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._log_error(f"更新UI任务失败: {e}")
                 except Exception as e:
                     self._log_error(f"收市调试切换失败: {e}")
             
@@ -259,8 +269,8 @@ class UIMixin:
                                 messagebox.showwarning("操作禁止", error_msg, parent=self._ui_root)
                             else:
                                 messagebox.showwarning("操作禁止", error_msg)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self._log_error(f"显示错误对话框失败: {e}")
                         return
                     
                     setattr(self.params, "debug_output", False)
@@ -277,8 +287,8 @@ class UIMixin:
                         root = getattr(self, '_ui_root', None)
                         if root:
                             root.update_idletasks()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self._log_error(f"更新UI任务失败: {e}")
                 except Exception as e:
                     self._log_error(f"切换交易模式失败: {e}")
 
@@ -337,8 +347,9 @@ class UIMixin:
             self._ui_btn_manual = btn_manual
             self._ui_running = True
             self._ui_creating = False
-            setattr(cls, "_ui_global_root", root)
-            setattr(cls, "_ui_global_running", True)
+            with cls._get_ui_lock():
+                setattr(cls, "_ui_global_root", root)
+                setattr(cls, "_ui_global_running", True)
             
             # ✅ 关键修复：UI创建后立即刷新样式，确保按钮状态与当前实际状态同步
             self._refresh_output_mode_ui_styles()
@@ -351,8 +362,9 @@ class UIMixin:
                     self._log_error(f"关闭窗口失败: {e}")
                 self._ui_running = False
                 self._ui_root = None
-                setattr(cls, "_ui_global_running", False)
-                setattr(cls, "_ui_global_root", None)
+                with cls._get_ui_lock():
+                    setattr(cls, "_ui_global_running", False)
+                    setattr(cls, "_ui_global_root", None)
             
             root.protocol("WM_DELETE_WINDOW", _on_close)
             
@@ -374,17 +386,19 @@ class UIMixin:
         
         cls = self.__class__
         
-        # 检查是否已运行
-        if getattr(cls, "_ui_global_running", False):
-            try:
-                self._schedule_bring_output_mode_ui_front()
-                self._log_info("输出模式界面已在运行")
-                return
-            except Exception as e:
-                self._log_error(f"前置窗口失败: {e}")
+        # 检查是否已运行（加锁保护）
+        with cls._get_ui_lock():
+            if getattr(cls, "_ui_global_running", False):
+                try:
+                    self._schedule_bring_output_mode_ui_front()
+                    self._log_info("输出模式界面已在运行")
+                    return
+                except Exception as e:
+                    self._log_error(f"前置窗口失败: {e}")
         
-        # 清理遗留窗口
-        old_root = getattr(cls, "_ui_global_root", None)
+        # 清理遗留窗口（加锁保护）
+        with cls._get_ui_lock():
+            old_root = getattr(cls, "_ui_global_root", None)
         if old_root:
             try:
                 if hasattr(self, "_ui_queue") and self._ui_queue:
@@ -393,8 +407,9 @@ class UIMixin:
                     old_root.destroy()
             except Exception as e:
                 self._log_error(f"清理遗留窗口失败: {e}")
-            setattr(cls, "_ui_global_root", None)
-            setattr(cls, "_ui_global_running", False)
+            with cls._get_ui_lock():
+                setattr(cls, "_ui_global_root", None)
+                setattr(cls, "_ui_global_running", False)
         
         # P2 Bug #80修复：检查是否在主线程
         import threading as _threading
@@ -417,7 +432,8 @@ class UIMixin:
                         # ✅ 修复：非主线程直接创建Tk并运行mainloop
                         # 在某些平台上，Tkinter可以在非主线程运行
                         root = None
-                        setattr(cls, "_ui_global_root", None)
+                        with cls._get_ui_lock():
+                            setattr(cls, "_ui_global_root", None)
                         
                         def _process_ui_queue():
                             nonlocal root
@@ -435,7 +451,8 @@ class UIMixin:
                                             try:
                                                 root = tk.Tk()
                                                 root.withdraw()  # 隐藏主窗口
-                                                setattr(cls, "_ui_global_root", root)
+                                                with cls._get_ui_lock():
+                                                    setattr(cls, "_ui_global_root", root)
                                                 self._log_info("UI线程中Tk root创建成功")
                                             except Exception as e:
                                                 self._log_error(f"UI线程中Tk root创建失败: {e}")
@@ -446,11 +463,12 @@ class UIMixin:
                                         if root:
                                             try:
                                                 root.destroy()
-                                            except:
-                                                pass
+                                            except Exception as e:
+                                                self._log_error(f"UI窗口销毁失败: {e}")
                                         should_continue = False
-                                        self._ui_running = False
-                                        setattr(cls, "_ui_global_running", False)
+                                        with cls._get_ui_lock():
+                                            self._ui_running = False
+                                            setattr(cls, "_ui_global_running", False)
                             except queue.Empty:
                                 pass
                             except Exception as e:
@@ -459,8 +477,8 @@ class UIMixin:
                                 if should_continue and root:
                                     try:
                                         root.after(100, _process_ui_queue)
-                                    except:
-                                        pass
+                                    except Exception as e:
+                                        self._log_error(f"UI队列调度失败: {e}")
                         
                         # 立即处理一次队列，检查是否有create_ui消息
                         _process_ui_queue()
@@ -489,11 +507,12 @@ class UIMixin:
                         try:
                             if 'root' in locals() and root:
                                 root.destroy()
-                        except:
-                            pass
+                        except Exception as e:
+                            self._log_error(f"UI窗口最终清理失败: {e}")
                         setattr(cls, "_ui_mainloop_started", False)
-                        self._ui_running = False
-                        setattr(cls, "_ui_global_running", False)
+                        with cls._get_ui_lock():
+                            self._ui_running = False
+                            setattr(cls, "_ui_global_running", False)
                 
                 # daemon=False，确保UI资源正确释放
                 t = _threading.Thread(target=_ui_mainloop_thread, daemon=False, name="UIMainLoop")
@@ -710,8 +729,8 @@ class UIMixin:
                             val = getattr(self.params, attr)
                             if not callable(val):
                                 params_dict[attr] = val
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self._log_error(f"读取参数{attr}失败: {e}")
             
             text_area.insert("1.0", json.dumps(params_dict, indent=2, ensure_ascii=False, default=str))
             
@@ -825,8 +844,8 @@ class UIMixin:
             try:
                 self.output(msg, force=True)
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_error(f"UI输出失败: {e}")
         log_func(msg)
 
     def _log_info(self, msg: str) -> None:
@@ -868,8 +887,8 @@ class UIMixin:
             if self._tick_summary_count % 1000 == 0:
                 instrument_id = getattr(tick, 'instrument_id', getattr(tick, 'InstrumentID', '?'))
                 logger.debug(f"[TickSummary] received {self._tick_summary_count} ticks, last={instrument_id}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[TickSummary] 记录失败: {e}")
 
 
 # =============================================================================
