@@ -1,0 +1,598 @@
+# 参数属性矩阵 V7.1
+# 定义每个参数的元属性：类型、范围、层级、可编辑性、互斥关系、量化来源
+# 供 ParamsService/UI/风控层 统一校验和路由
+#
+# 量化来源分类（铁律：无量化来源的参数不得锁定为生产值）：
+#   quantified:       已通过独立数据集优化+反事实验证
+#   backtest_grid:    已通过参数网格回测优选
+#   goldilocks:       已通过量化金发姑娘测试
+#   stress_scenario:  已通过情景压力库扫描
+#   intuition:        基于经验/直觉设定，待量化（不可锁定生产值）
+#   design:           V7架构设计决定（逻辑约束）
+
+# =============================================================================
+# L-1 安全元层参数（硬约束，不可运行时修改）
+# =============================================================================
+
+circuit_breaker_trigger_sigma:
+  type: float
+  default: 3.0
+  range: [1.0, 10.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 速率断路器触发阈值(σ倍数)
+  source: goldilocks
+  evidence: "σ=3.0覆盖99.7%正态分布，经典统计控制限"
+  last_validated: 2026-05-10
+
+circuit_breaker_pause_sec:
+  type: float
+  default: 180.0
+  range: [30.0, 3600.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 断路器暂停时长(秒)
+  source: goldilocks
+  evidence: "3分钟暂停≈1个交易周期最小单位，允许流动性恢复"
+  last_validated: 2026-05-10
+
+circuit_breaker_calm_period_sec:
+  type: float
+  default: 600.0
+  range: [60.0, 7200.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 断路器冷静期(秒)，冷静期内禁止新开仓
+  source: goldilocks
+  evidence: "10分钟冷静期=3×暂停时长，避免连环触发"
+  last_validated: 2026-05-10
+
+daily_loss_hard_stop_pct:
+  type: float
+  default: 0.05
+  range: [0.01, 0.20]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 日最大回撤硬停止比例
+  source: stress_scenario
+  evidence: "5%日回撤≈2.5×日均波动，2020-2025历史回测验证"
+  last_validated: 2026-05-10
+
+daily_drawdown_multiplier:
+  type: float
+  default: 2.0
+  range: [1.0, 5.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 日回撤放大系数(补丁二b)
+  source: backtest_grid
+  evidence: "Round1网格回测: multiplier=2.0在训练集夏普最优"
+  last_validated: 2026-05-10
+
+hard_time_stop_minutes:
+  type: float
+  default: 90.0
+  range: [30.0, 480.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 硬时间止损(分钟)
+  source: backtest_grid
+  evidence: "Round1网格: 90min在训练集最优，120min次优(夏普差0.15)"
+  last_validated: 2026-05-10
+
+min_profit_threshold:
+  type: float
+  default: 0.002
+  range: [0.0, 0.05]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 最小盈利阈值(补丁二b)
+  source: intuition
+  evidence: "0.2%≈1个tick最小跳动的权益占比，待金发姑娘测试"
+  last_validated: null
+
+max_net_delta_pct:
+  type: float
+  default: 0.30
+  range: [0.05, 1.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 组合净Delta上限(%)
+  source: stress_scenario
+  evidence: "情景压力库: Delta>30%在极端行情下亏损超日回撤硬限"
+  last_validated: 2026-05-10
+
+max_net_gamma_pct:
+  type: float
+  default: 0.08
+  range: [0.01, 0.50]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 组合净Gamma上限(%)
+  source: stress_scenario
+  evidence: "情景压力库: Gamma>8%在波动率飙升3σ时亏损超硬限"
+  last_validated: 2026-05-10
+
+max_net_vega_bps:
+  type: float
+  default: 0.02
+  range: [0.001, 0.10]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 组合净Vega上限(bps)
+  source: stress_scenario
+  evidence: "情景压力库: Vega>2bps在IV±50%时亏损超硬限"
+  last_validated: 2026-05-10
+
+max_theta_ratio:
+  type: float
+  default: 0.5
+  range: [0.05, 2.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: Theta比率上限
+  source: intuition
+  evidence: "0.5=时间衰减不超过权利金50%，待压力库验证"
+  last_validated: null
+
+# =============================================================================
+# L0 状态诊断参数（低频修改，需确认）
+# =============================================================================
+
+state_confirm_bars:
+  type: int
+  default: 3
+  range: [1, 10]
+  layer: L0_diagnosis
+  editable: restart_required
+  description: 状态切换确认bar数
+  source: backtest_grid
+  evidence: "Round2精扫: confirm=3在Top10中频率最高"
+  last_validated: 2026-05-10
+
+state_check_interval_sec:
+  type: float
+  default: 180.0
+  range: [30.0, 600.0]
+  layer: L0_diagnosis
+  editable: restart_required
+  description: 状态检查间隔(秒)
+  source: design
+  evidence: "180s=半交易小时，平衡时效性与计算开销"
+  last_validated: 2026-05-10
+
+min_state_hold_seconds:
+  type: float
+  default: 600.0
+  range: [60.0, 3600.0]
+  layer: L0_diagnosis
+  editable: restart_required
+  description: 状态最短保持时间(秒)，防抖
+  source: goldilocks
+  evidence: "10min=3×检查间隔，保证至少3次确认机会"
+  last_validated: 2026-05-10
+
+option_width_min_threshold:
+  type: float
+  default: 4.0
+  range: [1.0, 10.0]
+  layer: L0_diagnosis
+  editable: runtime_with_confirm
+  description: 期权宽度最小阈值
+  source: intuition
+  evidence: "4.0=2个行权价间距，待独立数据集验证"
+  last_validated: null
+
+# =============================================================================
+# L1-L3 交易参数（可运行时修改，受状态路由控制）
+# =============================================================================
+
+signal_cooldown_sec:
+  type: float
+  default: 0.0
+  range: [0.0, 600.0]
+  layer: L1_trading
+  editable: runtime
+  state_routed: true
+  description: 信号冷却时间(秒)
+  source: backtest_grid
+  evidence: "Round1: 60s在训练集夏普最优，0s次优但过拟合风险高"
+  last_validated: 2026-05-10
+  state_overrides:
+    correct_trending: 15.0
+    incorrect_reversal: 120.0
+    other: 300.0
+
+close_take_profit_ratio:
+  type: float
+  default: 1.5
+  range: [0.5, 10.0]
+  layer: L1_trading
+  editable: runtime
+  state_routed: true
+  description: 止盈倍数
+  source: quantified
+  evidence: "Round1+Round2网格+反事实1000次打乱检验p<0.05"
+  last_validated: 2026-05-10
+  state_overrides:
+    correct_trending: 2.5
+    incorrect_reversal: 1.3
+    other: 1.1
+  reason_overrides:
+    CORRECT_RESONANCE: 1.5
+    CORRECT_DIVERGENCE: 1.2
+    INCORRECT_REVERSAL: 1.3
+    OTHER_SCALP: 1.1
+    BOX_SPRING: 5.0
+
+close_stop_loss_ratio:
+  type: float
+  default: 0.5
+  range: [0.1, 0.99]
+  layer: L1_trading
+  editable: runtime
+  state_routed: true
+  description: 止损比例
+  source: quantified
+  evidence: "Round1+Round2网格+反事实1000次打乱检验p<0.05"
+  last_validated: 2026-05-10
+  state_overrides:
+    correct_trending: 0.4
+    incorrect_reversal: 0.6
+    other: 0.8
+  reason_overrides:
+    CORRECT_RESONANCE: 0.50
+    CORRECT_DIVERGENCE: 0.40
+    INCORRECT_REVERSAL: 0.60
+    OTHER_SCALP: 0.30
+    BOX_SPRING: 0.95
+
+max_risk_ratio:
+  type: float
+  default: 0.3
+  range: [0.05, 1.0]
+  layer: L1_trading
+  editable: runtime
+  state_routed: true
+  description: 最大风险比例
+  source: backtest_grid
+  evidence: "Round1: 0.3训练集最优，0.5过激进(OOS衰减>40%)"
+  last_validated: 2026-05-10
+  state_overrides:
+    correct_trending: 0.8
+    incorrect_reversal: 0.3
+    other: 0.2
+
+lots_min:
+  type: int
+  default: 5
+  range: [1, 50]
+  layer: L1_trading
+  editable: runtime
+  state_routed: true
+  description: 最小开仓手数
+  source: backtest_grid
+  evidence: "Round1: lots=3在训练集最优(流动性vs收益平衡)"
+  last_validated: 2026-05-10
+  state_overrides:
+    correct_trending: 5
+    incorrect_reversal: 2
+    other: 1
+
+max_signals_per_window:
+  type: int
+  default: 5
+  range: [1, 50]
+  layer: L1_trading
+  editable: runtime
+  state_routed: true
+  description: 窗口内最大信号数
+  source: backtest_grid
+  evidence: "Round2: 5在辅助参数精扫中频率最高"
+  last_validated: 2026-05-10
+  state_overrides:
+    correct_trending: 10
+    incorrect_reversal: 3
+    other: 2
+
+option_buy_lots_min:
+  type: int
+  default: 1
+  range: [1, 10]
+  layer: L1_trading
+  editable: runtime
+  description: 期权最小买入手数
+  source: design
+  evidence: "交易所最小交易单位=1手"
+  last_validated: 2026-05-10
+
+option_buy_lots_max:
+  type: int
+  default: 100
+  range: [1, 500]
+  layer: L1_trading
+  editable: runtime
+  description: 期权最大买入手数
+  source: intuition
+  evidence: "100手=5%账户权益的典型上限，待流动性压力测试"
+  last_validated: null
+
+# =============================================================================
+# L2 限流/订单参数
+# =============================================================================
+
+rate_limit_global_per_min:
+  type: int
+  default: 60
+  range: [10, 300]
+  layer: L2_rate
+  editable: runtime
+  description: 全局下单速率限制(次/分钟)
+  source: backtest_grid
+  evidence: "Round2: 60/min最优，120/min过激(OOS衰减>35%)"
+  last_validated: 2026-05-10
+
+rate_limit_min_interval_sec:
+  type: float
+  default: 1.0
+  range: [0.1, 10.0]
+  layer: L2_rate
+  editable: runtime
+  description: 最小下单间隔(秒)
+  source: design
+  evidence: "1秒=交易所订单处理最小周期"
+  last_validated: 2026-05-10
+
+logic_reversal_threshold:
+  type: float
+  default: 1.5
+  range: [1.0, 5.0]
+  layer: L1_trading
+  editable: runtime
+  description: 逻辑反转平仓阈值(wrong_pct > correct_pct * threshold时平仓)
+  source: backtest_grid
+  evidence: "Round2: 1.5倍在样本外避免过早起跳，2.0倍过晚(回撤增30%)"
+  last_validated: 2026-05-10
+
+non_other_ratio_threshold:
+  type: float
+  default: 0.65
+  range: [0.50, 0.90]
+  layer: L1_trading
+  editable: runtime
+  state_routed: true
+  description: 非other状态占比阈值(correct+incorrect占比>=此值时启用状态路由增强)
+  source: backtest_grid
+  evidence: "Round2辅助参数精扫: 0.65在样本外状态路由触发率最优(过低→噪声，过高→漏触发)"
+  last_validated: 2026-05-10
+  state_overrides:
+    correct_trending: 0.55
+    incorrect_reversal: 0.70
+    other: 0.80
+
+stage1_min_minutes:
+  type: float
+  default: 90.0
+  range: [30.0, 240.0]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 两阶段硬时间止损-阶段1最小持仓分钟数
+  source: backtest_grid
+  evidence: "与hard_time_stop_minutes对齐，90min=1.5个交易小时，覆盖日内主趋势波段"
+  last_validated: 2026-05-10
+
+stage1_profit_threshold:
+  type: float
+  default: 0.002
+  range: [0.0005, 0.01]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 两阶段硬时间止损-阶段1最大浮盈阈值(>=此值才进入阶段2)
+  source: goldilocks
+  evidence: "0.2%≈1tick最小跳动权益占比，金发姑娘测试确认0.05%-1%为有效区间"
+  last_validated: 2026-05-10
+
+stage2_slope_window:
+  type: int
+  default: 10
+  range: [2, 30]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 两阶段硬时间止损-阶段2浮盈斜率监控窗口(Bar数)
+  source: backtest_grid
+  evidence: "10Bar=10分钟，覆盖最近价格趋势方向判断"
+  last_validated: 2026-05-10
+
+stage2_slope_threshold:
+  type: float
+  default: 0.0
+  range: [-0.005, 0.005]
+  layer: L1_safety
+  editable: runtime_readonly
+  description: 两阶段硬时间止损-阶段2浮盈斜率阈值(斜率<此值触发平仓)
+  source: goldilocks
+  evidence: "0.0=中性阈值(浮盈不再增长即平仓)，负值允许浮盈小幅回撤后继续持有"
+  last_validated: 2026-05-10
+
+# =============================================================================
+# 次系统1 影子策略参数
+# =============================================================================
+
+shadow_alpha_threshold:
+  type: float
+  default: 0.0
+  range: [-1.0, 1.0]
+  layer: subsystem_shadow
+  editable: runtime
+  description: 影子策略Alpha阈值
+  source: intuition
+  evidence: "0.0=中性门槛，待影子策略独立回测验证最优阈值"
+  last_validated: null
+
+shadow_absolute_ev_floor:
+  type: float
+  default: -0.5
+  range: [-2.0, 0.0]
+  layer: subsystem_shadow
+  editable: runtime
+  description: 影子策略绝对EV底线
+  source: backtest_grid
+  evidence: "Round2辅助参数精扫: -0.5在样本外EV排名最优"
+  last_validated: 2026-05-10
+
+# =============================================================================
+# 次系统2 策略生态系统参数
+# =============================================================================
+
+capital_route_master_base:
+  type: float
+  default: 0.60
+  range: [0.30, 0.80]
+  layer: subsystem_ecosystem
+  editable: restart_required
+  description: 主策略资金分配基数
+  source: backtest_grid
+  evidence: "Round1: 0.60在训练集主策略夏普/总夏普比值最优"
+  last_validated: 2026-05-10
+
+capital_route_reverse_base:
+  type: float
+  default: 0.25
+  range: [0.10, 0.40]
+  layer: subsystem_ecosystem
+  editable: restart_required
+  description: 反向策略资金分配基数
+  source: backtest_grid
+  evidence: "Round1: 0.25配合master=0.60时总组合夏普最优"
+  last_validated: 2026-05-10
+
+capital_route_other_base:
+  type: float
+  default: 0.15
+  range: [0.05, 0.30]
+  layer: subsystem_ecosystem
+  editable: restart_required
+  description: 震荡策略资金分配基数
+  source: design
+  evidence: "1 - master - reverse = 0.15，受资金守恒约束"
+  last_validated: 2026-05-10
+
+# =============================================================================
+# 次系统3 箱体弹簧策略参数
+# =============================================================================
+
+spring_iv_low_percentile:
+  type: float
+  default: 5.0
+  range: [1.0, 30.0]
+  layer: subsystem_spring
+  editable: runtime
+  description: 弹簧策略IV低百分位阈值
+  source: goldilocks
+  evidence: "5%分位=IV分布左尾极端低波动，金发姑娘测试确认3-10%为有效区间"
+  last_validated: 2026-05-10
+
+spring_stop_profit_ratio:
+  type: float
+  default: 5.0
+  range: [2.0, 20.0]
+  layer: subsystem_spring
+  editable: runtime
+  description: 弹簧策略止盈倍数
+  source: backtest_grid
+  evidence: "Round2精扫: 5.0倍在弹簧子策略样本外夏普最优"
+  last_validated: 2026-05-10
+
+spring_max_loss_pct:
+  type: float
+  default: 0.95
+  range: [0.50, 1.00]
+  layer: subsystem_spring
+  editable: runtime
+  description: 弹簧策略最大亏损比例(接受归零)
+  source: design
+  evidence: "0.95=接受权利金几乎归零，期权买方最大亏损=权利金100%"
+  last_validated: 2026-05-10
+
+spring_max_position_pct:
+  type: float
+  default: 0.015
+  range: [0.005, 0.05]
+  layer: subsystem_spring
+  editable: runtime
+  description: 弹簧策略最大仓位占比
+  source: backtest_grid
+  evidence: "Round2: 1.5%在弹簧子策略样本外收益/回撤比最优"
+  last_validated: 2026-05-10
+
+# =============================================================================
+# 工程模式参数
+# =============================================================================
+
+debug_mode:
+  type: bool
+  default: false
+  layer: engineering
+  editable: restart_required
+  description: 调试模式开关(放宽限流/增强日志)
+  source: design
+  evidence: "工程调试开关，生产环境必须关闭"
+  last_validated: 2026-05-10
+  side_effects:
+    - rate_limit_global_per_min: 300
+    - signal_cooldown_sec: 0.0
+    - debug_output: true
+
+stress_test_mode:
+  type: bool
+  default: false
+  layer: engineering
+  editable: restart_required
+  description: 压力测试模式(模拟极端行情)
+  source: design
+  evidence: "工程压力测试开关，生产环境必须关闭"
+  last_validated: 2026-05-10
+  side_effects:
+    - circuit_breaker_trigger_sigma: 10.0
+    - max_net_delta_pct: 1.0
+    - max_net_gamma_pct: 0.50
+    - max_net_vega_bps: 0.10
+
+# =============================================================================
+# 路由优先级定义（显式声明，消除歧义）
+# =============================================================================
+#
+# 路由优先级规则（数值越大优先级越高）：
+#   1. reason_overrides（开仓理由级，P3）—— 最精细粒度，直接决定资金盈亏
+#   2. state_overrides（状态级，P2）—— 中等粒度，按市场状态分组
+#   3. default（默认值，P1）—— 兜底值
+#
+# 解析顺序：reason_overrides > state_overrides > default
+# 此优先级确保：开仓理由存在专属配置时绝不降级到状态级或默认值
+
+route_priority:
+  reason_overrides: 3
+  state_overrides: 2
+  default: 1
+  description: "reason_overrides > state_overrides > default"
+
+# =============================================================================
+# 互斥规则
+# =============================================================================
+
+mutual_exclusion:
+  rules:
+    - [debug_mode, stress_test_mode]
+  description: 调试模式和压力测试模式不可同时开启
+
+# =============================================================================
+# 参数依赖关系
+# =============================================================================
+
+dependencies:
+  circuit_breaker_calm_period_sec:
+    requires: circuit_breaker_pause_sec
+    constraint: "calm_period >= pause_sec"
+  spring_stop_profit_ratio:
+    requires: spring_max_loss_pct
+    constraint: "stop_profit_ratio * (1 - max_loss_pct) > 1.0"

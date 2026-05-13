@@ -1,0 +1,139 @@
+# 代码Bug与设计问题分析报告
+
+**生成时间**: 2026-04-23
+**分析范围**: ali2026v3_trading 全部27个py文件
+**分析类型**: 显式Bug / 隐式Bug / 关键函数职责
+
+---
+
+## 严重性汇总
+
+### P0 - 致命Bug（必须立即修复，共7项）
+
+| 编号 | 文件 | 位置 | 描述 |
+|------|------|------|------|
+| ST-1 | storage.py | L1296 | delete_instrument 访问已废弃字段 kline_table/tick_table -> KeyError崩溃 |
+| ST-2 | storage.py | L2172 | _save_depth_batch_impl 访问已废弃字段 tick_table -> KeyError崩溃 |
+| ST-3 | storage.py | L2324 | _save_option_snapshot_batch_impl 访问已废弃字段 tick_table -> KeyError崩溃 |
+| ST-4 | storage.py | L1041 | register_instrument INSERT包含不存在的列 -> SQL失败 |
+| ST-5 | storage.py | L1102 | register_instrument期权INSERT包含不存在的列 -> SQL失败 |
+| RS-1 | risk_service.py | L348 | _check_position_limit逻辑错误：检查单笔需求金额而非累计持仓，风控形同虚设 |
+| PS-2 | position_service.py | L671 | _trigger_close_position阻塞式重试(time.sleep 0.7s)，多持仓止损串行严重滞后 |
+
+### P1 - 严重Bug（应尽快修复，共16项）
+
+| 编号 | 文件 | 描述 |
+|------|------|------|
+| DS-3 | data_service.py | _load_or_create_table SQL注入风险（PARQUET_PATH拼接） |
+| DS-4 | data_service.py | sync_tick_tables_to_ticks_raw SQL注入（table_name拼接） |
+| DS-7 | data_service.py | _save_kv_impl updated_at类型不匹配(REAL vs string) |
+| DS-8 | data_service.py | _all_connections无锁保护，遍历时并发修改 |
+| DS-12 | data_service.py | _backfill_option_metadata全表UPDATE无分批 |
+| DS-13 | data_service.py | _update_option_status_columns全表UPDATE无分批 |
+| ST-6 | storage.py | _migrate_legacy_schema查询sqlite_master(DuckDB不支持) |
+| ST-8 | storage.py | cleanup_old_data事务未COMMIT/ROLLBACK |
+| ST-13 | storage.py | K线聚合器全局锁瓶颈 |
+| EB-1 | event_bus.py | publish异步模式双重通知 |
+| OS-1 | order_service.py | get_order_service双重检查锁不完整 |
+| OS-4 | order_service.py | _orders_by_id字典无限增长(内存泄漏) |
+| OFA-2 | order_flow_analyzer.py | 多个查询方法锁释放后访问data引用(悬空引用) |
+| PS-1 | position_service.py | _closing标记不是线程安全的(可能重复平仓) |
+| PS-5 | position_service.py | _add_position position_id可能重复(毫秒碰撞) |
+| PS-8 | position_service.py | _trigger_close_position多次延迟导入(热路径性能) |
+
+---
+
+## 1. data_service.py
+
+**路径**: ali2026v3_trading/data_service.py
+
+### 关键类/函数及职责
+
+| 类/函数 | 职责 |
+|---------|------|
+| DataService | 单例数据服务，管理DuckDB持久化连接、查询缓存、批量插入、元数据表管理 |
+| _LazyDataServiceProxy | 惰性代理，延迟初始化DataService单例 |
+| get_data_service() | 全局单例获取函数 |
+| query() / query_cached() | SQL查询接口（带LRU+TTL缓存） |
+| batch_insert_ticks() / batch_insert_klines() | 批量数据写入 |
+| sync_tick_tables_to_ticks_raw() | 分表数据同步到统一表 |
+| _create_metadata_tables() | 创建元数据表（IF NOT EXISTS保护） |
+| _create_indexes_and_views() | 创建索引、视图、物化视图替代表 |
+
+### 显式Bug
+
+| 编号 | 严重性 | 行号 | 描述 |
+|------|--------|------|------|
+| DS-1 | P1 | 1404 | batch_insert_ticks末尾不可达代码：return 0在except之后永远不会执行 |
+| DS-2 | P2 | 309/405 | _create_empty_table与_create_metadata_tables表定义类型不一致(INTEGER vs BIGINT) |
+| DS-3 | P1 | 289 | _load_or_create_table中SQL注入风险：PARQUET_PATH直接拼接到read_parquet() |
+| DS-4 | P1 | 1876 | sync_tick_tables_to_ticks_raw中SQL注入：table_name直接拼接到FROM/JOIN |
+| DS-5 | P2 | 621 | _create_indexes_and_views每次初始化DROP物理表，丢失统计数据 |
+| DS-6 | P2 | 1304 | delete_instrument中SQL未参数化(f-string插入) |
+| DS-7 | P1 | 2588 | _save_kv_impl中updated_at类型不匹配(REAL列插入isoformat字符串) |
+
+### 隐式Bug
+
+| 编号 | 严重性 | 行号 | 描述 |
+|------|--------|------|------|
+| DS-8 | P1 | 244/1770 | _all_connections列表无锁保护，并发追加+遍历导致RuntimeError |
+| DS-9 | P2 | 1017 | query_cached返回可变Arrow Table引用，调用方修改会污染缓存 |
+| DS-10 | P2 | 1808 | _tick_sync_lock是Lock(非重入)，未来维护中可能死锁 |
+| DS-11 | P3 | 208 | _preload_realtime_cache初始化时视图可能无数据 |
+| DS-12 | P1 | 510 | _backfill_option_metadata全表UPDATE无分批，长时间锁表 |
+| DS-13 | P1 | 765 | _update_option_status_columns全表UPDATE无分批 |
+
+---
+
+## 2. storage.py
+
+**路径**: ali2026v3_trading/storage.py
+
+### 关键类/函数及职责
+
+| 类/函数 | 职责 |
+|---------|------|
+| InstrumentDataManager | 核心数据管理器：合约注册、异步写入队列、K线聚合、数据查询 |
+| _start_async_writer / _async_writer_loop | 双通道异步写入(Tick+Kline) |
+| register_instrument | 合约注册(期货/期权自动识别) |
+| process_tick | Tick数据处理入口(验证、注册、入队、K线聚合) |
+| load_historical_klines | 批量历史K线加载 |
+
+### 显式Bug
+
+| 编号 | 严重性 | 行号 | 描述 |
+|------|--------|------|------|
+| ST-1 | **P0** | 1296 | delete_instrument访问已废弃字段kline_table/tick_table -> KeyError |
+| ST-2 | **P0** | 2172 | _save_depth_batch_impl访问已废弃字段tick_table -> KeyError |
+| ST-3 | **P0** | 2324 | _save_option_snapshot_batch_impl访问已废弃字段tick_table -> KeyError |
+| ST-4 | **P0** | 1041 | register_instrument INSERT包含不存在的列 -> SQL失败 |
+| ST-5 | **P0** | 1102 | register_instrument期权INSERT包含不存在的列 -> SQL失败 |
+| ST-6 | P1 | 566 | _migrate_legacy_schema查询sqlite_master(DuckDB不支持) |
+| ST-7 | P2 | 619 | _create_indexes无条件创建subscriptions索引(表可能不存在) |
+| ST-8 | P1 | 2554 | cleanup_old_data事务未COMMIT/ROLLBACK，deleted始终为0 |
+| ST-9 | P2 | 856/868 | infer_exchange_from_id中SI重复匹配(SHFE优先，GFEX永远不可达) |
+
+### 隐式Bug
+
+| 编号 | 严重性 | 行号 | 描述 |
+|------|--------|------|------|
+| ST-10 | P2 | 267 | _async_writer_loop中task_queue.empty()不可靠 |
+| ST-11 | P2 | 361 | _flush_batch_to_db无事务回滚，部分写入不回滚 |
+| ST-12 | P3 | 314 | _enqueue_write热路径中重复from import |
+| ST-13 | P1 | 1469 | K线聚合器全局锁瓶颈(应改为分片锁) |
+| ST-14 | P2 | 221 | _stop_async_writer数据丢失(仅保存到内存) |
+| ST-15 | P2 | 1022 | register_instrument锁内执行DB操作影响并发 |
+
+---
+
+## 3. event_bus.py
+
+**Path**: ali2026v3_trading/event_bus.py
+
+### Explicit Bugs
+
+| ID | Sev | Line | Desc |
+|------|--------|------|------|
+| EB-1 | P1 | 329 | publish async double notification |
+| EB-2 | P2 | 377 | _failed_count no lock |
+| EB-3 | P2 | 250 | _dropped no lock |

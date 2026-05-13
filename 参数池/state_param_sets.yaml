@@ -1,0 +1,177 @@
+correct_trending:
+  option_width_min_threshold: 2.0
+  signal_cooldown_sec: 15
+  close_take_profit_ratio: 2.5
+  close_stop_loss_ratio: 0.4
+  max_risk_ratio: 0.8
+  max_signals_per_window: 10
+  lots_min: 5
+  option_buy_lots_min: 1
+  option_buy_lots_max: 100
+
+incorrect_reversal:
+  option_width_min_threshold: 4.0
+  signal_cooldown_sec: 120
+  close_take_profit_ratio: 1.3
+  close_stop_loss_ratio: 0.6
+  max_risk_ratio: 0.3
+  max_signals_per_window: 3
+  lots_min: 2
+  option_buy_lots_min: 1
+  option_buy_lots_max: 30
+
+other:
+  option_width_min_threshold: 4.0
+  signal_cooldown_sec: 300
+  close_take_profit_ratio: 1.1
+  close_stop_loss_ratio: 0.8
+  max_risk_ratio: 0.2
+  max_signals_per_window: 2
+  lots_min: 1
+  option_buy_lots_min: 1
+  option_buy_lots_max: 10
+
+correct_trending_defensive:
+  option_width_min_threshold: 3.0
+  signal_cooldown_sec: 30
+  close_take_profit_ratio: 2.0
+  close_stop_loss_ratio: 0.5
+  max_risk_ratio: 0.5
+  max_signals_per_window: 5
+  lots_min: 3
+  option_buy_lots_min: 1
+  option_buy_lots_max: 50
+
+CORRECT_RESONANCE:
+  close_take_profit_ratio: 1.5
+  close_stop_loss_ratio: 0.5
+  max_hold_minutes_stage1: 90
+  max_hold_minutes_stage2: 240
+  position_scale: 1.0
+
+CORRECT_DIVERGENCE:
+  close_take_profit_ratio: 1.2
+  close_stop_loss_ratio: 0.4
+  max_hold_minutes_stage1: 90
+  max_hold_minutes_stage2: 0
+  position_scale: 0.5
+
+INCORRECT_REVERSAL:
+  close_take_profit_ratio: 1.3
+  close_stop_loss_ratio: 0.6
+  max_hold_minutes_stage1: 60
+  max_hold_minutes_stage2: 0
+  position_scale: 0.3
+
+OTHER_SCALP:
+  close_take_profit_ratio: 1.1
+  close_stop_loss_ratio: 0.3
+  max_hold_minutes_stage1: 30
+  max_hold_minutes_stage2: 0
+  position_scale: 0.2
+
+MANUAL:
+  close_take_profit_ratio: 1.5
+  close_stop_loss_ratio: 0.5
+  max_hold_minutes_stage1: 90
+  max_hold_minutes_stage2: 240
+  position_scale: 1.0
+
+# V7次系统2: 箱体极值策略参数（比趋势策略更苛刻）
+box_extreme:
+  option_width_min_threshold: 4.0
+  signal_cooldown_sec: 120
+  close_take_profit_ratio: 0.4
+  close_stop_loss_ratio: 0.3
+  max_risk_ratio: 0.05
+  max_signals_per_window: 2
+  lots_min: 1
+  option_buy_lots_min: 1
+  option_buy_lots_max: 10
+  max_hold_minutes: 30
+  iv_percentile_min: 50.0
+  position_scale: 0.3
+  min_extreme_confidence: 0.6
+  min_bounce_count: 2
+  box_width_max_pct: 5.0
+
+BOX_BOTTOM_EXTREME:
+  close_take_profit_ratio: 0.4
+  close_stop_loss_ratio: 0.3
+  max_hold_minutes_stage1: 30
+  max_hold_minutes_stage2: 0
+  position_scale: 0.3
+
+BOX_TOP_EXTREME:
+  close_take_profit_ratio: 0.4
+  close_stop_loss_ratio: 0.3
+  max_hold_minutes_stage1: 30
+  max_hold_minutes_stage2: 0
+  position_scale: 0.3
+
+# V7次系统2: 策略生态系统资金路由
+capital_route:
+  master_base: 0.60
+  reverse_base: 0.25
+  other_base: 0.15
+  dynamic_enabled: true
+  master_active_boost: 0.15
+  min_maintenance_ratio: 0.05
+
+# V7次系统3: 箱体弹簧子策略参数（波动率脉冲，非方向交易）
+BOX_SPRING:
+  close_take_profit_ratio: 5.0
+  close_stop_loss_ratio: 0.95
+  max_hold_minutes_stage1: 120
+  max_hold_minutes_stage2: 0
+  position_scale: 0.15
+
+box_spring:
+  iv_lookback_bars: 120
+  min_box_touches: 3
+  max_box_width_pct: 0.04
+  iv_low_percentile: 5.0
+  iv_very_low_percentile: 2.0
+  min_days_to_expiry: 2
+  max_days_to_expiry: 5
+  max_premium_cost_pct: 0.015
+  stop_profit_ratio: 5.0
+  max_spring_loss_pct: 0.95
+  max_position_pct: 0.015
+  spring_cooldown_sec: 300
+  max_spring_positions: 3
+  max_spring_hold_minutes: 120
+
+# V7: 三态切换时间窗口参数（控制状态判断频率与确认机制）
+state_switch:
+  state_confirm_bars: 3
+  state_check_interval_sec: 180.0
+  state_switch_position_policy: keep_with_original_rules
+  non_other_ratio_threshold: 0.4
+  min_state_hold_seconds: 600
+
+# V7: L-1安全元层补丁参数
+safety_meta_layer:
+  circuit_breaker_pause_sec: 180.0
+  circuit_breaker_calm_period_sec: 600.0
+  daily_drawdown_multiplier: 2.0
+  hard_time_stop_minutes: 90.0
+  min_profit_threshold: 0.002
+
+# V7: 影子策略监控引擎时间窗口参数
+shadow_engine:
+  alpha_window_days: 7
+  summary_interval_hours: 24
+  alpha_decline_threshold_pct: 20.0
+  consecutive_decline_limit: 2
+  min_trades_for_metrics: 5
+  log_flush_interval: 100
+
+# V7: 箱体检测时间窗口参数
+box_detector:
+  lookback_bars: 60
+  min_box_bars: 20
+  adx_period: 14
+  adx_threshold: 25.0
+  iv_history_maxlen: 1000
+  bounce_tolerance_pct: 0.1
