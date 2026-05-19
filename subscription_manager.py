@@ -106,7 +106,6 @@ class SubscriptionConfig:
     
     # 批量写入
     db_batch_size: int = 100                      # DuckDB批量大小
-    handshake_timeout: float = 10.0               # 握手超时(秒)
     throttle_window: float = 1.0                  # 节流窗口(秒)
     
     # 异步落盘 (WAL保护)
@@ -222,21 +221,31 @@ class SubscriptionManager:
         """初始化WAL文件"""
         if not self._config.enable_wal:
             return
-        
+
         try:
             os.makedirs(os.path.dirname(self._config.wal_path) if os.path.dirname(self._config.wal_path) else '.', exist_ok=True)
-            self._wal_file = open(self._config.wal_path, 'a', encoding='utf-8')
+        except Exception as e:
+            logger.error("[SubscriptionManagerV2] WAL directory creation failed: %s", e)
+            self._wal_file = None
+            return
+
+        try:
+            self._wal_file = open(self._config.wal_path, 'a', encoding='utf-8', buffering=1)
+        except Exception as e:
+            logger.error("[SubscriptionManagerV2] WAL file open failed: %s", e)
+            self._wal_file = None
+            return
+
+        try:
             logger.info("[SubscriptionManagerV2] WAL enabled: %s", self._config.wal_path)
-            
-            # P1 Bug #36修复：注册atexit关闭WAL文件，防止进程退出时文件泄漏
             atexit.register(self._close_wal)
-            
-            # 启动时恢复
+
             if self._config.recover_on_start:
                 self._recover_from_wal()
         except Exception as e:
-            logger.error("[SubscriptionManagerV2] WAL init failed: %s", e)
-            self._wal_file = None
+            logger.error("[SubscriptionManagerV2] WAL post-init failed: %s", e)
+            self._close_wal()
+            return
     
     def _rotate_wal(self):
         """WAL文件轮转"""
@@ -320,7 +329,7 @@ class SubscriptionManager:
                 os.rename(self._config.wal_path, recovered_path)
             except OSError as e:
                 # Windows上文件锁定时重命名失败是常见情况，不影响功能
-                if e.winerror == 32:  # ERROR_SHARING_VIOLATION
+                if getattr(e, 'winerror', None) == 32:  # ERROR_SHARING_VIOLATION
                     logger.warning(f"[SubscriptionManagerV2] WAL file locked by another process, skipping rename")
                 else:
                     logger.warning(f"[SubscriptionManagerV2] WAL rename failed: {e}")
@@ -570,9 +579,6 @@ class SubscriptionManager:
                     if task_type == 'subscribe':
                         self._retry_subscribe(task)
                         success_count += 1
-                    elif task_type == 'handshake':
-                        self._retry_handshake(task)
-                        success_count += 1
                 except Exception as e:
                     logger.error("[SubscriptionManagerV2] Retry failed: %s", e)
                     if count < self._config.max_retries:
@@ -632,15 +638,6 @@ class SubscriptionManager:
         
         logger.info("[SubscriptionManagerV2] Retrying subscribe: %s", instrument_id)
         self._do_subscribe(instrument_id, data_type)
-    
-    def _retry_handshake(self, task: dict):
-        """重试握手"""
-        underlying = task.get('underlying')
-        expiration = task.get('expiration')
-        
-        logger.info("[SubscriptionManagerV2] Retrying handshake: %s_%s", underlying, expiration)
-        # TODO: 调用实际握手逻辑
-        self._handshake(underlying, expiration)
     
     # ========================================================================
     # 独立清理线程 (借鉴 OrderFlowAnalyzer 设计)
@@ -973,16 +970,7 @@ class SubscriptionManager:
             try:
                 # 握手
                 if option_ids:
-                    parsed = self.parse_option(option_ids[0])
-                    expiration = parsed['year_month']
-                    if not self._handshake_with_retry(underlying, expiration):
-                        logger.error("[SubscriptionManagerV2] Handshake failed: %s_%s", underlying, expiration)
-                        failed_tasks.append({
-                            'type': 'handshake',
-                            'underlying': underlying,
-                            'expiration': expiration
-                        })
-                        continue
+                    logger.debug("[SubscriptionManagerV2] Handshake removed: all subscriptions via _do_subscribe only")
                 
                 # 订阅期权合约
                 for opt_id in option_ids:
@@ -1041,24 +1029,6 @@ class SubscriptionManager:
                 'data_type': data_type
             })
             logger.warning("[SubscriptionManagerV2] 订阅失败已入重试队列: %s (%s)", instrument_id, data_type)
-    
-    def _handshake_with_retry(self, underlying: str, expiration: str) -> bool:
-        """握手 (带重试)"""
-        try:
-            return self._handshake(underlying, expiration)
-        except Exception as e:
-            logger.error("[SubscriptionManagerV2] Handshake error: %s", e)
-            self._enqueue_for_retry({
-                'type': 'handshake',
-                'underlying': underlying,
-                'expiration': expiration
-            })
-            return False
-    
-    def _handshake(self, underlying: str, expiration: str) -> bool:
-        """握手协议 (未实现 - 返回True以兼容现有调用方)"""
-        logger.debug("[SubscriptionManagerV2] Handshake not implemented for %s/%s", underlying, expiration)
-        return True
     
     # ========================================================================
     # 查询接口

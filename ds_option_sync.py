@@ -9,6 +9,65 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _build_option_sync_sql(include_row_id=False):
+    row_id = "t.rowid AS row_id," if include_row_id else ""
+    row_id_lag = "row_id," if include_row_id else ""
+    row_id_calc = "row_id," if include_row_id else ""
+    return f"""
+    WITH option_base AS (
+        SELECT
+            {row_id}
+            t.instrument_id,
+            t.timestamp,
+            t.last_price AS option_price,
+            oi.underlying_future_id,
+            fi.product AS underlying_symbol,
+            COALESCE(t.option_type, oi.option_type) AS option_type,
+            COALESCE(t.strike_price, oi.strike_price) AS strike_price,
+            f.last_price AS underlying_price
+        FROM ticks_raw t
+        INNER JOIN option_instruments oi ON oi.instrument_id = t.instrument_id
+        INNER JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id
+        ASOF LEFT JOIN ticks_raw f
+            ON f.instrument_id = fi.instrument_id
+            AND t.timestamp >= f.timestamp
+        WHERE oi.underlying_future_id IS NOT NULL
+    ),
+    option_with_lag AS (
+        SELECT
+            {row_id_lag}
+            *,
+            LAG(underlying_price) OVER (PARTITION BY instrument_id ORDER BY timestamp) AS prev_underlying_price,
+            LAG(option_price) OVER (PARTITION BY instrument_id ORDER BY timestamp) AS prev_option_price
+        FROM option_base
+        WHERE underlying_price IS NOT NULL
+    ),
+    option_calculated AS (
+        SELECT
+            {row_id_calc}
+            *,
+            CASE 
+                WHEN option_type = 'CALL' AND underlying_price < strike_price THEN TRUE
+                WHEN option_type = 'PUT' AND underlying_price > strike_price THEN TRUE
+                ELSE FALSE
+            END AS is_otm,
+            CASE 
+                WHEN underlying_price IS NULL OR prev_underlying_price IS NULL OR prev_option_price IS NULL THEN 'other'
+                WHEN option_type = 'CALL' AND underlying_price > prev_underlying_price AND option_price > prev_option_price THEN 'correct_rise'
+                WHEN option_type = 'PUT' AND underlying_price < prev_underlying_price AND option_price > prev_option_price THEN 'correct_rise'
+                WHEN option_type = 'CALL' AND underlying_price < prev_underlying_price AND option_price > prev_option_price THEN 'wrong_rise'
+                WHEN option_type = 'PUT' AND underlying_price > prev_underlying_price AND option_price > prev_option_price THEN 'wrong_rise'
+                WHEN option_type = 'CALL' AND underlying_price < prev_underlying_price AND option_price < prev_option_price THEN 'correct_fall'
+                WHEN option_type = 'PUT' AND underlying_price > prev_underlying_price AND option_price < prev_option_price THEN 'correct_fall'
+                WHEN option_type = 'CALL' AND underlying_price > prev_underlying_price AND option_price < prev_option_price THEN 'wrong_fall'
+                WHEN option_type = 'PUT' AND underlying_price < prev_underlying_price AND option_price < prev_option_price THEN 'wrong_fall'
+                ELSE 'other'
+            END AS sync_status
+        FROM option_with_lag
+        WHERE prev_underlying_price IS NOT NULL AND prev_option_price IS NOT NULL
+    )"""
+
+
 class OptionSyncMixin:
     """期权同步状态计算Mixin - 由DataService组合使用"""
 
@@ -32,62 +91,14 @@ class OptionSyncMixin:
         try:
             conn.execute("DELETE FROM option_sync_otm_stats")
             
-            conn.execute("""
+            conn.execute(f"""
                 INSERT INTO option_sync_otm_stats (
                     month, underlying_symbol, option_type,
                     correct_rise_otm_count, wrong_rise_otm_count, 
                     correct_fall_otm_count, wrong_fall_otm_count, other_otm_count,
                     total_otm_count, total_samples, calculated_at
                 )
-                WITH option_base AS (
-                    SELECT
-                        t.instrument_id,
-                        t.timestamp,
-                        t.last_price AS option_price,
-                        oi.underlying_future_id,
-                        fi.product AS underlying_symbol,
-                        COALESCE(t.option_type, oi.option_type) AS option_type,
-                        COALESCE(t.strike_price, oi.strike_price) AS strike_price,
-                        f.last_price AS underlying_price
-                    FROM ticks_raw t
-                    INNER JOIN option_instruments oi ON oi.instrument_id = t.instrument_id
-                    INNER JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id
-                    ASOF LEFT JOIN ticks_raw f
-                        ON f.instrument_id = fi.instrument_id
-                        AND t.timestamp >= f.timestamp
-                    WHERE oi.underlying_future_id IS NOT NULL
-                ),
-                option_with_lag AS (
-                    SELECT
-                        *,
-                        LAG(underlying_price) OVER (PARTITION BY instrument_id ORDER BY timestamp) AS prev_underlying_price,
-                        LAG(option_price) OVER (PARTITION BY instrument_id ORDER BY timestamp) AS prev_option_price
-                    FROM option_base
-                    WHERE underlying_price IS NOT NULL
-                ),
-                option_calculated AS (
-                    SELECT
-                        *,
-                        CASE 
-                            WHEN option_type = 'CALL' AND underlying_price < strike_price THEN TRUE
-                            WHEN option_type = 'PUT' AND underlying_price > strike_price THEN TRUE
-                            ELSE FALSE
-                        END AS is_otm,
-                        CASE 
-                            WHEN underlying_price IS NULL OR prev_underlying_price IS NULL OR prev_option_price IS NULL THEN 'other'
-                            WHEN option_type = 'CALL' AND underlying_price > prev_underlying_price AND option_price > prev_option_price THEN 'correct_rise'
-                            WHEN option_type = 'PUT' AND underlying_price < prev_underlying_price AND option_price > prev_option_price THEN 'correct_rise'
-                            WHEN option_type = 'CALL' AND underlying_price < prev_underlying_price AND option_price > prev_option_price THEN 'wrong_rise'
-                            WHEN option_type = 'PUT' AND underlying_price > prev_underlying_price AND option_price > prev_option_price THEN 'wrong_rise'
-                            WHEN option_type = 'CALL' AND underlying_price < prev_underlying_price AND option_price < prev_option_price THEN 'correct_fall'
-                            WHEN option_type = 'PUT' AND underlying_price > prev_underlying_price AND option_price < prev_option_price THEN 'correct_fall'
-                            WHEN option_type = 'CALL' AND underlying_price > prev_underlying_price AND option_price < prev_option_price THEN 'wrong_fall'
-                            WHEN option_type = 'PUT' AND underlying_price < prev_underlying_price AND option_price < prev_option_price THEN 'wrong_fall'
-                            ELSE 'other'
-                        END AS sync_status
-                    FROM option_with_lag
-                    WHERE prev_underlying_price IS NOT NULL AND prev_option_price IS NOT NULL
-                )
+                {_build_option_sync_sql(include_row_id=False)}
                 SELECT
                     strftime(timestamp, '%Y%m') AS month,
                     underlying_symbol,
@@ -126,61 +137,18 @@ class OptionSyncMixin:
         
         try:
             # ========== 第一部分：期权同步状态计算 ==========
-            conn.execute("""
+            conn.execute(f"""
                 CREATE OR REPLACE TEMP VIEW option_status_calc AS
-                WITH option_base AS (
-                    SELECT
-                        t.rowid AS row_id,
-                        t.instrument_id,
-                        t.timestamp,
-                        t.last_price AS option_price,
-                        oi.underlying_future_id,
-                        fi.product AS underlying_symbol,
-                        COALESCE(t.option_type, oi.option_type) AS option_type,
-                        COALESCE(t.strike_price, oi.strike_price) AS strike_price,
-                        f.last_price AS underlying_price
-                    FROM ticks_raw t
-                    INNER JOIN option_instruments oi ON oi.instrument_id = t.instrument_id
-                    INNER JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id
-                    ASOF LEFT JOIN ticks_raw f
-                        ON f.instrument_id = fi.instrument_id
-                        AND t.timestamp >= f.timestamp
-                    WHERE oi.underlying_future_id IS NOT NULL
-                ),
-                option_with_lag AS (
-                    SELECT
-                        row_id,
-                        *,
-                        LAG(underlying_price) OVER (PARTITION BY instrument_id ORDER BY timestamp) AS prev_underlying_price,
-                        LAG(option_price) OVER (PARTITION BY instrument_id ORDER BY timestamp) AS prev_option_price
-                    FROM option_base
-                    WHERE underlying_price IS NOT NULL
-                )
+                {_build_option_sync_sql(include_row_id=True)}
                 SELECT
                     row_id,
-                    CASE 
-                        WHEN option_type = 'CALL' AND underlying_price < strike_price THEN TRUE
-                        WHEN option_type = 'PUT' AND underlying_price > strike_price THEN TRUE
-                        ELSE FALSE
-                    END AS is_otm,
-                    CASE 
-                        WHEN underlying_price IS NULL OR prev_underlying_price IS NULL OR prev_option_price IS NULL THEN 'other'
-                        WHEN option_type = 'CALL' AND underlying_price > prev_underlying_price AND option_price > prev_option_price THEN 'correct_rise'
-                        WHEN option_type = 'PUT' AND underlying_price < prev_underlying_price AND option_price > prev_option_price THEN 'correct_rise'
-                        WHEN option_type = 'CALL' AND underlying_price < prev_underlying_price AND option_price > prev_option_price THEN 'wrong_rise'
-                        WHEN option_type = 'PUT' AND underlying_price > prev_underlying_price AND option_price > prev_option_price THEN 'wrong_rise'
-                        WHEN option_type = 'CALL' AND underlying_price < prev_underlying_price AND option_price < prev_option_price THEN 'correct_fall'
-                        WHEN option_type = 'PUT' AND underlying_price > prev_underlying_price AND option_price < prev_option_price THEN 'correct_fall'
-                        WHEN option_type = 'CALL' AND underlying_price > prev_underlying_price AND option_price < prev_option_price THEN 'wrong_fall'
-                        WHEN option_type = 'PUT' AND underlying_price < prev_underlying_price AND option_price < prev_option_price THEN 'wrong_fall'
-                        ELSE 'other'
-                    END AS sync_status,
+                    is_otm,
+                    sync_status,
                     NULL AS future_sync_status,
                     NULL AS is_same_rise,
                     NULL AS is_same_fall,
                     NULL AS is_diff_sync
-                FROM option_with_lag
-                WHERE prev_underlying_price IS NOT NULL AND prev_option_price IS NOT NULL
+                FROM option_calculated
             """)
             
             conn.execute("""
@@ -281,3 +249,4 @@ class OptionSyncMixin:
             
         except Exception as e:
             logger.warning(f"Failed to update status columns: {e}")
+            raise

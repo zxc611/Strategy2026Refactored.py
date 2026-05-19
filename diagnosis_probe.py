@@ -17,7 +17,7 @@ from collections import deque
 from ali2026v3_trading.shared_utils import normalize_instrument_id
 
 
-MONITORED_CONTRACTS = {
+_DEFAULT_MONITORED_CONTRACTS = {
     'IH2605': {'exchange': 'CFFEX', 'name': '上证50股指期货', 'type': 'future'},
     'IF2605': {'exchange': 'CFFEX', 'name': '沪深300股指期货', 'type': 'future'},
     'IM2605': {'exchange': 'CFFEX', 'name': '中证1000股指期货', 'type': 'future'},
@@ -51,9 +51,9 @@ def _load_monitored_contracts_from_config() -> Dict[str, Dict]:
                 logging.info(f"Loaded {len(custom)} monitored contracts from MONITORED_CONTRACTS_LIST env")
                 return custom
     except Exception as e:
-        logging.warning(f"Failed to load MONITORED_CONTRACTS from env, using hardcoded fallback ({len(MONITORED_CONTRACTS)} contracts): {e}")
-    logging.debug(f"Using {len(MONITORED_CONTRACTS)} hardcoded monitored contracts as fallback")
-    return MONITORED_CONTRACTS
+        logging.warning(f"Failed to load MONITORED_CONTRACTS from env, using hardcoded fallback ({len(_DEFAULT_MONITORED_CONTRACTS)} contracts): {e}")
+    logging.debug(f"Using {len(_DEFAULT_MONITORED_CONTRACTS)} hardcoded monitored contracts as fallback")
+    return _DEFAULT_MONITORED_CONTRACTS
 
 
 MONITORED_CONTRACTS = _load_monitored_contracts_from_config()
@@ -67,6 +67,7 @@ _PARSE_TRACE_LOCK = threading.RLock()
 _is_monitored_cache_result: Optional[bool] = None
 _is_monitored_cache_time: float = 0.0
 _IS_MONITORED_CACHE_TTL = 1.0
+_is_monitored_cache_lock = threading.Lock()
 
 _get_cached_params_fn = None
 _get_cached_params_lock = threading.Lock()
@@ -89,8 +90,9 @@ def _get_config_cached_params():
 def is_monitored_contract(instrument_id: str) -> bool:
     global _is_monitored_cache_result, _is_monitored_cache_time
     now = time.monotonic()
-    if _is_monitored_cache_result is not None and (now - _is_monitored_cache_time) < _IS_MONITORED_CACHE_TTL:
-        return _is_monitored_cache_result
+    with _is_monitored_cache_lock:
+        if _is_monitored_cache_result is not None and (now - _is_monitored_cache_time) < _IS_MONITORED_CACHE_TTL:
+            return _is_monitored_cache_result
     try:
         cached_params = _get_config_cached_params()
         if cached_params and isinstance(cached_params, dict):
@@ -99,16 +101,19 @@ def is_monitored_contract(instrument_id: str) -> bool:
                 params = getattr(strategy, 'params', None)
                 if params:
                     result = bool(getattr(params, 'diagnostic_output', False))
-                    _is_monitored_cache_result = result
-                    _is_monitored_cache_time = now
+                    with _is_monitored_cache_lock:
+                        _is_monitored_cache_result = result
+                        _is_monitored_cache_time = now
                     return result
-        _is_monitored_cache_result = False
-        _is_monitored_cache_time = now
+        with _is_monitored_cache_lock:
+            _is_monitored_cache_result = False
+            _is_monitored_cache_time = now
         return False
     except Exception as e:
         logging.debug(f"is_monitored_contract check failed: {e}")
-        _is_monitored_cache_result = False
-        _is_monitored_cache_time = now
+        with _is_monitored_cache_lock:
+            _is_monitored_cache_result = False
+            _is_monitored_cache_time = now
         return False
 
 
@@ -341,8 +346,10 @@ def diagnose_duckdb_insert(instrument_id: str, success: bool, reason: str = None
 class DiagnosisProbeManager:
     """12环节诊断探针统一管理器"""
 
-    _shard_enqueue_counts: Dict[int, int] = {}
     _shard_enqueue_lock = threading.Lock()
+
+    def __init__(self):
+        self._shard_enqueue_counts: Dict[int, int] = {}
 
     @staticmethod
     def on_subscribe(instrument_id: str, contract_type: str, success: bool, reason: str = None):
@@ -358,12 +365,11 @@ class DiagnosisProbeManager:
         diagnose_tick_entry(instrument_id, price, volume, open_interest, contract_type)
         DiagnosisProbeManager.record_contract_tick(instrument_id, price, volume, open_interest, contract_type)
 
-    @staticmethod
-    def on_storage_enqueue(instrument_id: str, success: bool, reason: str = None, shard_idx: int = -1):
+    def on_storage_enqueue(self, instrument_id: str, success: bool, reason: str = None, shard_idx: int = -1):
         diagnose_storage_enqueue(instrument_id, success, reason)
         if shard_idx >= 0:
             with DiagnosisProbeManager._shard_enqueue_lock:
-                DiagnosisProbeManager._shard_enqueue_counts[shard_idx] = DiagnosisProbeManager._shard_enqueue_counts.get(shard_idx, 0) + 1
+                self._shard_enqueue_counts[shard_idx] = self._shard_enqueue_counts.get(shard_idx, 0) + 1
 
     @staticmethod
     def on_async_write(instrument_id: str, func_name: str, data_count: int):

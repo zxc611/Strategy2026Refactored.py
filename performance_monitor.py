@@ -235,11 +235,24 @@ def count_call(path: Optional[str] = None):
             if not PathCounter.is_enabled():
                 return func(*args, **kwargs)
             
-            # 自动检测方法调用（第一个参数是 self）
-            if args and hasattr(args[0], '__class__'):
-                call_path = path or f"{type(args[0]).__name__}.{func.__name__}"
-            else:
-                call_path = path or f"{func.__module__}.{func.__name__}"
+            call_path = path
+            if call_path is None:
+                is_bound_method = False
+                is_classmethod = False
+                
+                if args:
+                    first_arg = args[0]
+                    if hasattr(first_arg, '__class__'):
+                        arg_class = first_arg.__class__
+                        if isinstance(first_arg, type):
+                            is_classmethod = True
+                            call_path = f"{first_arg.__name__}.{func.__name__}"
+                        elif arg_class.__module__ != 'builtins' and not isinstance(first_arg, (int, float, str, list, dict, tuple, set, bytes)):
+                            is_bound_method = True
+                            call_path = f"{arg_class.__name__}.{func.__name__}"
+                
+                if not is_bound_method and not is_classmethod:
+                    call_path = f"{func.__module__}.{func.__name__}"
             
             start_time = time.time()
             exception = None

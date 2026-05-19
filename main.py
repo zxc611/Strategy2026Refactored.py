@@ -22,17 +22,18 @@ from __future__ import annotations
 
 # Single source of truth for exports - used by both __getattr__ and __all__
 _LAZY_IMPORTS = {
-    't_type_bootstrap': 't_type_bootstrap',
-    'Strategy2026': 'ali2026v3_trading.strategy_core_service',
-    'ServiceContainer': 'ali2026v3_trading.config_service',
-    'InstrumentDataManager': 'ali2026v3_trading',
-    'OrderService': 'ali2026v3_trading.order_service',
-    'RiskService': 'ali2026v3_trading.risk_service',
-    'ParamsService': 'ali2026v3_trading.params_service',
-    'StrategyCore': 'ali2026v3_trading.strategy_core_service',
-    'StrategyState': 'ali2026v3_trading.strategy_lifecycle_mixin',
-    'ConfigService': 'ali2026v3_trading.config_service',
+    'Strategy2026': ('ali2026v3_trading.strategy_core_service', 'Strategy2026'),
+    'ServiceContainer': ('ali2026v3_trading.config_service', 'ServiceContainer'),
+    'InstrumentDataManager': ('ali2026v3_trading', 'InstrumentDataManager'),
+    'OrderService': ('ali2026v3_trading.order_service', 'OrderService'),
+    'RiskService': ('ali2026v3_trading.risk_service', 'RiskService'),
+    'ParamsService': ('ali2026v3_trading.params_service', 'ParamsService'),
+    'StrategyCore': ('ali2026v3_trading.strategy_core_service', 'StrategyCoreService'),
+    'StrategyState': ('ali2026v3_trading.strategy_lifecycle_mixin', 'StrategyState'),
+    'ConfigService': ('ali2026v3_trading.config_service', 'ConfigService'),
 }
+
+_IMPORT_CACHE: dict = {}
 
 __all__ = list(_LAZY_IMPORTS.keys())
 
@@ -42,10 +43,22 @@ def __getattr__(name):
     
     This delays importing from t_type_bootstrap until the symbol is actually
     accessed, breaking the circular dependency chain.
+    
+    Performance: Uses cache to avoid repeated imports.
     """
+    if name in _IMPORT_CACHE:
+        return _IMPORT_CACHE[name]
+    
     if name in _LAZY_IMPORTS:
         import importlib
-        module = importlib.import_module(_LAZY_IMPORTS[name])
-        return getattr(module, name)
+        entry = _LAZY_IMPORTS[name]
+        if isinstance(entry, tuple):
+            module_name, attr_name = entry
+        else:
+            module_name, attr_name = entry, name
+        module = importlib.import_module(module_name)
+        attr = getattr(module, attr_name)
+        _IMPORT_CACHE[name] = attr
+        return attr
     
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

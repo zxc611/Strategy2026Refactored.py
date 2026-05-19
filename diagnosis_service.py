@@ -72,6 +72,7 @@ class DiagnoserConfig:
     enable_incremental_diagnosis: bool = False
 
 
+@runtime_checkable
 class StrategyProtocol(Protocol):
     """策略协议接口（类型约束）"""
     infini: Optional[Any]
@@ -136,14 +137,13 @@ class DiagnosisReport(object):
             except queue.Full:
                 logging.warning("[Diagnoser] Log queue full, discarding old logs")
 
+        max_logs = self.config.max_logs
         with self._logs_lock:
-            max_logs = self.config.max_logs
             if len(self.logs) >= max_logs:
                 critical_logs = [l for l in self.logs if '[ERROR]' in l or '[WARN]' in l]
                 other_logs = [l for l in self.logs if '[ERROR]' not in l and '[WARN]' not in l]
                 retained = critical_logs + other_logs[-(max_logs//2):]
                 self.logs = retained
-
             self.logs.append(log_entry)
 
     def add_metric(self, key: str, value: Any) -> None:

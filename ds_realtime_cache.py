@@ -19,6 +19,9 @@ _INTRADAY_MAX_TICKS_PER_SYMBOL = int(os.getenv('INTRADAY_MAX_TICKS_PER_SYMBOL', 
 _INTRADAY_MAX_TOTAL_TICKS = int(os.getenv('INTRADAY_MAX_TOTAL_TICKS', '5000000'))
 _INTRADAY_FULL_CAPTURE = _INTRADAY_MODE in ('production', 'prod', 'full')
 
+_DEFAULT_FLUSH_WINDOWS = [(12, 0, 12, 50), (15, 30, 20, 0)]
+_INTERNAL_ID_HASH_MASK = 0xFFFFFFFFFFFF
+
 
 def _get_data_paths_config():
     try:
@@ -65,9 +68,11 @@ def _resolve_flush_windows():
     if env_val:
         return _parse_flush_windows_str(env_val)
     cfg = _get_data_paths_config()
-    if cfg:
+    if cfg and hasattr(cfg, 'get_flush_windows') and callable(cfg.get_flush_windows):
         return cfg.get_flush_windows()
-    return [(12, 0, 12, 50), (15, 30, 20, 0)]
+    if cfg and hasattr(cfg, 'flush_windows_str') and cfg.flush_windows_str:
+        return _parse_flush_windows_str(cfg.flush_windows_str)
+    return _DEFAULT_FLUSH_WINDOWS
 
 
 def _parse_flush_windows_str(windows_str):
@@ -83,7 +88,7 @@ def _parse_flush_windows_str(windows_str):
             windows.append((sh, sm, eh, em))
         except (ValueError, TypeError):
             pass
-    return windows or [(12, 0, 12, 50), (15, 30, 20, 0)]
+    return windows or _DEFAULT_FLUSH_WINDOWS
 
 
 class RealTimeCache:
@@ -103,14 +108,17 @@ class RealTimeCache:
     """
     MAX_PENDING_TICKS = 5000
 
-    def __init__(self, max_recent_ticks: int = 100, wal_path=None, flush_windows=None):
+    def __init__(self, max_recent_ticks: int = 100, wal_path=None, flush_windows=None,
+                 default_flush_windows=None):
         self._params_service = None
         self._lock = threading.RLock()
         self._shard_locks = [threading.Lock() for _ in range(16)]
+        self._stats_lock = threading.Lock()
         self._latest_ticks: Dict[str, Dict[str, Any]] = {}
         self._max_recent_ticks = max_recent_ticks
         self._cache_hits = 0
         self._cache_misses = 0
+        self._default_flush_windows = default_flush_windows or _DEFAULT_FLUSH_WINDOWS
         self._flush_windows = flush_windows or _resolve_flush_windows()
         self._internal_id_counter = 0
         self._pending_ticks: List[Dict[str, Any]] = []
@@ -172,51 +180,58 @@ class RealTimeCache:
             if not internal_id:
                 internal_id = self._params_service.get_internal_id(symbol) if self._params_service else 0
                 if internal_id is None:
-                    internal_id = hash(symbol) & 0xFFFFFFFFFFFF
+                    internal_id = hash(symbol) & _INTERNAL_ID_HASH_MASK
             if option_type is None and self._params_service is not None:
                 try:
                     info = self._params_service.get_instrument_meta_by_id(symbol)
                     if info and info.get('type') == 'option':
                         from ali2026v3_trading.shared_utils import normalize_option_type
                         nt = normalize_option_type(info.get('option_type', ''))
-                        option_type = 'CALL' if nt == 'CALL' else ('PUT' if nt == 'PUT' else None)
+                        option_type = nt if nt in ('CALL', 'PUT') else None
                         strike_price = info.get('strike_price')
                 except Exception:
                     pass
-        tick_entry = {
-            'internal_id': internal_id, 'price': price, 'timestamp': timestamp,
-            'volume': volume, 'bid_price': bid_price, 'ask_price': ask_price,
-            'option_type': option_type, 'strike_price': strike_price,
-        }
-        with self._get_shard_lock(symbol):
-            self._latest_ticks[symbol] = tick_entry
-            if self._full_capture and self._tick_sequences is not None:
-                seq = self._tick_sequences.get(symbol)
-                if seq is None:
-                    ml = self._max_per_symbol if self._max_per_symbol > 0 else None
-                    seq = collections.deque(maxlen=ml)
-                    self._tick_sequences[symbol] = seq
-                if self._max_total > 0 and self._total_tick_count >= self._max_total:
-                    self._total_dropped_overflow += 1
-                    if self._total_dropped_overflow <= 10 or self._total_dropped_overflow % 100000 == 0:
-                        logging.warning(f"[IntradayMemoryState] 全量上限溢出 total={self._total_tick_count} "
-                                       f"max={self._max_total} dropped={self._total_dropped_overflow}")
-                else:
-                    seq.append(tick_entry)
-                    self._total_tick_count += 1
+            tick_entry = {
+                'internal_id': internal_id, 'price': price, 'timestamp': timestamp,
+                'volume': volume, 'bid_price': bid_price, 'ask_price': ask_price,
+                'option_type': option_type, 'strike_price': strike_price,
+            }
+            with self._get_shard_lock(symbol):
+                self._latest_ticks[symbol] = tick_entry
+                if self._full_capture and self._tick_sequences is not None:
+                    seq = self._tick_sequences.get(symbol)
+                    if seq is None:
+                        ml = self._max_per_symbol if self._max_per_symbol > 0 else None
+                        seq = collections.deque(maxlen=ml)
+                        self._tick_sequences[symbol] = seq
+                    if self._max_total > 0 and self._total_tick_count >= self._max_total:
+                        self._total_dropped_overflow += 1
+                        if self._total_dropped_overflow <= 10 or self._total_dropped_overflow % 100000 == 0:
+                            logging.warning(f"[IntradayMemoryState] 全量上限溢出 total={self._total_tick_count} "
+                                           f"max={self._max_total} dropped={self._total_dropped_overflow}")
+                    else:
+                        seq.append(tick_entry)
+                        self._total_tick_count += 1
         return internal_id
 
     def get_latest_price(self, symbol: str) -> Optional[float]:
         with self._get_shard_lock(symbol):
             tick = self._latest_ticks.get(symbol)
-        if tick is not None:
-            self._cache_hits += 1
-            return tick['price']
-        self._cache_misses += 1
+            if tick is not None:
+                with self._stats_lock:
+                    self._cache_hits += 1
+                return tick['price']
+        with self._stats_lock:
+            self._cache_misses += 1
         return None
 
     def get_recent_ticks(self, symbol: str, count: int = 10) -> List[Dict]:
         with self._get_shard_lock(symbol):
+            if self._full_capture and self._tick_sequences is not None:
+                seq = self._tick_sequences.get(symbol)
+                if seq is not None:
+                    ticks = list(seq)
+                    return ticks[-count:] if count > 0 else ticks
             tick = self._latest_ticks.get(symbol)
         return [tick] if tick is not None else []
 
@@ -232,12 +247,19 @@ class RealTimeCache:
         with self._get_shard_lock(symbol):
             return symbol in self._latest_ticks
 
+    def _collect_base_stats(self) -> Dict[str, Any]:
+        return {
+            'total_symbols': len(self._latest_ticks),
+            'cache_hits': self._cache_hits,
+            'cache_misses': self._cache_misses,
+        }
+
     def get_cache_stats(self) -> Dict[str, Any]:
         with self._lock:
-            total = self._cache_hits + self._cache_misses
-            return {'total_symbols': len(self._latest_ticks), 'cache_hits': self._cache_hits,
-                    'cache_misses': self._cache_misses,
-                    'hit_rate_percent': round(self._cache_hits / total * 100, 2) if total > 0 else 0}
+            base = self._collect_base_stats()
+            total = base['cache_hits'] + base['cache_misses']
+            base['hit_rate_percent'] = round(base['cache_hits'] / total * 100, 2) if total > 0 else 0
+            return base
 
     def reset_stats(self):
         with self._lock:
@@ -347,12 +369,9 @@ class RealTimeCache:
 
     def get_intraday_stats(self) -> Dict[str, Any]:
         with self._lock:
-            stats = {
-                'mode': 'FULL_CAPTURE' if self._full_capture else 'LATEST_ONLY',
-                'symbols': len(self._latest_ticks),
-                'cache_hits': self._cache_hits,
-                'cache_misses': self._cache_misses,
-            }
+            stats = self._collect_base_stats()
+            stats['mode'] = 'FULL_CAPTURE' if self._full_capture else 'LATEST_ONLY'
+            stats['symbols'] = stats.pop('total_symbols')
             if self._full_capture and self._tick_sequences is not None:
                 stats['total_ticks'] = self._total_tick_count
                 stats['total_dropped_overflow'] = self._total_dropped_overflow
@@ -439,15 +458,11 @@ class RealTimeCache:
 
     def get_memory_stats(self) -> Dict[str, Any]:
         with self._lock:
-            stats = {
-                'mode': 'full_capture' if self._full_capture else 'latest_only',
-                'total_symbols': len(self._latest_ticks),
-                'total_ticks': self._total_tick_count,
-                'dropped_overflow': self._total_dropped_overflow,
-                'cache_hits': self._cache_hits,
-                'cache_misses': self._cache_misses,
-                'is_authoritative': True,
-            }
+            stats = self._collect_base_stats()
+            stats['mode'] = 'full_capture' if self._full_capture else 'latest_only'
+            stats['total_ticks'] = self._total_tick_count
+            stats['dropped_overflow'] = self._total_dropped_overflow
+            stats['is_authoritative'] = True
             if self._full_capture and self._tick_sequences is not None:
                 stats['sequence_count'] = len(self._tick_sequences)
             return stats
@@ -464,4 +479,8 @@ def get_realtime_cache(**kwargs) -> RealTimeCache:
                 _realtime_cache_instance = RealTimeCache(**kwargs)
     return _realtime_cache_instance
 
-_HAS_REALTIME_CACHE = True
+try:
+    assert RealTimeCache is not None and callable(get_realtime_cache)
+    _HAS_REALTIME_CACHE = True
+except (NameError, AssertionError):
+    _HAS_REALTIME_CACHE = False

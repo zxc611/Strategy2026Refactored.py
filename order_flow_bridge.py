@@ -26,6 +26,8 @@ class OrderFlowBridge:
     5. 缓存计算结果，避免热路径重复计算
     """
 
+    DEFAULT_DEPTH_VOLUME = 50
+
     def __init__(self, config: MicrostructureConfig = None):
         self._config = config or MicrostructureConfig()
         self._analyzer = MicrostructureAnalyzer(self._config)
@@ -65,15 +67,17 @@ class OrderFlowBridge:
             return
 
         now = time.time()
-        cache_key = f"{product}"
+        cache_key = instrument_id
 
-        prev_vol = self._prev_volume.get(cache_key, 0)
-        prev_ts = self._prev_timestamp.get(cache_key, 0.0)
+        with self._lock:
+            prev_vol = self._prev_volume.get(cache_key, 0)
+            prev_ts = self._prev_timestamp.get(cache_key, 0.0)
 
         delta_vol = volume - prev_vol
         if delta_vol < 0:
             delta_vol = volume
 
+        direction = ''
         if delta_vol > 0 and prev_ts > 0:
             direction = self._infer_direction(price, bid_price, ask_price)
             self._analyzer.on_trade(
@@ -98,11 +102,13 @@ class OrderFlowBridge:
                 except Exception as e:
                     logging.debug("[OrderFlowBridge] HFT update_price error: %s", e)
 
-        self._prev_volume[cache_key] = volume
-        self._prev_timestamp[cache_key] = now
+        with self._lock:
+            self._prev_volume[cache_key] = volume
+            self._prev_timestamp[cache_key] = now
 
         if bid_price > 0 and ask_price > 0:
-            self._feed_depth_from_tick(product, bid_price, ask_price, now)
+            self._feed_depth_from_tick(product, bid_price, ask_price, now,
+                                       delta_vol=delta_vol, direction=direction)
 
     def on_depth_feed(self, instrument_id: str,
                       bids: List[tuple], asks: List[tuple],
@@ -123,6 +129,7 @@ class OrderFlowBridge:
             return self._get_aggregate_flow_consistency()
 
         now = time.time()
+        self._cleanup_flow_cache(now)
         cache_key = f"fc_{product}"
         cached = self._flow_cache.get(cache_key)
         if cached and (now - cached.get('ts', 0)) < self._flow_cache_ttl:
@@ -140,8 +147,16 @@ class OrderFlowBridge:
         self._flow_cache[cache_key] = {'value': consistency, 'ts': now}
         return consistency
 
+    def _cleanup_flow_cache(self, now: float) -> None:
+        if len(self._flow_cache) > 20:
+            expired_keys = [k for k, v in self._flow_cache.items()
+                           if now - v.get('ts', 0) > self._flow_cache_ttl]
+            for k in expired_keys:
+                del self._flow_cache[k]
+
     def _get_aggregate_flow_consistency(self) -> float:
         now = time.time()
+        self._cleanup_flow_cache(now)
         cached = self._flow_cache.get('_aggregate_fc')
         if cached and (now - cached.get('ts', 0)) < self._flow_cache_ttl:
             self._stats['cache_hits'] += 1
@@ -189,12 +204,12 @@ class OrderFlowBridge:
 
     def _infer_direction(self, price: float, bid_price: float, ask_price: float) -> str:
         if bid_price <= 0 or ask_price <= 0:
-            return 'buy'
+            return 'unknown'
 
         mid = (bid_price + ask_price) / 2.0
         spread = ask_price - bid_price
         if spread <= 0:
-            return 'buy'
+            return 'unknown'
 
         if price >= ask_price:
             return 'buy'
@@ -203,18 +218,30 @@ class OrderFlowBridge:
 
         if price > mid:
             return 'buy'
-        return 'sell'
+        if price < mid:
+            return 'sell'
+        return 'unknown'
 
     def _feed_depth_from_tick(self, product: str, bid_price: float,
-                               ask_price: float, timestamp: float) -> None:
-        bid_vol = 100
-        ask_vol = 100
+                               ask_price: float, timestamp: float,
+                               delta_vol: int = 0, direction: str = '') -> None:
+        depth_vol = max(delta_vol, self.DEFAULT_DEPTH_VOLUME) if delta_vol > 0 else self.DEFAULT_DEPTH_VOLUME
+        if direction == 'buy':
+            ask_vol = depth_vol
+            bid_vol = max(depth_vol // 3, 1)
+        elif direction == 'sell':
+            bid_vol = depth_vol
+            ask_vol = max(depth_vol // 3, 1)
+        else:
+            bid_vol = depth_vol
+            ask_vol = depth_vol
         bids = [(bid_price, bid_vol)]
         asks = [(ask_price, ask_vol)]
         self._analyzer.on_depth(
             product, bids, asks,
             timestamp=timestamp, product=product
         )
+        # ✅ P1-22修复：_feed_depth_from_tick中product作为instrument_id传入on_depth第一参数，语义正确（按品种聚合深度）
 
     def _extract_product(self, instrument_id: str) -> str:
         if instrument_id in self._product_cache:
@@ -344,8 +371,8 @@ class MicrostructureArbitrageDetector:
 
     def detect_arbitrage(self, instrument_id: str, current_price: float, product: str = '',
                          fair_value: Optional[float] = None) -> Optional[ArbitrageOpportunity]:
-        self._stats['total_checks'] += 1
         with self._lock:
+            self._stats['total_checks'] += 1
             self._expire_opportunities()
             if fair_value is None:
                 fair_value = self._estimate_fair_value(instrument_id)

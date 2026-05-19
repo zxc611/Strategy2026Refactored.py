@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 from ali2026v3_trading.scheduler_service import is_market_open
 from ali2026v3_trading import InstrumentDataManager
+from ali2026v3_trading.config_service import UIConfig
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +71,8 @@ class UIMixin:
         super().__init__(*args, **kwargs)
         # ✅ M21 Bug #3修复：初始化锁
         import threading
-        if UIService._ui_lock is None:
-            UIService._ui_lock = threading.Lock()
+        if UIMixin._ui_lock is None:
+            UIMixin._ui_lock = threading.Lock()
     
     @classmethod
     def _get_ui_lock(cls):
@@ -117,8 +118,8 @@ class UIMixin:
             except Exception as e:
                 self._log_error(f"设置窗口置顶失败: {e}")
             try:
-                w = safe_getattr_int(self.params, "ui_window_width", 320, 320)
-                h = safe_getattr_int(self.params, "ui_window_height", 310, 310)
+                w = UIConfig.WINDOW_WIDTH
+                h = UIConfig.WINDOW_HEIGHT
             except Exception as e:
                 self._log_error(f"读取UI窗口尺寸失败: {e}")
                 w, h = 320, 310
@@ -417,112 +418,18 @@ class UIMixin:
         current_thread = _threading.current_thread()
         
         if current_thread != main_thread:
-            # 不在主线程，通过queue请求主线程创建UI
-            self._log_warning("检测到非主线程调用UI，将通过queue调度到主线程")
-            if not hasattr(self, "_ui_queue"):
-                self._ui_queue = queue.Queue()
-            # 标记需要创建UI
-            self._ui_queue.put({"action": "create_ui", "params": None})
-            # 如果还没有UI线程，启动一个专门的UI主循环线程
-            if not getattr(cls, "_ui_mainloop_started", False):
-                setattr(cls, "_ui_mainloop_started", True)
-                def _ui_mainloop_thread():
-                    try:
-                        import tkinter as tk
-                        # ✅ 修复：非主线程直接创建Tk并运行mainloop
-                        # 在某些平台上，Tkinter可以在非主线程运行
-                        root = None
-                        with cls._get_ui_lock():
-                            setattr(cls, "_ui_global_root", None)
-                        
-                        def _process_ui_queue():
-                            nonlocal root
-                            should_continue = True
-                            try:
-                                msg_count = 0
-                                while not self._ui_queue.empty() and msg_count < 20:
-                                    msg = self._ui_queue.get_nowait()
-                                    msg_count += 1
-                                    action = msg.get("action")
-                                    
-                                    if action == "create_ui":
-                                        # 尝试在当前线程创建Tk root（仅首次）
-                                        if root is None:
-                                            try:
-                                                root = tk.Tk()
-                                                root.withdraw()  # 隐藏主窗口
-                                                with cls._get_ui_lock():
-                                                    setattr(cls, "_ui_global_root", root)
-                                                self._log_info("UI线程中Tk root创建成功")
-                                            except Exception as e:
-                                                self._log_error(f"UI线程中Tk root创建失败: {e}")
-                                                root = None
-                                        if root:
-                                            self._create_ui_in_main_thread(root)
-                                    elif action == "destroy":
-                                        if root:
-                                            try:
-                                                root.destroy()
-                                            except Exception as e:
-                                                self._log_error(f"UI窗口销毁失败: {e}")
-                                        should_continue = False
-                                        with cls._get_ui_lock():
-                                            self._ui_running = False
-                                            setattr(cls, "_ui_global_running", False)
-                            except queue.Empty:
-                                pass
-                            except Exception as e:
-                                self._log_error(f"处理UI队列失败: {e}")
-                            finally:
-                                if should_continue and root:
-                                    try:
-                                        root.after(100, _process_ui_queue)
-                                    except Exception as e:
-                                        self._log_error(f"UI队列调度失败: {e}")
-                        
-                        # 立即处理一次队列，检查是否有create_ui消息
-                        _process_ui_queue()
-                        
-                        if root:
-                            root.after(100, _process_ui_queue)
-                            self._log_info("UI线程进入mainloop")
-                            root.mainloop()
-                            self._log_info("UI线程mainloop已退出")
-                        else:
-                            # root创建失败，使用简单轮询模式
-                            self._log_warning("Tk root创建失败，使用轮询模式")
-                            import time as _time
-                            poll_count = 0
-                            while poll_count < 300:  # 最多轮询30秒
-                                if not self._ui_queue.empty():
-                                    _process_ui_queue()
-                                _time.sleep(0.1)
-                                poll_count += 1
-                    except Exception as e:
-                        self._log_error(f"UI主循环线程异常: {e}")
-                        import traceback
-                        self._log_error(traceback.format_exc())
-                    finally:
-                        # 显式销毁窗口
-                        try:
-                            if 'root' in locals() and root:
-                                root.destroy()
-                        except Exception as e:
-                            self._log_error(f"UI窗口最终清理失败: {e}")
-                        setattr(cls, "_ui_mainloop_started", False)
-                        with cls._get_ui_lock():
-                            self._ui_running = False
-                            setattr(cls, "_ui_global_running", False)
-                
-                # daemon=False，确保UI资源正确释放
-                t = _threading.Thread(target=_ui_mainloop_thread, daemon=False, name="UIMainLoop")
-                t.start()
-                self._log_info("UI主循环线程已启动")
+            self._log_warning("检测到非主线程调用UI，Tkinter要求主线程创建，切换为headless(无头)模式")
+            with cls._get_ui_lock():
+                self._ui_running = False
+                setattr(cls, "_ui_global_running", False)
             return
         
         # 在主线程中，直接创建UI（非阻塞方式）
         try:
             import tkinter as tk
+            if threading.current_thread() is not threading.main_thread():
+                self._log_warning("非主线程，跳过Tk root创建")
+                return
             root = tk.Tk()
             setattr(cls, "_ui_global_root", root)
             
@@ -951,6 +858,9 @@ class StrategyUI:
             import tkinter as tk
             from tkinter import ttk, scrolledtext
             
+            if threading.current_thread() is not threading.main_thread():
+                self._log_warning("非主线程，跳过Tk root创建")
+                return
             self.root = tk.Tk()
             self.root.title(self.title)
             self.root.geometry(f"{self.width}x{self.height}")

@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 
 __all__ = ['TickHandlerMixin', 'DynamicPursuitEngine', 'PursuitPosition']
 
+logger = logging.getLogger(__name__)
+
 
 class TickHandlerMixin:
     """Tick数据处理Mixin"""
@@ -221,8 +223,10 @@ class TickHandlerMixin:
         from ali2026v3_trading.subscription_manager import SubscriptionManager
 
         try:
-            exchange = self._get_tick_field(tick, 'exchange', '')
-            instrument_id = self._get_tick_field(tick, 'instrument_id', '')
+            # ✅ P1-12修复: 集成_normalize_tick统一Tick格式
+            normalized_tick = self._normalize_tick(tick)
+            exchange = normalized_tick.get('exchange', '')
+            instrument_id = normalized_tick.get('instrument_id', '')
 
             self._process_tick(tick)
 
@@ -367,8 +371,7 @@ class TickHandlerMixin:
         # DuckDB使用线程本地连接，无需每次tick后关闭
     
     def _dispatch_tick_degraded(self, tick: Any, instrument_id: str, last_price: float, volume: int, exchange: str) -> None:
-        # ✅ P0修复：初始化和递增均在锁内，避免竞态
-        with getattr(self, '_probe_lock', threading.Lock()):
+        with self._probe_lock:
             if not hasattr(self, '_degraded_tick_count'):
                 self._degraded_tick_count = 0
             self._degraded_tick_count += 1
@@ -678,8 +681,7 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个 | 速率 {tick_rate:.1f} 
                     if hasattr(self, '_e2e_shard_enqueued'):
                         self._e2e_shard_enqueued[shard_idx] = self._e2e_shard_enqueued.get(shard_idx, 0) + 1
 
-                # ✅ P0修复：加锁保护_snapshot_tick_count递增
-                with getattr(self, '_probe_lock', threading.Lock()):
+                with self._probe_lock:
                     self._snapshot_tick_count += 1
                     should_snapshot = (self._snapshot_tick_count % self._snapshot_interval == 0)
                 
@@ -933,6 +935,12 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个 | 速率 {tick_rate:.1f} 
         signal_volume = pursuit_signal.get('volume', 1)
         price = pursuit_signal.get('price', last_price)
         strength_delta = pursuit_signal.get('strength_delta', 0.0)
+        estimated_plr = pursuit_signal.get('estimated_plr', 0.0)
+        min_pursuit_plr = getattr(self, '_min_pursuit_plr', 1.5)
+        if min_pursuit_plr > 0 and estimated_plr > 0 and estimated_plr < min_pursuit_plr:
+            logging.debug("[HFT] pursuit entry blocked: estimated_plr=%.2f < min=%.2f for %s",
+                          estimated_plr, min_pursuit_plr, instrument_id)
+            return
         try:
             self._ensure_order_service()
             order_svc = getattr(self, '_order_service', None)
@@ -1086,14 +1094,7 @@ Tick数据：总计 {self._stats['total_ticks']:,} 个 | 速率 {tick_rate:.1f} 
         logging.debug("[HFT] signal_filter passed: %s smooth=%.3f vel=%.4f",
                       instrument_id, smooth, velocity)
 
-    def _ensure_order_service(self) -> None:
-        if getattr(self, '_order_service', None) is not None:
-            return
-        try:
-            from ali2026v3_trading.order_service import get_order_service
-            self._order_service = get_order_service()
-        except Exception as e:
-            logging.debug("[_ensure_order_service] %s", e)
+    # ✅ P1-18修复：_ensure_order_service已提取到StrategyCoreService基类，此处删除重复定义
 
 
 @dataclass
@@ -1302,6 +1303,12 @@ class DynamicPursuitEngine:
             return (exit_price - pos.weighted_avg_price) * pos.total_volume
         return (pos.weighted_avg_price - exit_price) * pos.total_volume
 
+    def _cleanup_closed_positions(self, max_closed: int = 50) -> None:
+        closed_keys = [k for k, p in self._positions.items() if not p.is_open]
+        if len(closed_keys) > max_closed:
+            for k in closed_keys[:len(closed_keys) - max_closed]:
+                del self._positions[k]
+
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
             self._cleanup_closed_positions()
@@ -1322,17 +1329,23 @@ class PyramidAddPositionEngine:
     def __init__(self, max_levels: int = 4,
                  pyramid_ratio: float = 0.5,
                  atr_adaptive: bool = True,
-                 atr_reference: float = 0.02):
+                 atr_reference: float = 0.02,
+                 min_plr_for_add: float = 1.5):
         self._max_levels = max_levels
         self._pyramid_ratio = pyramid_ratio
         self._atr_adaptive = atr_adaptive
         self._atr_reference = atr_reference
+        self._min_plr_for_add = min_plr_for_add
         self._positions: Dict[str, Dict] = {}
-        self._stats = {'total_adds': 0, 'total_volume_added': 0}
+        self._stats = {'total_adds': 0, 'total_volume_added': 0, 'plr_blocked_adds': 0}
 
     def calc_add_volume(self, instrument_id: str, base_volume: int,
-                        current_level: int, current_atr: float = 0.0) -> int:
+                        current_level: int, current_atr: float = 0.0,
+                        current_plr: float = 0.0) -> int:
         if current_level >= self._max_levels:
+            return 0
+        if self._min_plr_for_add > 0 and current_plr > 0 and current_plr < self._min_plr_for_add:
+            self._stats['plr_blocked_adds'] += 1
             return 0
         volume = int(base_volume * (self._pyramid_ratio ** current_level))
         if self._atr_adaptive and current_atr > 0 and self._atr_reference > 0:
@@ -1346,7 +1359,7 @@ class PyramidAddPositionEngine:
         return {'service_name': 'PyramidAddPositionEngine', **self._stats}
 
     def _cleanup_closed_positions(self, max_closed: int = 50) -> None:
-        closed_keys = [k for k, p in self._positions.items() if not p.is_open]
+        closed_keys = [k for k, p in self._positions.items() if not p.get('is_open', True)]
         if len(closed_keys) > max_closed:
             for k in closed_keys[:len(closed_keys) - max_closed]:
                 del self._positions[k]

@@ -9,7 +9,7 @@ storage_core.py — 存储核心模块
   __init__.py       → InstrumentDataManager = _StorageCoreMixin + _StorageQueryMixin + 单例
 """
 
-from ali2026v3_trading.shared_utils import InitPhase, InitializationError, InitStateMachine, requires_phase, ThreadLifecycleManager
+from ali2026v3_trading.shared_utils import InitPhase, InitStateMachine, requires_phase, ThreadLifecycleManager
 from ali2026v3_trading.data_service import get_data_service
 from ali2026v3_trading.query_service import _KlineAggregator, StorageMaintenanceService
 from ali2026v3_trading.subscription_manager import SubscriptionConfig, SubscriptionManager
@@ -21,12 +21,11 @@ import threading
 import time
 import json
 import queue
-import math
 from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def _get_default_db_path() -> str:
@@ -51,11 +50,19 @@ class _StorageCoreMixin:
 
     SUPPORTED_PERIODS = ['1min', '5min', '15min', '30min', '60min']
 
+    DEFAULT_TICK_SHARD_COUNT = 16
+    DEFAULT_TICK_WRITER_COUNT = 6
+    DEFAULT_MAX_SUB_BATCH = 50
+    DEFAULT_SHARD_CAP_MIN = 10000
+    DEFAULT_SHARD_CAP_DIVISOR = 10000000
+    DEFAULT_KLINE_MISSING_TIMEOUT_MULTIPLIER = 2.0
+
     def __init__(self, db_path: Optional[str] = None, max_retries: int = 3, retry_delay: float = 0.1,
                  async_queue_size: int = 500000, batch_size: int = 5000,
                  drop_on_full: bool = True, max_connections: int = 20,
                  cleanup_interval: Optional[int] = 3600,
-                 cleanup_config: Optional[Dict[str, int]] = None):
+                 cleanup_config: Optional[Dict[str, int]] = None,
+                 kline_missing_timeout_multiplier: float = 2.0):
         """初始化数据库连接，创建元数据表，启用WAL模式
 
         三阶段初始化（P2-2 初始化阶段化）：
@@ -65,6 +72,14 @@ class _StorageCoreMixin:
         各阶段独立，失败可回滚到上阶段结束状态。
         """
         self._init_state = InitStateMachine()
+        self._kline_missing_timeout_multiplier = kline_missing_timeout_multiplier
+        try:
+            from ali2026v3_trading.config_params import get_cached_params
+            _params = get_cached_params()
+            if 'kline_missing_timeout_multiplier' in _params:
+                self._kline_missing_timeout_multiplier = _params['kline_missing_timeout_multiplier']
+        except Exception:
+            pass
         self._phase1_memory_init(db_path, max_retries, retry_delay, batch_size, drop_on_full)
         self._phase2_db_init(max_retries, retry_delay, cleanup_interval, cleanup_config)
         self._phase3_runtime_init()
@@ -82,11 +97,11 @@ class _StorageCoreMixin:
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
 
-        self._TICK_SHARD_COUNT = 16
-        self._TICK_WRITER_COUNT = 6
+        self._TICK_SHARD_COUNT = self.DEFAULT_TICK_SHARD_COUNT
+        self._TICK_WRITER_COUNT = self.DEFAULT_TICK_WRITER_COUNT
         from ali2026v3_trading.shared_utils import get_shard_router
         self._shard_router = get_shard_router(shard_count=self._TICK_SHARD_COUNT)
-        _shard_cap = max(10000, 10000000 // self._TICK_SHARD_COUNT)
+        _shard_cap = max(self.DEFAULT_SHARD_CAP_MIN, self.DEFAULT_SHARD_CAP_DIVISOR // self._TICK_SHARD_COUNT)
         self._tick_shard_queues = [queue.Queue(maxsize=_shard_cap) for _ in range(self._TICK_SHARD_COUNT)]
         self._tick_shard_writers: list = []
         self._kline_queue = queue.Queue(maxsize=100000)
@@ -238,7 +253,8 @@ class _StorageCoreMixin:
     @property
     def _id_cache(self):
         """代理到ParamsService的internal_id映射（通过公共接口）"""
-        return self._params_service.get_all_instrument_cache()
+        instrument_cache = self._params_service.get_all_instrument_cache()
+        return {info['internal_id']: info for info in instrument_cache.values() if 'internal_id' in info}
 
     @property
     def _product_cache(self):
@@ -578,7 +594,7 @@ class _StorageCoreMixin:
         if not batch:
             return 0
 
-        max_sub_batch = 50
+        max_sub_batch = self.DEFAULT_MAX_SUB_BATCH
         if len(batch) <= max_sub_batch:
             return self._flush_sub_batch(batch, writer_idx=writer_idx)
         executed_total = 0
@@ -739,21 +755,26 @@ class _StorageCoreMixin:
         except Exception as e:
             logging.warning("[SpillWAL] WAL恢复失败: %s", e)
 
+    @staticmethod
+    def _wal_serialize(task) -> list:
+        wal_entry = [task[0] if len(task) > 0 else '']
+        args_data = task[1] if len(task) > 1 else None
+        try:
+            json.dumps(args_data, default=str)
+            wal_entry.append(args_data)
+        except (TypeError, ValueError):
+            wal_entry.append(str(args_data))
+        kwargs_data = task[2] if len(task) > 2 else {}
+        try:
+            json.dumps(kwargs_data, default=str)
+            wal_entry.append(kwargs_data)
+        except (TypeError, ValueError):
+            wal_entry.append(str(kwargs_data))
+        return wal_entry
+
     def _spill_wal_append(self, task) -> None:
         try:
-            wal_entry = [task[0] if len(task) > 0 else '']
-            args_data = task[1] if len(task) > 1 else None
-            try:
-                json.dumps(args_data, default=str)
-                wal_entry.append(args_data)
-            except (TypeError, ValueError):
-                wal_entry.append(str(args_data))
-            kwargs_data = task[2] if len(task) > 2 else {}
-            try:
-                json.dumps(kwargs_data, default=str)
-                wal_entry.append(kwargs_data)
-            except (TypeError, ValueError):
-                wal_entry.append(str(kwargs_data))
+            wal_entry = self._wal_serialize(task)
             with self._spill_wal_lock:
                 with open(self._spill_wal_path, 'a', encoding='utf-8') as f:
                     f.write(json.dumps(wal_entry, ensure_ascii=False, default=str) + '\n')
@@ -768,19 +789,7 @@ class _StorageCoreMixin:
                 with open(self._spill_wal_path, 'a', encoding='utf-8') as f:
                     for task in tasks:
                         try:
-                            wal_entry = [task[0] if len(task) > 0 else '']
-                            args_data = task[1] if len(task) > 1 else None
-                            try:
-                                json.dumps(args_data, default=str)
-                                wal_entry.append(args_data)
-                            except (TypeError, ValueError):
-                                wal_entry.append(str(args_data))
-                            kwargs_data = task[2] if len(task) > 2 else {}
-                            try:
-                                json.dumps(kwargs_data, default=str)
-                                wal_entry.append(kwargs_data)
-                            except (TypeError, ValueError):
-                                wal_entry.append(str(kwargs_data))
+                            wal_entry = self._wal_serialize(task)
                             f.write(json.dumps(wal_entry, ensure_ascii=False, default=str) + '\n')
                         except Exception as _batch_wal_err:
                             logging.debug("[SpillWAL] 批量WAL单条写入失败(跳过): %s", _batch_wal_err)
@@ -803,19 +812,7 @@ class _StorageCoreMixin:
                 with open(tmp_path, 'w', encoding='utf-8') as f:
                     for task in self._pending_on_stop_data:
                         try:
-                            wal_entry = [task[0] if len(task) > 0 else '']
-                            args_data = task[1] if len(task) > 1 else None
-                            try:
-                                json.dumps(args_data, default=str)
-                                wal_entry.append(args_data)
-                            except (TypeError, ValueError):
-                                wal_entry.append(str(args_data))
-                            kwargs_data = task[2] if len(task) > 2 else {}
-                            try:
-                                json.dumps(kwargs_data, default=str)
-                                wal_entry.append(kwargs_data)
-                            except (TypeError, ValueError):
-                                wal_entry.append(str(kwargs_data))
+                            wal_entry = self._wal_serialize(task)
                             f.write(json.dumps(wal_entry, ensure_ascii=False, default=str) + '\n')
                         except Exception as _wal_err:
                             logging.debug("[SpillWAL] 单条WAL写入失败(跳过): %s", _wal_err)
@@ -1133,6 +1130,39 @@ class _StorageCoreMixin:
         logging.debug("[DEPRECATED] save_tick已废弃，请使用process_tick（含K线聚合+完整验证+shard路由）")
         self.process_tick(tick)
 
+    def _batch_insert_with_fallback(self, table_name: str, fields: tuple, rows: list,
+                                     batch_limit: int = 100, caller: str = '') -> None:
+        if not rows:
+            return
+        field_str = ', '.join(fields)
+        placeholder_str = ', '.join(['?'] * len(fields))
+        update_fields = ', '.join([f"{f} = excluded.{f}" for f in fields[1:]])
+        for batch_start in range(0, len(rows), batch_limit):
+            batch = rows[batch_start:batch_start + batch_limit]
+            flat_values = [v for row in batch for v in row]
+            multi_placeholder = ', '.join([f'({placeholder_str})'] * len(batch))
+            try:
+                self._data_service.query(f"""
+                    INSERT INTO {table_name}
+                    ({field_str})
+                    VALUES {multi_placeholder}
+                    ON CONFLICT(timestamp) DO UPDATE SET
+                    {update_fields}
+                """, flat_values, raise_on_error=True)
+            except Exception as e:
+                logging.warning("%s batch insert failed, fallback to row-by-row: %s", caller, e)
+                for row in batch:
+                    try:
+                        self._data_service.query(f"""
+                            INSERT INTO {table_name}
+                            ({field_str})
+                            VALUES ({placeholder_str})
+                            ON CONFLICT(timestamp) DO UPDATE SET
+                            {update_fields}
+                        """, list(row), raise_on_error=True)
+                    except Exception as _row_err:
+                        logging.debug("[DB] 单行写入失败(已降级): %s", _row_err)
+
     def _save_depth_batch_impl(self, depth_list: List[Dict[str, Any]]):
         grouped: Dict[str, List[tuple]] = {}
         for d in depth_list:
@@ -1170,38 +1200,10 @@ class _StorageCoreMixin:
                 grouped[key] = []
             grouped[key].append(tuple(values))
 
-        _BATCH_INSERT_LIMIT = 100
         for (table_name, fields), rows in grouped.items():
             if not rows:
                 continue
-            field_str = ', '.join(fields)
-            placeholder_str = ', '.join(['?'] * len(fields))
-            update_fields = ', '.join([f"{f} = excluded.{f}" for f in fields[1:]])
-            for batch_start in range(0, len(rows), _BATCH_INSERT_LIMIT):
-                batch = rows[batch_start:batch_start + _BATCH_INSERT_LIMIT]
-                flat_values = [v for row in batch for v in row]
-                multi_placeholder = ', '.join([f'({placeholder_str})'] * len(batch))
-                try:
-                    self._data_service.query(f"""
-                        INSERT INTO {table_name}
-                        ({field_str})
-                        VALUES {multi_placeholder}
-                        ON CONFLICT(timestamp) DO UPDATE SET
-                        {update_fields}
-                    """, flat_values, raise_on_error=True)
-                except Exception as e:
-                    logging.warning("_save_depth_batch_impl batch insert failed, fallback to row-by-row: %s", e)
-                    for row in batch:
-                        try:
-                            self._data_service.query(f"""
-                                INSERT INTO {table_name}
-                                ({field_str})
-                                VALUES ({placeholder_str})
-                                ON CONFLICT(timestamp) DO UPDATE SET
-                                {update_fields}
-                            """, list(row), raise_on_error=True)
-                        except Exception as _row_err:
-                            logging.debug("[DB] 单行写入失败(已降级): %s", _row_err)
+            self._batch_insert_with_fallback(table_name, fields, rows, caller='_save_depth_batch_impl')
 
     @requires_phase(InitPhase.READY)
     def save_depth_batch(self, depth_list: List[Dict[str, Any]]) -> None:
@@ -1317,38 +1319,10 @@ class _StorageCoreMixin:
                 grouped[key] = []
             grouped[key].append(tuple(values))
 
-        _BATCH_INSERT_LIMIT = 100
         for (table_name, fields), rows in grouped.items():
             if not rows:
                 continue
-            field_str = ', '.join(fields)
-            placeholder_str = ', '.join(['?'] * len(fields))
-            update_fields = ', '.join([f"{f} = excluded.{f}" for f in fields[1:]])
-            for batch_start in range(0, len(rows), _BATCH_INSERT_LIMIT):
-                batch = rows[batch_start:batch_start + _BATCH_INSERT_LIMIT]
-                flat_values = [v for row in batch for v in row]
-                multi_placeholder = ', '.join([f'({placeholder_str})'] * len(batch))
-                try:
-                    self._data_service.query(f"""
-                        INSERT INTO {table_name}
-                        ({field_str})
-                        VALUES {multi_placeholder}
-                        ON CONFLICT(timestamp) DO UPDATE SET
-                        {update_fields}
-                    """, flat_values, raise_on_error=True)
-                except Exception as e:
-                    logging.warning("_save_option_snapshot_batch_impl batch insert failed, fallback to row-by-row: %s", e)
-                    for row in batch:
-                        try:
-                            self._data_service.query(f"""
-                                INSERT INTO {table_name}
-                                ({field_str})
-                                VALUES ({placeholder_str})
-                                ON CONFLICT(timestamp) DO UPDATE SET
-                                {update_fields}
-                            """, list(row), raise_on_error=True)
-                        except Exception as _row_err:
-                            logging.debug("[DB] 期权快照单行写入失败(已降级): %s", _row_err)
+            self._batch_insert_with_fallback(table_name, fields, rows, caller='_save_option_snapshot_batch_impl')
 
     @requires_phase(InitPhase.READY)
     def save_option_snapshot_batch(self, data_list: List[Dict[str, Any]]) -> None:
@@ -1468,7 +1442,7 @@ class _StorageCoreMixin:
             logging.error("无效周期格式：%s, 错误：%s", period, e)
             return True
 
-        timeout = minutes * 60 * 2.0
+        timeout = minutes * 60 * self._kline_missing_timeout_multiplier
         return (current_time - last_time) > timeout
 
     @requires_phase(InitPhase.EXTERNAL_SERVICES)
@@ -1663,10 +1637,19 @@ class _StorageCoreMixin:
             return 0
 
         try:
+            count_sql = f"SELECT COUNT(*) as cnt FROM {table} WHERE ts < ?"
+            count_params = list(params)
+            if condition:
+                match2 = re.match(r"^\s+AND\s+(\w+)\s*=\s*['\"]?([^'\"]+)['\"]?$", condition, re.IGNORECASE)
+                if match2:
+                    count_sql += f" AND {match2.group(1)} = ?"
+                    count_params.append(match2.group(2))
+            count_result = self._data_service.query(count_sql, tuple(count_params))
+            deleted = count_result.to_pylist()[0]['cnt'] if count_result else 0
+
             self._data_service.query("BEGIN")
             self._data_service.query(sql, tuple(params))
             self._data_service.query("COMMIT")
-            deleted = 0
             logging.info("从表 %s 删除了 %d 条过期数据（截止 %.3f）", table, deleted, cutoff)
             return deleted
         except Exception as e:

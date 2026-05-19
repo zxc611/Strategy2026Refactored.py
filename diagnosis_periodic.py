@@ -43,144 +43,7 @@ def _get_runtime_state():
 
 
 def _emit_periodic_resource_ownership_snapshot(runtime_core) -> None:
-    strategy_id = getattr(runtime_core, 'strategy_id', 'unknown') if runtime_core else 'unknown'
-    run_id = getattr(runtime_core, '_lifecycle_run_id', 'N/A') if runtime_core else 'N/A'
-    phase = 'periodic-diagnosis'
-    allowed_prefixes = (
-        'Main', 'Thread-', 'APScheduler', 'ThreadPoolExecutor',
-        'Storage-AsyncWriter[shared-service]', 'Storage-Cleanup[shared-service]',
-        'SubAsyncWriter[shared-service]', 'SubRetry[shared-service]', 'SubCleanup[shared-service]',
-        'TTypeService-Preload[shared-service]', 'onStop-worker',
-    )
-    threads = threading.enumerate()
-    strategy_threads = []
-    shared_threads = []
-    system_threads = []
-    for thread_obj in threads:
-        name = thread_obj.name or ''
-        if '[shared-service]' in name:
-            shared_threads.append(name)
-        elif any(name.startswith(prefix) for prefix in allowed_prefixes):
-            system_threads.append(name)
-        elif 'strategy' in name.lower() or strategy_id in name:
-            strategy_threads.append(name)
-        elif name and not name.startswith('Main'):
-            system_threads.append(name)
-    logging.info(
-        f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}][phase={phase}]"
-        f"[source_type=resource-ownership] "
-        f"Thread scan: total={len(threads)}, shared-service={len(shared_threads)}, "
-        f"strategy-instance={len(strategy_threads)}, system={len(system_threads)}"
-    )
-    if shared_threads:
-        for name in shared_threads:
-            logging.info(
-                f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                f"[run_id={run_id}][source_type=resource-ownership] "
-                f"Thread alive: {name} (expected: continues after strategy stop)"
-            )
-    if strategy_threads:
-        for name in strategy_threads:
-            logging.warning(
-                f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                f"[run_id={run_id}][source_type=resource-ownership] "
-                f"⚠️ LEAKED thread: {name} (expected: should be gone after strategy stop)"
-            )
-    else:
-        logging.info(
-            f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-            f"[run_id={run_id}][source_type=resource-ownership] "
-            f"✅ No strategy-instance threads leaked"
-        )
-    scheduler_mgr = getattr(runtime_core, '_scheduler_manager', None) if runtime_core else None
-    if scheduler_mgr and hasattr(scheduler_mgr, 'get_jobs_by_owner'):
-        try:
-            remaining_jobs = scheduler_mgr.get_jobs_by_owner(strategy_id)
-            if remaining_jobs:
-                job_ids = [job['job_id'] for job in remaining_jobs]
-                logging.warning(
-                    f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=strategy-job] "
-                    f"⚠️ LEAKED scheduler jobs: {job_ids}"
-                )
-            else:
-                logging.info(
-                    f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=strategy-job] "
-                    f"✅ No strategy-instance scheduler jobs leaked"
-                )
-        except Exception as exc:
-            logging.debug(
-                f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                f"[source_type=resource-ownership] Scheduler diagnosis error: {exc}"
-            )
-    storage_obj = getattr(runtime_core, '_storage', None) if runtime_core else None
-    if storage_obj and hasattr(storage_obj, 'get_queue_stats'):
-        try:
-            qstats = storage_obj.get_queue_stats()
-            qsize = qstats.get('current_queue_size', 0)
-            tick_fill = qstats.get('tick_fill_rate', 0)
-            kline_fill = qstats.get('kline_fill_rate', 0)
-            maint_fill = qstats.get('maintenance_fill_rate', 0)
-            spill_cnt = qstats.get('spill_count', 0)
-            replay_cnt = qstats.get('replay_count', 0)
-            pending_cnt = qstats.get('pending_on_stop_data_size', 0)
-            if qsize > 0:
-                logging.info(
-                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=shared-queue-drain] "
-                    f"Storage queue backlog: {qsize} tasks tick_fill={tick_fill:.1f}% kline_fill={kline_fill:.1f}% maint_fill={maint_fill:.1f}%"
-                )
-            else:
-                logging.info(
-                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=shared-queue-drain] "
-                    f"✅ Storage queue empty"
-                )
-            shard_backlog_parts = []
-            for k, v in sorted(qstats.items()):
-                if k.startswith('tick_shard_') and k.endswith('_size') and v > 0:
-                    si = k.replace('tick_shard_', '').replace('_size', '')
-                    fill_key = f'tick_shard_{si}_fill'
-                    fill_val = qstats.get(fill_key, 0)
-                    shard_backlog_parts.append(f"shard-{si}={v}({fill_val:.1f}%)")
-            if shard_backlog_parts:
-                logging.info(
-                    f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                    f"[source_type=per-shard-backlog] {', '.join(shard_backlog_parts)}"
-                )
-            if spill_cnt > 0 or pending_cnt > 0:
-                logging.info(
-                    f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                    f"[source_type=spill-replay] spill=%d replay=%d pending=%d",
-                    spill_cnt, replay_cnt, pending_cnt
-                )
-        except Exception as exc:
-            logging.debug(
-                f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                f"[source_type=resource-ownership] Storage queue diagnosis error: {exc}"
-            )
-    event_bus = getattr(runtime_core, '_event_bus', None) if runtime_core else None
-    if event_bus and hasattr(event_bus, '_pending_events'):
-        try:
-            pending = getattr(event_bus, '_pending_events', 0)
-            if pending > 0:
-                logging.info(
-                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=event-tail] "
-                    f"EventBus pending callbacks: {pending} (expected: drain in progress)"
-                )
-            else:
-                logging.info(
-                    f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=event-tail] "
-                    f"✅ EventBus pending callbacks empty"
-                )
-        except Exception as exc:
-            logging.debug(
-                f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}]"
-                f"[source_type=resource-ownership] EventBus diagnosis error: {exc}"
-            )
+    ResourceOwnershipScanner.log_resource_ownership_table(runtime_core, phase='periodic-diagnosis')
 
 
 _DIAGNOSIS_STARTUP_GRACE_SECONDS = 60.0
@@ -344,25 +207,39 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
                     if hasattr(storage, '_tick_shard_queues'):
                         for q in storage._tick_shard_queues:
                             try:
-                                for item in list(q.queue)[:100]:
-                                    if isinstance(item, dict):
-                                        if item.get('instrument_id') == contract:
-                                            storage_enqueued = True
-                                            break
-                                    elif isinstance(item, (list, tuple)) and len(item) > 0:
-                                        args = item
-                                        if len(args) > 0 and str(args[0]) == contract:
-                                            storage_enqueued = True
-                                            break
-                                        if len(args) > 0:
-                                            try:
-                                                internal_id = args[0]
-                                                info_by_id = storage._get_info_by_id(int(internal_id))
-                                                if info_by_id and info_by_id.get('instrument_id') == contract:
-                                                    storage_enqueued = True
-                                                    break
-                                            except Exception as e:
-                                                logging.debug(f"Diagnosis: storage enqueue check failed: {e}")
+                                peek_count = min(q.qsize(), 100) if hasattr(q, 'qsize') else 0
+                                peeked = []
+                                for _ in range(peek_count):
+                                    try:
+                                        peeked.append(q.get_nowait())
+                                    except Exception:
+                                        break
+                                try:
+                                    for item in peeked:
+                                        if isinstance(item, dict):
+                                            if item.get('instrument_id') == contract:
+                                                storage_enqueued = True
+                                                break
+                                        elif isinstance(item, (list, tuple)) and len(item) > 0:
+                                            args = item
+                                            if len(args) > 0 and str(args[0]) == contract:
+                                                storage_enqueued = True
+                                                break
+                                            if len(args) > 0:
+                                                try:
+                                                    internal_id = args[0]
+                                                    info_by_id = storage._get_info_by_id(int(internal_id))
+                                                    if info_by_id and info_by_id.get('instrument_id') == contract:
+                                                        storage_enqueued = True
+                                                        break
+                                                except Exception as e:
+                                                    logging.debug(f"Diagnosis: storage enqueue check failed: {e}")
+                                finally:
+                                    for item in peeked:
+                                        try:
+                                            q.put_nowait(item)
+                                        except Exception:
+                                            pass
                                 if storage_enqueued:
                                     break
                             except Exception as e:
@@ -473,7 +350,7 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
         for reason, contracts in reason_stats.items():
             logging.info(f"  {reason} ({len(contracts)}个): {', '.join(contracts[:5])}{'...' if len(contracts) > 5 else ''}")
         logging.info(f"\n  [{MONITORED_CONTRACT_COUNT}Diagnosis] 📊 12环节状态汇总:")
-        环节_stats = {
+        stage_stats = {
             '1-Config': sum(1 for f in failed_contracts if not f.get('exists_in_file', False)),
             '2-Memory': sum(1 for f in failed_contracts if not f.get('loaded_in_memory', False)),
             '3-Subscribe': sum(1 for f in failed_contracts if not f.get('in_subscribe_list', False)),
@@ -487,7 +364,7 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
             '11-AsyncWrite': sum(1 for f in failed_contracts if not f.get('async_written', False)),
             '12-DuckDB': sum(1 for f in failed_contracts if not f.get('duckdb_inserted', False)),
         }
-        for stage_name, fail_count in 环节_stats.items():
+        for stage_name, fail_count in stage_stats.items():
             if fail_count > 0:
                 status = '❌' if fail_count == len(failed_contracts) else '⚠️'
                 logging.info(f"    {stage_name:15s}: {fail_count}/{len(failed_contracts)} {status}")

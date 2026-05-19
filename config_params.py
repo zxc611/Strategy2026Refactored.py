@@ -87,25 +87,25 @@ DEFAULT_PARAM_TABLE = {
     "project_root": str(Path(__file__).parent.parent),
     "workspace": str(Path(__file__).parent.parent),
     "month_mapping": {
-        "IF": ["IF2602", "IF2603"],
-        "IH": ["IH2602", "IH2603"],
-        "IM": ["IM2602", "IM2603"],
-        "CU": ["CU2603", "CU2604"],
-        "AL": ["AL2603", "AL2604"],
-        "ZN": ["ZN2603", "ZN2604"],
-        "RB": ["RB2603", "RB2604"],
-        "AU": ["AU2603", "AU2604"],
-        "AG": ["AG2603", "AG2604"],
-        "M": ["M2603", "M2605"],
-        "Y": ["Y2603", "Y2605"],
-        "A": ["A2603", "A2605"],
-        "JM": ["JM2604", "JM2605"],
-        "I": ["I2603", "I2605"],
-        "J": ["J2604", "J2605"],
-        "CF": ["CF2603", "CF2605"],
-        "SR": ["SR2603", "SR2605"],
-        "MA": ["MA2603", "MA2605"],
-        "TA": ["TA2603", "TA2605"],
+        "IF": ["IF2602", "IF2603", "IF2606", "IF2609", "IF2612"],
+        "IH": ["IH2602", "IH2603", "IH2606", "IH2609", "IH2612"],
+        "IM": ["IM2602", "IM2603", "IM2606", "IM2609", "IM2612"],
+        "CU": ["CU2603", "CU2604", "CU2605", "CU2606", "CU2607"],
+        "AL": ["AL2603", "AL2604", "AL2605", "AL2606", "AL2607"],
+        "ZN": ["ZN2603", "ZN2604", "ZN2605", "ZN2606", "ZN2607"],
+        "RB": ["RB2603", "RB2605", "RB2606", "RB2610", "RB2611"],
+        "AU": ["AU2603", "AU2604", "AU2606", "AU2608", "AU2612"],
+        "AG": ["AG2603", "AG2604", "AG2606", "AG2609", "AG2612"],
+        "M":  ["M2603",  "M2605",  "M2607",  "M2608",  "M2609"],
+        "Y":  ["Y2603",  "Y2605",  "Y2607",  "Y2608",  "Y2609"],
+        "A":  ["A2603",  "A2605",  "A2607",  "A2609",  "A2611"],
+        "JM": ["JM2604", "JM2605", "JM2606", "JM2609", "JM2612"],
+        "I":  ["I2603",  "I2605",  "I2606",  "I2609",  "I2610"],
+        "J":  ["J2604",  "J2605",  "J2606",  "J2609",  "J2612"],
+        "CF": ["CF2603", "CF2605", "CF2607", "CF2609", "CF2611"],
+        "SR": ["SR2603", "SR2605", "SR2607", "SR2609", "SR2611"],
+        "MA": ["MA2603", "MA2605", "MA2606", "MA2609", "MA2612"],
+        "TA": ["TA2603", "TA2605", "TA2606", "TA2609", "TA2612"],
     },
     "signal_cooldown_sec": 0.0,
     "option_buy_lots_min": 1,
@@ -126,7 +126,7 @@ DEFAULT_PARAM_TABLE = {
     "option_order_is_auto_suspend": 0,
     "option_order_user_force_close": 0,
     "option_order_is_swap": 0,
-    "close_take_profit_ratio": 1.5,
+    "close_take_profit_ratio": 1.5,  # 全局兜底默认值，被get_default_state_param_sets()中各状态特定值覆盖(correct_trending=2.5, incorrect_reversal=1.3, other_scalp=1.1)
     "close_overnight_check_time": "14:58",
     "close_daycut_time": "15:58",
     "close_max_hold_days": 3,
@@ -140,10 +140,6 @@ DEFAULT_PARAM_TABLE = {
     "close_order_price_type": "2",
     "output_mode": "debug",
     "force_debug_on_start": True,
-    "ui_window_width": 260,
-    "ui_window_height": 240,
-    "ui_font_large": 11,
-    "ui_font_small": 10,
     "enable_output_mode_ui": True,
     "daily_summary_hour": 15,
     "daily_summary_minute": 1,
@@ -166,7 +162,6 @@ DEFAULT_PARAM_TABLE = {
     "account_id": "",
     "kline_max_age_sec": 0,
     "signal_max_age_sec": 180,
-    "top3_rows": 3,
     "lots_min": 5,
     "history_load_max_workers": 4,
     "option_sync_tolerance": 0.5,
@@ -196,16 +191,37 @@ DEFAULT_PARAM_TABLE = {
     "max_theta_ratio": 0.5,
     "debug_mode": False,
     "stress_test_mode": False,
+    "close_stop_loss_ratio": 0.5,
+    "max_risk_ratio": 0.8,
+    "max_signals_per_window": 10,
+    "max_hold_minutes": 120,
+    "box_gain_ratio": 0.5,
+    "plr_normalization_base": 3.0,
+    "box_breakout_tolerance": 0.005,
+    "spring_price_pos_min": 0.3,
+    "spring_price_pos_max": 0.7,
+    "strike_distance_threshold": 0.02,
+    "direction_buy_call_threshold": 0.45,
+    "direction_buy_put_threshold": 0.55,
+    "default_order_flow_consistency": 0.5,
+    "kline_missing_timeout_multiplier": 2.0,
+    "phase_scan_gate_threshold": 25,
+    "phase_scan_score_weights": [0.4, 0.3, 0.3],
+    "default_slippage_bps": 3.0,
 }
 
 _PARAMS_JSON_PATH: Optional[str] = None
 _PARAMS_JSON_CACHE: Optional[Dict[str, Any]] = None
+_PARAMS_JSON_CACHE_TIMESTAMP: float = 0.0
+PARAMS_JSON_CACHE_TTL: float = 300.0
+_PARAMS_JSON_LOCK = threading.Lock()
 
 
 def get_cached_params() -> dict:
     global _param_table_cache, _param_table_cache_timestamp
-    now = time.time()
     with _param_table_lock:
+        now = time.time()
+        is_refresh = _param_table_cache is not None
         if (_param_table_cache is not None and
             now - _param_table_cache_timestamp < CACHE_TTL):
             return _param_table_cache
@@ -214,16 +230,27 @@ def get_cached_params() -> dict:
         except Exception as e:
             logging.warning(f"[config_params] JSON加载失败({e})，回退到代码内 DEFAULT_PARAM_TABLE")
             _param_table_cache = copy.deepcopy(DEFAULT_PARAM_TABLE)
+        if 'state_param_sets' not in _param_table_cache:
+            _param_table_cache['state_param_sets'] = get_default_state_param_sets()
         _param_table_cache_timestamp = now
-        logging.info(f"[config_params.get_cached_params] 参数表已{'刷新' if _param_table_cache else '加载'}，包含 {len(_param_table_cache)} 个参数 (TTL={CACHE_TTL}s)")
+        action = "刷新" if is_refresh else "加载"
+        logging.info(f"[config_params.get_cached_params] 参数表已{action}，包含 {len(_param_table_cache)} 个参数 (TTL={CACHE_TTL}s)")
         return _param_table_cache
 
 
 def reset_param_cache() -> None:
-    global _param_table_cache
+    global _param_table_cache, _PARAMS_JSON_CACHE
     with _param_table_lock:
         _param_table_cache = None
+        _PARAMS_JSON_CACHE = None
         logging.info("[config_params.reset_param_cache] 参数缓存已重置，下次访问时将重新加载")
+
+
+SENSITIVE_KEYS = frozenset(['api_key', 'infini_api_key', 'access_key', 'access_secret', 'password', 'secret'])
+
+
+def _filter_sensitive_keys(keys: list) -> list:
+    return [k for k in keys if k not in SENSITIVE_KEYS]
 
 
 def update_cached_params(updates: Dict[str, Any], sync_default_table: bool = True) -> dict:
@@ -237,14 +264,18 @@ def update_cached_params(updates: Dict[str, Any], sync_default_table: bool = Tru
         for key, value in normalized_updates.items():
             _param_table_cache[key] = value
         _param_table_cache_timestamp = time.time()
+    safe_keys = _filter_sensitive_keys(list(normalized_updates.keys()))
     logging.info(
         "[config_params.update_cached_params] 已更新参数缓存字段：%s",
-        ', '.join(sorted(normalized_updates.keys())),
+        ', '.join(sorted(safe_keys)),
     )
     return _param_table_cache
 
 
 def _resolve_params_json_path() -> str:
+    global _PARAMS_JSON_PATH
+    if _PARAMS_JSON_PATH and os.path.isfile(_PARAMS_JSON_PATH):
+        return _PARAMS_JSON_PATH
     possible = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'params_default.json'),
         os.path.join(os.getcwd(), 'config', 'params_default.json'),
@@ -252,15 +283,19 @@ def _resolve_params_json_path() -> str:
     ]
     for p in possible:
         if os.path.isfile(p):
+            _PARAMS_JSON_PATH = p
             return p
-    return possible[0]
+    _PARAMS_JSON_PATH = possible[0]
+    return _PARAMS_JSON_PATH
 
 
 def load_default_params_from_json(json_path: Optional[str] = None) -> Dict[str, Any]:
-    global _PARAMS_JSON_CACHE
+    global _PARAMS_JSON_CACHE, _PARAMS_JSON_CACHE_TIMESTAMP
+    with _PARAMS_JSON_LOCK:
+        now = time.time()
+        if _PARAMS_JSON_CACHE is not None and (now - _PARAMS_JSON_CACHE_TIMESTAMP < PARAMS_JSON_CACHE_TTL):
+            return _PARAMS_JSON_CACHE
     path = json_path or _resolve_params_json_path()
-    if _PARAMS_JSON_CACHE is not None:
-        return _PARAMS_JSON_CACHE
     if not os.path.isfile(path):
         logging.warning(f"[config_params] 参数JSON不存在: {path}，回退到代码内 DEFAULT_PARAM_TABLE")
         return dict(DEFAULT_PARAM_TABLE)
@@ -280,7 +315,9 @@ def load_default_params_from_json(json_path: Optional[str] = None) -> Dict[str, 
     for key, value in DEFAULT_PARAM_TABLE.items():
         if key not in result:
             result[key] = value
-    _PARAMS_JSON_CACHE = result
+    with _PARAMS_JSON_LOCK:
+        _PARAMS_JSON_CACHE = result
+        _PARAMS_JSON_CACHE_TIMESTAMP = now
     logging.info(f"[config_params] 从JSON加载参数完成: {path}，共 {len(result)} 个参数")
     return result
 
@@ -460,3 +497,65 @@ try:
     merge_option_params_to_default()
 except Exception as e:
     logging.warning(f"[config_params] 合并期权参数时出错: {e}")
+
+
+# ============================================================================
+# 状态参数集默认值（P1-26修复：提取公共函数，消除重复）
+# ============================================================================
+
+def get_default_state_param_sets() -> Dict[str, Dict[str, Any]]:
+    """返回状态参数集的默认配置。
+
+    被 StateParamManager 和 ShadowStrategyEngine 统一调用，
+    避免两处硬编码重复并保持YAML路径一致性。
+
+    优先从 参数池/state_param_sets.yaml 加载；
+    文件不存在或解析失败时回退到代码内硬编码默认值。
+    """
+    _yaml_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "参数池", "state_param_sets.yaml",
+    )
+    if os.path.isfile(_yaml_path):
+        try:
+            import yaml
+            with open(_yaml_path, "r", encoding="utf-8") as _f:
+                _data = yaml.safe_load(_f)
+            if isinstance(_data, dict) and _data:
+                _core_states = {}
+                for _state in ("correct_trending", "incorrect_reversal", "other"):
+                    if _state in _data and isinstance(_data[_state], dict):
+                        _core_states[_state] = _data[_state]
+                if len(_core_states) == 3:
+                    return _core_states
+        except Exception:
+            pass
+    return {
+        'correct_trending': {
+            'option_width_min_threshold': 2.0,
+            'signal_cooldown_sec': 15,
+            'close_take_profit_ratio': 2.5,
+            'close_stop_loss_ratio': 0.4,
+            'max_risk_ratio': 0.8,
+            'max_signals_per_window': 10,
+            'lots_min': 5,
+        },
+        'incorrect_reversal': {
+            'option_width_min_threshold': 4.0,
+            'signal_cooldown_sec': 120,
+            'close_take_profit_ratio': 1.3,
+            'close_stop_loss_ratio': 0.6,
+            'max_risk_ratio': 0.3,
+            'max_signals_per_window': 3,
+            'lots_min': 2,
+        },
+        'other': {
+            'option_width_min_threshold': 4.0,
+            'signal_cooldown_sec': 300,
+            'close_take_profit_ratio': 1.1,
+            'close_stop_loss_ratio': 0.8,
+            'max_risk_ratio': 0.2,
+            'max_signals_per_window': 2,
+            'lots_min': 1,
+        },
+    }

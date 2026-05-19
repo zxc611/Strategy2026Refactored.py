@@ -31,6 +31,7 @@ from __future__ import annotations
 from importlib import import_module
 import threading
 import logging
+from typing import Optional
 
 from ali2026v3_trading.storage_core import _StorageCoreMixin, _get_default_db_path
 from ali2026v3_trading.storage_query import _StorageQueryMixin
@@ -69,7 +70,7 @@ _EXPORTS = {
     'SpringState': ('ali2026v3_trading.box_spring_strategy', 'SpringState'),
 }
 
-__all__ = list(_EXPORTS.keys())
+__all__ = list(_EXPORTS.keys()) + ['InstrumentDataManager', 'get_instrument_data_manager']
 
 
 def __getattr__(name):
@@ -85,7 +86,7 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(_EXPORTS.keys()) | {'__version__', '__author__', '__doc__'})
+    return sorted(set(_EXPORTS.keys()) | {'__version__', '__author__', '__doc__', 'InstrumentDataManager', 'get_instrument_data_manager'})
 
 
 # ============================================================================
@@ -101,11 +102,16 @@ class InstrumentDataManager(_StorageCoreMixin, _StorageQueryMixin):
     pass
 
 
-_instrument_data_manager_instance: InstrumentDataManager = None
+_instrument_data_manager_instance: Optional[InstrumentDataManager] = None
 _instrument_data_manager_lock = threading.Lock()
 
 
-def get_instrument_data_manager() -> InstrumentDataManager:
+def get_instrument_data_manager(
+    tick_retention_days: int = 30,
+    kline_retention_days: int = 90,
+    async_queue_size: int = 500000,
+    batch_size: int = 5000,
+) -> InstrumentDataManager:
     global _instrument_data_manager_instance
 
     with _instrument_data_manager_lock:
@@ -116,11 +122,11 @@ def get_instrument_data_manager() -> InstrumentDataManager:
                 db_path=db_path,
                 max_retries=3,
                 retry_delay=0.1,
-                async_queue_size=500000,
-                batch_size=5000,
+                async_queue_size=async_queue_size,
+                batch_size=batch_size,
                 drop_on_full=True,
                 cleanup_interval=3600,
-                cleanup_config={'tick': 30, 'kline': 90}
+                cleanup_config={'tick': tick_retention_days, 'kline': kline_retention_days}
             )
 
             logging.info(f"[Storage] Global InstrumentDataManager singleton initialized (db={db_path})")

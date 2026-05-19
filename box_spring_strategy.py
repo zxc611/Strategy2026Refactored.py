@@ -84,6 +84,8 @@ class SpringSignal:
     strike_price: float
     current_price: float
     premium_price: float
+    lots: int = 1
+    open_reason: str = ''
     created_at: datetime = field(default_factory=datetime.now)
     is_consumed: bool = False
 
@@ -104,6 +106,8 @@ class SpringPosition:
     is_open: bool = True
     peak_premium: float = 0.0
     peak_time: Optional[datetime] = None
+    paired_instrument_id: str = ''
+    paired_current_premium: float = 0.0
 
     @property
     def pnl_ratio(self) -> float:
@@ -122,6 +126,39 @@ class SpringPosition:
         loss_pct = 1.0 - (self.current_premium / self.entry_premium)
         return loss_pct >= self.max_loss_pct
 
+    def adjust_tp_sl_by_plr(self, estimated_plr: float, min_take_profit_ratio: float = 1.0,
+                            min_max_loss_pct: float = 0.15) -> None:
+        if estimated_plr > 0:
+            self.stop_profit_ratio = max(min(estimated_plr, 8.0), min_take_profit_ratio)
+            self.max_loss_pct = max(min(1.0 / estimated_plr, 0.95), min_max_loss_pct)
+
+
+@dataclass
+class PendingPullback:
+    signal: SpringSignal
+    signal_bar_index: int
+    peak_premium: float
+    peak_bar_index: int
+    bars_elapsed: int = 0
+    is_expired: bool = False
+
+    def check_retrace(self, current_premium: float,
+                      pullback_retrace_pct: float,
+                      pullback_wait_bars: int) -> bool:
+        if self.is_expired:
+            return False
+        self.bars_elapsed += 1
+        if self.bars_elapsed > pullback_wait_bars:
+            self.is_expired = True
+            return False
+        if current_premium > self.peak_premium:
+            self.peak_premium = current_premium
+            self.peak_bar_index += self.bars_elapsed
+        if self.peak_premium <= 0:
+            return False
+        retrace_pct = (self.peak_premium - current_premium) / self.peak_premium
+        return retrace_pct >= pullback_retrace_pct
+
 
 _box_spring_instance: Optional['BoxSpringStrategy'] = None
 _box_spring_lock = threading.Lock()
@@ -132,6 +169,24 @@ def get_box_spring_strategy(params: Optional[Dict] = None) -> 'BoxSpringStrategy
     if _box_spring_instance is None:
         with _box_spring_lock:
             if _box_spring_instance is None:
+                if params is None:
+                    try:
+                        from ali2026v3_trading.config_params import get_cached_params
+                        all_params = get_cached_params()
+                        spring_keys = [
+                            'box_breakout_tolerance', 'spring_price_pos_min', 'spring_price_pos_max',
+                            'strike_distance_threshold', 'direction_buy_call_threshold',
+                            'direction_buy_put_threshold', 'iv_low_percentile', 'iv_very_low_percentile',
+                            'min_box_touches', 'max_box_width_pct', 'min_days_to_expiry',
+                            'max_days_to_expiry', 'max_premium_cost_pct', 'stop_profit_ratio',
+                            'max_loss_pct', 'max_position_pct', 'dynamic_tp_sl_enabled',
+                            'min_estimated_plr', 'spring_cooldown_sec', 'max_spring_positions',
+                            'pullback_enabled', 'pullback_wait_bars', 'pullback_retrace_pct',
+                            'pullback_iv_min_percentile', 'pullback_iv_max_percentile',
+                        ]
+                        params = {k: all_params[k] for k in spring_keys if k in all_params}
+                    except Exception:
+                        params = {}
                 _box_spring_instance = BoxSpringStrategy(params or {})
     return _box_spring_instance
 
@@ -147,6 +202,13 @@ class BoxSpringStrategy:
         self._iv_history: Dict[str, deque] = {}
         self._iv_window = params.get('iv_lookback_bars', 120)
 
+        try:
+            from ali2026v3_trading.box_detector import get_box_detector
+            self._box_detector = get_box_detector()
+        except Exception:
+            from ali2026v3_trading.box_detector import BoxDetector
+            self._box_detector = BoxDetector()
+
         self._signals: Dict[str, SpringSignal] = {}
         self._positions: Dict[str, SpringPosition] = {}
 
@@ -158,10 +220,43 @@ class BoxSpringStrategy:
         self._max_days_to_expiry = params.get('max_days_to_expiry', 5)
         self._max_premium_cost_pct = params.get('max_premium_cost_pct', 0.015)
         self._stop_profit_ratio = params.get('stop_profit_ratio', 5.0)
-        self._max_loss_pct = params.get('max_loss_loss_pct', 0.95)
+        self._max_loss_pct = params.get('max_loss_pct', 0.95)
         self._max_position_pct = params.get('max_position_pct', 0.015)
+        self._dynamic_tp_sl_enabled = params.get('dynamic_tp_sl_enabled', False)
+        self._min_estimated_plr = params.get('min_estimated_plr', 0.0)
+        self._capital_scale: str = params.get('capital_scale', 'medium')
         self._cooldown_sec = params.get('spring_cooldown_sec', 300)
         self._max_active_positions = params.get('max_spring_positions', 3)
+
+        self._pullback_enabled = params.get('pullback_enabled', False)
+        self._pullback_wait_bars = params.get('pullback_wait_bars', 5)
+        self._pullback_retrace_pct = params.get('pullback_retrace_pct', 0.15)
+        self._pullback_iv_min_percentile = params.get('pullback_iv_min_percentile', 20.0)
+        self._pullback_iv_max_percentile = params.get('pullback_iv_max_percentile', 80.0)
+        self._pending_pullbacks: Dict[str, PendingPullback] = {}
+        self._pullback_bar_counter: int = 0
+        self._pullback_stats = {
+            'signals_deferred': 0,
+            'retrace_entries': 0,
+            'retrace_timeouts': 0,
+            'retrace_iv_rejected': 0,
+        }
+
+        self._box_breakout_tolerance = params.get('box_breakout_tolerance', 0.005)
+        self._spring_price_pos_min = params.get('spring_price_pos_min', 0.3)
+        self._spring_price_pos_max = params.get('spring_price_pos_max', 0.7)
+        self._strike_distance_threshold = params.get('strike_distance_threshold', 0.02)
+        self._direction_buy_call_threshold = params.get('direction_buy_call_threshold', 0.45)
+        self._direction_buy_put_threshold = params.get('direction_buy_put_threshold', 0.55)
+
+        from ali2026v3_trading.shared_utils import PullbackManager
+        self._pullback_mgr = PullbackManager({
+            'pullback_enabled': self._pullback_enabled,
+            'pullback_wait_bars': self._pullback_wait_bars,
+            'pullback_retrace_pct': self._pullback_retrace_pct,
+            'pullback_iv_min_percentile': self._pullback_iv_min_percentile,
+            'pullback_iv_max_percentile': self._pullback_iv_max_percentile,
+        })
 
         self._last_signal_time: Dict[str, float] = {}
 
@@ -178,6 +273,19 @@ class BoxSpringStrategy:
             'loss_count': 0,
         }
 
+    def set_capital_scale(self, capital_scale: str) -> None:
+        with self._lock:
+            old_scale = self._capital_scale
+            self._capital_scale = capital_scale
+            logging.info(
+                '[BoxSpringStrategy] capital_scale changed: %s -> %s',
+                old_scale, capital_scale,
+            )
+
+    def get_capital_scale(self) -> str:
+        with self._lock:
+            return self._capital_scale
+
     # ========================================================================
     # 箱体识别
     # ========================================================================
@@ -188,6 +296,53 @@ class BoxSpringStrategy:
             return None
 
         ts = timestamp or datetime.now()
+
+        self._box_detector.update_bar(high, low, close, timestamp=ts.isoformat())
+
+        box_profile = self._box_detector.detect_box()
+
+        if box_profile is None or not box_profile.is_valid:
+            if not box_profile or not box_profile.is_box:
+                return self._update_box_fallback(instrument_id, high, low, close, ts)
+            return None
+
+        box_id = box_profile.box_id
+        box_top = box_profile.upper
+        box_bottom = box_profile.lower
+        width_pct = box_profile.width_pct / 100.0
+
+        if width_pct > self._max_box_width_pct:
+            self._invalidate_box(instrument_id, 'width_exceeded')
+            return None
+
+        box = self._boxes.get(instrument_id)
+        if box and box.is_active:
+            if close > box.box_top * (1.0 + self._box_breakout_tolerance) or close < box.box_bottom * (1.0 - self._box_breakout_tolerance):
+                self._invalidate_box(instrument_id, 'price_broken')
+                return None
+
+            if high >= box.box_top * 0.998 or low <= box.box_bottom * 1.002:
+                box.touch_count += 1
+                box.last_touch_time = ts
+
+            return box
+
+        new_box = BoxRange(
+            box_id=box_id,
+            instrument_id=instrument_id,
+            box_top=box_top,
+            box_bottom=box_bottom,
+            box_width_pct=width_pct,
+            confirmed_at=ts,
+            touch_count=box_profile.bounce_count or 1,
+            last_touch_time=ts,
+        )
+        with self._lock:
+            self._boxes[instrument_id] = new_box
+        return new_box
+
+    def _update_box_fallback(self, instrument_id: str, high: float, low: float,
+                              close: float, ts: datetime) -> Optional[BoxRange]:
         width_pct = (high - low) / close if close > 0 else 1.0
 
         if width_pct > self._max_box_width_pct:
@@ -196,7 +351,7 @@ class BoxSpringStrategy:
 
         box = self._boxes.get(instrument_id)
         if box and box.is_active:
-            if close > box.box_top * 1.005 or close < box.box_bottom * 0.995:
+            if close > box.box_top * (1.0 + self._box_breakout_tolerance) or close < box.box_bottom * (1.0 - self._box_breakout_tolerance):
                 self._invalidate_box(instrument_id, 'price_broken')
                 return None
 
@@ -242,6 +397,8 @@ class BoxSpringStrategy:
         if iv <= 0:
             return 50.0
 
+        self._box_detector.update_iv(iv)
+
         with self._lock:
             if instrument_id not in self._iv_history:
                 self._iv_history[instrument_id] = deque(maxlen=self._iv_window)
@@ -252,14 +409,8 @@ class BoxSpringStrategy:
                 return 50.0
 
             sorted_ivs = sorted(history)
-            rank = 0
-            for v in sorted_ivs:
-                if v < iv:
-                    rank += 1
-                else:
-                    break
-            percentile = (rank / len(sorted_ivs)) * 100.0
-            return percentile
+            from ali2026v3_trading.box_detector import BoxDetector
+            return BoxDetector.compute_iv_percentile(iv, sorted_ivs)
 
     def get_iv_percentile(self, instrument_id: str) -> float:
         with self._lock:
@@ -268,8 +419,8 @@ class BoxSpringStrategy:
                 return 50.0
             current_iv = history[-1]
             sorted_ivs = sorted(history)
-            rank = sum(1 for v in sorted_ivs if v < current_iv)
-            return (rank / len(sorted_ivs)) * 100.0
+            from ali2026v3_trading.box_detector import BoxDetector
+            return BoxDetector.compute_iv_percentile(current_iv, sorted_ivs)
 
     # ========================================================================
     # 弹簧识别：四条件同时满足
@@ -293,12 +444,14 @@ class BoxSpringStrategy:
         if iv_pct > self._iv_low_percentile:
             return None
 
+        is_very_compressed = iv_pct <= self._iv_very_low_percentile
+
         price_pos = box.price_position(future_price)
-        if price_pos < 0.3 or price_pos > 0.7:
+        if price_pos < self._spring_price_pos_min or price_pos > self._spring_price_pos_max:
             return None
 
         strike_distance_pct = abs(future_price - strike_price) / future_price if future_price > 0 else 1.0
-        if strike_distance_pct > 0.02:
+        if strike_distance_pct > self._strike_distance_threshold:
             return None
 
         premium_cost_pct = premium_price / account_equity if account_equity > 0 else 1.0
@@ -317,11 +470,12 @@ class BoxSpringStrategy:
         )
 
         signal_id = f"SPRING_{instrument_id}_{int(now*1000)}"
+        initial_state = SpringState.DORMANT
         signal = SpringSignal(
             signal_id=signal_id,
             instrument_id=instrument_id,
             option_instrument_id=option_instrument_id,
-            spring_state=SpringState.COMPRESSED,
+            spring_state=initial_state,
             iv_percentile=iv_pct,
             premium_cost_pct=premium_cost_pct,
             gamma_exposure=gamma_exposure,
@@ -332,22 +486,33 @@ class BoxSpringStrategy:
             premium_price=premium_price,
         )
 
+        if is_very_compressed:
+            signal.spring_state = SpringState.COMPRESSED
+            with self._lock:
+                self._stats['compressed_detected'] += 1
+                self._last_signal_time[instrument_id] = now
+            logging.info(
+                "[BoxSpring] COMPRESSED(very_low_iv): %s IV_pct=%.1f%% premium=%.4f gamma_exp=%.4f dir=%s DTE=%d",
+                option_instrument_id, iv_pct, premium_price, gamma_exposure, direction, days_to_expiry
+            )
+        else:
+            signal.spring_state = SpringState.DORMANT
+            with self._lock:
+                self._last_signal_time[instrument_id] = now
+            logging.info(
+                "[BoxSpring] DORMANT(iv_low_but_not_very): %s IV_pct=%.1f%% premium=%.4f dir=%s DTE=%d",
+                option_instrument_id, iv_pct, premium_price, direction, days_to_expiry
+            )
+
         with self._lock:
             self._signals[signal_id] = signal
-            self._stats['compressed_detected'] += 1
-            self._last_signal_time[instrument_id] = now
-
-        logging.info(
-            "[BoxSpring] COMPRESSED: %s IV_pct=%.1f%% premium=%.4f gamma_exp=%.4f dir=%s DTE=%d",
-            option_instrument_id, iv_pct, premium_price, gamma_exposure, direction, days_to_expiry
-        )
 
         return signal
 
     def _infer_direction(self, box: BoxRange, price: float, price_pos: float) -> str:
-        if price_pos < 0.45:
+        if price_pos < self._direction_buy_call_threshold:
             return 'BUY_CALL'
-        elif price_pos > 0.55:
+        elif price_pos > self._direction_buy_put_threshold:
             return 'BUY_PUT'
         else:
             return 'BUY_STRADDLE'
@@ -369,17 +534,37 @@ class BoxSpringStrategy:
     # 入场信号：箱内脉冲触发
     # ========================================================================
 
+    def estimate_plr_before_entry(self, instrument_id: str) -> float:
+        with self._lock:
+            matched_signal = None
+            for sig in self._signals.values():
+                if sig.instrument_id == instrument_id and not sig.is_consumed:
+                    matched_signal = sig
+                    break
+            if matched_signal is None:
+                return 0.0
+            box = self._boxes.get(instrument_id)
+            if box is None or not box.is_active:
+                return 0.0
+            box_upper = getattr(box, 'upper', getattr(box, 'box_top', 0.0))
+            box_lower = getattr(box, 'lower', getattr(box, 'box_bottom', 0.0))
+            box_height = box_upper - box_lower
+        if box_height < 1e-10 or matched_signal.premium_price < 1e-10:
+            return 0.0
+        from ali2026v3_trading.box_detector import BoxDetector
+        return BoxDetector.estimate_plr(box_height, matched_signal.premium_price)
+
     def check_trigger(self, instrument_id: str, order_flow_imbalance: float = 0.0,
                       option_chain_activity: float = 0.0) -> Optional[SpringSignal]:
         with self._lock:
-            compressed = [
+            triggerable = [
                 s for s in self._signals.values()
                 if s.instrument_id == instrument_id
-                and s.spring_state == SpringState.COMPRESSED
+                and s.spring_state in (SpringState.COMPRESSED, SpringState.DORMANT)
                 and not s.is_consumed
             ]
 
-        if not compressed:
+        if not triggerable:
             return None
 
         triggered = False
@@ -396,7 +581,7 @@ class BoxSpringStrategy:
         if not triggered:
             return None
 
-        signal = compressed[0]
+        signal = triggerable[0]
         signal.spring_state = SpringState.TRIGGERED
 
         with self._lock:
@@ -411,68 +596,341 @@ class BoxSpringStrategy:
         return signal
 
     # ========================================================================
+    # 回撤开仓（Pullback Entry）
+    # ========================================================================
+
+    def check_pullback_entry(self, signal: SpringSignal,
+                             current_premium: float = 0.0,
+                             iv_percentile: float = 50.0,
+                             bar_index: int = 0) -> Optional[SpringSignal]:
+        if not self._pullback_enabled:
+            return signal
+        deferred = self._pullback_mgr.should_defer(
+            signal_id=signal.signal_id,
+            strategy_type='spring',
+            instrument_id=signal.option_instrument_id,
+            direction=signal.direction,
+            current_price=current_premium or signal.premium_price,
+            iv_percentile=iv_percentile,
+        )
+        if deferred:
+            with self._lock:
+                if signal.signal_id not in self._pending_pullbacks:
+                    self._pending_pullbacks[signal.signal_id] = PendingPullback(
+                        signal=signal,
+                        signal_bar_index=bar_index,
+                        peak_premium=current_premium or signal.premium_price,
+                        peak_bar_index=bar_index,
+                    )
+                    self._pullback_stats['signals_deferred'] += 1
+                    logging.info(
+                        "[BoxSpring] PendingPullback created: %s peak_prem=%.4f bar=%d",
+                        signal.signal_id, current_premium or signal.premium_price, bar_index,
+                    )
+            return None
+        return signal
+
+    def _process_pending_pullbacks(self, current_premiums: Dict[str, float]) -> List[SpringSignal]:
+        if not self._pullback_enabled:
+            return []
+        ready_signals: List[SpringSignal] = []
+        with self._lock:
+            expired_ids = []
+            for sig_id, pp in self._pending_pullbacks.items():
+                opt_id = pp.signal.option_instrument_id
+                current_prem = current_premiums.get(opt_id, 0.0)
+                if current_prem <= 0:
+                    continue
+                retrace_ok = pp.check_retrace(
+                    current_prem,
+                    self._pullback_retrace_pct,
+                    self._pullback_wait_bars,
+                )
+                if retrace_ok:
+                    pp.signal.spring_state = SpringState.TRIGGERED
+                    ready_signals.append(pp.signal)
+                    self._pullback_stats['retrace_entries'] += 1
+                    logging.info(
+                        "[BoxSpring] PendingPullback retrace entry: %s peak=%.4f current=%.4f",
+                        sig_id, pp.peak_premium, current_prem,
+                    )
+                elif pp.is_expired:
+                    expired_ids.append(sig_id)
+                    pp.signal.spring_state = SpringState.EXPIRED
+                    self._pullback_stats['retrace_timeouts'] += 1
+                    logging.info(
+                        "[BoxSpring] PendingPullback expired: %s bars=%d",
+                        sig_id, pp.bars_elapsed,
+                    )
+            for sig_id in expired_ids:
+                del self._pending_pullbacks[sig_id]
+        ready = self._pullback_mgr.process_bar(current_premiums)
+        for p in ready:
+            self._pullback_stats['retrace_entries'] = self._pullback_mgr._stats['retrace_entries']
+            self._pullback_stats['retrace_timeouts'] = self._pullback_mgr._stats['retrace_timeouts']
+        return ready_signals
+
+    def get_pullback_stats(self) -> Dict[str, Any]:
+        return self._pullback_mgr.get_stats()
+
+    # ========================================================================
     # 下单执行
     # ========================================================================
 
     def execute_spring_entry(self, signal: SpringSignal) -> Optional[str]:
-        active_count = sum(1 for p in self._positions.values() if p.is_open)
-        if active_count >= self._max_active_positions:
-            logging.debug("[BoxSpring] Max positions reached: %d", active_count)
+        with self._lock:
+            active_count = sum(1 for p in self._positions.values() if p.is_open)
+            if active_count >= self._max_active_positions:
+                logging.debug("[BoxSpring] Max positions reached: %d", active_count)
+                return None
+
+            if not self._check_cross_strategy_risk(signal):
+                logging.warning("[BoxSpring] 跨策略风控阻断, 跳过Spring入场")
+                return None
+
+            # ✅ P1-10修复: 铁律检查——防止趋势转换
+            if not self.prevent_trend_conversion(
+                signal.instrument_id, 'OPEN', signal.open_reason
+            ):
+                logging.warning("[BoxSpring] 铁律阻断: 趋势转换被阻止 %s", signal.instrument_id)
+                return None
+
+            estimated_plr = 0.0
+            if self._min_estimated_plr > 0 or self._dynamic_tp_sl_enabled:
+                estimated_plr = self.estimate_plr_before_entry(signal.instrument_id)
+                if self._min_estimated_plr > 0 and estimated_plr < self._min_estimated_plr:
+                    logging.debug("[BoxSpring] PLR过滤: estimated_plr=%.2f < min=%.2f", estimated_plr, self._min_estimated_plr)
+                    return None
+
+            try:
+                from ali2026v3_trading.order_service import get_order_service
+                osvc = get_order_service()
+                if not osvc:
+                    return None
+
+                self._record_spring_trade(signal)
+
+                if signal.direction == 'BUY_STRADDLE':
+                    return self._execute_straddle_entry(signal)
+
+                action_map = {
+                    'BUY_CALL': ('BUY', 'OPEN'),
+                    'BUY_PUT': ('BUY', 'OPEN'),
+                }
+                direction, action = action_map.get(signal.direction, ('BUY', 'OPEN'))
+
+                order_id = osvc.send_order(
+                    instrument_id=signal.option_instrument_id,
+                    volume=signal.lots,
+                    price=signal.premium_price,
+                    direction=direction,
+                    action=action,
+                    open_reason=self.OPEN_REASON,
+                )
+
+                if order_id:
+                    pos_id = f"SPRING_POS_{signal.option_instrument_id}_{int(time.time()*1000)}"
+                    position = SpringPosition(
+                        position_id=pos_id,
+                        signal_id=signal.signal_id,
+                        instrument_id=signal.instrument_id,
+                        option_instrument_id=signal.option_instrument_id,
+                        direction=signal.direction,
+                        entry_premium=signal.premium_price,
+                        current_premium=signal.premium_price,
+                        entry_time=datetime.now(),
+                        stop_profit_ratio=self._stop_profit_ratio,
+                        max_loss_pct=self._max_loss_pct,
+                        box_id=signal.box_id,
+                    )
+                    self._positions[pos_id] = position
+                    if self._dynamic_tp_sl_enabled and estimated_plr > 0:
+                        position.adjust_tp_sl_by_plr(estimated_plr)
+                    signal.spring_state = SpringState.ACTIVE
+                    signal.is_consumed = True
+                    self._stats['positions_opened'] += 1
+
+                    logging.info(
+                        "[BoxSpring] ENTRY: %s dir=%s premium=%.4f stop_profit=%.1fx max_loss=%.0f%%",
+                        signal.option_instrument_id, signal.direction, signal.premium_price,
+                        self._stop_profit_ratio, self._max_loss_pct * 100
+                    )
+                    return order_id
+
+            except Exception as e:
+                logging.error("[BoxSpring] Entry error: %s", e)
+
+        return None
+
+    def _execute_straddle_entry(self, signal: SpringSignal) -> Optional[str]:
+        paired_instrument_id, paired_premium, signal_opt_type = self._find_straddle_pair(signal)
+
+        if not paired_instrument_id or not signal_opt_type:
+            logging.warning("[BoxSpring] STRADDLE: no pair found for %s (opt_type=%s)",
+                            signal.option_instrument_id, signal_opt_type)
             return None
+
+        is_call = signal_opt_type == 'CALL'
+        call_instrument = signal.option_instrument_id if is_call else paired_instrument_id
+        put_instrument = paired_instrument_id if is_call else signal.option_instrument_id
+        call_premium = signal.premium_price if is_call else paired_premium
+        put_premium = paired_premium if is_call else signal.premium_price
 
         try:
             from ali2026v3_trading.order_service import get_order_service
             osvc = get_order_service()
             if not osvc:
                 return None
-
-            action_map = {
-                'BUY_CALL': ('BUY', 'OPEN'),
-                'BUY_PUT': ('SELL', 'OPEN'),
-                'BUY_STRADDLE': ('BUY', 'OPEN'),
-            }
-            direction, action = action_map.get(signal.direction, ('BUY', 'OPEN'))
-
-            order_id = osvc.send_order(
-                instrument_id=signal.option_instrument_id,
-                volume=1,
-                price=signal.premium_price,
-                direction=direction,
-                action=action,
-                open_reason=self.OPEN_REASON,
-            )
-
-            if order_id:
-                pos_id = f"SPRING_POS_{signal.option_instrument_id}_{int(time.time()*1000)}"
-                position = SpringPosition(
-                    position_id=pos_id,
-                    signal_id=signal.signal_id,
-                    instrument_id=signal.instrument_id,
-                    option_instrument_id=signal.option_instrument_id,
-                    direction=signal.direction,
-                    entry_premium=signal.premium_price,
-                    current_premium=signal.premium_price,
-                    entry_time=datetime.now(),
-                    stop_profit_ratio=self._stop_profit_ratio,
-                    max_loss_pct=self._max_loss_pct,
-                    box_id=signal.box_id,
-                )
-                with self._lock:
-                    self._positions[pos_id] = position
-                    signal.is_consumed = True
-                    self._stats['positions_opened'] += 1
-
-                logging.info(
-                    "[BoxSpring] ENTRY: %s dir=%s premium=%.4f stop_profit=%.1fx max_loss=%.0f%%",
-                    signal.option_instrument_id, signal.direction, signal.premium_price,
-                    self._stop_profit_ratio, self._max_loss_pct * 100
-                )
-                return order_id
-
         except Exception as e:
-            logging.error("[BoxSpring] Entry error: %s", e)
+            logging.error("[BoxSpring] STRADDLE: get_order_service failed: %s", e)
+            return None
 
-        return None
+        call_order_id = osvc.send_order(
+            instrument_id=call_instrument,
+            volume=1,
+            price=call_premium,
+            direction='BUY',
+            action='OPEN',
+            open_reason=self.OPEN_REASON,
+        )
+
+        if not call_order_id:
+            logging.warning("[BoxSpring] STRADDLE: Call order failed for %s, aborting straddle",
+                            call_instrument)
+            return None
+
+        put_order_id = osvc.send_order(
+            instrument_id=put_instrument,
+            volume=1,
+            price=put_premium,
+            direction='BUY',
+            action='OPEN',
+            open_reason=self.OPEN_REASON,
+        )
+
+        if not put_order_id:
+            logging.warning("[BoxSpring] STRADDLE: Put order failed for %s, closing Call leg to avoid single-leg risk",
+                            put_instrument)
+            try:
+                osvc.send_order(
+                    instrument_id=call_instrument,
+                    volume=1,
+                    price=call_premium,
+                    direction='SELL',
+                    action='CLOSE',
+                    open_reason=self.OPEN_REASON,
+                )
+            except Exception:
+                logging.error("[BoxSpring] STRADDLE: failed to close Call leg after Put failure")
+            return None
+
+        total_entry_premium = call_premium + put_premium
+
+        pos_id = f"SPRING_POS_STRADDLE_{signal.instrument_id}_{int(time.time()*1000)}"
+        position = SpringPosition(
+            position_id=pos_id,
+            signal_id=signal.signal_id,
+            instrument_id=signal.instrument_id,
+            option_instrument_id=call_instrument,
+            direction='BUY_STRADDLE',
+            entry_premium=total_entry_premium,
+            current_premium=call_premium,
+            entry_time=datetime.now(),
+            stop_profit_ratio=self._stop_profit_ratio,
+            max_loss_pct=self._max_loss_pct,
+            box_id=signal.box_id,
+            paired_instrument_id=put_instrument,
+            paired_current_premium=put_premium,
+        )
+        with self._lock:
+            self._positions[pos_id] = position
+            estimated_plr = self.estimate_plr_before_entry(signal.instrument_id) if hasattr(self, 'estimate_plr_before_entry') else 0.0
+            if self._dynamic_tp_sl_enabled and estimated_plr > 0:
+                position.adjust_tp_sl_by_plr(estimated_plr)
+            signal.is_consumed = True
+            self._stats['positions_opened'] += 1
+
+        logging.info(
+            "[BoxSpring] STRADDLE ENTRY: call=%s(oid=%s) put=%s(oid=%s) "
+            "call_prem=%.4f put_prem=%.4f total=%.4f stop_profit=%.1fx max_loss=%.0f%%",
+            call_instrument, call_order_id, put_instrument, put_order_id,
+            call_premium, put_premium, total_entry_premium,
+            self._stop_profit_ratio, self._max_loss_pct * 100
+        )
+
+        return call_order_id
+
+    def _find_straddle_pair(self, signal: SpringSignal) -> Tuple[str, float, str]:
+        try:
+            from ali2026v3_trading.t_type_service import get_t_type_service
+            t_type = get_t_type_service()
+            try:
+                if not t_type or not t_type._width_cache:
+                    return '', 0.0, ''
+                cache = t_type._width_cache
+            except AttributeError as e:
+                logging.warning(
+                    "[BoxSpring] _find_straddle_pair: failed to access t_type._width_cache "
+                    "(internal API may have changed): %s", e
+                )
+                return '', 0.0, ''
+
+            strike = signal.strike_price
+
+            signal_opt_type = ''
+            try:
+                with cache._lock:
+                    for iid, info in cache._option_info.items():
+                        if info.get('instrument_id') == signal.option_instrument_id:
+                            signal_opt_type = info.get('option_type', '')
+                            break
+            except AttributeError as e:
+                logging.warning(
+                    "[BoxSpring] _find_straddle_pair: failed to access cache._lock or cache._option_info "
+                    "(internal API may have changed): %s", e
+                )
+                return '', 0.0, ''
+
+            if not signal_opt_type:
+                return '', 0.0, ''
+
+            target_type = 'PUT' if signal_opt_type == 'CALL' else 'CALL'
+
+            try:
+                with cache._lock:
+                    for iid, info in cache._option_info.items():
+                        if info.get('underlying_future_id') != signal.instrument_id:
+                            continue
+                        if info.get('strike_price') != strike:
+                            continue
+                        if info.get('option_type') != target_type:
+                            continue
+                        inst_id = info.get('instrument_id', '')
+                        if not inst_id or inst_id == signal.option_instrument_id:
+                            continue
+
+                        premium = 0.0
+                        try:
+                            from ali2026v3_trading.data_service import get_data_service
+                            ds = get_data_service()
+                            if ds and ds.realtime_cache:
+                                premium = ds.realtime_cache.get_latest_price(inst_id) or 0.0
+                        except Exception:
+                            pass
+                        if premium <= 0:
+                            premium = signal.premium_price
+
+                        return inst_id, premium, signal_opt_type
+            except AttributeError as e:
+                logging.warning(
+                    "[BoxSpring] _find_straddle_pair: failed to access cache._lock or cache._option_info "
+                    "(internal API may have changed): %s", e
+                )
+                return '', 0.0, ''
+        except Exception as e:
+            logging.warning("[BoxSpring] _find_straddle_pair error: %s", e)
+
+        return '', 0.0, ''
 
     # ========================================================================
     # 平仓纪律：弹簧松开即走 / 接受归零
@@ -485,13 +943,31 @@ class BoxSpringStrategy:
         with self._lock:
             open_positions = [
                 p for p in self._positions.values()
-                if p.option_instrument_id == option_instrument_id and p.is_open
+                if (p.option_instrument_id == option_instrument_id or
+                    p.paired_instrument_id == option_instrument_id) and p.is_open
             ]
 
         if not open_positions:
             return None
 
         pos = open_positions[0]
+
+        if pos.direction == 'BUY_STRADDLE' and pos.paired_instrument_id:
+            if option_instrument_id == pos.paired_instrument_id:
+                pos.paired_current_premium = current_premium
+            else:
+                pos.current_premium = current_premium
+            total_premium = pos.current_premium + pos.paired_current_premium
+            if total_premium > pos.peak_premium:
+                pos.peak_premium = total_premium
+                pos.peak_time = datetime.now()
+
+            close_action = self._evaluate_close_straddle(pos)
+            if close_action:
+                pos.current_premium = total_premium
+                return self._execute_close(pos, close_action)
+            return None
+
         pos.current_premium = current_premium
 
         if current_premium > pos.peak_premium:
@@ -502,6 +978,25 @@ class BoxSpringStrategy:
         if close_action:
             return self._execute_close(pos, close_action)
 
+        return None
+
+    def _evaluate_close_straddle(self, pos: SpringPosition) -> Optional[str]:
+        total_premium = pos.current_premium + pos.paired_current_premium
+        if pos.entry_premium <= 0:
+            return 'STOP_LOSS'
+        pnl_ratio = total_premium / pos.entry_premium
+        if pnl_ratio >= pos.stop_profit_ratio:
+            return 'TAKE_PROFIT'
+        loss_pct = 1.0 - (total_premium / pos.entry_premium)
+        if loss_pct >= pos.max_loss_pct:
+            return 'STOP_LOSS'
+        hold_minutes = (datetime.now() - pos.entry_time).total_seconds() / 60.0
+        max_hold = self.params.get('max_spring_hold_minutes', 120)
+        if hold_minutes > max_hold:
+            return 'TIME_EXPIRE'
+        box = self._boxes.get(pos.instrument_id)
+        if box and not box.is_active:
+            return 'BOX_BROKEN'
         return None
 
     def _evaluate_close(self, pos: SpringPosition) -> Optional[str]:
@@ -527,7 +1022,11 @@ class BoxSpringStrategy:
             from ali2026v3_trading.order_service import get_order_service
             osvc = get_order_service()
             if osvc:
-                close_direction = 'SELL' if pos.direction in ('BUY_CALL', 'BUY_STRADDLE') else 'BUY'
+                _CLOSE_DIRECTION_MAP = {
+                    'BUY_CALL': 'SELL', 'BUY_PUT': 'SELL', 'BUY_STRADDLE': 'SELL',
+                    'SELL_CALL': 'BUY', 'SELL_PUT': 'BUY',
+                }
+                close_direction = _CLOSE_DIRECTION_MAP.get(pos.direction, 'SELL')
                 osvc.send_order(
                     instrument_id=pos.option_instrument_id,
                     volume=1,
@@ -535,16 +1034,29 @@ class BoxSpringStrategy:
                     direction=close_direction,
                     action='CLOSE',
                 )
+                if pos.direction == 'BUY_STRADDLE' and pos.paired_instrument_id:
+                    paired_close_dir = _CLOSE_DIRECTION_MAP.get(pos.direction, 'SELL')
+                    osvc.send_order(
+                        instrument_id=pos.paired_instrument_id,
+                        volume=1,
+                        price=pos.paired_current_premium,
+                        direction=paired_close_dir,
+                        action='CLOSE',
+                    )
                 osvc.persist_close_event(
                     order_id=pos.position_id,
                     close_reason=f'SPRING_{reason}',
-                    pnl=pos.current_premium - pos.entry_premium,
+                    pnl=(pos.current_premium + pos.paired_current_premium) - pos.entry_premium if pos.direction == 'BUY_STRADDLE' else pos.current_premium - pos.entry_premium,
                 )
         except Exception as e:
             logging.error("[BoxSpring] Close error: %s", e)
 
         pos.is_open = False
-        pnl = pos.current_premium - pos.entry_premium
+        if reason == 'TIME_EXPIRE':
+            sig = self._signals.get(pos.signal_id)
+            if sig:
+                sig.spring_state = SpringState.EXPIRED
+        pnl = (pos.current_premium + pos.paired_current_premium) - pos.entry_premium if pos.direction == 'BUY_STRADDLE' else pos.current_premium - pos.entry_premium
 
         with self._lock:
             self._stats['total_pnl'] += pnl
@@ -557,6 +1069,21 @@ class BoxSpringStrategy:
             else:
                 self._stats['positions_closed_expired'] += 1
                 self._stats['loss_count'] += 1
+
+        try:
+            from ali2026v3_trading.risk_service import get_risk_service
+            rs = get_risk_service()
+            rs.record_trade_result('spring', pnl, self._capital_scale)
+        except Exception as e:
+            logging.debug("[BoxSpring] record_trade_result failed: %s", e)
+
+        try:
+            from ali2026v3_trading.strategy_ecosystem import get_strategy_ecosystem
+            eco = get_strategy_ecosystem()
+            eco.record_strategy_pnl('spring', pnl)
+            eco.update_plr_stats('spring')
+        except Exception as e:
+            logging.debug("[BoxSpring] record_strategy_pnl/update_plr_stats failed: %s", e)
 
         logging.info(
             "[BoxSpring] CLOSE: %s reason=%s entry=%.4f exit=%.4f pnl=%.4f ratio=%.2f",
@@ -581,7 +1108,8 @@ class BoxSpringStrategy:
     def is_spring_position(self, instrument_id: str) -> bool:
         with self._lock:
             for pos in self._positions.values():
-                if pos.option_instrument_id == instrument_id and pos.is_open:
+                if (pos.option_instrument_id == instrument_id or
+                    pos.paired_instrument_id == instrument_id) and pos.is_open:
                     return True
         return False
 
@@ -640,6 +1168,36 @@ class BoxSpringStrategy:
                 'total_pnl': round(self._stats['total_pnl'], 4),
             }
 
+    def _check_cross_strategy_risk(self, signal: SpringSignal) -> bool:
+        try:
+            from ali2026v3_trading.position_service import (
+                aggregate_greeks_exposure,
+                get_cross_strategy_risk_guard,
+                get_position_service,
+            )
+            guard = get_cross_strategy_risk_guard()
+            pos_svc = get_position_service()
+            if pos_svc is None:
+                logging.warning("[BoxSpring._check_cross_strategy_risk] PositionService unavailable, fail-safe阻断")
+                return False
+            exposure = aggregate_greeks_exposure(pos_svc.positions)
+            level, reason, detail = guard.check(exposure)
+            if level in (guard.BLOCK, guard.CIRCUIT_BREAK):
+                return False
+            return True
+        except Exception as e:
+            import logging
+            logging.warning("[BoxSpring._check_cross_strategy_risk] Error: %s, fail-safe阻断", e)
+            return False
+
+    def _record_spring_trade(self, signal: SpringSignal):
+        try:
+            from ali2026v3_trading.strategy_ecosystem import get_strategy_ecosystem
+            eco = get_strategy_ecosystem()
+            eco.record_spring_trade(signal.direction)
+        except Exception as e:
+            logging.warning("[BoxSpring] _record_spring_trade failed: %s", e)
+
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
             ev = self.get_expected_value()
@@ -647,6 +1205,8 @@ class BoxSpringStrategy:
             return {
                 'service_name': 'BoxSpringStrategy',
                 **self._stats,
+                **self._pullback_mgr._stats,
+                'pending_pullbacks': len(self._pullback_mgr._pending),
                 'active_positions': active,
                 'active_boxes': sum(1 for b in self._boxes.values() if b.is_active),
                 'expected_value': ev,
@@ -701,6 +1261,14 @@ class BoxSpringStrategy:
                         iv = greeks.get('iv', 0.0)
                         if iv > 0:
                             self.update_iv(pos.option_instrument_id, iv)
+                        gamma = greeks.get('gamma', 0.0)
+                        theta = greeks.get('theta', 0.0)
+                        vega = greeks.get('vega', 0.0)
+                        if abs(gamma) > 0 or abs(theta) > 0 or abs(vega) > 0:
+                            logging.debug(
+                                "[BoxSpring] Greeks update: %s gamma=%.6f theta=%.6f vega=%.6f",
+                                pos.option_instrument_id, gamma, theta, vega,
+                            )
 
                         from ali2026v3_trading.data_service import get_data_service
                         ds = get_data_service()
@@ -835,7 +1403,7 @@ class BoxSpringStrategy:
                             continue
 
                         distance = abs(future_price - strike) / future_price if future_price > 0 else 1.0
-                        if distance > 0.03:
+                        if distance > self._strike_distance_threshold:
                             continue
 
                         expiry_str = info.get('expiry_date', '')
@@ -967,5 +1535,6 @@ __all__ = [
     'SpringSignal',
     'SpringPosition',
     'SpringState',
+    'PendingPullback',
     'get_box_spring_strategy',
 ]

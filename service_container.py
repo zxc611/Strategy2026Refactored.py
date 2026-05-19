@@ -17,6 +17,8 @@ class ServiceContainer:
       禁止反向依赖(高层→低层中跳过中间层)
     """
 
+    UNKNOWN_LAYER = 99
+
     _LAYERS = {
         'event_bus': 0, 'config': 0, 'params': 0,
         'storage': 1, 'market_data': 1,
@@ -50,9 +52,9 @@ class ServiceContainer:
     def register(self, name: str, service: Any) -> None:
         """注册服务（带层级校验）"""
         self._services[name] = service
-        svc_layer = self._LAYERS.get(name, 99)
+        svc_layer = self._LAYERS.get(name, self.UNKNOWN_LAYER)
         for dep in self._dependencies.get(name, []):
-            dep_layer = self._LAYERS.get(dep, 99)
+            dep_layer = self._LAYERS.get(dep, self.UNKNOWN_LAYER)
             if dep_layer >= svc_layer:
                 logging.warning(
                     "[ServiceContainer] layer violation: %s(L%d) depends on %s(L%d)",
@@ -119,22 +121,73 @@ class ServiceContainer:
             event_bus = get_global_event_bus()
             self.register('event_bus', event_bus)
 
-            from ali2026v3_trading.config_service import get_cached_params
-            config = get_cached_params()
+            from ali2026v3_trading.config_service import get_config
+            from ali2026v3_trading.config_params import get_cached_params
+            config = get_config()
+            params = get_cached_params()
             self.register('config', config)
-            self.register('params', config)
+            self.register('params', params)
 
             from ali2026v3_trading import get_instrument_data_manager
             storage = get_instrument_data_manager()
             self.register('storage', storage)
 
-            from ali2026v3_trading.signal_service import SignalService
-            signal_service = SignalService(event_bus=event_bus)
-            self.register('signal', signal_service)
+            try:
+                from ali2026v3_trading.query_service import QueryService
+                market_data = QueryService(storage)
+                self.register('market_data', market_data)
+            except ImportError:
+                logging.warning("[ServiceContainer] QueryService not available, market_data skipped")
+
+            try:
+                from ali2026v3_trading.greeks_calculator import GreeksCalculator
+                analytics = GreeksCalculator()
+                self.register('analytics', analytics)
+            except ImportError:
+                logging.warning("[ServiceContainer] GreeksCalculator not available, analytics skipped")
+
+            try:
+                from ali2026v3_trading.risk_service import RiskService
+                risk = RiskService()
+                self.register('risk', risk)
+            except ImportError:
+                logging.warning("[ServiceContainer] RiskService not available, risk skipped")
 
             from ali2026v3_trading.order_service import OrderService
             order_service = OrderService(event_bus=event_bus)
             self.register('order', order_service)
+
+            from ali2026v3_trading.signal_service import SignalService
+            signal_service = SignalService(event_bus=event_bus)
+            self.register('signal', signal_service)
+
+            try:
+                from ali2026v3_trading.t_type_service import TTypeService
+                t_type = TTypeService()
+                self.register('t_type', t_type)
+            except ImportError:
+                logging.warning("[ServiceContainer] TTypeService not available, t_type skipped")
+
+            try:
+                from ali2026v3_trading.diagnosis_service import DiagnosisService
+                diagnosis = DiagnosisService()
+                self.register('diagnosis', diagnosis)
+            except ImportError:
+                logging.warning("[ServiceContainer] DiagnosisService not available, diagnosis skipped")
+
+            try:
+                from ali2026v3_trading.ui_service import UIMixin
+                ui = UIMixin()
+                self.register('ui', ui)
+            except ImportError:
+                logging.warning("[ServiceContainer] UIMixin not available, ui skipped")
+
+            try:
+                from ali2026v3_trading.strategy_core_service import StrategyCoreService
+                strategy_core = StrategyCoreService()
+                self.register('strategy_core', strategy_core)
+            except ImportError:
+                logging.warning("[ServiceContainer] StrategyCoreService not available, strategy_core skipped")
 
             success = self.initialize_all()
 
@@ -146,5 +199,5 @@ class ServiceContainer:
             return success
 
         except Exception as e:
-            logging.error("[ServiceContainer] failed to create services: %s", e)
-            return False
+            logging.error("[ServiceContainer] failed to create services: %s", e, exc_info=True)
+            raise

@@ -57,6 +57,10 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
+_POSITION_LIMIT_DELTA_DISPLAY_MULTIPLIER = 1000
+_POSITION_LIMIT_GAMMA_DISPLAY_MULTIPLIER = 50
+_POSITION_LIMIT_VEGA_DISPLAY_MULTIPLIER = 200
+
 # ----------------------------------------------------------------------------
 # 辅助数学函数
 # ----------------------------------------------------------------------------
@@ -298,14 +302,15 @@ class BinomialTreePricer:
         steps: int = 200,
         american: bool = False
     ) -> Dict[str, float]:
-        h = S * 0.001
+        h = max(S * 0.001, 0.01)
+        S_down = max(S - h, 0.01)
         price = BinomialTreePricer.price(S, K, T, r, q, sigma, option_type, steps, american)
         price_up = BinomialTreePricer.price(S + h, K, T, r, q, sigma, option_type, steps, american)
-        price_down = BinomialTreePricer.price(S - h, K, T, r, q, sigma, option_type, steps, american)
+        price_down = BinomialTreePricer.price(S_down, K, T, r, q, sigma, option_type, steps, american)
         price_T = BinomialTreePricer.price(S, K, max(T - 1.0/365.0, 0.0), r, q, sigma, option_type, steps, american)
         price_vol_up = BinomialTreePricer.price(S, K, T, r, q, sigma + 0.01, option_type, steps, american)
 
-        delta = (price_up - price_down) / (2.0 * h)
+        delta = (price_up - price_down) / (S + h - S_down)
         gamma = (price_up - 2.0 * price + price_down) / (h * h)
         theta = (price_T - price) / (1.0 / 365.0)
         vega = (price_vol_up - price) / 100.0
@@ -379,8 +384,8 @@ class MonteCarloPricer:
 
             payoffs_arr = [math.exp(-r * T) * p for p in payoffs]
             mean = sum(payoffs_arr) / len(payoffs_arr)
-            variance = sum((p - mean) ** 2 for p in payoffs_arr) / (len(payoffs_arr) - 1)
-            std_error = math.sqrt(variance / len(payoffs_arr))
+            variance = sum((p - mean) ** 2 for p in payoffs_arr) / (len(payoffs_arr) - 1) if len(payoffs_arr) > 1 else 0.0
+            std_error = math.sqrt(variance / len(payoffs_arr)) if variance > 0 else 0.0
             return mean, std_error
 
         dt = T / n_steps
@@ -398,8 +403,8 @@ class MonteCarloPricer:
             payoffs.append(math.exp(-r * T) * payoff)
 
         mean = sum(payoffs) / n_simulations
-        variance = sum((p - mean) ** 2 for p in payoffs) / (n_simulations - 1)
-        std_error = math.sqrt(variance / n_simulations)
+        variance = sum((p - mean) ** 2 for p in payoffs) / (n_simulations - 1) if n_simulations > 1 else 0.0
+        std_error = math.sqrt(variance / n_simulations) if variance > 0 else 0.0
         return mean, std_error
 
     @staticmethod
@@ -493,14 +498,14 @@ class TradingCalendar:
         """
         today = datetime.now().date()
         if expiry_date <= today:
-            return 1.0 / (252.0 * 240.0)
+            return 1.0 / (self.TRADING_DAYS_PER_YEAR * self.TRADING_HOURS_PER_DAY)
         
         if use_trading_days:
             days = self.trading_days_between(today, expiry_date)
-            return max(1.0 / (252.0 * 24.0), days / 252.0)
+            return max(1.0 / (self.TRADING_DAYS_PER_YEAR * self.TRADING_HOURS_PER_DAY), days / self.TRADING_DAYS_PER_YEAR)
         else:
             days = (expiry_date - today).days
-            return max(1.0 / (252.0 * 24.0), days / 365.0)
+            return max(1.0 / (self.TRADING_DAYS_PER_YEAR * self.TRADING_HOURS_PER_DAY), days / self.DAYS_PER_YEAR)
 
 
 # ----------------------------------------------------------------------------
@@ -516,6 +521,11 @@ class GreeksCalculator:
     - 完整的异常处理和日志
     """
 
+    TRADING_DAYS_PER_YEAR = 252.0
+    TRADING_HOURS_PER_DAY = 8.5
+    DAYS_PER_YEAR = 365.0
+    DEFAULT_RISK_FREE_RATE = 0.02
+
     def __init__(self, config_path: Optional[str] = None):
         """
         Args:
@@ -524,7 +534,7 @@ class GreeksCalculator:
         self._lock = threading.RLock()
 
         # 默认配置
-        self._risk_free_rate = 0.02
+        self._risk_free_rate = self.DEFAULT_RISK_FREE_RATE
         self._update_strategy = {
             'time_interval_sec': 1.0,      # 时间间隔超过1秒则更新
             'price_change_pct': 0.5,       # 价格变化超过0.5%则更新
@@ -869,6 +879,9 @@ class GreeksCalculator:
             
             return greeks.copy()
 
+    def get_lock(self) -> 'threading.RLock':
+        return self._lock
+
     def update_greeks_from_tick(
         self,
         instrument_id: str,
@@ -1133,13 +1146,13 @@ class GreeksCalculator:
         
         # 使用明确的默认值（不再动态计算）
         if delta_limit is None:
-            delta_limit = 1000
+            delta_limit = _POSITION_LIMIT_DELTA_DISPLAY_MULTIPLIER
         if gamma_limit is None:
-            gamma_limit = 50
+            gamma_limit = _POSITION_LIMIT_GAMMA_DISPLAY_MULTIPLIER
         if theta_min is None:
             theta_min = -500
         if vega_limit is None:
-            vega_limit = 200
+            vega_limit = _POSITION_LIMIT_VEGA_DISPLAY_MULTIPLIER
         
         warnings = []
         

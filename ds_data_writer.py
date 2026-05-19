@@ -46,10 +46,11 @@ class DataWriterMixin:
                 try:
                     info = self.params_service.get_instrument_meta_by_id(instrument_id)
                     if info and info.get('type') == 'option':
-                        raw_opt = info.get('option_type', '')
-                        raw_opt_upper = raw_opt.upper() if raw_opt else ''
-                        tick_row['option_type'] = 'CALL' if raw_opt_upper in ('C', 'CALL') else 'PUT' if raw_opt_upper in ('P', 'PUT') else None
-                        tick_row['strike_price'] = float(info.get('strike_price') or 0.0)
+                        from ali2026v3_trading.shared_utils import normalize_option_type
+                        nt = normalize_option_type(info.get('option_type', ''))
+                        tick_row['option_type'] = nt if nt in ('CALL', 'PUT') else None
+                        raw_sp = info.get('strike_price')
+                        tick_row['strike_price'] = float(raw_sp) if raw_sp is not None else None
                         enriched = True
                 except Exception:
                     pass
@@ -60,7 +61,8 @@ class DataWriterMixin:
                     if not tick_row.get('option_type'):
                         tick_row['option_type'] = 'CALL' if parsed.get('option_type') == 'C' else 'PUT'
                     if not tick_row.get('strike_price'):
-                        tick_row['strike_price'] = float(parsed.get('strike_price') or 0.0)
+                        raw_sp = parsed.get('strike_price')
+                        tick_row['strike_price'] = float(raw_sp) if raw_sp is not None else None
                 except Exception:
                     pass
 
@@ -122,7 +124,21 @@ class DataWriterMixin:
             if ts_str is None:
                 continue
             try:
-                ts = datetime.fromisoformat(str(ts_str).split('.')[0]).timestamp()
+                ts_raw = str(ts_str)
+                if ts_raw.endswith('Z'):
+                    ts_raw = ts_raw[:-1] + '+00:00'
+                dot_idx = ts_raw.find('.')
+                if dot_idx >= 0:
+                    tz_start = -1
+                    for i in range(dot_idx + 1, len(ts_raw)):
+                        if ts_raw[i] in ('+', '-'):
+                            tz_start = i
+                            break
+                    if tz_start >= 0:
+                        ts_raw = ts_raw[:dot_idx] + ts_raw[tz_start:]
+                    else:
+                        ts_raw = ts_raw[:dot_idx]
+                ts = datetime.fromisoformat(ts_raw).timestamp()
                 dt = datetime.fromtimestamp(ts)
                 normalized_ticks.append({
                     'timestamp': dt,
@@ -389,7 +405,7 @@ class DataWriterMixin:
                     updates.append("option_type = ?")
                     params.append(option_type)
 
-                if strike_price and float(existing[6] or 0.0) != float(strike_price):
+                if strike_price and (existing[6] is None or float(existing[6]) != float(strike_price)):
                     updates.append("strike_price = ?")
                     params.append(strike_price)
 
@@ -640,26 +656,8 @@ class DataWriterMixin:
             tables = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_name='ticks_raw'").fetchall()
             if not tables:
                 logger.info("[SyncTicks] Creating ticks_raw table...")
-                conn.execute("""
-                    CREATE TABLE ticks_raw (
-                        timestamp TIMESTAMP,
-                        instrument_id VARCHAR,
-                        last_price DOUBLE,
-                        volume BIGINT,
-                        open_interest DOUBLE,
-                        bid_price DOUBLE,
-                        ask_price DOUBLE,
-                        date DATE,
-                        option_type VARCHAR,
-                        strike_price DOUBLE,
-                        is_otm BOOLEAN,
-                        sync_status VARCHAR,
-                        future_sync_status VARCHAR,
-                        is_same_rise BOOLEAN,
-                        is_same_fall BOOLEAN,
-                        is_diff_sync BOOLEAN
-                    )
-                """)
+                from ali2026v3_trading.ds_schema_manager import get_ticks_raw_create_sql
+                conn.execute(get_ticks_raw_create_sql())
                 logger.info("[SyncTicks] ticks_raw table created")
 
             option_tables = conn.execute("""

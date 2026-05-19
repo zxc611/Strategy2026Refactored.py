@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import ast
 import time
 import logging
 import threading
@@ -48,26 +49,28 @@ from dataclasses import dataclass
 # 数据结构
 # ============================================================================
 
-@dataclass
-class OutputConfig:
-    """输出配置"""
-    mode: str = "debug"
-    trade_quiet: bool = True
-    diagnostic_enabled: bool = True
-    debug_enabled: bool = False
+from ali2026v3_trading.config_service import OutputConfig as _ConfigOutputConfig
 
-    def __post_init__(self):
-        if self.mode == "debug":
-            self.mode = "close_debug"
-        self.is_trade_like = self.mode in ("trade", "open_debug")
+
+class OutputConfig(_ConfigOutputConfig):
+    """输出配置 — 扩展自config_service.OutputConfig，增加交易输出控制"""
+    def __init__(self, mode: str = "debug", trade_quiet: bool = True,
+                 diagnostic_enabled: bool = True, debug_enabled: bool = False):
+        super().__init__()
+        if mode == "debug":
+            mode = "close_debug"
+        self.mode = mode
+        self.trade_quiet = trade_quiet
+        self.diagnostic_enabled = diagnostic_enabled
+        self.debug_enabled = debug_enabled
+        self.is_trade_like = mode in ("trade", "open_debug")
         self.combined_debug_enabled = (
             self.diagnostic_enabled and
-            (self.debug_enabled or self.mode == "close_debug")
+            (self.debug_enabled or mode == "close_debug")
         )
 
     def should_output(self, is_trade: bool = False, is_force: bool = False,
                       is_trade_table: bool = False, is_diag: bool = False) -> bool:
-        """判断是否应该输出"""
         if self.is_trade_like and self.trade_quiet and not is_trade_table:
             return False
         if is_diag and not self.diagnostic_enabled and not is_trade and not is_force:
@@ -812,40 +815,41 @@ class ParamsService:
                 logging.error("[ParamsService] Empty path provided")
                 return {}
 
-            now = time.time()
+            with self._lock:
+                now = time.time()
 
-            # 检查节流
-            last_check = self._param_check_timestamp.get(path, 0)
-            if not force and (now - last_check < self._check_interval):
-                if path in self._param_cache:
-                    return self._param_cache[path]
+                # 检查节流
+                last_check = self._param_check_timestamp.get(path, 0)
+                if not force and (now - last_check < self._check_interval):
+                    if path in self._param_cache:
+                        return self._param_cache[path]
 
-            self._param_check_timestamp[path] = now
+                self._param_check_timestamp[path] = now
 
-            # 检查文件是否存在
-            if not os.path.exists(path):
-                self._log(f"[ParamsService] File not found: {path}")
+                # 检查文件是否存在
+                if not os.path.exists(path):
+                    self._log(f"[ParamsService] File not found: {path}")
+                    return {}
+
+                # 检查缓存
+                mtime = os.path.getmtime(path)
+                if path in self._param_cache and self._param_cache_meta.get(path) == mtime:
+                    cached = self._param_cache.get(path)
+                    if isinstance(cached, dict):
+                        return cached
+
+                # 加载文件
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                if isinstance(data, dict):
+                    self._param_cache[path] = data
+                    self._param_cache_meta[path] = mtime
+                    self._log(f"[ParamsService] Loaded {len(data)} params from {path}")
+                    return data
+
+                logging.error(f"[ParamsService] Invalid data type: {type(data)}")
                 return {}
-
-            # 检查缓存
-            mtime = os.path.getmtime(path)
-            if path in self._param_cache and self._param_cache_meta.get(path) == mtime:
-                cached = self._param_cache.get(path)
-                if isinstance(cached, dict):
-                    return cached
-
-            # 加载文件
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            if isinstance(data, dict):
-                self._param_cache[path] = data
-                self._param_cache_meta[path] = mtime
-                self._log(f"[ParamsService] Loaded {len(data)} params from {path}")
-                return data
-
-            logging.error(f"[ParamsService] Invalid data type: {type(data)}")
-            return {}
 
         except Exception as e:
             logging.error(f"[ParamsService.load_params] Error: {e}")
@@ -897,13 +901,14 @@ class ParamsService:
             是否成功
         """
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(params, f, indent=2, ensure_ascii=False)
+            with self._lock:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(params, f, indent=2, ensure_ascii=False)
 
-            # 更新缓存
-            mtime = os.path.getmtime(path)
-            self._param_cache[path] = params
-            self._param_cache_meta[path] = mtime
+                # 更新缓存
+                mtime = os.path.getmtime(path)
+                self._param_cache[path] = params
+                self._param_cache_meta[path] = mtime
 
             self._log(f"[ParamsService] Saved {len(params)} params to {path}")
             return True
@@ -1127,13 +1132,20 @@ class ParamsService:
             obj: 目标对象
             notify: 是否通知观察者
         """
+        notify_list = []
         with self._lock:
             for key, value in self._params.items():
                 if hasattr(obj, key):
                     try:
-                        setattr(obj, key, value)
+                        new_value = getattr(obj, key)
+                        old_value = self._params.get(key)
+                        self._params[key] = new_value
+                        if notify and old_value != new_value:
+                            notify_list.append((key, old_value, new_value))
                     except Exception as e:
                         logging.warning(f"[ParamsService] Error setting {key}: {e}")
+        for info in notify_list:
+            self._notify_observers(*info)
 
     def apply_to_object(self, obj: Any) -> None:
         """
@@ -1343,6 +1355,62 @@ class ParamsService:
         'min': min, 'max': max, 'abs': abs,
         'round': round, 'pow': pow,
     }
+    
+    _ALLOWED_EXPR_CHARS = frozenset('0123456789.+-*/() %')
+
+    _SAFE_BIN_OPS = {
+        ast.Add: lambda a, b: a + b,
+        ast.Sub: lambda a, b: a - b,
+        ast.Mult: lambda a, b: a * b,
+        ast.Div: lambda a, b: a / b,
+        ast.Mod: lambda a, b: a % b,
+        ast.Pow: lambda a, b: a ** b,
+        ast.FloorDiv: lambda a, b: a // b,
+    }
+
+    _SAFE_UNARY_OPS = {
+        ast.USub: lambda a: -a,
+        ast.UAdd: lambda a: +a,
+    }
+
+    @classmethod
+    def _safe_eval_ast(cls, expr: str, namespace: Dict[str, Any]) -> Any:
+        tree = ast.parse(expr, mode='eval')
+        return cls._eval_ast_node(tree.body, namespace)
+
+    @classmethod
+    def _eval_ast_node(cls, node: ast.AST, namespace: Dict[str, Any]) -> Any:
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id in namespace:
+                return namespace[node.id]
+            raise NameError(f"name '{node.id}' is not defined")
+        if isinstance(node, ast.BinOp):
+            op_func = cls._SAFE_BIN_OPS.get(type(node.op))
+            if op_func is None:
+                raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+            return op_func(cls._eval_ast_node(node.left, namespace),
+                           cls._eval_ast_node(node.right, namespace))
+        if isinstance(node, ast.UnaryOp):
+            op_func = cls._SAFE_UNARY_OPS.get(type(node.op))
+            if op_func is None:
+                raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
+            return op_func(cls._eval_ast_node(node.operand, namespace))
+        if isinstance(node, ast.Call):
+            func = cls._eval_ast_node(node.func, namespace)
+            args = [cls._eval_ast_node(arg, namespace) for arg in node.args]
+            return func(*args)
+        if isinstance(node, ast.Attribute):
+            raise ValueError("Attribute access not allowed in dynamic expressions")
+        raise ValueError(f"Unsupported AST node: {type(node).__name__}")
+
+    @classmethod
+    def _validate_expr_safe(cls, expr: str) -> bool:
+        if not expr or not isinstance(expr, str):
+            return False
+        allowed = cls._ALLOWED_EXPR_CHARS | frozenset('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_')
+        return all(c in allowed for c in expr)
 
     def eval_dynamic_param(self, key: str, context: Optional[Dict[str, Any]] = None) -> Any:
         """根据动态表达式计算参数值
@@ -1393,7 +1461,17 @@ class ParamsService:
                 return self.get(key)
 
         try:
-            result = eval(dynamic_expr, {"__builtins__": {}}, eval_ns)
+            if not self._validate_expr_safe(dynamic_expr):
+                logging.error(
+                    "[ParamsService] eval_dynamic_param REJECTED unsafe expr for '%s': %r",
+                    key, dynamic_expr,
+                )
+                return self.get(key)
+            result = self._safe_eval_ast(dynamic_expr, eval_ns)
+            logging.info(
+                "[ParamsService] eval_dynamic_param OK for '%s': expr=%r result=%r",
+                key, dynamic_expr, result,
+            )
         except Exception as e:
             logging.error(
                 "[ParamsService] eval_dynamic_param FAILED for '%s': expr=%r error=%s",

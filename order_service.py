@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import threading
 import logging
 import time
@@ -36,6 +37,8 @@ class BaseService:
 
 
 class PlatformAuthenticator:
+    DEFAULT_TOKEN_EXPIRY_SECONDS = 3600.0
+    
     def __init__(self):
         self._token: Optional[str] = None
         self._token_expiry: float = 0.0
@@ -47,7 +50,9 @@ class PlatformAuthenticator:
                 return self._token
             return None
 
-    def set_token(self, token: str, expires_in: float = 3600.0) -> None:
+    def set_token(self, token: str, expires_in: float = None) -> None:
+        if expires_in is None:
+            expires_in = self.DEFAULT_TOKEN_EXPIRY_SECONDS
         with self._lock:
             self._token = token
             self._token_expiry = time.time() + expires_in
@@ -67,6 +72,12 @@ def get_order_service() -> 'OrderService':
 
 
 class OrderService(BaseService):
+    DEFAULT_ORDER_TIMEOUT_SECONDS = 5.0
+    MAX_CHASE_RETRIES = 3
+    MAX_SEND_RETRIES = 3
+    CLEANUP_INTERVAL_SECONDS = 300
+    DEFAULT_CONTRACT_MULTIPLIER = 100
+    
     def __init__(self, event_bus=None):
         super().__init__(event_bus)
         self.authenticator = PlatformAuthenticator()
@@ -80,9 +91,9 @@ class OrderService(BaseService):
         self._platform_insert_order = None
         self._platform_cancel_order = None
         self._platform_insert_order_params = set()
-        self._order_timeout_seconds = 5.0
-        self._max_chase_retries = 3
-        self._max_send_retries = 3
+        self._order_timeout_seconds = self.DEFAULT_ORDER_TIMEOUT_SECONDS
+        self._max_chase_retries = self.MAX_CHASE_RETRIES
+        self._max_send_retries = self.MAX_SEND_RETRIES
         self._stats = {
             'total_orders': 0,
             'successful_orders': 0,
@@ -92,9 +103,10 @@ class OrderService(BaseService):
             'self_trade_blocks': 0,
             'retry_successes': 0,
             'partial_fills': 0,
+            'insufficient_fund_orders': 0,
         }
         self._last_cleanup = time.time()
-        self._cleanup_interval = 300
+        self._cleanup_interval = self.CLEANUP_INTERVAL_SECONDS
 
         self._trade_log_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), 'logs'
@@ -102,6 +114,13 @@ class OrderService(BaseService):
         self._trade_log_path: Optional[str] = None
         self._trade_log_lock = threading.Lock()
         self._trade_log_initialized = False
+
+        self._insufficient_fund_signals: List[Dict[str, Any]] = []
+        self._pending_order_attempts: Dict[str, Dict[str, Any]] = {}
+        self._virtual_positions: Dict[str, Dict[str, Any]] = {}
+        self._virtual_position_pnl_history: List[Dict[str, Any]] = []
+        self._max_insufficient_fund_signals = 1000
+        self._max_pnl_history = 10000
 
         self._hft_order_splitter = None
         self._hft_defense_engine = None
@@ -178,6 +197,13 @@ class OrderService(BaseService):
                     self._stats['self_trade_blocks'] += 1
                 return None
 
+            risk_level = self._check_cross_strategy_risk()
+            if risk_level in ('BLOCK', 'CIRCUIT_BREAK'):
+                logging.warning("[OrderService] 跨策略风控阻断: level=%s instrument=%s dir=%s", risk_level, instrument_id, direction)
+                with self._lock:
+                    self._stats['risk_guard_blocks'] = self._stats.get('risk_guard_blocks', 0) + 1
+                return None
+
         try:
             order_id = self._generate_order_id()
             order = {
@@ -197,6 +223,15 @@ class OrderService(BaseService):
             with self._lock:
                 self._orders_by_id[order_id] = order
                 self._stats['total_orders'] += 1
+                self._pending_order_attempts[order_id] = {
+                    'timestamp': datetime.now().isoformat(),
+                    'instrument_id': instrument_id,
+                    'price': price,
+                    'volume': volume,
+                    'direction': direction,
+                    'action': action,
+                    'open_reason': order.get('open_reason', ''),
+                }
 
             send_result = self._execute_send_order(order, retry_count=0)
             if send_result is None and not is_chase:
@@ -257,11 +292,14 @@ class OrderService(BaseService):
                 logging.info("[OrderService] 平台下单成功: %s %s %s %d@%.2f reason=%s", order_id, instrument_id, direction, int(volume), price, order.get('open_reason', ''))
                 return order_id
             except Exception as e:
+                error_msg = str(e)
                 logging.error("[OrderService] 平台下单失败(retry=%d): %s %s", retry_count, instrument_id, e)
                 if retry_count == 0:
                     with self._lock:
                         order['status'] = 'FAILED'
                         self._stats['failed_orders'] += 1
+                        if '资金不足' in error_msg or 'insufficient' in error_msg.lower():
+                            self._record_insufficient_fund(order_id, error_msg)
                 return None
         else:
             logging.info("[OrderService] 模拟下单: %s %s %s %d@%.2f reason=%s", order_id, instrument_id, direction, int(volume), price, order.get('open_reason', ''))
@@ -283,19 +321,43 @@ class OrderService(BaseService):
         logging.error("[OrderService] All %d retries failed: %s", self._max_send_retries, order['instrument_id'])
         return None
 
+    def _check_cross_strategy_risk(self) -> str:
+        try:
+            from ali2026v3_trading.position_service import (
+                aggregate_greeks_exposure,
+                get_cross_strategy_risk_guard,
+                get_position_service,
+            )
+            guard = get_cross_strategy_risk_guard()
+            pos_svc = get_position_service()
+            exposure = aggregate_greeks_exposure(pos_svc.positions)
+            level, reason, detail = guard.check(exposure)
+            if level in (guard.BLOCK, guard.CIRCUIT_BREAK):
+                return level
+            return 'PASS'
+        except Exception as e:
+            logging.warning("[OrderService._check_cross_strategy_risk] Error: %s, fail-safe阻断", e)
+            return 'BLOCK'
+
+    @staticmethod
+    def _check_self_trade_core(order_side: str, existing_orders: List[Dict]) -> bool:
+        for order in existing_orders:
+            if order.get('status') not in ('SUBMITTED', 'PENDING'):
+                continue
+            if order_side == 'BUY' and order.get('direction') == 'SELL' and order.get('action') == 'OPEN':
+                return True
+            if order_side == 'SELL' and order.get('direction') == 'BUY' and order.get('action') == 'OPEN':
+                return True
+        return False
+
     def _check_self_trade(self, instrument_id: str, direction: str) -> bool:
         """V7新增：自成交检测 — 同合约存在反向挂单则告警并禁止"""
         with self._lock:
-            for order in self._orders_by_id.values():
-                if order['instrument_id'] != instrument_id:
-                    continue
-                if order['status'] not in ('SUBMITTED', 'PENDING'):
-                    continue
-                if direction == 'BUY' and order['direction'] == 'SELL' and order['action'] == 'OPEN':
-                    return True
-                if direction == 'SELL' and order['direction'] == 'BUY' and order['action'] == 'OPEN':
-                    return True
-        return False
+            matching_orders = [
+                o for o in self._orders_by_id.values()
+                if o['instrument_id'] == instrument_id
+            ]
+            return self._check_self_trade_core(direction, matching_orders)
 
     def execute_by_ranking(self, targets: List[Dict[str, Any]], direction: str = 'BUY', action: str = 'OPEN') -> List[str]:
         if not targets:
@@ -475,13 +537,6 @@ class OrderService(BaseService):
         chase_ticks = min(retry_count, 3)
         price_offset = tick_size * chase_ticks
         
-        # ✅ P1修复：添加最大滑点限制（不超过5个tick）
-        max_chase_ticks = 5
-        if chase_ticks > max_chase_ticks:
-            logging.warning(f"[OrderService._chase_reorder] Chase ticks {chase_ticks} exceeds max {max_chase_ticks}, capping")
-            chase_ticks = max_chase_ticks
-            price_offset = tick_size * chase_ticks
-        
         if original_order['direction'] == 'BUY':
             new_price = original_order['price'] + price_offset
         else:
@@ -635,6 +690,409 @@ class OrderService(BaseService):
                 order['pnl'] = pnl
                 self._persist_trade_log(order, 'CLOSE', extra={'close_reason': close_reason, 'pnl': pnl})
 
+    def _record_insufficient_fund(self, order_id: str, error_msg: str) -> None:
+        import re
+        with self._lock:
+            self._stats['insufficient_fund_orders'] += 1
+            attempt = self._pending_order_attempts.pop(order_id, {})
+            if not attempt:
+                attempt = {
+                    'timestamp': datetime.now().isoformat(),
+                    'instrument_id': '',
+                    'price': 0,
+                    'volume': 0,
+                    'direction': '',
+                    'action': '',
+                    'open_reason': '',
+                }
+            missing_match = re.search(r'缺少资金\[([\d.]+)\]', error_msg)
+            missing_fund = float(missing_match.group(1)) if missing_match else 0.0
+            instrument_id = attempt.get('instrument_id', '')
+            option_type = "UNKNOWN"
+            strike_price = 0.0
+            opt_match = re.search(r'([CP])-(\d+)', instrument_id)
+            if opt_match:
+                option_type = "PUT" if opt_match.group(1) == 'P' else "CALL"
+                strike_price = float(opt_match.group(2))
+            signal_record = {
+                'timestamp': attempt.get('timestamp', datetime.now().isoformat()),
+                'order_id': order_id,
+                'instrument_id': instrument_id,
+                'option_type': option_type,
+                'strike_price': strike_price,
+                'price': attempt.get('price', 0),
+                'volume': attempt.get('volume', 0),
+                'direction': attempt.get('direction', ''),
+                'action': attempt.get('action', ''),
+                'open_reason': attempt.get('open_reason', ''),
+                'missing_fund': missing_fund,
+                'error_msg': error_msg,
+                'signal_type': f"OPEN_{option_type}" if attempt.get('action') == 'OPEN' else f"CLOSE_{option_type}",
+                'theoretical_pnl': 0.0,
+            }
+            self._insufficient_fund_signals.append(signal_record)
+            if len(self._insufficient_fund_signals) > self._max_insufficient_fund_signals:
+                self._insufficient_fund_signals = self._insufficient_fund_signals[-self._max_insufficient_fund_signals:]
+            self._persist_trade_log(
+                {'order_id': order_id, **attempt},
+                'INSUFFICIENT_FUND',
+                extra={'missing_fund': missing_fund, 'error_msg': error_msg, 'signal_type': signal_record['signal_type']}
+            )
+            if attempt.get('action') == 'OPEN':
+                self._create_virtual_position(signal_record)
+            logging.warning(
+                "[OrderService] 资金不足信号: %s %s price=%.2f missing=%.2f type=%s",
+                order_id, instrument_id, attempt.get('price', 0), missing_fund, signal_record['signal_type']
+            )
+
+    def record_insufficient_fund_from_log(self, instrument_id: str, price: float,
+                                           volume: int, direction: str, open_close: str,
+                                           missing_fund: float, strategy_id: str = '',
+                                           investor_id: str = '') -> None:
+        import re
+        with self._lock:
+            self._stats['insufficient_fund_orders'] += 1
+            option_type = "UNKNOWN"
+            strike_price = 0.0
+            opt_match = re.search(r'([CP])-(\d+)', instrument_id)
+            if opt_match:
+                option_type = "PUT" if opt_match.group(1) == 'P' else "CALL"
+                strike_price = float(opt_match.group(2))
+            signal_record = {
+                'timestamp': datetime.now().isoformat(),
+                'order_id': '',
+                'instrument_id': instrument_id,
+                'option_type': option_type,
+                'strike_price': strike_price,
+                'price': price,
+                'volume': volume,
+                'direction': direction,
+                'open_close': open_close,
+                'open_reason': '',
+                'missing_fund': missing_fund,
+                'strategy_id': strategy_id,
+                'investor_id': investor_id,
+                'signal_type': f"OPEN_{option_type}" if open_close == '开仓' else f"CLOSE_{option_type}",
+                'theoretical_pnl': 0.0,
+            }
+            self._insufficient_fund_signals.append(signal_record)
+            if len(self._insufficient_fund_signals) > self._max_insufficient_fund_signals:
+                self._insufficient_fund_signals = self._insufficient_fund_signals[-self._max_insufficient_fund_signals:]
+            if open_close == '开仓':
+                self._create_virtual_position(signal_record)
+            logging.warning(
+                "[OrderService] 资金不足信号(外部): %s %s price=%.2f missing=%.2f type=%s",
+                instrument_id, direction, price, missing_fund, signal_record['signal_type']
+            )
+
+    def _create_virtual_position(self, signal_record: Dict[str, Any]) -> None:
+        instrument_id = signal_record.get('instrument_id', '')
+        if not instrument_id:
+            return
+        direction = signal_record.get('direction', '')
+        is_long = direction in ('买', 'BUY')
+        vpid = f"VP_{instrument_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{id(signal_record)}"
+        virtual_pos = {
+            'virtual_position_id': vpid,
+            'instrument_id': instrument_id,
+            'option_type': signal_record.get('option_type', 'UNKNOWN'),
+            'strike_price': signal_record.get('strike_price', 0),
+            'open_price': signal_record.get('price', 0),
+            'open_time': signal_record.get('timestamp', datetime.now().isoformat()),
+            'open_date': datetime.now().strftime("%Y-%m-%d"),
+            'volume': signal_record.get('volume', 0),
+            'direction': 'long' if is_long else 'short',
+            'open_reason': signal_record.get('open_reason', ''),
+            'signal_type': signal_record.get('signal_type', ''),
+            'missing_fund': signal_record.get('missing_fund', 0),
+            'mark_price': signal_record.get('price', 0),
+            'mark_date': datetime.now().strftime("%Y-%m-%d"),
+            'daily_pnl': 0.0,
+            'accumulated_pnl': 0.0,
+            'status': 'OPEN',
+            'close_price': 0.0,
+            'close_time': None,
+            'close_reason': '',
+            'realized_pnl': 0.0,
+            'pnl_history': [],
+        }
+        self._virtual_positions[vpid] = virtual_pos
+        logging.info(
+            "[OrderService] 创建虚拟仓位: %s %s %s price=%.2f vol=%d missing=%.2f",
+            vpid, instrument_id, virtual_pos['direction'],
+            virtual_pos['open_price'], virtual_pos['volume'], virtual_pos['missing_fund']
+        )
+
+    def _calc_pnl(self, direction: str, open_price: float, close_price: float, volume: int, instrument_id: str = '') -> float:
+        contract_size = self.DEFAULT_CONTRACT_MULTIPLIER
+        if instrument_id:
+            try:
+                from ali2026v3_trading.params_service import get_params_service
+                params_svc = get_params_service()
+                meta = params_svc.get_instrument_meta_by_id(instrument_id)
+                if meta:
+                    product = meta.get('product', '')
+                    product_cache = params_svc.get_product_cache(product)
+                    if product_cache:
+                        contract_size = float(product_cache.get('contract_size', 100))
+            except Exception:
+                pass
+        if direction in ('long', '买', 'BUY'):
+            return (close_price - open_price) * volume * contract_size
+        else:
+            return (open_price - close_price) * volume * contract_size
+
+    def mark_virtual_positions_eod(self, close_prices: Optional[Dict[str, float]] = None) -> None:
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            for vpid, vp in list(self._virtual_positions.items()):
+                if vp['status'] != 'OPEN':
+                    continue
+                if vp.get('mark_date') == today:
+                    continue
+                close_price = 0.0
+                if close_prices and vp['instrument_id'] in close_prices:
+                    close_price = close_prices[vp['instrument_id']]
+                if close_price <= 0:
+                    try:
+                        from ali2026v3_trading.data_service import get_data_service
+                        ds = get_data_service()
+                        if ds and hasattr(ds, 'realtime_cache'):
+                            tick = ds.realtime_cache._latest_ticks.get(vp['instrument_id'])
+                            if tick:
+                                close_price = tick.get('price', tick.get('last_price', 0.0))
+                    except Exception:
+                        pass
+                if close_price <= 0:
+                    close_price = vp.get('mark_price', vp['open_price'])
+                daily_pnl = self._calc_pnl(vp['direction'], vp.get('mark_price', vp['open_price']), close_price, vp['volume'])
+                vp['mark_price'] = close_price
+                vp['mark_date'] = today
+                vp['daily_pnl'] = daily_pnl
+                vp['accumulated_pnl'] += daily_pnl
+                pnl_entry = {
+                    'date': today,
+                    'mark_price': close_price,
+                    'daily_pnl': daily_pnl,
+                    'accumulated_pnl': vp['accumulated_pnl'],
+                }
+                vp['pnl_history'].append(pnl_entry)
+                self._virtual_position_pnl_history.append({
+                    'virtual_position_id': vpid,
+                    'instrument_id': vp['instrument_id'],
+                    **pnl_entry,
+                })
+                if len(self._virtual_position_pnl_history) > self._max_pnl_history:
+                    self._virtual_position_pnl_history = self._virtual_position_pnl_history[-self._max_pnl_history:]
+                logging.info(
+                    "[OrderService] 虚拟仓位隔夜标记: %s %s mark=%.2f daily_pnl=%.2f accum_pnl=%.2f",
+                    vpid, vp['instrument_id'], close_price, daily_pnl, vp['accumulated_pnl']
+                )
+
+    def on_close_signal(self, instrument_id: str, signal_type: str, close_price: float) -> Optional[Dict[str, Any]]:
+        is_close_long = signal_type in ('CLOSE_LONG', 'SELL', '卖', '平多')
+        is_close_short = signal_type in ('CLOSE_SHORT', 'BUY', '买', '平空')
+        if not (is_close_long or is_close_short):
+            return None
+        with self._lock:
+            matched_vpid = None
+            for vpid, vp in self._virtual_positions.items():
+                if vp['status'] != 'OPEN':
+                    continue
+                if vp['instrument_id'] != instrument_id:
+                    continue
+                if is_close_long and vp['direction'] == 'long':
+                    matched_vpid = vpid
+                    break
+                if is_close_short and vp['direction'] == 'short':
+                    matched_vpid = vpid
+                    break
+            if not matched_vpid:
+                return None
+            vp = self._virtual_positions[matched_vpid]
+            if close_price <= 0:
+                try:
+                    from ali2026v3_trading.data_service import get_data_service
+                    ds = get_data_service()
+                    if ds and hasattr(ds, 'realtime_cache'):
+                        tick = ds.realtime_cache._latest_ticks.get(instrument_id)
+                        if tick:
+                            if is_close_long:
+                                close_price = tick.get('bid_price', tick.get('price', 0.0))
+                            else:
+                                close_price = tick.get('ask_price', tick.get('price', 0.0))
+                except Exception:
+                    pass
+            if close_price <= 0:
+                close_price = vp.get('mark_price', vp['open_price'])
+            daily_pnl = self._calc_pnl(vp['direction'], vp.get('mark_price', vp['open_price']), close_price, vp['volume'])
+            realized_pnl = vp['accumulated_pnl'] + daily_pnl
+            vp['mark_price'] = close_price
+            vp['mark_date'] = datetime.now().strftime("%Y-%m-%d")
+            vp['daily_pnl'] = daily_pnl
+            vp['accumulated_pnl'] = realized_pnl
+            vp['close_price'] = close_price
+            vp['close_time'] = datetime.now().isoformat()
+            vp['close_reason'] = f"策略平仓信号: {signal_type}"
+            vp['realized_pnl'] = realized_pnl
+            vp['status'] = 'CLOSED'
+            pnl_entry = {
+                'date': datetime.now().strftime("%Y-%m-%d"),
+                'mark_price': close_price,
+                'daily_pnl': daily_pnl,
+                'accumulated_pnl': realized_pnl,
+                'event': 'CLOSE_SIGNAL',
+                'close_reason': vp['close_reason'],
+            }
+            vp['pnl_history'].append(pnl_entry)
+            for signal in self._insufficient_fund_signals:
+                if signal.get('instrument_id') == instrument_id and (
+                    (signal.get('direction') in ('买', 'BUY') and is_close_long)
+                    or (signal.get('direction') in ('卖', 'SELL') and is_close_short)
+                ):
+                    signal['theoretical_pnl'] = realized_pnl
+                    signal['status'] = 'CLOSED_BY_SIGNAL'
+            self._persist_trade_log(
+                {'order_id': matched_vpid, 'instrument_id': instrument_id, 'price': close_price,
+                 'volume': vp['volume'], 'direction': vp['direction']},
+                'VIRTUAL_CLOSE',
+                extra={
+                    'virtual_position_id': matched_vpid,
+                    'open_price': vp['open_price'],
+                    'close_price': close_price,
+                    'realized_pnl': realized_pnl,
+                    'close_reason': vp['close_reason'],
+                    'hold_days': len(vp['pnl_history']),
+                }
+            )
+            logging.info(
+                "[OrderService] 虚拟仓位平仓结算: %s %s open=%.2f close=%.2f realized_pnl=%.2f reason=%s",
+                matched_vpid, instrument_id, vp['open_price'], close_price, realized_pnl, vp['close_reason']
+            )
+            return dict(vp)
+
+    def get_virtual_positions(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            positions = list(self._virtual_positions.values())
+            if status:
+                positions = [vp for vp in positions if vp.get('status') == status]
+            return positions
+
+    def get_virtual_position_summary(self) -> Dict[str, Any]:
+        with self._lock:
+            open_positions = [vp for vp in self._virtual_positions.values() if vp['status'] == 'OPEN']
+            closed_positions = [vp for vp in self._virtual_positions.values() if vp['status'] == 'CLOSED']
+            total_open_pnl = sum(vp.get('accumulated_pnl', 0) for vp in open_positions)
+            total_realized_pnl = sum(vp.get('realized_pnl', 0) for vp in closed_positions)
+            return {
+                'total_virtual': len(self._virtual_positions),
+                'open_count': len(open_positions),
+                'closed_count': len(closed_positions),
+                'total_open_pnl': total_open_pnl,
+                'total_realized_pnl': total_realized_pnl,
+                'total_pnl': total_open_pnl + total_realized_pnl,
+            }
+
+    def generate_daily_signal_report(self, date: Optional[str] = None) -> str:
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            date_signals = [
+                s for s in self._insufficient_fund_signals
+                if s.get('timestamp', '').startswith(date.replace('-', ''))
+                or s.get('timestamp', '').startswith(date)
+            ]
+        total_missing = sum(s.get('missing_fund', 0) for s in date_signals)
+        total_pnl = sum(s.get('theoretical_pnl', 0) for s in date_signals)
+        with self._lock:
+            open_vps = [vp for vp in self._virtual_positions.values() if vp['status'] == 'OPEN']
+            closed_today = [vp for vp in self._virtual_positions.values()
+                           if vp['status'] == 'CLOSED' and vp.get('close_time', '')[:10] == date]
+        total_open_pnl = sum(vp.get('accumulated_pnl', 0) for vp in open_vps)
+        total_realized_pnl = sum(vp.get('realized_pnl', 0) for vp in closed_today)
+        lines = [
+            "=" * 80,
+            f"当日信号明细报告 - {date}",
+            "=" * 80,
+            f"资金不足信号数: {len(date_signals)}",
+            f"缺少资金总额: {total_missing:.2f}",
+            f"理论盈亏合计: {total_pnl:.2f}",
+            f"虚拟仓位(持仓中): {len(open_vps)} 浮动盈亏: {total_open_pnl:.2f}",
+            f"虚拟仓位(今日平仓): {len(closed_today)} 实现盈亏: {total_realized_pnl:.2f}",
+            "-" * 80,
+        ]
+        for i, s in enumerate(date_signals, 1):
+            lines.extend([
+                f"【信号 {i}】",
+                f"  时间: {s.get('timestamp', '')}",
+                f"  合约: {s.get('instrument_id', '')}",
+                f"  期权类型: {s.get('option_type', '')}",
+                f"  行权价: {s.get('strike_price', 0)}",
+                f"  方向: {s.get('direction', '')} {s.get('open_close', s.get('action', ''))}",
+                f"  价格: {s.get('price', 0)}",
+                f"  数量: {s.get('volume', 0)}",
+                f"  缺少资金: {s.get('missing_fund', 0):.2f}",
+                f"  信号类型: {s.get('signal_type', '')}",
+                f"  开仓理由: {s.get('open_reason', '')}",
+                f"  理论盈亏: {s.get('theoretical_pnl', 0):.2f}",
+            ])
+        if open_vps:
+            lines.extend(["", "-" * 80, "虚拟持仓明细:", "-" * 80])
+            for i, vp in enumerate(open_vps, 1):
+                lines.extend([
+                    f"【虚拟仓位 {i}】",
+                    f"  合约: {vp['instrument_id']}  方向: {vp['direction']}",
+                    f"  开仓价: {vp['open_price']:.2f}  标记价: {vp.get('mark_price', 0):.2f}",
+                    f"  数量: {vp['volume']}  累计盈亏: {vp.get('accumulated_pnl', 0):.2f}",
+                    f"  持仓天数: {len(vp.get('pnl_history', []))}",
+                ])
+        if closed_today:
+            lines.extend(["", "-" * 80, "今日平仓虚拟仓位:", "-" * 80])
+            for i, vp in enumerate(closed_today, 1):
+                lines.extend([
+                    f"【已平仓 {i}】",
+                    f"  合约: {vp['instrument_id']}  方向: {vp['direction']}",
+                    f"  开仓价: {vp['open_price']:.2f}  平仓价: {vp.get('close_price', 0):.2f}",
+                    f"  实现盈亏: {vp.get('realized_pnl', 0):.2f}  平仓原因: {vp.get('close_reason', '')}",
+                ])
+        lines.extend([
+            "=" * 80,
+            f"报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "=" * 80,
+        ])
+        report = "\n".join(lines)
+        report_file = os.path.join(self._trade_log_dir, f"daily_signal_report_{date}.txt")
+        try:
+            os.makedirs(self._trade_log_dir, exist_ok=True)
+            with open(report_file, 'w', encoding='utf-8') as f:
+                f.write(report)
+            json_file = os.path.join(self._trade_log_dir, f"daily_signal_report_{date}.json")
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'date': date,
+                    'signals': date_signals,
+                    'total_missing': total_missing,
+                    'total_pnl': total_pnl,
+                    'virtual_positions_open': [{'id': k, **{kk: vv for kk, vv in v.items() if kk != 'pnl_history'}}
+                                               for k, v in self._virtual_positions.items() if v['status'] == 'OPEN'],
+                    'virtual_positions_closed_today': [{'id': k, **v} for k, v in self._virtual_positions.items()
+                                                       if v['status'] == 'CLOSED' and v.get('close_time', '')[:10] == date],
+                }, f, ensure_ascii=False, indent=2, default=str)
+            logging.info("[OrderService] 日报已生成: %s", report_file)
+        except Exception as e:
+            logging.warning("[OrderService] 生成日报失败: %s", e)
+        return report
+
+    def get_insufficient_fund_signals(self, date: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            if date:
+                return [
+                    s for s in self._insufficient_fund_signals
+                    if s.get('timestamp', '').startswith(date.replace('-', ''))
+                    or s.get('timestamp', '').startswith(date)
+                ]
+            return list(self._insufficient_fund_signals)
+
     def enable_hft_enhancements(self) -> None:
         self._hft_order_splitter = SmartOrderSplitter()
         logging.info("[OrderService] HFT增强已启用(智能订单拆分)")
@@ -762,11 +1220,15 @@ class SmartOrderSplitter:
     def __init__(self, max_depth_levels: int = 5,
                  aggressive_signal_threshold: float = 0.8,
                  passive_signal_threshold: float = 0.6,
-                 max_slippage_ticks: int = 3):
+                 max_slippage_ticks: int = 3,
+                 high_plr_threshold: float = 3.0,
+                 low_plr_threshold: float = 1.5):
         self._max_depth_levels = max_depth_levels
         self._aggressive_threshold = aggressive_signal_threshold
         self._passive_threshold = passive_signal_threshold
         self._max_slippage_ticks = max_slippage_ticks
+        self._high_plr_threshold = high_plr_threshold
+        self._low_plr_threshold = low_plr_threshold
         self._lock = threading.Lock()
         self._stats = {
             'total_splits': 0,
@@ -774,6 +1236,7 @@ class SmartOrderSplitter:
             'passive_orders': 0,
             'adaptive_orders': 0,
             'avg_slippage_bps': 0.0,
+            'plr_adjusted_splits': 0,
         }
 
     def plan_order_split(
@@ -785,8 +1248,16 @@ class SmartOrderSplitter:
         bids: Optional[List[Tuple[float, int]]] = None,
         asks: Optional[List[Tuple[float, int]]] = None,
         strategy: OrderSplitStrategy = OrderSplitStrategy.ADAPTIVE,
+        estimated_plr: float = 0.0,
     ) -> SplitOrderResult:
         self._stats['total_splits'] += 1
+        if estimated_plr > 0:
+            if estimated_plr >= self._high_plr_threshold:
+                strategy = OrderSplitStrategy.AGGRESSIVE
+                self._stats['plr_adjusted_splits'] += 1
+            elif estimated_plr < self._low_plr_threshold:
+                strategy = OrderSplitStrategy.PASSIVE
+                self._stats['plr_adjusted_splits'] += 1
         effective_strategy = self._resolve_strategy(strategy, signal_strength)
         if effective_strategy == OrderSplitStrategy.AGGRESSIVE:
             child_orders = self._plan_aggressive_split(

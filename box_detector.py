@@ -59,6 +59,7 @@ class BoxProfile:
     median: float = 0.0
     width_pct: float = 0.0
     confidence: float = 0.0
+    confidence_source: str = 'box'  # P1-29修复: 区分box/extreme来源
     duration_bars: int = 0
     bounce_count: int = 0
     adx: float = 0.0
@@ -85,6 +86,7 @@ class ExtremeState:
     iv_filter_passed: bool = False
     flow_exhaustion_detected: bool = False
     confidence: float = 0.0
+    confidence_source: str = 'extreme'  # P1-29修复: 区分box/extreme来源
     tradeable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -122,6 +124,22 @@ class BoxDetector:
     5. 生成箱体交易信号
     """
 
+    ADX_DEFAULT_VALUE = 50.0
+    ADX_MULTIPLIER = 100.0
+    BOX_HISTORY_MAXLEN = 100
+    FLOW_IMBALANCE_THRESHOLD = 0.2
+    CVD_SLOPE_THRESHOLD = 0.01
+    WIDTH_SCORE_WEIGHT = 0.25
+    ADX_SCORE_WEIGHT = 0.25
+    BOUNCE_SCORE_WEIGHT = 0.30
+    PLR_SCORE_WEIGHT = 0.20
+    PRICE_SCORE_WEIGHT = 0.25
+    RESONANCE_SCORE_WEIGHT = 0.30
+    IV_SCORE_WEIGHT = 0.25
+    FLOW_SCORE_WEIGHT = 0.20
+    BOTTOM_THRESHOLD_RATIO = 0.15
+    TOP_THRESHOLD_RATIO = 0.15
+
     def __init__(
         self,
         params: Optional[BoxStrategyParams] = None,
@@ -131,6 +149,8 @@ class BoxDetector:
         adx_threshold: float = 25.0,
         bounce_tolerance_pct: float = 0.1,
         iv_history_maxlen: int = 1000,
+        box_gain_ratio: float = 0.5,
+        plr_normalization_base: float = 3.0,
     ):
         self._lock = threading.RLock()
         self._params = params or BoxStrategyParams()
@@ -139,6 +159,8 @@ class BoxDetector:
         self._adx_period = adx_period
         self._adx_threshold = adx_threshold
         self._bounce_tolerance_pct = bounce_tolerance_pct
+        self._box_gain_ratio = box_gain_ratio
+        self._plr_normalization_base = plr_normalization_base
 
         self._price_highs: deque = deque(maxlen=lookback_bars)
         self._price_lows: deque = deque(maxlen=lookback_bars)
@@ -147,7 +169,7 @@ class BoxDetector:
         self._timestamps: deque = deque(maxlen=lookback_bars)
 
         self._current_box: Optional[BoxProfile] = None
-        self._box_history: deque = deque(maxlen=100)
+        self._box_history: deque = deque(maxlen=self.BOX_HISTORY_MAXLEN)
         self._extreme_state: Optional[ExtremeState] = None
 
         self._iv_history: deque = deque(maxlen=iv_history_maxlen)
@@ -191,18 +213,24 @@ class BoxDetector:
 
     def update_iv(self, iv: float) -> None:
         with self._lock:
+            if iv is None or iv <= 0:
+                return
             if len(self._iv_history) == self._iv_history.maxlen:
-                oldest = self._iv_history[0]
-                idx = bisect_left(self._iv_sorted, oldest)
-                if idx < len(self._iv_sorted) and self._iv_sorted[idx] == oldest:
-                    self._iv_sorted.pop(idx)
-            self._iv_history.append(iv)
-            insort(self._iv_sorted, iv)
+                evicted = self._iv_history[0]
+                self._iv_history.append(iv)
+                try:
+                    self._iv_sorted.remove(evicted)
+                except ValueError:
+                    pass
+                insort(self._iv_sorted, iv)
+            else:
+                self._iv_history.append(iv)
+                insort(self._iv_sorted, iv)
 
     @staticmethod
     def _compute_adx_simplified(highs, lows, closes, period: int = 14) -> float:
         if len(closes) < period + 1:
-            return 50.0
+            return BoxDetector.ADX_DEFAULT_VALUE
         plus_dm_list = []
         minus_dm_list = []
         tr_list = []
@@ -232,23 +260,23 @@ class BoxDetector:
             tr_list.append(tr)
 
         if not tr_list or sum(tr_list) < 1e-10:
-            return 50.0
+            return BoxDetector.ADX_DEFAULT_VALUE
 
         avg_plus_dm = sum(plus_dm_list) / len(plus_dm_list)
         avg_minus_dm = sum(minus_dm_list) / len(minus_dm_list)
         avg_tr = sum(tr_list) / len(tr_list)
 
         if avg_tr < 1e-10:
-            return 50.0
+            return BoxDetector.ADX_DEFAULT_VALUE
 
-        plus_di = 100.0 * avg_plus_dm / avg_tr
-        minus_di = 100.0 * avg_minus_dm / avg_tr
+        plus_di = BoxDetector.ADX_MULTIPLIER * avg_plus_dm / avg_tr
+        minus_di = BoxDetector.ADX_MULTIPLIER * avg_minus_dm / avg_tr
 
         di_sum = plus_di + minus_di
         if di_sum < 1e-10:
             return 0.0
 
-        dx = 100.0 * abs(plus_di - minus_di) / di_sum
+        dx = BoxDetector.ADX_MULTIPLIER * abs(plus_di - minus_di) / di_sum
         return dx
 
     @staticmethod
@@ -348,7 +376,15 @@ class BoxDetector:
                 adx_score = max(0.0, 1.0 - adx / self._adx_threshold)
                 bounce_score = min(1.0, bounce_count / (self._params.min_bounce_count * 2))
 
-                confidence = 0.3 * width_score + 0.3 * adx_score + 0.4 * bounce_score
+                plr_score = 0.0
+                box_height = box_upper - box_lower
+                if box_height > 1e-10:
+                    mid_price = (box_upper + box_lower) / 2.0
+                    potential_loss = abs(mid_price - box_lower) if abs(mid_price - box_lower) > 1e-10 else 1e-10
+                    potential_plr = BoxDetector.estimate_plr(box_height, potential_loss, self._box_gain_ratio)
+                    plr_score = min(1.0, potential_plr / self._plr_normalization_base)
+
+                confidence = self.WIDTH_SCORE_WEIGHT * width_score + self.ADX_SCORE_WEIGHT * adx_score + self.BOUNCE_SCORE_WEIGHT * bounce_score + self.PLR_SCORE_WEIGHT * plr_score
 
                 is_box = bounce_count >= self._params.min_bounce_count
 
@@ -403,8 +439,8 @@ class BoxDetector:
 
             price_position_pct = (current_price - box.lower) / box_range * 100.0
 
-            is_bottom = current_price <= box.lower + box_range * 0.15
-            is_top = current_price >= box.upper - box_range * 0.15
+            is_bottom = current_price <= box.lower + box_range * self.BOTTOM_THRESHOLD_RATIO
+            is_top = current_price >= box.upper - box_range * self.TOP_THRESHOLD_RATIO
 
             is_bottom_extreme = False
             is_top_extreme = False
@@ -424,8 +460,8 @@ class BoxDetector:
             if not iv_filter_passed and current_iv > 0:
                 self._stats['iv_filtered'] += 1
 
-            imbalance_exhausted = abs(flow_imbalance) < 0.2
-            cvd_stalling = abs(cvd_slope) < 0.01
+            imbalance_exhausted = abs(flow_imbalance) < self.FLOW_IMBALANCE_THRESHOLD
+            cvd_stalling = abs(cvd_slope) < self.CVD_SLOPE_THRESHOLD
             flow_exhaustion = imbalance_exhausted or cvd_stalling
             if flow_exhaustion:
                 self._stats['flow_exhaustion_confirmed'] += 1
@@ -438,10 +474,10 @@ class BoxDetector:
                 flow_score = 1.0 if flow_exhaustion else 0.3
 
                 confidence = (
-                    0.25 * max(0.0, price_score) +
-                    0.30 * resonance_score +
-                    0.25 * iv_score +
-                    0.20 * flow_score
+                    self.PRICE_SCORE_WEIGHT * max(0.0, price_score) +
+                    self.RESONANCE_SCORE_WEIGHT * resonance_score +
+                    self.IV_SCORE_WEIGHT * iv_score +
+                    self.FLOW_SCORE_WEIGHT * flow_score
                 )
 
             tradeable = (
@@ -482,11 +518,22 @@ class BoxDetector:
                 self._stats['iv_filtered'] += 1
             return passed
 
-    def _compute_iv_percentile(self, current_iv: float) -> float:
-        if not self._iv_sorted or current_iv <= 0:
+    @staticmethod
+    def compute_iv_percentile(iv_value: float, iv_sorted_list: List[float]) -> float:
+        if not iv_sorted_list or iv_value <= 0:
             return 0.0
-        count_below = bisect_left(self._iv_sorted, current_iv)
-        return count_below / len(self._iv_sorted) * 100.0
+        count_below = bisect_left(iv_sorted_list, iv_value)
+        return count_below / len(iv_sorted_list) * 100.0
+
+    @staticmethod
+    def estimate_plr(box_height: float, avg_loss: float, box_gain_ratio: float = 0.5) -> float:
+        if box_height < 1e-10 or avg_loss < 1e-10:
+            return 0.0
+        potential_gain = box_height * box_gain_ratio
+        return potential_gain / avg_loss
+
+    def _compute_iv_percentile(self, current_iv: float) -> float:
+        return BoxDetector.compute_iv_percentile(current_iv, self._iv_sorted)
 
     def check_order_flow_exhaustion(
         self,
@@ -494,8 +541,8 @@ class BoxDetector:
         cvd_slope: float,
     ) -> bool:
         with self._lock:
-            imbalance_exhausted = abs(flow_imbalance) < 0.2
-            cvd_stalling = abs(cvd_slope) < 0.01
+            imbalance_exhausted = abs(flow_imbalance) < self.FLOW_IMBALANCE_THRESHOLD
+            cvd_stalling = abs(cvd_slope) < self.CVD_SLOPE_THRESHOLD
 
             exhaustion = imbalance_exhausted or cvd_stalling
 
@@ -542,6 +589,25 @@ class BoxDetector:
         with self._lock:
             return [b.to_dict() for b in list(self._box_history)[-limit:]]
 
+    def estimate_potential_plr(self, current_price: float, direction: str) -> float:
+        with self._lock:
+            if not self._current_box or self._current_box.lower is None or self._current_box.upper is None:
+                return 0.0
+            box_bottom = self._current_box.lower
+            box_top = self._current_box.upper
+            box_height = box_top - box_bottom
+            if box_height < 1e-10:
+                return 0.0
+            if direction == 'long':
+                risk = current_price - box_bottom
+                reward = box_top - current_price
+            else:
+                risk = box_top - current_price
+                reward = current_price - box_bottom
+            if risk < 1e-10:
+                return 0.0
+            return reward / risk
+
 
 _box_detector: Optional[BoxDetector] = None
 _box_detector_lock = threading.Lock()
@@ -549,11 +615,20 @@ _box_detector_lock = threading.Lock()
 
 def get_box_detector(**kwargs) -> BoxDetector:
     global _box_detector
-    if _box_detector is None:
-        with _box_detector_lock:
-            if _box_detector is None:
-                _box_detector = BoxDetector(**kwargs)
-    return _box_detector
+    with _box_detector_lock:
+        if _box_detector is None:
+            if not kwargs:
+                try:
+                    from ali2026v3_trading.config_params import get_cached_params
+                    all_params = get_cached_params()
+                    detector_keys = ['box_gain_ratio', 'plr_normalization_base']
+                    for k in detector_keys:
+                        if k in all_params and k not in kwargs:
+                            kwargs[k] = all_params[k]
+                except Exception:
+                    pass
+            _box_detector = BoxDetector(**kwargs)
+        return _box_detector
 
 
 __all__ = [

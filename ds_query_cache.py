@@ -33,7 +33,7 @@ class QueryCacheMixin:
             self.realtime_cache.update_tick(symbol, price, timestamp, volume, bid_price, ask_price)
         
         with self._cache_lock:
-            keys_to_delete = [k for k in self._query_cache.keys() if k == symbol or (isinstance(k, str) and k.startswith(symbol + '.'))]
+            keys_to_delete = [k for k in self._query_cache.keys() if k == symbol or (isinstance(k, str) and k.startswith(symbol + '.') and len(k) > len(symbol) + 1 and k[len(symbol) + 1].isdigit())]
             for k in keys_to_delete:
                 del self._query_cache[k]
 
@@ -332,4 +332,3 @@ class QueryCacheMixin:
         with self._cache_lock:
             self._query_cache.clear()
         logger.info("Query cache cleared.")
-        logging.info('[DataService] Cache cleared')

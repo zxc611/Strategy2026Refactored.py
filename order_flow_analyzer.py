@@ -12,15 +12,6 @@ __all__ = ['MicrostructureAnalyzer', 'MicrostructureConfig', 'VolumeWeightedOrde
 
 logger = logging.getLogger(__name__)
 
-# 设置日志级别为DEBUG，便于调试
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-
 
 @dataclass
 class MicrostructureConfig:
@@ -33,6 +24,20 @@ class MicrostructureConfig:
     cvd_lookback_seconds: int = 600
     imbalance_depth_levels: int = 5
     vwap_lookback_seconds: int = 60
+    
+    IMBALANCE_SCORE_MULTIPLIER = 1.5
+    OFI_SHORT_TERM_WEIGHT = 0.6
+    OFI_LONG_TERM_WEIGHT = 0.4
+    DEVIATION_THRESHOLD = 0.3
+    SLIPPAGE_THRESHOLD_BPS = 0.5
+    SCORE_INCREMENT = 0.5
+    BASE_CONFIDENCE = 0.5
+    MODERATE_CONFIDENCE = 0.6
+    CONFIDENCE_ADJUSTMENT = 0.3
+    LARGE_ORDER_RATIO_THRESHOLD = 0.3
+    VOLUME_NORMALIZATION_FACTOR = 0.5
+    SMART_MONEY_WEIGHT = 3.0
+    LARGE_ORDER_WEIGHT = 2.0
 
 # 延迟导入 data_service，避免循环依赖
 def _get_data_service():
@@ -394,7 +399,7 @@ class ProductMicroData:
                 vwap_bps = (vwap_slippage / vwap_60) * 10000 if vwap_60 > 0 else 0
 
                 # 效率评级
-                if abs(slippage_bps) <= 0.5:
+                if abs(slippage_bps) <= MicrostructureConfig.SLIPPAGE_THRESHOLD_BPS:
                     efficiency = 'excellent'
                 elif abs(slippage_bps) <= 2:
                     efficiency = 'good'
@@ -448,7 +453,7 @@ class ProductMicroData:
                 # 2. 即时订单流不平衡（-1~1，映射到 -1.5 ~ 1.5）
                 imb = self.calc_instant_imbalance(depth_levels=5)
                 details['instant_imbalance'] = imb
-                imb_score = imb * 1.5
+                imb_score = imb * MicrostructureConfig.IMBALANCE_SCORE_MULTIPLIER
                 score += imb_score
                 reasons.append(f"order_book imbalance={imb:.2f}")
 
@@ -469,10 +474,10 @@ class ProductMicroData:
                 if vwap > 0 and current_price > 0:
                     deviation_pct = (current_price - vwap) / vwap * 100
                     details['vwap_deviation_pct'] = deviation_pct
-                    if deviation_pct > 0.3:
+                    if deviation_pct > MicrostructureConfig.DEVIATION_THRESHOLD:
                         score += 1.0
                         reasons.append(f"price above VWAP by {deviation_pct:.2f}%")
-                    elif deviation_pct < -0.3:
+                    elif deviation_pct < -MicrostructureConfig.DEVIATION_THRESHOLD:
                         score -= 1.0
                         reasons.append(f"price below VWAP by {abs(deviation_pct):.2f}%")
                     else:
@@ -490,10 +495,10 @@ class ProductMicroData:
                         details['footprint_poc'] = poc_price
                         details['footprint_volume'] = vol_profile[poc_price]
                         if current_price > poc_price:
-                            score += 0.5
+                            score += MicrostructureConfig.SCORE_INCREMENT
                             reasons.append(f"price above footprint POC={poc_price}")
                         elif current_price < poc_price:
-                            score -= 0.5
+                            score -= MicrostructureConfig.SCORE_INCREMENT
                             reasons.append(f"price below footprint POC={poc_price}")
 
                 # 5. 价格动量（基于CVD变化率，增加epsilon防除零）
@@ -514,8 +519,8 @@ class ProductMicroData:
                 ofi_60s = self.calc_ofi(lookback_seconds=60)
                 details['ofi_10s'] = ofi_10s
                 details['ofi_60s'] = ofi_60s
-                ofi_weighted = ofi_10s * 0.6 + ofi_60s * 0.4
-                ofi_score = ofi_weighted * 1.5
+                ofi_weighted = ofi_10s * MicrostructureConfig.OFI_SHORT_TERM_WEIGHT + ofi_60s * MicrostructureConfig.OFI_LONG_TERM_WEIGHT
+                ofi_score = ofi_weighted * MicrostructureConfig.IMBALANCE_SCORE_MULTIPLIER
                 score += ofi_score
                 reasons.append(f"OFI(10s)={ofi_10s:.2f}, OFI(60s)={ofi_60s:.2f}")
 
@@ -525,19 +530,19 @@ class ProductMicroData:
                 # 信号判定
                 if final_score >= 5:
                     signal = "strong_buy"
-                    confidence = min(1.0, (final_score - 5) / 5 + 0.5)
+                    confidence = min(1.0, (final_score - 5) / 5 + MicrostructureConfig.BASE_CONFIDENCE)
                 elif final_score >= 2:
                     signal = "buy"
-                    confidence = 0.6 + (final_score - 2) / 3 * 0.3
+                    confidence = MicrostructureConfig.MODERATE_CONFIDENCE + (final_score - 2) / 3 * MicrostructureConfig.CONFIDENCE_ADJUSTMENT
                 elif final_score <= -5:
                     signal = "strong_sell"
-                    confidence = min(1.0, (-final_score - 5) / 5 + 0.5)
+                    confidence = min(1.0, (-final_score - 5) / 5 + MicrostructureConfig.BASE_CONFIDENCE)
                 elif final_score <= -2:
                     signal = "sell"
-                    confidence = 0.6 + (-final_score - 2) / 3 * 0.3
+                    confidence = MicrostructureConfig.MODERATE_CONFIDENCE + (-final_score - 2) / 3 * MicrostructureConfig.CONFIDENCE_ADJUSTMENT
                 else:
                     signal = "neutral"
-                    confidence = 0.5
+                    confidence = MicrostructureConfig.BASE_CONFIDENCE
 
                 return {
                     'product': self.product,
@@ -927,11 +932,11 @@ class VolumeWeightedOrderFlow:
                     smart_sell += trade['volume']
             net = smart_buy - smart_sell
             total = smart_buy + smart_sell
-            if total > 0 and net / total > 0.3:
+            if total > 0 and net / total > MicrostructureConfig.LARGE_ORDER_RATIO_THRESHOLD:
                 signal = 'strong_buy'
             elif total > 0 and net / total > 0.1:
                 signal = 'buy'
-            elif total > 0 and net / total < -0.3:
+            elif total > 0 and net / total < -MicrostructureConfig.LARGE_ORDER_RATIO_THRESHOLD:
                 signal = 'strong_sell'
             elif total > 0 and net / total < -0.1:
                 signal = 'sell'
@@ -941,10 +946,10 @@ class VolumeWeightedOrderFlow:
 
     def _calc_volume_weight(self, volume: int) -> float:
         if volume >= self._smart_money_threshold:
-            return _math.log(volume + 1) / _math.log(self._smart_money_threshold + 1) * 3.0
+            return _math.log(volume + 1) / _math.log(self._smart_money_threshold + 1) * MicrostructureConfig.SMART_MONEY_WEIGHT
         elif volume >= self._large_threshold:
-            return _math.log(volume + 1) / _math.log(self._large_threshold + 1) * 2.0
-        return _math.log(volume + 1) / _math.log(self._large_threshold + 1) * 0.5
+            return _math.log(volume + 1) / _math.log(self._large_threshold + 1) * MicrostructureConfig.LARGE_ORDER_WEIGHT
+        return _math.log(volume + 1) / _math.log(self._large_threshold + 1) * MicrostructureConfig.VOLUME_NORMALIZATION_FACTOR
 
     def get_cumulative_flow(self, product: str) -> float:
         with self._lock:

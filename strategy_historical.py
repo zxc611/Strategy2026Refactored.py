@@ -291,6 +291,10 @@ class HistoricalKlineMixin:
     - 进度跟踪和诊断
     """
     
+    DEFAULT_RETRY_DELAYS = [10.0, 30.0, 60.0]
+    DEFAULT_THREAD_JOIN_TIMEOUT = 300.0
+    MAX_RETRIES = 3
+    
     def _init_historical_kline_mixin(self) -> None:
         """初始化历史K线Mixin的状态
         
@@ -309,8 +313,8 @@ class HistoricalKlineMixin:
         
         # Provider重试状态（BP-1/2/3/6修复）
         self._historical_load_retry_count = 0
-        self._historical_load_max_retries = 3
-        self._historical_provider_retry_delays = [10.0, 30.0, 60.0]
+        self._historical_load_max_retries = self.MAX_RETRIES
+        self._historical_provider_retry_delays = self.DEFAULT_RETRY_DELAYS
         
         # 诊断标志
         self._hkl_diag_emitted = False
@@ -713,12 +717,12 @@ class HistoricalKlineMixin:
                 "Blocking until load completes (max 300s)...",
                 self.strategy_id,
             )
-            thread.join(timeout=300.0)
+            thread.join(timeout=self.DEFAULT_THREAD_JOIN_TIMEOUT)
             if thread.is_alive():
                 logging.warning(
-                    "[HKL][strategy_id=%s] Historical K-line load still running after 300s, "
+                    "[HKL][strategy_id=%s] Historical K-line load still running after %.1fs, "
                     "proceeding non-blocking (load continues in background)",
-                    self.strategy_id,
+                    self.strategy_id, self.DEFAULT_THREAD_JOIN_TIMEOUT,
                 )
             else:
                 logging.info(

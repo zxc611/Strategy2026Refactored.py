@@ -18,9 +18,11 @@ from __future__ import annotations
 import threading
 import logging
 import uuid
+import os
+import json
 from datetime import datetime
 import time
-from typing import Any, Dict, List, Optional, Callable, Tuple
+from typing import Any, Dict, List, Optional, Callable, Tuple, Deque
 from collections import deque
 
 # 导入 EventBus（可选依赖）
@@ -49,21 +51,30 @@ class SignalService:
     - 事件驱动
     """
     
-    def __init__(self, event_bus: Optional[EventBus] = None):
+    SIGNAL_HISTORY_MAX_LEN = 1000
+    DEFAULT_COOLDOWN_SECONDS = 60.0
+    CLEANUP_INTERVAL_SECONDS = 300
+    _CONFIG_COOLDOWN_KEY = 'signal_cooldown_seconds'
+    _CONFIG_CLEANUP_KEY = 'signal_cleanup_interval_seconds'
+    MARKET_CLOSE_HOUR = 15
+    MARKET_CLOSE_MINUTE_START = 15
+    MARKET_CLOSE_MINUTE_END = 20
+    DEFAULT_ORDER_FLOW_CONSISTENCY = 0.5
+
+    def __init__(self, event_bus: Optional[EventBus] = None, default_order_flow_consistency: float = 0.5):
         """初始化信号服务
-        
+
         Args:
             event_bus: 事件总线实例（可选，用于发布信号事件）
         """
         # 信号历史
-        self._signal_history: deque = deque(maxlen=1000)
-        
+        self._signal_history: deque = deque(maxlen=self.SIGNAL_HISTORY_MAX_LEN)
+
         # 冷却时间管理（存储信号时刻，非冷却结束时刻）
         self._cooldown_times: Dict[str, float] = {}
         self._cooldown_durations: Dict[str, float] = {}
         self._last_cleanup = time.time()
-        self._cleanup_interval = 300  # 5分钟清理一次
-        
+
         # 信号统计
         self._stats = {
             'total_signals': 0,
@@ -71,23 +82,91 @@ class SignalService:
             'emitted_signals': 0,
             'last_signal_time': None
         }
-        
+
         # 线程锁
         self._lock = threading.RLock()
-        
-        # 默认配置
-        self._default_cooldown_seconds = 60.0  # 默认冷却 60 秒
+
+        self._default_cooldown_seconds = self.DEFAULT_COOLDOWN_SECONDS
+        self._cleanup_interval = self.CLEANUP_INTERVAL_SECONDS
+        self._default_order_flow_consistency = default_order_flow_consistency
+
+        try:
+            from ali2026v3_trading.config_params import get_cached_params
+            _params = get_cached_params()
+            if 'default_order_flow_consistency' in _params:
+                self._default_order_flow_consistency = _params['default_order_flow_consistency']
+        except Exception:
+            pass
+
+        try:
+            from ali2026v3_trading.config_service import ConfigService
+            _cfg = ConfigService()
+            _cooldown_cfg = _cfg.get(self._CONFIG_COOLDOWN_KEY, None) if hasattr(_cfg, 'get') else None
+            _cleanup_cfg = _cfg.get(self._CONFIG_CLEANUP_KEY, None) if hasattr(_cfg, 'get') else None
+            if _cooldown_cfg is not None:
+                self._default_cooldown_seconds = float(_cooldown_cfg)
+                logging.info("[SignalService] 冷却时间从配置读取: %.1fs", self._default_cooldown_seconds)
+            if _cleanup_cfg is not None:
+                self._cleanup_interval = float(_cleanup_cfg)
+                logging.info("[SignalService] 清理间隔从配置读取: %.1fs", self._cleanup_interval)
+        except Exception:
+            pass
         
         # EventBus 集成
-        self._event_bus = event_bus or (get_global_event_bus() if _HAS_EVENT_BUS and get_global_event_bus else None)
+        self._event_bus = event_bus or (get_global_event_bus() if _HAS_EVENT_BUS else None)
+
+        # PLR过滤
+        self._min_estimated_plr: float = 0.0
+        self._plr_filter_enabled: bool = False
 
         self._hft_signal_filter = None
         self._hft_filter_enabled = False
+        self._decision_score_filter_enabled = False
+
+        # P1-4修复: 根据ConfigService配置自动启用HFT过滤
+        try:
+            from ali2026v3_trading.config_service import ConfigService
+            _cfg = ConfigService()
+            if getattr(_cfg, 'trading', None) and getattr(_cfg.trading, 'enable_hft_filter', False):
+                self.enable_hft_filter()
+        except Exception:
+            pass
+
+        # ✅ P1-5修复: 集成AdaptiveSignalThreshold
+        try:
+            self._adaptive_threshold = AdaptiveSignalThreshold()
+            logging.info("[SignalService] AdaptiveSignalThreshold已集成")
+        except Exception as e:
+            logging.warning("[SignalService] AdaptiveSignalThreshold集成失败: %s", e)
+            self._adaptive_threshold = None
+
+        self._log_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'logs'
+        )
+        self._daily_report_generated: Dict[str, bool] = {}
+
+        # ✅ 集成结构化JSONL日志（L-P1-1）
+        try:
+            from ali2026v3_trading.health_check_api import StructuredJsonlLogger
+            self._structured_logger = StructuredJsonlLogger(log_dir=self._log_dir)
+            logging.info("[SignalService] 结构化JSONL日志已集成")
+        except Exception as e:
+            logging.warning("[SignalService] 结构化日志集成失败: %s", e)
+            self._structured_logger = None
 
     def enable_hft_filter(self, threshold: float = 0.6, use_kalman: bool = True) -> None:
         self._hft_signal_filter = SignalTimingFilter(threshold=threshold, use_kalman=use_kalman)
         self._hft_filter_enabled = True
         logging.info("[SignalService] HFT信号时序滤波器已启用 threshold=%.2f", threshold)
+
+    def enable_plr_filter(self, min_estimated_plr: float = 2.0) -> None:
+        self._min_estimated_plr = min_estimated_plr
+        self._plr_filter_enabled = True
+        logging.info("[SignalService] PLR过滤已启用 min_estimated_plr=%.2f", min_estimated_plr)
+
+    def disable_plr_filter(self) -> None:
+        self._plr_filter_enabled = False
+        logging.info("[SignalService] PLR过滤已禁用")
 
     def filter_with_hft(self, instrument_id: str, resonance_strength: float) -> Optional[Dict[str, Any]]:
         if not self._hft_filter_enabled or not self._hft_signal_filter:
@@ -102,7 +181,10 @@ class SignalService:
         volume: float,
         reason: str = '',
         priority: int = 0,
-        cooldown_seconds: Optional[float] = None
+        cooldown_seconds: Optional[float] = None,
+        estimated_plr: float = 0.0,
+        signal_strength: float = 0.0,
+        days_to_expiry: int = 999,
     ) -> Optional[Dict[str, Any]]:
         """生成交易信号
         
@@ -114,6 +196,7 @@ class SignalService:
             reason: 原因描述
             priority: 优先级 (0-10)
             cooldown_seconds: 冷却时间（秒）
+            estimated_plr: 预估盈亏比（0.0表示未计算）
             
         Returns:
             Optional[Dict]: 信号对象，被过滤返回 None
@@ -125,6 +208,28 @@ class SignalService:
         with self._lock:
             self._stats['total_signals'] += 1
             
+            # PLR过滤
+            if self._plr_filter_enabled and self._min_estimated_plr > 0:
+                if signal_type in ('BUY', 'SELL') and estimated_plr < self._min_estimated_plr:
+                    self._stats['filtered_signals'] += 1
+                    logging.debug(f"[SignalService] Signal filtered (PLR): {instrument_id} {signal_type} estimated_plr={estimated_plr:.2f} < {self._min_estimated_plr:.2f}")
+                    return None
+            
+            # ModeEngine信号过滤（信号强度+time_decay）
+            try:
+                from ali2026v3_trading.mode_engine import ModeEngine
+                _me = ModeEngine.get_instance()
+                _passed, _reason = _me.filter_signal_by_mode(
+                    signal_type, estimated_plr=estimated_plr,
+                    signal_strength=signal_strength, days_to_expiry=days_to_expiry,
+                )
+                if not _passed:
+                    self._stats['filtered_signals'] += 1
+                    logging.debug(f"[SignalService] Signal filtered (ModeEngine): {instrument_id} {signal_type} {_reason}")
+                    return None
+            except Exception:
+                pass
+            
             # 冷却检查
             effective_cooldown = cooldown_seconds if cooldown_seconds is not None else self._default_cooldown_seconds
             cooldown_key = f"{instrument_id}_{signal_type}" if signal_type else instrument_id
@@ -133,6 +238,49 @@ class SignalService:
                 logging.debug(f"[SignalService] Signal filtered (cooldown): {instrument_id} {signal_type}")
                 return None
             
+            # ✅ 集成决策分数过滤（P0-10修复）
+            if self._decision_score_filter_enabled:
+                try:
+                    signal = self.apply_decision_score_filter(
+                        {'signal_id': '', 'instrument_id': instrument_id, 'signal_type': signal_type,
+                         'price': price, 'volume': volume, 'reason': reason, 'priority': priority,
+                         'estimated_plr': estimated_plr, 'filtered': False, 'filter_reason': ''},
+                        state_strength=signal_strength,
+                        order_flow_consistency=self._default_order_flow_consistency,
+                    )
+                    if signal.get('filtered'):
+                        self._stats['filtered_signals'] += 1
+                        logging.info("[SignalService] Signal filtered (decision_score): %s %s %s",
+                                     instrument_id, signal_type, signal.get('filter_reason', ''))
+                        return None
+                except Exception as e:
+                    logging.debug("[SignalService] decision_score_filter error: %s", e)
+
+            # ✅ P1-4修复: 集成HFT信号过滤
+            if self._hft_filter_enabled and self._hft_signal_filter is not None:
+                try:
+                    hft_result = self.filter_with_hft(instrument_id, signal_strength)
+                    if hft_result is not None and not hft_result.get('signal_passed', True):
+                        self._stats['hft_filtered'] = self._stats.get('hft_filtered', 0) + 1
+                        logging.info("[SignalService] HFT过滤阻断: %s %s", instrument_id, hft_result.get('reason', ''))
+                        return None
+                except Exception as e:
+                    logging.debug("[SignalService] HFT过滤异常: %s", e)
+
+            # ✅ P1-5修复: 集成AdaptiveSignalThreshold自适应阈值
+            if self._adaptive_threshold is not None:
+                try:
+                    current_threshold = self._adaptive_threshold.threshold
+                    if signal_strength < current_threshold:
+                        self._adaptive_threshold.record_signal(passed=False, pnl=0.0)
+                        self._stats['adaptive_filtered'] = self._stats.get('adaptive_filtered', 0) + 1
+                        logging.info("[SignalService] 自适应阈值过滤: strength=%.2f < threshold=%.2f",
+                                     signal_strength, current_threshold)
+                        return None
+                    self._adaptive_threshold.record_signal(passed=True, pnl=0.0)
+                except Exception as e:
+                    logging.debug("[SignalService] AdaptiveThreshold异常: %s", e)
+
             # 生成信号
             # 统一使用 UUID 生成唯一 ID（避免时间戳冲突）
             signal = {
@@ -143,6 +291,7 @@ class SignalService:
                 'volume': volume,
                 'reason': reason,
                 'priority': priority,
+                'estimated_plr': estimated_plr,
                 'generated_at': datetime.now(),
                 'status': 'EMITTED'
             }
@@ -174,6 +323,35 @@ class SignalService:
         
         logging.info(f"[SignalService] Signal generated: {signal['signal_id']} {instrument_id} {signal_type} "
                     f"@{price} x{volume}")
+
+        # ✅ 集成结构化JSONL日志记录（L-P1-1）
+        if self._structured_logger is not None:
+            try:
+                self._structured_logger.log_signal({
+                    "signal_id": signal['signal_id'],
+                    "instrument_id": instrument_id,
+                    "direction": "buy" if signal_type in ('BUY', 'CLOSE_SHORT') else "sell",
+                    "strength": signal_strength,
+                    "estimated_plr": estimated_plr,
+                    "decision_score": 0.0,
+                    "position_scale": 1.0,
+                    "filtered": False,
+                    "filter_reason": "",
+                })
+            except Exception as e:
+                logging.debug("[SignalService] StructuredLogger error: %s", e)
+
+        if signal_type in ('CLOSE_LONG', 'CLOSE_SHORT'):
+            if self._event_bus:
+                try:
+                    self._event_bus.publish('signal.close', {
+                        'instrument_id': instrument_id,
+                        'signal_type': signal_type,
+                        'price': price,
+                        'signal_id': signal['signal_id'],
+                    })
+                except Exception as e:
+                    logging.debug("[SignalService] publish close signal event failed: %s", e)
         
         return signal
     
@@ -357,9 +535,132 @@ class SignalService:
         
         return True, "Valid signal"
 
+    def generate_daily_signal_report(self, date: Optional[str] = None) -> Optional[str]:
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+
+        if self._daily_report_generated.get(date):
+            return None
+
+        with self._lock:
+            date_signals = [
+                s for s in self._signal_history
+                if isinstance(s.get('generated_at'), datetime) and s['generated_at'].strftime("%Y-%m-%d") == date
+            ]
+
+        if not date_signals:
+            return None
+
+        buy_signals = [s for s in date_signals if s.get('signal_type') in ('BUY',)]
+        sell_signals = [s for s in date_signals if s.get('signal_type') in ('SELL',)]
+        close_long = [s for s in date_signals if s.get('signal_type') == 'CLOSE_LONG']
+        close_short = [s for s in date_signals if s.get('signal_type') == 'CLOSE_SHORT']
+
+        lines = [
+            "=" * 80,
+            f"当日信号明细报告 - {date}",
+            "=" * 80,
+            f"总信号数: {len(date_signals)}",
+            f"  买入信号: {len(buy_signals)}",
+            f"  卖出信号: {len(sell_signals)}",
+            f"  平多信号: {len(close_long)}",
+            f"  平空信号: {len(close_short)}",
+            "-" * 80,
+            "信号明细:",
+        ]
+
+        for i, s in enumerate(date_signals, 1):
+            ts = s['generated_at'].strftime('%H:%M:%S') if isinstance(s.get('generated_at'), datetime) else str(s.get('generated_at', ''))
+            lines.extend([
+                f"【信号 {i}】",
+                f"  时间: {ts}",
+                f"  合约: {s.get('instrument_id', '')}",
+                f"  类型: {s.get('signal_type', '')}",
+                f"  价格: {s.get('price', 0)}",
+                f"  数量: {s.get('volume', 0)}",
+                f"  原因: {s.get('reason', '')}",
+                f"  信号ID: {s.get('signal_id', '')}",
+            ])
+
+        lines.extend([
+            "=" * 80,
+            f"报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "=" * 80,
+        ])
+
+        report = "\n".join(lines)
+
+        try:
+            os.makedirs(self._log_dir, exist_ok=True)
+            report_file = os.path.join(self._log_dir, f"signal_daily_report_{date}.txt")
+            with open(report_file, 'w', encoding='utf-8') as f:
+                f.write(report)
+            json_file = os.path.join(self._log_dir, f"signal_daily_report_{date}.json")
+            serializable_signals = []
+            for s in date_signals:
+                entry = dict(s)
+                if isinstance(entry.get('generated_at'), datetime):
+                    entry['generated_at'] = entry['generated_at'].isoformat()
+                serializable_signals.append(entry)
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'date': date,
+                    'total': len(date_signals),
+                    'buy': len(buy_signals),
+                    'sell': len(sell_signals),
+                    'close_long': len(close_long),
+                    'close_short': len(close_short),
+                    'signals': serializable_signals,
+                }, f, ensure_ascii=False, indent=2, default=str)
+            self._daily_report_generated[date] = True
+            logging.info("[SignalService] 日信号报告已生成: %s", report_file)
+        except Exception as e:
+            logging.warning("[SignalService] 生成日信号报告失败: %s", e)
+
+        return report
+
+    def check_market_close_and_report(self) -> Optional[str]:
+        now = datetime.now()
+        current_time = now.time()
+        from datetime import time as dt_time
+        close_time = dt_time(self.MARKET_CLOSE_HOUR, self.MARKET_CLOSE_MINUTE_START)
+        check_end = dt_time(self.MARKET_CLOSE_HOUR, self.MARKET_CLOSE_MINUTE_END)
+        if close_time <= current_time <= check_end:
+            today = now.strftime("%Y-%m-%d")
+            return self.generate_daily_signal_report(today)
+        return None
+
+    def apply_decision_score_filter(self, signal: Dict[str, Any], state_strength: float,
+                                     order_flow_consistency: float) -> Dict[str, Any]:
+        try:
+            from ali2026v3_trading.risk_service import get_risk_service
+            rs = get_risk_service()
+            result = rs.compute_decision_score(state_strength, order_flow_consistency)
+            if result["action"] == "no_open_wait":
+                signal["filtered"] = True
+                signal["filter_reason"] = f"decision_score_low: score={result['decision_score']:.2f}"
+            signal["decision_score"] = result["decision_score"]
+            signal["position_scale"] = result["position_scale"]
+            signal["decision_action"] = result["action"]
+        except Exception as e:
+            logging.debug("[SignalService] apply_decision_score_filter error: %s", e)
+        return signal
+
+
+_signal_service_instance: Optional['SignalService'] = None
+_signal_service_lock = threading.Lock()
+
+
+def get_signal_service(**kwargs) -> 'SignalService':
+    global _signal_service_instance
+    with _signal_service_lock:
+        if _signal_service_instance is None:
+            _signal_service_instance = SignalService(**kwargs)
+    return _signal_service_instance
+
 
 # 导出公共接口
-__all__ = ['SignalService', 'KalmanFilter1D', 'EMASignalFilter', 'SignalTimingFilter']
+__all__ = ['SignalService', 'KalmanFilter1D', 'EMASignalFilter', 'SignalTimingFilter', 'get_signal_service']
 
 
 class KalmanFilter1D:

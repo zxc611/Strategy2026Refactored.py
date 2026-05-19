@@ -25,6 +25,7 @@ query_service.py - 数据查询服务 (DuckDB 版本)
 from __future__ import annotations
 
 import logging
+import os
 import csv
 import time
 import threading
@@ -288,7 +289,7 @@ class QueryService:
             storage_instance: InstrumentDataManager 实例（用于访问数据库和缓存）
         """
         self._storage = storage_instance
-        # M23-Bug2: 反向索引缓存 {internal_id: instrument_id} 加速O(1)查找
+        self._futures_file_path = ""
         self._internal_id_to_instrument_idx: Dict[int, str] = {}
         self._idx_built = False
         self._idx_lock = threading.Lock()
@@ -508,6 +509,11 @@ class QueryService:
         """
         import time as _time
         MAX_RETRIES = 3
+
+        self._futures_file_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'subscription_futures_fixed.txt',
+        )
 
         # ========== 阶段1：从TXT合约配置文件加载合约列表（重试3次） ==========
         selected_futures_list: List[str] = []
@@ -1194,7 +1200,7 @@ class QueryService:
                 start_dt = stats.get('first_time')
                 end_dt = stats.get('last_time')
             
-            klines = ds.get_kline_range(instrument_id, start_dt, end_dt)
+            klines = ds.get_klines(instrument_id, start=start_dt, end=end_dt)
             
             df = klines.to_pandas()
             df.to_csv(output_file, index=False)

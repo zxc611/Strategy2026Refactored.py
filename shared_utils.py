@@ -122,6 +122,7 @@ def normalize_year_month(year_month: str) -> str:
 
     支持多种输入格式，统一输出为 YYMM 格式：
     - '6M05' -> '2605' (6月05年 -> 26年05月)
+    - '26M05' -> '2605' (2位年份前缀+月份)
     - '202605' -> '2605' (完整年份)
     - '2605' -> '2605' (已是标准格式，直通)
 
@@ -135,16 +136,39 @@ def normalize_year_month(year_month: str) -> str:
     if not year_month:
         return ''
 
+    if len(year_month) == 4 and year_month.isdigit():
+        month_part = int(year_month[2:])
+        if 1 <= month_part <= 12:
+            return year_month
+        return year_month
+
     if len(year_month) == 6 and year_month.isdigit():
+        month_part = int(year_month[4:])
+        if 1 <= month_part <= 12:
+            return year_month[2:]
         return year_month[2:]
 
-    if len(year_month) == 4 and 'M' in year_month.upper():
-        import re
-        m = re.match(r'(\d)M(\d{2})', year_month, re.IGNORECASE)
-        if m:
-            month_digit = m.group(1)
-            year_suffix = m.group(2)
-            return f'2{month_digit}{year_suffix}'
+    import re
+    m = re.match(r'(\d{1,4})[M/\-](\d{1,2})$', year_month, re.IGNORECASE)
+    if m:
+        year_str = m.group(1)
+        month_str = m.group(2).zfill(2)
+        month_val = int(month_str)
+        if month_val < 1 or month_val > 12:
+            return year_month
+        if len(year_str) == 4:
+            return f'{year_str[2:]}{month_str}'
+        elif len(year_str) == 2:
+            return f'{year_str}{month_str}'
+        elif len(year_str) == 1:
+            from datetime import datetime
+            current_year = datetime.now().year
+            candidate_full = current_year - (current_year % 10) + int(year_str)
+            if candidate_full > current_year + 1:
+                candidate_full -= 10
+            yy = f'{candidate_full % 100:02d}'
+            return f'{yy}{month_str}'
+        return year_month
 
     return year_month
 
@@ -188,19 +212,24 @@ class RingBuffer:
             self.data.extend(items)
 
     def __len__(self):
-        return len(self.data)
+        with self._lock:
+            return len(self.data)
 
     def __getitem__(self, index):
-        return self.data[index]
+        with self._lock:
+            return self.data[index]
 
     def __iter__(self):
-        return iter(self.data)
+        with self._lock:
+            return iter(list(self.data))
 
     def clear(self):
-        self.data.clear()
+        with self._lock:
+            self.data.clear()
 
     def to_list(self):
-        return list(self.data)
+        with self._lock:
+            return list(self.data)
 
 
 class ShardRouter:
@@ -236,20 +265,7 @@ class ShardRouter:
     def route(self, instrument_id: str) -> int:
         _pc_raw = extract_product_code(instrument_id)
         product_code = _pc_raw.lower() if _pc_raw else ''
-        if not product_code:
-            product_code = 'unknown'
-
-        with self._binding_lock:
-            if product_code in self._binding_map:
-                return self._binding_map[product_code]
-
-        h = self._deterministic_hash(product_code)
-        shard_idx = h % self._shard_count
-
-        with self._binding_lock:
-            self._binding_map[product_code] = shard_idx
-
-        return shard_idx
+        return self.route_by_product_code(product_code)
 
     def route_by_product_code(self, product_code: str) -> int:
         if not product_code:
@@ -307,7 +323,7 @@ class ShardRouter:
 
 _GLOBAL_SHARD_ROUTER: Optional[ShardRouter] = None
 _GLOBAL_SHARD_ROUTER_LOCK = threading.Lock()
-_DEFAULT_SHARD_COUNT = 16
+DEFAULT_SHARD_COUNT = 16
 
 
 def get_shard_router(shard_count: int = None) -> ShardRouter:
@@ -317,7 +333,7 @@ def get_shard_router(shard_count: int = None) -> ShardRouter:
     """
     global _GLOBAL_SHARD_ROUTER
     if shard_count is None:
-        shard_count = _DEFAULT_SHARD_COUNT
+        shard_count = DEFAULT_SHARD_COUNT
     with _GLOBAL_SHARD_ROUTER_LOCK:
         if _GLOBAL_SHARD_ROUTER is None:
             _GLOBAL_SHARD_ROUTER = ShardRouter(shard_count=shard_count)
@@ -498,3 +514,230 @@ def requires_phase(required: InitPhase):
         wrapper.__wrapped__ = method
         return wrapper
     return decorator
+
+
+# ========================================================================
+# 回撤开仓（Pullback Entry） — 通用基础设施
+# 非高频策略(resonance/box/spring/arbitrage/market_making)共用
+# 核心思想：权利金本位，信号触发后等待权利金回撤达标再入场
+# ========================================================================
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class PendingPullbackSignal:
+    signal_id: str
+    strategy_type: str
+    instrument_id: str
+    direction: str
+    peak_price: float
+    signal_price: float
+    signal_bar_index: int
+    peak_bar_index: int = 0
+    bars_elapsed: int = 0
+    is_expired: bool = False
+    dynamic_wait_bars: int = 0
+    dynamic_retrace_pct: float = 0.0
+    ref_price: float = 0.0
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def check_retrace(self, current_price: float,
+                      retrace_pct: float,
+                      wait_bars: int,
+                      min_retrace_abs: float = 0.0) -> bool:
+        if self.is_expired:
+            return False
+        self.bars_elapsed += 1
+        effective_wait = self.dynamic_wait_bars if self.dynamic_wait_bars > 0 else wait_bars
+        effective_retrace = self.dynamic_retrace_pct if self.dynamic_retrace_pct > 0.0 else retrace_pct
+        if self.bars_elapsed > effective_wait:
+            self.is_expired = True
+            return False
+        ref = self.ref_price if self.ref_price > 0.0 else self.peak_price
+        if current_price > ref:
+            self.peak_price = current_price
+            if self.ref_price <= 0.0:
+                self.ref_price = current_price
+            self.peak_bar_index += self.bars_elapsed
+        if ref <= 0:
+            return False
+        retrace_abs = ref - current_price
+        retrace_pct_actual = retrace_abs / ref
+        if retrace_pct_actual < 0:
+            return False
+        if min_retrace_abs > 0.0 and retrace_abs < min_retrace_abs:
+            return False
+        return retrace_pct_actual >= effective_retrace
+
+
+class PullbackManager:
+    """通用回撤开仓管理器 — 非高频策略共用
+
+    参数:
+        pullback_enabled: 是否启用回撤延迟
+        pullback_wait_bars: 基础最长等待Bar数
+        pullback_retrace_pct: 权利金/价格回撤百分比阈值(如0.15=15%)
+        pullback_iv_min_percentile: IV环境最低百分位
+        pullback_iv_max_percentile: IV环境最高百分位
+        pullback_ref_mode: 参照基准模式 "peak"(极值) | "atr"(ATR锚定) | "vwap"(VWAP) | "delta"(Delta锚定)
+        pullback_atr_wait_multiplier: ATR动态等待倍数(wait_bars += ATR_pct * multiplier)
+        pullback_retrace_pct_call: Call方向专用回撤幅度(None则用retrace_pct)
+        pullback_retrace_pct_put: Put方向专用回撤幅度(None则用retrace_pct)
+        pullback_theta_decay_accel: Theta衰减加速系数(临近到期缩短等待, 0=禁用)
+        pullback_min_retrace_abs: 最小回撤绝对值(防止权利金极薄时百分比无意义)
+    """
+
+    REF_MODES = frozenset({'peak', 'atr', 'vwap', 'delta'})
+
+    def __init__(self, params: Dict[str, Any] = None):
+        p = params or {}
+        self.enabled: bool = p.get('pullback_enabled', False)
+        self.wait_bars: int = p.get('pullback_wait_bars', 5)
+        self.retrace_pct: float = p.get('pullback_retrace_pct', 0.15)
+        self.iv_min_pct: float = p.get('pullback_iv_min_percentile', 20.0)
+        self.iv_max_pct: float = p.get('pullback_iv_max_percentile', 80.0)
+        self.ref_mode: str = p.get('pullback_ref_mode', 'peak')
+        if self.ref_mode not in self.REF_MODES:
+            logging.warning("[Pullback] Unknown ref_mode='%s', falling back to 'peak'", self.ref_mode)
+            self.ref_mode = 'peak'
+        self.atr_wait_multiplier: float = p.get('pullback_atr_wait_multiplier', 0.0)
+        self.retrace_pct_call: Optional[float] = p.get('pullback_retrace_pct_call', None)
+        self.retrace_pct_put: Optional[float] = p.get('pullback_retrace_pct_put', None)
+        self.theta_decay_accel: float = p.get('pullback_theta_decay_accel', 0.0)
+        self.min_retrace_abs: float = p.get('pullback_min_retrace_abs', 0.0)
+        self._pending: Dict[str, PendingPullbackSignal] = {}
+        self._bar_counter: int = 0
+        self._lock = threading.RLock()
+        self._stats = {
+            'signals_deferred': 0,
+            'retrace_entries': 0,
+            'retrace_timeouts': 0,
+            'iv_rejected': 0,
+            'atr_wait_extended': 0,
+            'theta_shortened': 0,
+        }
+
+    def _compute_directional_retrace(self, direction: str) -> float:
+        if direction.upper() in ('CALL', 'BUY', 'LONG'):
+            return self.retrace_pct_call if self.retrace_pct_call is not None else self.retrace_pct
+        return self.retrace_pct_put if self.retrace_pct_put is not None else self.retrace_pct
+
+    def _compute_dynamic_wait(self, atr_pct: float = 0.0,
+                              days_to_expiry: float = 999.0) -> int:
+        wait = self.wait_bars
+        if self.atr_wait_multiplier > 0.0 and atr_pct > 0.0:
+            atr_ext = int(atr_pct * self.atr_wait_multiplier)
+            wait += atr_ext
+            if atr_ext > 0:
+                with self._lock:
+                    self._stats['atr_wait_extended'] += 1
+        if self.theta_decay_accel > 0.0 and days_to_expiry < 30.0:
+            theta_shrink = int(self.theta_decay_accel * max(0.0, 30.0 - days_to_expiry))
+            wait = max(1, wait - theta_shrink)
+            if theta_shrink > 0:
+                with self._lock:
+                    self._stats['theta_shortened'] += 1
+        return max(1, wait)
+
+    def _compute_ref_price(self, current_price: float,
+                           atr_value: float = 0.0,
+                           vwap: float = 0.0,
+                           delta_anchor: float = 0.0) -> float:
+        if self.ref_mode == 'atr' and atr_value > 0.0:
+            return current_price + atr_value
+        elif self.ref_mode == 'vwap' and vwap > 0.0:
+            return vwap
+        elif self.ref_mode == 'delta' and abs(delta_anchor) > 0.001:
+            return current_price * (1.0 + abs(delta_anchor) * 0.1)
+        return current_price
+
+    def should_defer(self, signal_id: str, strategy_type: str,
+                     instrument_id: str, direction: str,
+                     current_price: float,
+                     iv_percentile: float = 50.0,
+                     atr_pct: float = 0.0,
+                     days_to_expiry: float = 999.0,
+                     atr_value: float = 0.0,
+                     vwap: float = 0.0,
+                     delta_anchor: float = 0.0,
+                     extra: Dict[str, Any] = None) -> bool:
+        if not self.enabled:
+            return False
+        if iv_percentile < self.iv_min_pct or iv_percentile > self.iv_max_pct:
+            with self._lock:
+                self._stats['iv_rejected'] += 1
+            return True
+        dynamic_wait = self._compute_dynamic_wait(atr_pct, days_to_expiry)
+        dynamic_retrace = self._compute_directional_retrace(direction)
+        ref_price = self._compute_ref_price(current_price, atr_value, vwap, delta_anchor)
+        pending = PendingPullbackSignal(
+            signal_id=signal_id,
+            strategy_type=strategy_type,
+            instrument_id=instrument_id,
+            direction=direction,
+            peak_price=current_price,
+            signal_price=current_price,
+            signal_bar_index=self._bar_counter,
+            dynamic_wait_bars=dynamic_wait,
+            dynamic_retrace_pct=dynamic_retrace,
+            ref_price=ref_price,
+            extra=extra or {},
+        )
+        with self._lock:
+            self._pending[signal_id] = pending
+            self._stats['signals_deferred'] += 1
+        logging.info(
+            "[Pullback] DEFERRED: %s type=%s dir=%s price=%.4f wait=%d retrace=%.0f%% ref=%s",
+            signal_id, strategy_type, direction, current_price,
+            dynamic_wait, dynamic_retrace * 100, self.ref_mode,
+        )
+        return True
+
+    def process_bar(self, current_prices: Dict[str, float]) -> List[PendingPullbackSignal]:
+        if not self.enabled or not self._pending:
+            return []
+        self._bar_counter += 1
+        ready = []
+        expired_keys = []
+        with self._lock:
+            for sig_id, pending in self._pending.items():
+                price = current_prices.get(pending.instrument_id, 0.0)
+                if price <= 0:
+                    continue
+                if pending.check_retrace(price, self.retrace_pct, self.wait_bars, self.min_retrace_abs):
+                    ready.append(pending)
+                    expired_keys.append(sig_id)
+                    self._stats['retrace_entries'] += 1
+                    logging.info(
+                        "[Pullback] RETRACE ENTRY: %s type=%s bars=%d retrace=%.1f%%",
+                        sig_id, pending.strategy_type, pending.bars_elapsed,
+                        (pending.peak_price - price) / pending.peak_price * 100
+                        if pending.peak_price > 0 else 0,
+                    )
+                elif pending.is_expired:
+                    expired_keys.append(sig_id)
+                    self._stats['retrace_timeouts'] += 1
+                    logging.info(
+                        "[Pullback] TIMEOUT: %s type=%s bars=%d",
+                        sig_id, pending.strategy_type, pending.bars_elapsed,
+                    )
+            for k in expired_keys:
+                del self._pending[k]
+        return ready
+
+    def get_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                **self._stats,
+                'pending_count': len(self._pending),
+                'pullback_enabled': self.enabled,
+                'pullback_wait_bars': self.wait_bars,
+                'pullback_retrace_pct': self.retrace_pct,
+                'pullback_ref_mode': self.ref_mode,
+                'pullback_atr_wait_multiplier': self.atr_wait_multiplier,
+                'pullback_retrace_pct_call': self.retrace_pct_call,
+                'pullback_retrace_pct_put': self.retrace_pct_put,
+                'pullback_theta_decay_accel': self.theta_decay_accel,
+                'pullback_min_retrace_abs': self.min_retrace_abs,
+            }

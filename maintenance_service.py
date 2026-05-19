@@ -18,6 +18,60 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+try:
+    from ali2026v3_trading.product_initializer import get_product_params as _get_product_params
+    _HAS_PRODUCT_PARAMS = True
+except ImportError:
+    _HAS_PRODUCT_PARAMS = False
+
+OPTION_PRODUCT_SPECS = {
+    'IO': {'tick_size': 0.2, 'contract_size': 100},
+    'HO': {'tick_size': 0.2, 'contract_size': 100},
+    'MO': {'tick_size': 0.2, 'contract_size': 100},
+    'EO': {'tick_size': 0.2, 'contract_size': 100},
+    'CU': {'tick_size': 10.0, 'contract_size': 5},
+    'AL': {'tick_size': 5.0, 'contract_size': 5},
+    'ZN': {'tick_size': 5.0, 'contract_size': 5},
+    'AU': {'tick_size': 0.02, 'contract_size': 1000},
+    'AG': {'tick_size': 1.0, 'contract_size': 15},
+    'RB': {'tick_size': 1.0, 'contract_size': 10},
+    'RU': {'tick_size': 5.0, 'contract_size': 10},
+    'MA': {'tick_size': 1.0, 'contract_size': 10},
+    'TA': {'tick_size': 2.0, 'contract_size': 5},
+    'OI': {'tick_size': 1.0, 'contract_size': 10},
+    'RM': {'tick_size': 1.0, 'contract_size': 10},
+    'SA': {'tick_size': 1.0, 'contract_size': 20},
+    'FG': {'tick_size': 1.0, 'contract_size': 20},
+    'SR': {'tick_size': 1.0, 'contract_size': 10},
+    'CF': {'tick_size': 5.0, 'contract_size': 5},
+    'AP': {'tick_size': 1.0, 'contract_size': 10},
+    'CJ': {'tick_size': 5.0, 'contract_size': 5},
+    'SF': {'tick_size': 2.0, 'contract_size': 5},
+    'SM': {'tick_size': 2.0, 'contract_size': 5},
+    'UR': {'tick_size': 1.0, 'contract_size': 5},
+    'M': {'tick_size': 1.0, 'contract_size': 10},
+    'Y': {'tick_size': 2.0, 'contract_size': 10},
+    'P': {'tick_size': 2.0, 'contract_size': 10},
+    'A': {'tick_size': 1.0, 'contract_size': 10},
+    'L': {'tick_size': 1.0, 'contract_size': 5},
+    'V': {'tick_size': 5.0, 'contract_size': 5},
+    'PP': {'tick_size': 1.0, 'contract_size': 5},
+    'EB': {'tick_size': 1.0, 'contract_size': 5},
+    'I': {'tick_size': 0.5, 'contract_size': 100},
+    'EG': {'tick_size': 1.0, 'contract_size': 5},
+    'C': {'tick_size': 1.0, 'contract_size': 10},
+    'CS': {'tick_size': 1.0, 'contract_size': 10},
+}
+
+DEFAULT_OPTION_SPEC = {'tick_size': 1.0, 'contract_size': 1.0}
+
+
+def _get_option_spec(product: str) -> Dict[str, Any]:
+    if _HAS_PRODUCT_PARAMS:
+        return _get_product_params(product)
+    return OPTION_PRODUCT_SPECS.get(product.upper(), DEFAULT_OPTION_SPEC)
+
+
 def _normalize_code(code: str) -> str:
     """标准化代码（交易所/产品），保留原始格式
 
@@ -194,7 +248,6 @@ class StorageMaintenanceService:
                 logging.info("[StorageMaintenance] 已是最新版本，跳过其余检查（repaired_tables=%d）", repaired_tables)
                 return
             
-            recovered_orphans = self.recover_orphan_option_metadata()
             seeded_option_products = self.ensure_option_product_catalog()
             repaired_option_fk = self.repair_option_underlying_product_references()
             exchange_updates = self.backfill_metadata_exchange()
@@ -205,9 +258,8 @@ class StorageMaintenanceService:
             self.set_kv_value('storage_maintenance_version', self.MAINTENANCE_VERSION)
             
             logging.info(
-                "[StorageMaintenance] 完成：repaired_tables=%d, recovered_orphans=%d, seeded_option_products=%d, repaired_option_fk=%d, exchange_updates=%d, normalized_subs=%d, dedup_subs=%d, dropped_empty_tables=%d",
+                "[StorageMaintenance] 完成：repaired_tables=%d, seeded_option_products=%d, repaired_option_fk=%d, exchange_updates=%d, normalized_subs=%d, dedup_subs=%d, dropped_empty_tables=%d",
                 repaired_tables,
-                recovered_orphans,
                 seeded_option_products,
                 repaired_option_fk,
                 exchange_updates,
@@ -224,12 +276,6 @@ class StorageMaintenanceService:
         
         Args:
             conn: 数据库连接（已废弃，保留参数用于兼容）
-        
-        使用方式：
-            # 在策略主循环中每 30 秒调用一次
-            if time.time() - last_diagnostic_time >= 30:
-                maintenance.run_periodic_diagnostic()
-                last_diagnostic_time = time.time()
         """
         try:
             logging.info("\n" + "="*80)
@@ -260,72 +306,10 @@ class StorageMaintenanceService:
                     if option_status['received']:
                         total_options_received += 1
                 
-                logging.info(f"\n[{idx}] {exchange} - {future_id} (期货)")
-                
-                if future_status['subscribed']:
-                    logging.info(f"  订阅：[OK] 成功")
-                else:
-                    logging.error(f"  订阅：[FAIL] 失败")
-                    if future_status['subscribe_error']:
-                        logging.error(f"    原因：{future_status['subscribe_error']}")
-                
-                if future_status['enqueued']:
-                    logging.info(f"  入队：[OK] 成功")
-                else:
-                    logging.error(f"  入队：[FAIL] 失败")
-                    if future_status['enqueue_error']:
-                        logging.error(f"    原因：{future_status['enqueue_error']}")
-                
-                has_data = future_status['received'] and future_status['kline_count'] > 0
-                if has_data:
-                    logging.info(f"  接收：[OK] 成功 ({future_status['kline_count']}条 K 线，{future_status['tick_count']}个 Tick)")
-                elif future_status['received']:
-                    logging.warning(f"  接收：[WARN] 无数据 ({future_status['kline_count']}条 K 线，{future_status['tick_count']}个 Tick)")
-                else:
-                    logging.error(f"  接收：[FAIL] 失败 ({future_status['kline_count']}条 K 线，{future_status['tick_count']}个 Tick)")
-                    if future_status['receive_error']:
-                        logging.error(f"    原因：{future_status['receive_error']}")
-                
-                if future_status['stored']:
-                    logging.info(f"  落库：[OK] 成功 (K 线表：{future_status['kline_table']}, Tick 表：{future_status['tick_table']})")
-                else:
-                    logging.error(f"  落库：[FAIL] 失败")
-                    if future_status['store_error']:
-                        logging.error(f"    原因：{future_status['store_error']}")
+                self._log_contract_diagnosis(idx, exchange, future_id, '期货', future_status)
                 
                 if option_id and option_status:
-                    logging.info(f"\n[{idx}] {exchange} - {option_id} (期权)")
-                    
-                    if option_status['subscribed']:
-                        logging.info(f"  订阅：[OK] 成功")
-                    else:
-                        logging.error(f"  订阅：[FAIL] 失败")
-                        if option_status['subscribe_error']:
-                            logging.error(f"    原因：{option_status['subscribe_error']}")
-                    
-                    if option_status['enqueued']:
-                        logging.info(f"  入队：[OK] 成功")
-                    else:
-                        logging.error(f"  入队：[FAIL] 失败")
-                        if option_status['enqueue_error']:
-                            logging.error(f"    原因：{option_status['enqueue_error']}")
-                    
-                    has_data = option_status['received'] and option_status['kline_count'] > 0
-                    if has_data:
-                        logging.info(f"  接收：[OK] 成功 ({option_status['kline_count']}条 K 线，{option_status['tick_count']}个 Tick)")
-                    elif option_status['received']:
-                        logging.warning(f"  接收：[WARN] 无数据 ({option_status['kline_count']}条 K 线，{option_status['tick_count']}个 Tick)")
-                    else:
-                        logging.error(f"  接收：[FAIL] 失败 ({option_status['kline_count']}条 K 线，{option_status['tick_count']}个 Tick)")
-                        if option_status['receive_error']:
-                            logging.error(f"    原因：{option_status['receive_error']}")
-                    
-                    if option_status['stored']:
-                        logging.info(f"  落库：[OK] 成功 (K 线表：{option_status['kline_table']}, Tick 表：{option_status['tick_table']})")
-                    else:
-                        logging.error(f"  落库：[FAIL] 失败")
-                        if option_status['store_error']:
-                            logging.error(f"    原因：{option_status['store_error']}")
+                    self._log_contract_diagnosis(idx, exchange, option_id, '期权', option_status)
                 elif option_id:
                     logging.info(f"\n[{idx}] {exchange} - {option_id} (期权)")
                     logging.warning(f"  ❌ 期权合约不存在")
@@ -339,6 +323,51 @@ class StorageMaintenanceService:
             
         except Exception as exc:
             logging.error(f"[2605 合约诊断] 执行失败：{exc}", exc_info=True)
+    
+    def _log_contract_diagnosis(self, idx: int, exchange: str, instrument_id: str, 
+                                 contract_type: str, status: Dict) -> None:
+        """输出单个合约诊断日志"""
+        logging.info(f"\n[{idx}] {exchange} - {instrument_id} ({contract_type})")
+        
+        self._log_status_field(status, 'subscribed', '订阅', 'subscribe_error')
+        self._log_status_field(status, 'enqueued', '入队', 'enqueue_error')
+        self._log_receive_status(status)
+        self._log_store_status(status)
+    
+    def _log_status_field(self, status: Dict, field: str, label: str, error_field: str) -> None:
+        """输出状态字段日志"""
+        if status.get(field):
+            logging.info(f"  {label}：[OK] 成功")
+        else:
+            logging.error(f"  {label}：[FAIL] 失败")
+            if status.get(error_field):
+                logging.error(f"    原因：{status[error_field]}")
+    
+    def _log_receive_status(self, status: Dict) -> None:
+        """输出接收状态日志"""
+        has_data = status.get('received') and status.get('kline_count', 0) > 0
+        kline_count = status.get('kline_count', 0)
+        tick_count = status.get('tick_count', 0)
+        
+        if has_data:
+            logging.info(f"  接收：[OK] 成功 ({kline_count}条 K 线，{tick_count}个 Tick)")
+        elif status.get('received'):
+            logging.warning(f"  接收：[WARN] 无数据 ({kline_count}条 K 线，{tick_count}个 Tick)")
+        else:
+            logging.error(f"  接收：[FAIL] 失败 ({kline_count}条 K 线，{tick_count}个 Tick)")
+            if status.get('receive_error'):
+                logging.error(f"    原因：{status['receive_error']}")
+    
+    def _log_store_status(self, status: Dict) -> None:
+        """输出落库状态日志"""
+        if status.get('stored'):
+            kline_table = status.get('kline_table', '')
+            tick_table = status.get('tick_table', '')
+            logging.info(f"  落库：[OK] 成功 (K 线表：{kline_table}, Tick 表：{tick_table})")
+        else:
+            logging.error(f"  落库：[FAIL] 失败")
+            if status.get('store_error'):
+                logging.error(f"    原因：{status['store_error']}")
     
     # subscriptions 表已废弃，相关方法已移除：
     # - deduplicate_subscriptions()
@@ -463,22 +492,6 @@ class StorageMaintenanceService:
             )
         except Exception as e:
             logging.error("[StorageMaintenance] set_kv_value failed: %s", e)
-    
-    def recover_orphan_option_metadata(self) -> int:
-        """恢复孤儿期权元数据 (DuckDB 统一表版本)"""
-        # ✅ Group A收口：不再使用LEGACYF0000占位符，历史数据已在迁移时处理
-        # if self.manager is not None and hasattr(self.manager, 'ensure_legacy_placeholder_roots'):
-        #     try:
-        #         self.manager.ensure_legacy_placeholder_roots()
-        #     except Exception as e:
-        #         logging.warning("[StorageMaintenance] ensure_legacy_placeholder_roots failed: %s", e)
-        
-        # ⚠️ DEPRECATED: 此方法已废弃
-        # 旧版本使用 tick_option_data 分表存储期权 Tick 数据，
-        # 现已统一迁移到 ticks_raw 表。此方法保留仅为向后兼容，
-        # 实际不再执行任何恢复操作。
-        logging.warning("[StorageMaintenance] recover_orphan_options is deprecated, using unified ticks_raw table")
-        return 0
     
     def backfill_metadata_exchange(self) -> int:
         """回填元数据交易所信息
@@ -650,12 +663,15 @@ class StorageMaintenanceService:
                 row = rows[0]
 
             if row is None:
+                spec = _get_option_spec(normalized_product)
+                tick_size = spec.get('tick_size', DEFAULT_OPTION_SPEC['tick_size'])
+                contract_size = spec.get('contract_size', DEFAULT_OPTION_SPEC['contract_size'])
                 try:
                     ds.query(
                         "INSERT INTO option_products "
                         "(product, exchange, underlying_product, format_template, tick_size, contract_size, is_active) "
-                        "VALUES (?, ?, ?, ?, 1.0, 1.0, 1)",
-                        (normalized_product, normalized_exchange, normalized_underlying, format_template),
+                        "VALUES (?, ?, ?, ?, ?, ?, 1)",
+                        (normalized_product, normalized_exchange, normalized_underlying, format_template, tick_size, contract_size),
                     )
                 except Exception as exc:
                     logging.warning("[StorageMaintenance] 跳过 option_products 插入 %s: %s", normalized_product, exc)
@@ -713,12 +729,6 @@ class StorageMaintenanceService:
         except Exception as e:
             logging.error("[StorageMaintenance] drop_empty_instrument_tables failed: %s", e)
         return deleted
-    
-    def ensure_legacy_placeholder_roots(self) -> None:
-        """确保遗留占位符根存在"""
-        # ✅ Group A收口：不再使用LEGACYF0000占位符，此函数已废弃
-        logging.warning("[QueryService] ensure_legacy_placeholder_roots is deprecated, LEGACY placeholder removed")
-        return
 
     def _diagnose_contract(self, instrument_id: str, is_future: bool) -> Dict:
         """

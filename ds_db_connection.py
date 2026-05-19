@@ -75,18 +75,22 @@ class DBConnectionMixin:
         return self.DUCKDB_MAX_MEMORY if self.DUCKDB_MAX_MEMORY else '4GB'
 
     def _get_connection(self, read_only: bool = False) -> duckdb.DuckDBPyConnection:
-        # DuckDB不允许同时使用read_only=True和read_only=False打开同一个数据库
-        # 忽略read_only参数，所有连接都使用读写模式
+        if read_only:
+            logger.warning("[DataService] read_only=True requested but DuckDB requires single-mode; using read-write")
         conn_attr = 'conn'
+        current_gen = getattr(self, '_connection_generation', 0)
+        conn_gen = getattr(self._thread_local, 'conn_generation', -1)
         if not hasattr(self._thread_local, conn_attr) or getattr(self._thread_local, conn_attr) is None:
             conn = duckdb.connect(self.DB_FILE, read_only=False)
             self._configure_connection(conn)
             setattr(self._thread_local, conn_attr, conn)
             self._thread_local.conn_healthy = True
+            self._thread_local.conn_generation = current_gen
             with self._all_connections_lock:
                 self._all_connections.append(conn)
-        elif not getattr(self._thread_local, 'conn_healthy', True):
-            logger.warning("[DataService] Connection marked unhealthy, recreating...")
+        elif conn_gen != current_gen or not getattr(self._thread_local, 'conn_healthy', True):
+            reason = "generation mismatch (close_all invalidated)" if conn_gen != current_gen else "unhealthy"
+            logger.warning("[DataService] Connection invalidated (%s), recreating...", reason)
             try:
                 old_conn = getattr(self._thread_local, conn_attr)
                 with self._all_connections_lock:
@@ -94,11 +98,12 @@ class DBConnectionMixin:
                         self._all_connections.remove(old_conn)
                 old_conn.close()
             except Exception as e:
-                logger.warning(f"Failed to close unhealthy connection: {e}")
+                logger.warning(f"Failed to close invalidated connection: {e}")
             conn = duckdb.connect(self.DB_FILE, read_only=False)
             self._configure_connection(conn)
             setattr(self._thread_local, conn_attr, conn)
             self._thread_local.conn_healthy = True
+            self._thread_local.conn_generation = current_gen
             with self._all_connections_lock:
                 self._all_connections.append(conn)
             logger.info("[DataService] Connection recovered successfully")
@@ -119,6 +124,9 @@ class DBConnectionMixin:
         error_str = str(e)
         return 'FATAL' in error_str or 'database has been invalidated' in error_str
 
+    def get_connection(self, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+        return self._get_connection(read_only)
+
     def close(self):
         if hasattr(self._thread_local, 'conn'):
             try:
@@ -128,9 +136,8 @@ class DBConnectionMixin:
             self._thread_local.conn = None
 
     def close_all(self):
-        """P1 Bug #41修复：关闭所有线程的连接，而不仅仅是当前线程"""
+        """P1 Bug #41修复：关闭所有线程的连接，并标记为无效"""
         self._stop_monitor.set()
-
         closed_count = 0
         with self._all_connections_lock:
             connections_to_close = list(self._all_connections)
@@ -141,9 +148,10 @@ class DBConnectionMixin:
                 closed_count += 1
             except Exception as e:
                 logger.warning(f"Failed to close connection: {e}")
-
-        self.close()
-        logger.info(f"DataService closed all {closed_count} connections.")
+        self._connection_generation = getattr(self, '_connection_generation', 0) + 1
+        self._thread_local.conn = None
+        self._thread_local.conn_healthy = False
+        logger.info(f"DataService closed all {closed_count} connections and invalidated generation to {getattr(self, '_connection_generation', 0)}.")
 
     def _start_performance_monitor(self):
         """P1 修复：简化监控逻辑，实现长期稳定的后台内存监控"""

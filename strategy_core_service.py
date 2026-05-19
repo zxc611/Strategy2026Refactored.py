@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 import threading
 import logging
+import collections
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -28,7 +29,7 @@ from ali2026v3_trading.strategy_historical import HistoricalKlineMixin
 from ali2026v3_trading.strategy_tick_handler import TickHandlerMixin
 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class StrategyCoreService(_LifecycleMixin, _InstrumentHelperMixin,
@@ -47,6 +48,8 @@ class StrategyCoreService(_LifecycleMixin, _InstrumentHelperMixin,
     - 线程安全
     - 事件驱动
     """
+    
+    MAX_PROCESSED_TRADE_IDS = 10000
 
     def __init__(self, strategy_id: str = None, event_bus: Optional[Any] = None):
         self.strategy_id = strategy_id or f"strategy_{int(time.time())}"
@@ -61,7 +64,7 @@ class StrategyCoreService(_LifecycleMixin, _InstrumentHelperMixin,
         self._analytics_warmup_done = False
         self._analytics_warmup_thread = None
         self.t_type_service = None
-        self._processed_trade_ids = set()
+        self._processed_trade_ids = collections.OrderedDict()
 
         # 线程锁（职责说明）
         self._lock = threading.RLock()
@@ -220,9 +223,11 @@ class StrategyCoreService(_LifecycleMixin, _InstrumentHelperMixin,
             trade_id = getattr(trade_data, 'trade_id', None) or (trade_data.get('trade_id') if isinstance(trade_data, dict) else None) or str(id(trade_data))
             if trade_id in self._processed_trade_ids:
                 return
-            self._processed_trade_ids.add(trade_id)
-            if len(self._processed_trade_ids) > 10000:
-                self._processed_trade_ids.clear()
+            self._processed_trade_ids[trade_id] = True
+            if len(self._processed_trade_ids) > self.MAX_PROCESSED_TRADE_IDS:
+                remove_count = len(self._processed_trade_ids) - int(self.MAX_PROCESSED_TRADE_IDS * 0.8)
+                for _ in range(remove_count):
+                    self._processed_trade_ids.popitem(last=False)
             from ali2026v3_trading.position_service import get_position_service
             pos_svc = get_position_service()
             pos_svc.on_trade(trade_data)
@@ -248,16 +253,75 @@ class StrategyCoreService(_LifecycleMixin, _InstrumentHelperMixin,
             open_reason = self._resolve_open_reason()
             for t in targets:
                 t['open_reason'] = t.get('open_reason', '') or open_reason
+            if not self._check_ecosystem_exclusion(targets):
+                logging.info("[OptionTrading] 互斥规则或跨策略风控阻断, 跳过本次周期")
+                return
+            # ✅ P0-5修复: 交易前风控检查
+            try:
+                from ali2026v3_trading.risk_service import get_risk_service
+                rs = get_risk_service(None)
+                for t in targets:
+                    signal = {
+                        'symbol': t.get('instrument_id', ''),
+                        'direction': t.get('direction', 'BUY'),
+                        'price': t.get('price', 0.0),
+                        'volume': t.get('volume', 0),
+                        'is_valid': True,
+                    }
+                    check_result = rs.check_before_trade(signal)
+                    if check_result.is_block:
+                        logging.warning("[OptionTrading] 风控阻断: %s %s reason=%s",
+                                        t.get('instrument_id', ''), t.get('direction', ''), check_result.reason)
+                        return
+            except Exception as e:
+                logging.warning("[OptionTrading] 风控检查异常: %s, 继续交易", e)
             self._ensure_order_service()
             if self._order_service:
                 order_ids = self._order_service.execute_by_ranking(targets)
                 if order_ids:
                     logging.info("[OptionTrading] 下单完成: %d 笔 reason=%s", len(order_ids), open_reason)
             self._feed_shadow_engine(targets, open_reason)
+            # ✅ P1-9修复: 集成box_spring_strategy的箱体弹簧扫描
+            try:
+                from ali2026v3_trading.box_spring_strategy import BoxSpringStrategy
+                bss = getattr(self, '_box_spring_strategy', None)
+                if bss is None:
+                    bss = BoxSpringStrategy()
+                    self._box_spring_strategy = bss
+                for t in targets:
+                    inst_id = t.get('instrument_id', '')
+                    if inst_id:
+                        bss.on_tick(inst_id, t.get('price', 0.0))
+            except Exception as e:
+                logging.debug("[StrategyCoreService] box_spring_strategy tick error: %s", e)
         except Exception as e:
             logging.error("[StrategyCoreService.execute_option_trading_cycle] Error: %s", e)
         finally:
             self._trading_lock.release()
+
+    def _check_ecosystem_exclusion(self, targets: list) -> bool:
+        try:
+            from ali2026v3_trading.strategy_ecosystem import get_strategy_ecosystem
+            eco = get_strategy_ecosystem()
+            spm = getattr(self, '_state_param_manager', None)
+            current_state = spm.get_current_state() if spm else 'other'
+            state_to_strategy = {
+                'correct_trending': 'master',
+                'incorrect_reversal': 'reverse',
+                'other': 'other',
+            }
+            strategy_id = state_to_strategy.get(current_state, 'master')
+            for t in targets:
+                direction = t.get('direction', 'BUY')
+                instrument_id = t.get('instrument_id', '')
+                allowed, reason = eco.check_mutual_exclusion(strategy_id, direction, instrument_id)
+                if not allowed:
+                    logging.warning("[OptionTrading] 互斥阻断: strategy=%s dir=%s reason=%s", strategy_id, direction, reason)
+                    return False
+            return True
+        except Exception as e:
+            logging.warning("[StrategyCoreService._check_ecosystem_exclusion] Error: %s, 阻断交易以保护安全", e)
+            return False
 
     def _feed_shadow_engine(self, targets: list, open_reason: str) -> None:
         """V7新增：将交易信号批量推送到影子策略监控引擎(优化：单次锁获取)"""
@@ -571,6 +635,13 @@ class Strategy2026(BaseStrategy, UIMixin):
     def _log_error(self, message: str) -> None:
         logging.error(f"[Strategy2026] {message}")
 
+    def _log_tick_summary(self, tick: Any) -> None:
+        instrument_id = getattr(tick, 'instrument_id', '') or getattr(tick, 'InstrumentID', '')
+        last_price = getattr(tick, 'last_price', 0.0) or getattr(tick, 'LastPrice', 0.0)
+        volume = getattr(tick, 'volume', 0) or getattr(tick, 'Volume', 0)
+        exchange = getattr(tick, 'exchange', '') or getattr(tick, 'ExchangeID', '')
+        logging.debug("[Strategy2026.onTick] %s %s price=%.2f vol=%d", exchange, instrument_id, last_price, volume)
+
     def _ensure_runtime_config_loaded(self) -> None:
         if self._config_loaded:
             return
@@ -736,6 +807,39 @@ class Strategy2026(BaseStrategy, UIMixin):
             _init_steps['core_init'] = False
             logging.error(f"[Strategy2026.onStart] CRITICAL: strategy_core 初始化阶段错误：{e}")
             logging.exception("[Strategy2026.onStart] strategy_core 初始化阶段堆栈:")
+
+        # ✅ P0-19集成: ServiceContainer依赖注入容器初始化
+        try:
+            from ali2026v3_trading.service_container import ServiceContainer
+            _service_container = ServiceContainer()
+            _sc_ok = _service_container.create_and_register_all_services()
+            if _sc_ok:
+                logging.info("[Strategy2026] ServiceContainer所有服务注册并初始化成功")
+            else:
+                logging.warning("[Strategy2026] ServiceContainer初始化返回False，部分服务可能未就绪")
+            _init_steps['service_container_init'] = True
+        except Exception as e:
+            _init_steps['service_container_init'] = False
+            logging.warning(f"[Strategy2026.onStart] ServiceContainer初始化跳过（非关键）: {e}")
+
+        # ✅ P0-21集成: 连接PerformanceConfig到PathCounter性能监控
+        try:
+            from ali2026v3_trading.performance_monitor import PathCounter
+            _perf_enabled = getattr(self, 'config', None)
+            if _perf_enabled is not None:
+                _perf_enabled = getattr(_perf_enabled, 'performance', None)
+                if _perf_enabled is not None:
+                    _perf_enabled = getattr(_perf_enabled, 'enable_performance_monitoring', True)
+            if _perf_enabled:
+                PathCounter.enable()
+                logging.info("[Strategy2026] 性能监控已启用（P0-21集成）")
+            else:
+                PathCounter.disable()
+                logging.info("[Strategy2026] 性能监控已禁用（PerformanceConfig配置）")
+            _init_steps['performance_monitor_init'] = True
+        except Exception as e:
+            _init_steps['performance_monitor_init'] = False
+            logging.debug(f"[Strategy2026.onStart] 性能监控初始化跳过: {e}")
 
         try:
             market_open = self.is_market_open()

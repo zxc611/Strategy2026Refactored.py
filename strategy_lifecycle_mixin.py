@@ -67,6 +67,8 @@ def _state_is(state, *targets) -> bool:
 
 class _LifecycleMixin:
 
+    OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
+
     @property
     def storage(self):
         """惰性初始化storage"""
@@ -81,10 +83,30 @@ class _LifecycleMixin:
                         raise RuntimeError(f"Storage init failed: {e}")
         return self._storage
 
+    VALID_STATE_TRANSITIONS = {
+        StrategyState.INITIALIZING: [StrategyState.RUNNING, StrategyState.ERROR, StrategyState.DEGRADED],
+        StrategyState.RUNNING: [StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED],
+        StrategyState.PAUSED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR],
+        StrategyState.DEGRADED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED_STOP],
+        StrategyState.ERROR: [StrategyState.INITIALIZING, StrategyState.STOPPED],
+        StrategyState.DEGRADED_STOP: [StrategyState.STOPPED, StrategyState.INITIALIZING],
+        StrategyState.STOPPED: [StrategyState.INITIALIZING],
+    }
+
     def transition_to(self, new_state: StrategyState) -> bool:
-        """线程安全的状态转换方法。"""
+        """线程安全的状态转换方法。
+        
+        包含状态转换合法性校验，防止非法状态跃迁。
+        """
         with self._state_lock:
             old_state = self._state
+            if not _state_is(old_state, new_state):
+                valid_targets = self.VALID_STATE_TRANSITIONS.get(old_state, [])
+                if not any(_state_is(new_state, t) for t in valid_targets):
+                    logging.warning(
+                        f"[StrategyCoreService] Invalid state transition: {old_state.value} -> {new_state.value}, allowed: {[s.value for s in valid_targets]}"
+                    )
+                    return False
             self._state = new_state
             logging.debug(f"[StrategyCoreService] State transition: {old_state.value} -> {new_state.value}")
             return True
@@ -160,7 +182,8 @@ class _LifecycleMixin:
             def _subscribe(instrument_id: str, data_type: str = 'tick') -> None:
                 exchange = resolve_product_exchange(instrument_id)
                 _sub_call_counter[0] += 1
-                if _sub_call_counter[0] <= 10 or (exchange == 'SHFE' and 'C' in instrument_id[6:] or 'P' in instrument_id[6:]):
+                suffix = instrument_id[6:] if len(instrument_id) > 6 else ''
+                if _sub_call_counter[0] <= 10 or (exchange == 'SHFE' and ('C' in suffix or 'P' in suffix)):
                     logging.info(f"[PROBE_SUB] #{_sub_call_counter[0]} exchange={exchange} instrument_id={instrument_id}")
                 sub(exchange, instrument_id)
             self.subscribe = _subscribe
@@ -335,8 +358,7 @@ class _LifecycleMixin:
             option_product = parsed['product']
             year_month = parsed['year_month']
 
-            OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
-            future_product = OPTION_TO_FUTURE_MAP.get(option_product, option_product)
+            future_product = self.OPTION_TO_FUTURE_MAP.get(option_product, option_product)
 
             rows = get_data_service().query(
                 "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
@@ -537,7 +559,7 @@ class _LifecycleMixin:
                 logging.info("[StrategyCoreService.on_init] Already initialized, skipping")
                 return True
 
-            if self._state not in (StrategyState.INITIALIZING, StrategyState.ERROR):
+            if not _state_is(self._state, StrategyState.INITIALIZING) and not _state_is(self._state, StrategyState.ERROR):
                 logging.warning(f"[StrategyCoreService.on_init] Cannot initialize in state: {self._state}")
                 return False
 
@@ -669,6 +691,17 @@ class _LifecycleMixin:
             self._is_running = True
             self.transition_to(StrategyState.RUNNING)
 
+            # ✅ P0-6修复: 日初重置时调用confirm_daily_resume恢复交易
+            try:
+                from ali2026v3_trading.risk_service import get_safety_meta_layer
+                safety = get_safety_meta_layer()
+                if safety and hasattr(safety, 'confirm_daily_resume'):
+                    resumed = safety.confirm_daily_resume()
+                    if resumed:
+                        logging.info("[StrategyCoreService.on_start] 日初重置: 日回撤硬停止已解除")
+            except Exception as e:
+                logging.debug("[StrategyCoreService.on_start] confirm_daily_resume error: %s", e)
+
             logging.info(f"[StrategyCoreService.on_start] Started: {self.strategy_id}")
 
             params = None
@@ -718,21 +751,42 @@ class _LifecycleMixin:
                     else:
                         logging.warning("[Subscribe] ⚠️ self.subscribe 不可调用，平台API未就绪，安排延迟重试")
                         self.transition_to(StrategyState.DEGRADED)
+                        import weakref as _weakref
+                        _self_ref = _weakref.ref(self)
                         def _retry_platform_subscribe():
                             for attempt in range(1, 4):
                                 time.sleep(5.0 * attempt)
-                                if not getattr(self, '_api_ready', False) and hasattr(self, '_runtime_strategy_host') and self._runtime_strategy_host:
-                                    try:
-                                        self.bind_platform_apis(self._runtime_strategy_host)
-                                        logging.info("[Subscribe] 🔄 延迟重试bind_platform_apis成功（第%d次）", attempt)
-                                    except Exception as bind_e:
-                                        logging.warning("[Subscribe] ⚠️ 延迟重试bind_platform_apis失败: %s", bind_e)
-                                if callable(self.subscribe):
-                                    self._start_platform_subscribe_async(self._subscribed_instruments)
-                                    self._e2e_counters['platform_subscribe_called'] = len(self._subscribed_instruments)
+                                _self = _self_ref()
+                                if _self is None:
+                                    logging.debug("[Subscribe] 策略已销毁(weakref)，终止重试")
+                                    return
+                                if getattr(_self, '_destroyed', False):
+                                    logging.debug("[Subscribe] 策略已销毁，终止重试")
+                                    return
+                                if not getattr(_self, '_api_ready', False):
+                                    _host = getattr(_self, '_runtime_strategy_host', None)
+                                    _bind_fn = getattr(_self, 'bind_platform_apis', None)
+                                    if _host and callable(_bind_fn):
+                                        try:
+                                            _bind_fn(_host)
+                                            logging.info("[Subscribe] 🔄 延迟重试bind_platform_apis成功（第%d次）", attempt)
+                                        except Exception as bind_e:
+                                            logging.warning("[Subscribe] ⚠️ 延迟重试bind_platform_apis失败: %s", bind_e)
+                                _subscribe_fn = getattr(_self, 'subscribe', None)
+                                if callable(_subscribe_fn):
+                                    _instruments = getattr(_self, '_subscribed_instruments', [])
+                                    _start_fn = getattr(_self, '_start_platform_subscribe_async', None)
+                                    if callable(_start_fn) and _instruments:
+                                        _start_fn(_instruments)
+                                    _e2e = getattr(_self, '_e2e_counters', None)
+                                    if _e2e is not None and _instruments:
+                                        _e2e['platform_subscribe_called'] = len(_instruments)
                                     logging.info("[Subscribe] 🔄 延迟重试平台订阅成功（第%d次）", attempt)
-                                    if _state_is(self._state, StrategyState.DEGRADED):
-                                        self.transition_to(StrategyState.RUNNING)
+                                    _cur_state = getattr(_self, '_state', None)
+                                    if _state_is(_cur_state, StrategyState.DEGRADED):
+                                        _transition_fn = getattr(_self, 'transition_to', None)
+                                        if callable(_transition_fn):
+                                            _transition_fn(StrategyState.RUNNING)
                                     return
                                 logging.warning("[Subscribe] ⚠️ 第%d次重试失败，API仍未就绪", attempt)
                             logging.error("[Subscribe] ❌ 平台API经3次重试始终未就绪，策略保持DEGRADED状态运行")
@@ -1399,16 +1453,35 @@ class _LifecycleMixin:
         from logging.handlers import RotatingFileHandler
 
         root_logger = logging.getLogger()
-        has_file_handler = any(
-            isinstance(h, (FileHandler, RotatingFileHandler))
-            for h in root_logger.handlers
-        )
 
-        if has_file_handler:
-            logging.debug("[StrategyCoreService._init_logging] Logging already initialized by config_service, skipping")
+        log_file = params.get('log_file', 'logs/strategy.log') if params else 'logs/strategy.log'
+        abs_log_file = os.path.abspath(log_file)
+
+        has_valid_file_handler = False
+        stale_handlers = []
+        for h in root_logger.handlers[:]:
+            if isinstance(h, (FileHandler, RotatingFileHandler)):
+                handler_file = os.path.abspath(getattr(h, 'baseFilename', ''))
+                if handler_file == abs_log_file:
+                    try:
+                        if h.stream and not h.stream.closed:
+                            has_valid_file_handler = True
+                        else:
+                            stale_handlers.append(h)
+                    except Exception:
+                        stale_handlers.append(h)
+
+        for h in stale_handlers:
+            try:
+                root_logger.removeHandler(h)
+                h.close()
+            except Exception:
+                pass
+
+        if has_valid_file_handler:
+            logging.debug("[StrategyCoreService._init_logging] Logging already initialized, skipping")
             return
 
-        log_file = params.get('log_file', 'auto_logs/strategy.log') if params else 'auto_logs/strategy.log'
         log_level_name = str((params or {}).get('log_level') or os.getenv('LOG_LEVEL', 'INFO'))
         log_level = getattr(logging, log_level_name, logging.INFO)
 
@@ -1423,15 +1496,17 @@ class _LifecycleMixin:
             datefmt='%Y-%m-%d %H:%M:%S'
         )
 
-        abs_log_file = os.path.abspath(log_file)
-
         has_target_file_handler = any(
             isinstance(h, (FileHandler, RotatingFileHandler))
             and os.path.abspath(getattr(h, 'baseFilename', '')) == abs_log_file
             for h in root_logger.handlers
         )
         if not has_target_file_handler:
-            file_handler = FileHandler(log_file, encoding='utf-8')
+            max_bytes = int((params or {}).get('log_max_bytes', 100 * 1024 * 1024))
+            backup_count = int((params or {}).get('log_backup_count', 3))
+            file_handler = RotatingFileHandler(
+                log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
+            )
             file_handler.setLevel(log_level)
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)

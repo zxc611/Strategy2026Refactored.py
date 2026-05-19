@@ -18,17 +18,14 @@ import duckdb
 import pyarrow as pa
 import pandas as pd
 from collections import OrderedDict, deque
-import collections
-import logging, os, threading, atexit, psutil, hashlib, time, tempfile
+import logging, os, threading, atexit, psutil
 from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, date, timezone
+from datetime import datetime, date
 
 # 2. 从子模块导入
 from ali2026v3_trading.ds_realtime_cache import (
     RealTimeCache, get_realtime_cache,
-    _INTRADAY_MODE, _INTRADAY_MAX_TICKS_PER_SYMBOL, _INTRADAY_MAX_TOTAL_TICKS, _INTRADAY_FULL_CAPTURE,
-    _HAS_REALTIME_CACHE, _resolve_flush_windows, _resolve_duckdb_file, _resolve_parquet_path,
-    _get_data_paths_config, _get_default_data_dir, _parse_flush_windows_str
+    _HAS_REALTIME_CACHE, _resolve_duckdb_file, _resolve_parquet_path,
 )
 from ali2026v3_trading.ds_db_connection import DBConnectionMixin
 from ali2026v3_trading.ds_query_cache import QueryCacheMixin
@@ -36,13 +33,33 @@ from ali2026v3_trading.ds_option_sync import OptionSyncMixin
 from ali2026v3_trading.ds_data_writer import DataWriterMixin
 from ali2026v3_trading.ds_schema_manager import SchemaManagerMixin
 
-# 3. 全局配置变量（保留，因为外部可能直接引用）
+# 3. 全局配置变量（延迟求值避免启动时异常）
 logger = logging.getLogger(__name__)
 
-DB_FILE = _resolve_duckdb_file()
-PARQUET_PATH = _resolve_parquet_path()
+_DB_FILE_CACHE = None
+_PARQUET_PATH_CACHE = None
+_DB_FILE_LOCK = threading.Lock()
 
-import psutil
+def _get_db_file():
+    global _DB_FILE_CACHE
+    if _DB_FILE_CACHE is None:
+        with _DB_FILE_LOCK:
+            if _DB_FILE_CACHE is None:
+                _DB_FILE_CACHE = _resolve_duckdb_file()
+    return _DB_FILE_CACHE
+
+def _get_parquet_path():
+    global _PARQUET_PATH_CACHE
+    if _PARQUET_PATH_CACHE is None:
+        with _DB_FILE_LOCK:
+            if _PARQUET_PATH_CACHE is None:
+                _PARQUET_PATH_CACHE = _resolve_parquet_path()
+    return _PARQUET_PATH_CACHE
+
+# ✅ P0-13修复: 模块级property对象在导入时self为None，改为函数调用
+DB_FILE = _get_db_file
+PARQUET_PATH = _get_parquet_path
+
 _total_mem = psutil.virtual_memory().total
 DUCKDB_MAX_MEMORY = os.getenv('DUCKDB_MAX_MEMORY', f'{int(_total_mem * 0.75 / (1024**3))}GB')
 DUCKDB_THREADS = int(os.getenv('DUCKDB_THREADS', str(os.cpu_count() or 4)))
@@ -64,16 +81,15 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
     - SchemaManagerMixin: 数据库Schema初始化与迁移
     """
 
-    _lock = threading.RLock()
-    _tick_sync_lock = threading.Lock()
-    _thread_local = threading.local()
-    _table_initialized = False
-    _stop_monitor = threading.Event()
-
     def __init__(self):
         """DataService 初始化 — 仅由 get_data_service() 工厂函数调用"""
-        self.DB_FILE = DB_FILE
-        self.PARQUET_PATH = PARQUET_PATH
+        self._lock = threading.RLock()
+        self._tick_sync_lock = threading.Lock()
+        self._thread_local = threading.local()
+        self._table_initialized = False
+        self._stop_monitor = threading.Event()
+        self.DB_FILE = _get_db_file()
+        self.PARQUET_PATH = _get_parquet_path()
         self.DUCKDB_MAX_MEMORY = DUCKDB_MAX_MEMORY
         self.DUCKDB_THREADS = DUCKDB_THREADS
         self.PREAGGREGATE_DAILY = PREAGGREGATE_DAILY
@@ -93,10 +109,10 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
         
         # 创建数据目录
         try:
-            if DB_FILE:
-                os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
-            if PARQUET_PATH:
-                os.makedirs(os.path.dirname(PARQUET_PATH), exist_ok=True)
+            if self.DB_FILE:
+                os.makedirs(os.path.dirname(self.DB_FILE), exist_ok=True)
+            if self.PARQUET_PATH:
+                os.makedirs(os.path.dirname(self.PARQUET_PATH), exist_ok=True)
         except Exception as e:
             logger.warning(f"[DataService] Failed to create data directories: {e}")
 

@@ -14,9 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import json
-import copy
 import logging
-import time
 import threading
 from logging.handlers import RotatingFileHandler
 try:
@@ -25,9 +23,8 @@ try:
 except ImportError:
     _HAS_CONCURRENT_HANDLER = False
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 
 from ali2026v3_trading.shared_utils import normalize_year_month
 
@@ -87,13 +84,8 @@ class PathConfig:
     config_dir: str = str(Path(__file__).parent / "config")
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            'project_root': self.project_root,
-            'db_path': self.db_path,
-            'state_file': self.state_file,
-            'log_dir': self.log_dir,
-            'config_dir': self.config_dir,
-        }
+        from dataclasses import asdict
+        return asdict(self)
 
 
 # ============================================================================
@@ -121,6 +113,15 @@ class TradingConfig:
 # ============================================================================
 # 输出配置
 # ============================================================================
+
+class UIConfig:
+    """UI显示配置常量 - 不影响策略逻辑，不作为策略参数暴露"""
+    WINDOW_WIDTH: int = 260
+    WINDOW_HEIGHT: int = 240
+    FONT_LARGE: int = 11
+    FONT_SMALL: int = 10
+    TOP3_ROWS: int = 3
+
 
 class OutputConfig:
     """输出配置"""
@@ -208,11 +209,8 @@ class DataPathsConfig:
             self.flush_windows_str = env_flush
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            'duckdb_file': self.duckdb_file,
-            'parquet_path': self.parquet_path,
-            'flush_windows_str': self.flush_windows_str,
-        }
+        from dataclasses import asdict
+        return asdict(self)
 
 
 # ============================================================================
@@ -253,20 +251,23 @@ class ConfigService:
         return cls._instance
     
     def __init__(self):
-        if hasattr(self, '_initialized') and self._initialized:
-            return
-        self._initialized = True
-        self._config_file_path: Optional[Path] = None
-        self._last_modified_time: float = 0.0
-        self.paths = PathConfig()
-        self.exchanges = ExchangeConfig()
-        self.trading = TradingConfig()
-        self.logging = LoggingConfig()
-        self.database = DatabaseConfig()
-        self.data_paths = DataPathsConfig()
-        self.performance = PerformanceConfig()
-        self._load_config_file()
-        self._apply_environment_overrides()
+        with type(self)._init_lock:
+            if getattr(self, '_initialized', False):
+                return
+            self._initialized = True
+            self._config_file_path: Optional[Path] = None
+            self._last_modified_time: float = 0.0
+            self.paths = PathConfig()
+            self.exchanges = ExchangeConfig()
+            self.trading = TradingConfig()
+            self.logging = LoggingConfig()
+            self.database = DatabaseConfig()
+            self.data_paths = DataPathsConfig()
+            self.performance = PerformanceConfig()
+            self.output = OutputConfig()
+            self._load_config_file()
+            self._apply_environment_overrides()
+            self._sync_config_data()
     
     def _load_config_file(self, config_path: Optional[str] = None) -> None:
         if config_path:
@@ -314,6 +315,12 @@ class ConfigService:
             for key, value in config_dict['data_paths'].items():
                 if hasattr(self.data_paths, key):
                     setattr(self.data_paths, key, value)
+        if 'output' in config_dict:
+            for key, value in config_dict['output'].items():
+                if key == 'mode':
+                    self.output.set_mode(value)
+                elif hasattr(self.output, key):
+                    setattr(self.output, key, value)
     
     def _apply_environment_overrides(self) -> None:
         if 'TRADING_DB_PATH' in os.environ:
@@ -321,7 +328,8 @@ class ConfigService:
         if 'LOG_LEVEL' in os.environ:
             self.logging.log_level = os.environ['LOG_LEVEL']
         if 'OUTPUT_MODE' in os.environ:
-            pass
+            output_mode = os.environ['OUTPUT_MODE'].lower()
+            self.output.set_mode(output_mode)
         if 'ENABLE_PERFORMANCE_MONITORING' in os.environ:
             value = os.environ['ENABLE_PERFORMANCE_MONITORING'].lower()
             self.performance.enable_performance_monitoring = value in ('true', '1', 'yes')
@@ -335,11 +343,22 @@ class ConfigService:
             val = os.environ['INTRADAY_FLUSH_WINDOWS']
             self.data_paths.flush_windows_str = val.strip() if val.strip() else self.data_paths.flush_windows_str
     
+    def _sync_config_data(self) -> None:
+        with type(self)._config_data_lock:
+            type(self)._config_data = self.to_dict()
+    
+    def get_config_data(self) -> Dict[str, Any]:
+        with type(self)._config_data_lock:
+            if not type(self)._config_data:
+                self._sync_config_data()
+            return dict(type(self)._config_data)
+    
     def reload(self) -> bool:
         if self._config_file_path and self._config_file_path.exists():
             current_mtime = self._config_file_path.stat().st_mtime
             if current_mtime > self._last_modified_time:
                 self._load_config_file(str(self._config_file_path))
+                self._sync_config_data()
                 return True
         return False
     
@@ -403,7 +422,12 @@ class ConfigService:
                 'alert_on_high_memory_usage': self.performance.alert_on_high_memory_usage,
                 'high_memory_threshold_mb': self.performance.high_memory_threshold_mb
             },
-            'data_paths': self.data_paths.to_dict()
+            'data_paths': self.data_paths.to_dict(),
+            'output': {
+                'mode': self.output.mode,
+                'diagnostic_output': self.output.diagnostic_output,
+                'debug_output': self.output.debug_output,
+            }
         }
     
     def save_to_file(self, config_path: str) -> bool:
@@ -423,8 +447,9 @@ class ConfigService:
 # Params 相关辅助
 # ============================================================================
 
-def Field(default=None, title="", **kwargs):
-    return default
+def ConfigField(default=None, title="", **kwargs):
+    from dataclasses import field as _dc_field
+    return _dc_field(default=default, metadata={"title": title, **kwargs})
 
 
 class DebugConfig:
@@ -489,6 +514,7 @@ __all__ = [
     'ExchangeConfig',
     'TradingConfig',
     'OutputConfig',
+    'UIConfig',
     'LoggingConfig',
     'DatabaseConfig',
     'PerformanceConfig',
@@ -526,11 +552,24 @@ def setup_logging():
     if _LOG_INITIALIZED:
         return False
     root_logger = logging.getLogger()
-    has_rotating_handler = any(
-        isinstance(h, RotatingFileHandler)
-        for h in root_logger.handlers
-    )
-    if has_rotating_handler:
+    has_valid_rotating_handler = False
+    stale_handlers = []
+    for h in root_logger.handlers[:]:
+        if isinstance(h, RotatingFileHandler):
+            try:
+                if h.stream and not h.stream.closed:
+                    has_valid_rotating_handler = True
+                else:
+                    stale_handlers.append(h)
+            except Exception:
+                stale_handlers.append(h)
+    for h in stale_handlers:
+        try:
+            root_logger.removeHandler(h)
+            h.close()
+        except Exception:
+            pass
+    if has_valid_rotating_handler:
         _LOG_INITIALIZED = True
         return False
     try:

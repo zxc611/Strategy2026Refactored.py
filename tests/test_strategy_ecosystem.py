@@ -310,10 +310,19 @@ class TestStrategySwitching(unittest.TestCase):
 
 class TestMutualExclusion(unittest.TestCase):
     def setUp(self):
+        import ali2026v3_trading.strategy_ecosystem as se_mod
+        se_mod._ecosystem = None
+        import ali2026v3_trading.position_service as ps_mod
+        ps_mod._cross_strategy_risk_guard = None
+        ps_mod._position_service_instance = None
+        from ali2026v3_trading.mode_engine import ModeEngine
+        ModeEngine.reset_instance()
         self.tmp = tempfile.mkdtemp()
         self.eco = StrategyEcosystem(log_dir=self.tmp)
 
     def tearDown(self):
+        import ali2026v3_trading.strategy_ecosystem as se_mod
+        se_mod._ecosystem = None
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_master_allowed_when_no_reverse(self):

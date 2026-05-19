@@ -314,8 +314,6 @@ class EventBus:
             self._notify_publish_callbacks(event_type, event, success)
             return success
         
-        # #139: 异步模式下立即返回 True（实际结果通过 callback 通知）
-        self._notify_publish_callbacks(event_type, event, True)
         return True
     
     def _notify_publish_callbacks(self, event_type: str, event: Any, success: bool) -> None:
@@ -335,17 +333,20 @@ class EventBus:
                     f"Publish callback error: {e}"
                 )
     
-    def _invoke_all_callbacks(self, callbacks: List[tuple], event: Any, event_type: str) -> None:
-        """调用所有回调函数（在线程池中执行，按优先级）
-        
-        Args:
-            callbacks: 回调函数列表 [(callback, priority), ...]
-            event: 事件对象
-            event_type: 事件类型
-        """
-        # P2 新增：按优先级执行回调
+    def _invoke_all_callbacks(self, callbacks: List[tuple], event: Any, event_type: str) -> bool:
+        all_success = True
         for callback, priority in callbacks:
-            self._invoke_callback(callback, event, event_type)
+            try:
+                callback(event)
+            except Exception as e:
+                all_success = False
+                logging.error(
+                    f"[EventBus] Callback exception for '{event_type}': {e}\n"
+                    f"Callback: {callback}\n"
+                    f"Event: {event}",
+                    exc_info=False
+                )
+        return all_success
     
     def _on_callback_complete(self, future: Future, event_type: str, event: Any) -> None:
         """回调完成后的处理
@@ -368,13 +369,17 @@ class EventBus:
                     f"[EventBus][owner_scope=shared-service][source_type=event-tail] "
                     f"Async callback failed: {exception}"
                 )
+                self._notify_publish_callbacks(event_type, event, False)
                 # #311: 发送失败通知
                 self._send_nack(event_type, event, str(exception))
+            else:
+                self._notify_publish_callbacks(event_type, event, True)
         except Exception as e:
             logging.error(
                 f"[EventBus][owner_scope=shared-service][source_type=event-tail] "
                 f"Failed to check callback result: {e}"
             )
+            self._notify_publish_callbacks(event_type, event, False)
     
     def _send_nack(self, event_type: str, event: Any, reason: str) -> None:
         """#311: 发送否定确认（处理失败通知）
@@ -392,7 +397,10 @@ class EventBus:
             'timestamp': datetime.now().isoformat()
         }
         logging.warning(f"[EventBus] NACK for {event_type}: {reason}")
-        # 可以选择发布 NACK 事件或调用特定回调
+        try:
+            self.publish(nack_event, async_mode=False, force=True)
+        except Exception as e:
+            logging.error(f"[EventBus] Failed to publish NACK event: {e}")
     
     def _invoke_callback(self, callback: Callable, event: Any, event_type: str) -> None:
         """调用回调函数（带异常处理）
@@ -487,6 +495,7 @@ class EventBus:
                     with open(filepath, 'r', encoding='utf-8') as f:
                         import json
                         event_data = json.load(f)
+                        self._event_history.append(event_data)
                         logging.info(f"[EventBus] Restored event from {filepath}")
                 except Exception as e:
                     logging.warning(f"[EventBus] Failed to restore {filepath}: {e}")

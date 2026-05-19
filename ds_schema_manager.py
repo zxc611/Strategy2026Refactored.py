@@ -14,9 +14,39 @@
 import duckdb
 import logging
 import os
+import re
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+def get_ticks_raw_create_sql():
+    return """
+        CREATE TABLE ticks_raw (
+            timestamp TIMESTAMP,
+            instrument_id VARCHAR,
+            last_price DOUBLE,
+            volume BIGINT,
+            open_interest DOUBLE,
+            bid_price DOUBLE,
+            ask_price DOUBLE,
+            date DATE,
+            option_type VARCHAR,
+            strike_price DOUBLE,
+            is_otm BOOLEAN,
+            sync_status VARCHAR,
+            future_sync_status VARCHAR,
+            is_same_rise BOOLEAN,
+            is_same_fall BOOLEAN,
+            is_diff_sync BOOLEAN
+        )
+    """
+
+
+def _validate_parquet_path(path: str) -> str:
+    if not re.match(r'^[a-zA-Z0-9_./\\:\-]+$', path):
+        raise ValueError(f"Invalid parquet path (contains unsafe characters): {path}")
+    return path
 
 
 class SchemaManagerMixin:
@@ -37,10 +67,12 @@ class SchemaManagerMixin:
 
         logger.info(f"Loading Parquet from {self.PARQUET_PATH}...")
         try:
+            validated_path = _validate_parquet_path(self.PARQUET_PATH)
+            safe_path = validated_path.replace("'", "''")
             conn.execute(f"""
                 CREATE OR REPLACE TEMP TABLE temp_ticks AS
                 SELECT *, CAST(timestamp AS DATE) AS date
-                FROM read_parquet('{self.PARQUET_PATH}', union_by_name=false)
+                FROM read_parquet('{safe_path}', union_by_name=false)
             """)
         except Exception as e:
             logger.error(f"Failed to read Parquet: {e}. Please ensure column names match.")
@@ -57,26 +89,7 @@ class SchemaManagerMixin:
         return True
 
     def _create_empty_table(self, conn):
-        conn.execute("""
-            CREATE TABLE ticks_raw (
-                timestamp TIMESTAMP,
-                instrument_id VARCHAR,
-                last_price DOUBLE,
-                volume BIGINT,
-                open_interest DOUBLE,
-                bid_price DOUBLE,
-                ask_price DOUBLE,
-                date DATE,
-                option_type VARCHAR,
-                strike_price DOUBLE,
-                is_otm BOOLEAN,
-                sync_status VARCHAR,
-                future_sync_status VARCHAR,
-                is_same_rise BOOLEAN,
-                is_same_fall BOOLEAN,
-                is_diff_sync BOOLEAN
-            )
-        """)
+        conn.execute(get_ticks_raw_create_sql())
         logger.info("Empty table created with option and future status columns.")
 
         conn.execute("""
@@ -334,35 +347,44 @@ class SchemaManagerMixin:
 
         按"入口解析一次"原则，删除SQL内联正则，
         改为Python层委托SubscriptionManager.parse_option解析，原样ID直通。
+
+        P1-42修复：去掉OFFSET分页，改为每次重新查询WHERE NULL行，
+        因为UPDATE会自动将已处理行从结果集排除，无需OFFSET跳页。
+        加ORDER BY确保查询确定性。
         """
         from ali2026v3_trading.subscription_manager import SubscriptionManager
 
-        result = conn.execute(
-            "SELECT instrument_id FROM ticks_raw WHERE option_type IS NULL OR strike_price IS NULL"
-        ).fetchall()
+        PAGE_SIZE = 1000
+        while True:
+            result = conn.execute(
+                "SELECT instrument_id FROM ticks_raw "
+                "WHERE option_type IS NULL OR strike_price IS NULL "
+                "ORDER BY instrument_id "
+                "LIMIT ?",
+                [PAGE_SIZE],
+            ).fetchall()
 
-        if not result:
-            return
+            if not result:
+                break
 
-        batch = []
-        for row in result:
-            instrument_id = row[0]
-            try:
-                parsed = SubscriptionManager.parse_option(instrument_id)
-                batch.append((
-                    parsed['option_type'],
-                    parsed['strike_price'],
-                    instrument_id,
-                ))
-            except (ValueError, KeyError):
-                continue
+            batch = []
+            for row in result:
+                instrument_id = row[0]
+                try:
+                    parsed = SubscriptionManager.parse_option(instrument_id)
+                    batch.append((
+                        parsed['option_type'],
+                        parsed['strike_price'],
+                        instrument_id,
+                    ))
+                except (ValueError, KeyError):
+                    continue
 
-            if len(batch) >= 1000:
+            if batch:
                 self._execute_backfill_batch(conn, batch)
-                batch = []
 
-        if batch:
-            self._execute_backfill_batch(conn, batch)
+            if len(result) < PAGE_SIZE:
+                break
 
     def _execute_backfill_batch(self, conn, batch):
         """批量执行回填UPDATE"""

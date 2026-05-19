@@ -54,6 +54,12 @@ class TTypeService:
     - 利用 DataService 的索引和缓存（5-20x 性能提升）
     """
     
+    DECISION_WEIGHT_STATE = 0.6
+    DECISION_WEIGHT_FLOW = 0.4
+    STATE_STRENGTH_HIGH = 0.7
+    STATE_STRENGTH_MID = 0.4
+    FLOW_CONSISTENCY_THRESHOLD = 0.3
+    
     def __init__(self, data_source: Optional[Any] = None, use_data_service: bool = True):
         """初始化 T 型图服务
         
@@ -353,17 +359,17 @@ class TTypeService:
             flow_consistency = self._auto_get_flow_consistency(product)
             flow_source = 'auto'
 
-        w1 = 0.6
-        w2 = 0.4
+        w1 = self.DECISION_WEIGHT_STATE
+        w2 = self.DECISION_WEIGHT_FLOW
         score = state_strength * w1 + flow_consistency * w2
 
-        if state_strength > 0.7 and flow_consistency > 0.3:
+        if state_strength > self.STATE_STRENGTH_HIGH and flow_consistency > self.FLOW_CONSISTENCY_THRESHOLD:
             action = "normal_open"
             position_scale = 1.0
-        elif state_strength > 0.7 and flow_consistency < -0.3:
+        elif state_strength > self.STATE_STRENGTH_HIGH and flow_consistency < -self.FLOW_CONSISTENCY_THRESHOLD:
             action = "divergence_warning"
             position_scale = 0.5
-        elif 0.4 <= state_strength <= 0.7 and flow_consistency > 0:
+        elif self.STATE_STRENGTH_MID <= state_strength <= self.STATE_STRENGTH_HIGH and flow_consistency > 0:
             action = "small_open_tight_stop"
             position_scale = 0.3
         else:

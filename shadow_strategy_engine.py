@@ -111,6 +111,11 @@ class ShadowStrategyEngine:
     ALPHA_DECLINE_THRESHOLD_PCT = 20.0
     CONSECUTIVE_DECLINE_LIMIT = 2
     MIN_TRADES_FOR_METRICS = 5
+    EQUITY_CURVE_MAX_LEN = 10000
+    TRADES_MAX_LEN = 10000
+    ALPHA_HISTORY_MAX_LEN = 1000
+    LOG_QUEUE_MAX_LEN = 50000
+    LOG_FLUSH_INTERVAL = 100
 
     def __init__(
         self,
@@ -136,11 +141,11 @@ class ShadowStrategyEngine:
         self._shadow_b_params: Optional[ShadowParamsSnapshot] = None
         self._params_locked: bool = False
 
-        self._shadow_a_trades: deque = deque(maxlen=10000)
-        self._shadow_b_trades: deque = deque(maxlen=10000)
-        self._master_trades: deque = deque(maxlen=10000)
+        self._shadow_a_trades: deque = deque(maxlen=self.TRADES_MAX_LEN)
+        self._shadow_b_trades: deque = deque(maxlen=self.TRADES_MAX_LEN)
+        self._master_trades: deque = deque(maxlen=self.TRADES_MAX_LEN)
 
-        self._alpha_history: deque = deque(maxlen=1000)
+        self._alpha_history: deque = deque(maxlen=self.ALPHA_HISTORY_MAX_LEN)
         self._last_alpha_metrics: Optional[AlphaMetrics] = None
 
         self._master_equity_curve: List[float] = []
@@ -168,19 +173,21 @@ class ShadowStrategyEngine:
 
         self._trade_id_counter: int = 0
 
-        self._log_write_queue: deque = deque(maxlen=50000)
+        self._log_write_queue: deque = deque(maxlen=self.LOG_QUEUE_MAX_LEN)
+        self._log_queue_lock = threading.Lock()
         self._log_writer_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='shadow_log')
         self._log_flush_counter: int = 0
-        self._LOG_FLUSH_INTERVAL: int = 100
 
         self._load_and_lock_params()
 
         logger.info("[ShadowStrategyEngine] 初始化完成, log_dir=%s", self._log_dir)
 
     def _generate_trade_id(self, shadow_type: str) -> str:
-        self._trade_id_counter += 1
+        with self._lock:
+            self._trade_id_counter += 1
+            counter = self._trade_id_counter
         ts = datetime.now().strftime('%Y%m%d%H%M%S')
-        return f"SHADOW-{shadow_type}-{ts}-{self._trade_id_counter:06d}"
+        return f"SHADOW-{shadow_type}-{ts}-{counter:06d}"
 
     def _compute_param_hash(self, param_set: Dict[str, Any]) -> str:
         import hashlib
@@ -235,35 +242,9 @@ class ShadowStrategyEngine:
 
     @staticmethod
     def _default_param_sets() -> Dict[str, Dict[str, Any]]:
-        return {
-            'correct_trending': {
-                'option_width_min_threshold': 2.0,
-                'signal_cooldown_sec': 15,
-                'close_take_profit_ratio': 2.5,
-                'close_stop_loss_ratio': 0.4,
-                'max_risk_ratio': 0.8,
-                'max_signals_per_window': 10,
-                'lots_min': 5,
-            },
-            'incorrect_reversal': {
-                'option_width_min_threshold': 4.0,
-                'signal_cooldown_sec': 120,
-                'close_take_profit_ratio': 1.3,
-                'close_stop_loss_ratio': 0.6,
-                'max_risk_ratio': 0.3,
-                'max_signals_per_window': 3,
-                'lots_min': 2,
-            },
-            'other': {
-                'option_width_min_threshold': 4.0,
-                'signal_cooldown_sec': 300,
-                'close_take_profit_ratio': 1.1,
-                'close_stop_loss_ratio': 0.8,
-                'max_risk_ratio': 0.2,
-                'max_signals_per_window': 2,
-                'lots_min': 1,
-            },
-        }
+        # P1-26修复: 委托到state_param_manager消除重复定义
+        from ali2026v3_trading.state_param_manager import StateParamManager
+        return StateParamManager._default_param_sets()
 
     def are_params_locked(self) -> bool:
         with self._lock:
@@ -438,7 +419,7 @@ class ShadowStrategyEngine:
             self._shadow_a_equity_curve.append(shadow_a_equity)
             self._shadow_b_equity_curve.append(shadow_b_equity)
 
-            max_len = 10000
+            max_len = self.EQUITY_CURVE_MAX_LEN
             if len(self._master_equity_curve) > max_len:
                 self._master_equity_curve = self._master_equity_curve[-max_len:]
                 self._shadow_a_equity_curve = self._shadow_a_equity_curve[-max_len:]
@@ -608,10 +589,13 @@ class ShadowStrategyEngine:
                 f"shadow_{record.shadow_type}_{datetime.now().strftime('%Y%m%d')}.jsonl"
             )
             line = json.dumps(record.to_dict(), ensure_ascii=False) + '\n'
-            self._log_write_queue.append((log_file, line))
-            self._log_flush_counter += 1
-            if self._log_flush_counter >= self._LOG_FLUSH_INTERVAL:
-                self._log_flush_counter = 0
+            with self._log_queue_lock:
+                self._log_write_queue.append((log_file, line))
+                self._log_flush_counter += 1
+                should_flush = self._log_flush_counter >= self.LOG_FLUSH_INTERVAL
+                if should_flush:
+                    self._log_flush_counter = 0
+            if should_flush:
                 self._async_flush_log_queue()
         except Exception as e:
             logger.warning("[ShadowStrategyEngine] 入队交易日志失败: %s", e)
@@ -619,8 +603,9 @@ class ShadowStrategyEngine:
     def _async_flush_log_queue(self) -> None:
         try:
             items = []
-            while self._log_write_queue:
-                items.append(self._log_write_queue.popleft())
+            with self._log_queue_lock:
+                while self._log_write_queue:
+                    items.append(self._log_write_queue.popleft())
             if items:
                 self._log_writer_executor.submit(self._do_write_logs, items)
         except Exception as e:
@@ -639,50 +624,62 @@ class ShadowStrategyEngine:
                 logger.warning("[ShadowStrategyEngine] 写入日志文件失败: %s", e)
 
     def generate_daily_summary(self) -> Dict[str, Any]:
+        today_str = datetime.now().strftime('%Y-%m-%d')
+
+        metrics = self.compute_alpha_metrics()
+
         with self._lock:
-            today_str = datetime.now().strftime('%Y-%m-%d')
+            shadow_a_trades_copy = list(self._shadow_a_trades)
+            shadow_b_trades_copy = list(self._shadow_b_trades)
+            master_trades_copy = list(self._master_trades)
+            stats_copy = dict(self._stats)
+            shadow_a_pnl = self._shadow_a_pnl_sum
+            shadow_b_pnl = self._shadow_b_pnl_sum
+            master_pnl = self._master_pnl_sum
+            params_locked = self._params_locked
+            degradation_active = self._degradation_active
+            absolute_ev_pause = self._absolute_ev_pause
 
-            metrics = self.compute_alpha_metrics()
+        summary = {
+            'summary_date': today_str,
+            'summary_timestamp': datetime.now().isoformat(),
+            'alpha_metrics': metrics.to_dict(),
+            'shadow_a_stats': {
+                'total_trades': stats_copy['shadow_a_trades'],
+                'total_pnl': shadow_a_pnl,
+                'expected_value': self._compute_expected_value(shadow_a_trades_copy),
+                'recent_trades': len([t for t in shadow_a_trades_copy if t.timestamp.startswith(today_str)]),
+            },
+            'shadow_b_stats': {
+                'total_trades': stats_copy['shadow_b_trades'],
+                'total_pnl': shadow_b_pnl,
+                'expected_value': self._compute_expected_value(shadow_b_trades_copy),
+                'recent_trades': len([t for t in shadow_b_trades_copy if t.timestamp.startswith(today_str)]),
+            },
+            'master_stats': {
+                'total_trades': stats_copy['master_trades'],
+                'total_pnl': master_pnl,
+                'expected_value': self._compute_expected_value(master_trades_copy),
+            },
+            'params_locked': params_locked,
+            'degradation_active': degradation_active,
+            'absolute_ev_pause': absolute_ev_pause,
+        }
 
-            summary = {
-                'summary_date': today_str,
-                'summary_timestamp': datetime.now().isoformat(),
-                'alpha_metrics': metrics.to_dict(),
-                'shadow_a_stats': {
-                    'total_trades': self._stats['shadow_a_trades'],
-                    'total_pnl': self._shadow_a_pnl_sum,
-                    'expected_value': self._compute_expected_value(self._shadow_a_trades),
-                    'recent_trades': len([t for t in self._shadow_a_trades if t.timestamp.startswith(today_str)]),
-                },
-                'shadow_b_stats': {
-                    'total_trades': self._stats['shadow_b_trades'],
-                    'total_pnl': self._shadow_b_pnl_sum,
-                    'expected_value': self._compute_expected_value(self._shadow_b_trades),
-                    'recent_trades': len([t for t in self._shadow_b_trades if t.timestamp.startswith(today_str)]),
-                },
-                'master_stats': {
-                    'total_trades': self._stats['master_trades'],
-                    'total_pnl': self._master_pnl_sum,
-                    'expected_value': self._compute_expected_value(self._master_trades),
-                },
-                'params_locked': self._params_locked,
-                'degradation_active': self._degradation_active,
-                'absolute_ev_pause': self._absolute_ev_pause,
-            }
+        try:
+            summary_file = os.path.join(
+                self._log_dir,
+                f"summary_{today_str}.json"
+            )
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
+            logger.info("[ShadowStrategyEngine] 日汇总写入: %s", summary_file)
+        except Exception as e:
+            logger.warning("[ShadowStrategyEngine] 写入日汇总失败: %s", e)
 
-            try:
-                summary_file = os.path.join(
-                    self._log_dir,
-                    f"summary_{today_str}.json"
-                )
-                with open(summary_file, 'w', encoding='utf-8') as f:
-                    json.dump(summary, f, ensure_ascii=False, indent=2)
-                logger.info("[ShadowStrategyEngine] 日汇总写入: %s", summary_file)
-            except Exception as e:
-                logger.warning("[ShadowStrategyEngine] 写入日汇总失败: %s", e)
-
+        with self._lock:
             self._last_daily_summary_date = today_str
-            return summary
+        return summary
 
     def generate_weekly_summary(self) -> Dict[str, Any]:
         with self._lock:

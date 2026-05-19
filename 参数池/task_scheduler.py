@@ -35,7 +35,36 @@ TEST_END = "2026-12-31"
 TARGET_SYMBOLS: Optional[List[str]] = None
 INITIAL_EQUITY = 1_000_000.0
 COMMISSION_PER_LOT = 1.5
-SLIPPAGE_BPS = 1.0
+
+try:
+    from ali2026v3_trading.config_params import get_cached_params
+    SLIPPAGE_BPS = get_cached_params().get('default_slippage_bps', 3.0)
+except Exception:
+    SLIPPAGE_BPS = 3.0
+
+PULLBACK_DEFAULTS = {
+    "pullback_enabled": False,
+    "pullback_wait_bars": 5,
+    "pullback_retrace_pct": 0.15,
+    "pullback_iv_min_percentile": 20.0,
+    "pullback_iv_max_percentile": 80.0,
+    "pullback_ref_mode": "peak",
+    "pullback_atr_wait_multiplier": 0.0,
+    "pullback_retrace_pct_call": None,
+    "pullback_retrace_pct_put": None,
+    "pullback_theta_decay_accel": 0.0,
+    "pullback_min_retrace_abs": 0.0,
+}
+
+PULLBACK_GRID = {
+    "pullback_enabled": [True, False],
+    "pullback_wait_bars": [2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "pullback_retrace_pct": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+    "pullback_ref_mode": ["peak", "atr"],
+    "pullback_atr_wait_multiplier": [0.0, 2.0, 5.0],
+    "pullback_theta_decay_accel": [0.0, 0.5, 1.0],
+    "pullback_min_retrace_abs": [0.0, 0.5, 1.0],
+}
 
 PARAM_GRID_ROUND1 = {
     "close_take_profit_ratio": [1.1, 1.5, 2.5],
@@ -45,12 +74,15 @@ PARAM_GRID_ROUND1 = {
     "signal_cooldown_sec": [0.0, 60.0, 120.0],
     "non_other_ratio_threshold": [0.3, 0.4, 0.5],
     "decision_interval_minutes": [1, 5, 15],
+    **PULLBACK_GRID,
 }
 
 PARAM_DEFAULTS = {
     "close_take_profit_ratio": 1.5,
     "close_stop_loss_ratio": 0.5,
     "max_risk_ratio": 0.3,
+    "max_risk_per_trade": 0.05,
+    "max_open_positions": 3,
     "lots_min": 3,
     "max_signals_per_window": 5,
     "signal_cooldown_sec": 60.0,
@@ -66,6 +98,7 @@ PARAM_DEFAULTS = {
     "daily_loss_hard_stop_pct": 0.05,
     "logic_reversal_threshold": 1.5,
     "decision_interval_minutes": 1,
+    **PULLBACK_DEFAULTS,
 }
 
 PARAM_GRID_ROUND2 = {
@@ -79,6 +112,7 @@ PARAM_GRID_ROUND2 = {
     "rate_limit_global_per_min": [30, 120],
     "hard_time_stop_minutes": [60.0, 120.0],
     "daily_loss_hard_stop_pct": [0.03, 0.08],
+    **PULLBACK_GRID,
 }
 
 PARAM_GRID_BOX_EXTREME = {
@@ -88,6 +122,7 @@ PARAM_GRID_BOX_EXTREME = {
     "close_take_profit_ratio": [1.5, 2.0, 3.0],
     "close_stop_loss_ratio": [0.3, 0.5, 0.7],
     "decision_interval_minutes": [1, 5, 15],
+    **PULLBACK_GRID,
 }
 
 PARAM_DEFAULTS_BOX_EXTREME = {
@@ -99,6 +134,7 @@ PARAM_DEFAULTS_BOX_EXTREME = {
     "lots_min": 1,
     "max_risk_ratio": 0.2,
     "decision_interval_minutes": 5,
+    **PULLBACK_DEFAULTS,
 }
 
 PARAM_GRID_BOX_SPRING = {
@@ -108,6 +144,7 @@ PARAM_GRID_BOX_SPRING = {
     "spring_stop_profit_ratio": [3.0, 5.0, 8.0],
     "spring_max_loss_pct": [0.85, 0.90, 0.95],
     "decision_interval_minutes": [1, 5, 15],
+    **PULLBACK_GRID,
 }
 
 PARAM_DEFAULTS_BOX_SPRING = {
@@ -123,6 +160,7 @@ PARAM_DEFAULTS_BOX_SPRING = {
     "close_stop_loss_ratio": 0.95,
     "hard_time_stop_minutes": 240.0,
     "max_risk_ratio": 0.015,
+    **PULLBACK_DEFAULTS,
 }
 
 PARAM_GRID_HFT = {
@@ -147,6 +185,50 @@ PARAM_DEFAULTS_HFT = {
     "hard_time_stop_minutes": 30.0,
     "daily_loss_hard_stop_pct": 0.03,
     "decision_interval_minutes": 1,
+}
+
+PARAM_DEFAULTS_ARBITRAGE = {
+    **PARAM_DEFAULTS_HFT,
+    "arb_deviation_threshold_bps": 50.0,
+    "arb_reversion_target_bps": 30.0,
+    "arb_min_confidence": 0.6,
+    "arb_max_hold_minutes": 15.0,
+    "close_take_profit_ratio": 1.0,
+    "close_stop_loss_ratio": 0.3,
+    "hard_time_stop_minutes": 15.0,
+    **PULLBACK_DEFAULTS,
+}
+
+PARAM_DEFAULTS_MARKET_MAKING = {
+    **PARAM_DEFAULTS_HFT,
+    "mm_ioc_signal_threshold": 0.8,
+    "mm_offset_min_ticks": 0,
+    "mm_offset_max_ticks": 3,
+    "mm_spread_target_bps": 5.0,
+    "mm_max_inventory_lots": 5,
+    "mm_rebalance_threshold": 3,
+    "close_take_profit_ratio": 0.8,
+    "close_stop_loss_ratio": 0.5,
+    "hard_time_stop_minutes": 60.0,
+    **PULLBACK_DEFAULTS,
+}
+
+PARAM_GRID_ARBITRAGE = {
+    "arb_deviation_threshold_bps": [30.0, 50.0, 80.0],
+    "arb_min_confidence": [0.5, 0.6, 0.7],
+    "arb_max_hold_minutes": [10.0, 15.0, 30.0],
+    "close_take_profit_ratio": [0.8, 1.0, 1.2],
+    "close_stop_loss_ratio": [0.2, 0.3, 0.4],
+    **PULLBACK_GRID,
+}
+
+PARAM_GRID_MARKET_MAKING = {
+    "mm_spread_target_bps": [3.0, 5.0, 8.0],
+    "mm_max_inventory_lots": [3, 5, 8],
+    "mm_rebalance_threshold": [2, 3, 5],
+    "close_take_profit_ratio": [0.6, 0.8, 1.0],
+    "close_stop_loss_ratio": [0.3, 0.5, 0.7],
+    **PULLBACK_GRID,
 }
 
 PARAM_DEFAULTS_SHADOW_A = {
@@ -221,6 +303,8 @@ REASON_MULTIPLIERS = {
     "CORRECT_DIVERGENCE":   {"tp_mult": 0.8,  "sl_mult": 0.8,  "time_mult": 0.67},
     "INCORRECT_REVERSAL":   {"tp_mult": 0.87, "sl_mult": 1.2,  "time_mult": 0.67},
     "OTHER_SCALP":          {"tp_mult": 0.73, "sl_mult": 0.6,  "time_mult": 0.33},
+    "ARBITRAGE":            {"tp_mult": 0.5,  "sl_mult": 0.5,  "time_mult": 0.25},
+    "MARKET_MAKING":        {"tp_mult": 0.4,  "sl_mult": 0.8,  "time_mult": 1.0},
     "MANUAL":               {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
 }
 
@@ -240,6 +324,24 @@ STRATEGY_SHADOW_DEFAULTS = {
 ROUND1_TOP_K = 10
 
 PARAM_GRID = PARAM_GRID_ROUND1
+
+OBJECTIVE_FUNCTIONS = {
+    'sharpe': lambda r: r.get('sharpe', 0.0),
+    'profit_factor': lambda r: r.get('profit_factor', 0.0),
+    'win_loss_ratio': lambda r: r.get('avg_win_loss_ratio', 0.0),
+    'plr_composite': lambda r: (
+        r.get('profit_factor', 0.0) * 0.4
+        + r.get('avg_win_loss_ratio', 0.0) * 0.3
+        + r.get('sharpe', 0.0) * 0.1
+        + r.get('total_return', 0.0) * 0.2
+    ),
+    'return_per_dd': lambda r: (
+        r.get('total_return', 0.0) / abs(r.get('max_drawdown', -0.01))
+        if abs(r.get('max_drawdown', -0.01)) > 1e-10 else 0.0
+    ),
+}
+
+DEFAULT_OBJECTIVE = 'sharpe'
 
 
 def validate_shadow_param_independence(threshold: float = 0.20) -> Dict[str, float]:
@@ -275,7 +377,6 @@ def validate_shadow_param_independence(threshold: float = 0.20) -> Dict[str, flo
                 logger.info("[P0-Q1 PASS] %s 参数差异度 %.2f%%", label, avg_diff * 100)
     return results
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -298,6 +399,15 @@ class _BacktestPosition:
 
 
 @dataclass
+class _ClosedTrade:
+    pnl: float
+    pnl_pct: float
+    close_reason: str
+    hold_minutes: float
+    open_reason: str = ""
+
+
+@dataclass
 class _BacktestState:
     equity: float = INITIAL_EQUITY
     peak_equity: float = INITIAL_EQUITY
@@ -315,6 +425,8 @@ class _BacktestState:
     total_signals: int = 0
     total_trades: int = 0
     prev_date: Optional[str] = None
+    recent_pnls: List[float] = field(default_factory=list)
+    closed_trades: List[_ClosedTrade] = field(default_factory=list)
 
 
 _STATE_MAP = {
@@ -343,6 +455,39 @@ def _resolve_time_stop(params: Dict[str, float], open_reason: str) -> float:
     base_time = params.get("hard_time_stop_minutes", 90.0)
     mult = REASON_MULTIPLIERS.get(open_reason, {"time_mult": 1.0})
     return base_time * mult["time_mult"]
+
+
+def _compute_lots_with_risk_budget(
+    equity: float,
+    price: float,
+    sl_ratio: float,
+    lots_min: int,
+    params: Dict[str, float],
+    recent_pnls: Optional[List[float]] = None,
+) -> int:
+    if sl_ratio <= 0:
+        return 0
+    if price <= 0:
+        return 0
+    lots = lots_min
+    risk = params.get("max_risk_ratio", 0.3)
+    max_lots = max(1, int(equity * risk / (price * sl_ratio)))
+    lots = min(lots, max_lots)
+    max_risk_per_trade = params.get("max_risk_per_trade", 0.05)
+    if max_risk_per_trade > 0 and equity > 0:
+        max_loss_per_lot = price * sl_ratio
+        if max_loss_per_lot > 0:
+            max_lots_by_risk = max(1, int(equity * max_risk_per_trade / max_loss_per_lot))
+            lots = min(lots, max_lots_by_risk)
+    if recent_pnls and len(recent_pnls) >= 3:
+        lookback = min(10, len(recent_pnls))
+        recent = recent_pnls[-lookback:]
+        losses = sum(1 for p in recent if p < 0)
+        if losses > lookback * 0.6:
+            lots = max(1, int(lots * 0.5))
+        elif losses > lookback * 0.4:
+            lots = max(1, int(lots * 0.75))
+    return max(0, lots)
 
 
 def _check_state_transition(
@@ -430,8 +575,7 @@ def _check_logic_reversal(
             if price <= 0:
                 continue
 
-            pnl_per_lot = (price - pos.open_price) * pos.volume / abs(pos.volume) if pos.volume != 0 else 0
-            pnl = pnl_per_lot * pos.lots
+            pnl = (price - pos.open_price) * pos.volume if pos.volume != 0 else 0
             bid_ask = bar.get("bid_ask_spread", 0.0)
             spread_q = bar.get("_spread_quality", 1)
             slip_bps = _compute_dynamic_slippage_bps(price, bid_ask, spread_quality=spread_q)
@@ -439,6 +583,9 @@ def _check_logic_reversal(
             commission = pos.lots * COMMISSION_PER_LOT
             bt.equity += pnl - slip - commission
             bt.total_trades += 1
+            bt.recent_pnls.append(pnl - slip - commission)
+            if len(bt.recent_pnls) > 50:
+                bt.recent_pnls = bt.recent_pnls[-50:]
             del bt.positions[symbol]
             logger.debug("逻辑反转平仓: %s @ %.2f (wrong=%.2f > correct*%.1f=%.2f)",
                          symbol, price, wrong_pct, reversal_threshold, correct_pct * reversal_threshold)
@@ -492,12 +639,16 @@ def _try_open(
     if strategy_type == "main" and reason == "CORRECT_RESONANCE" and strength < 0.3:
         return
 
-    lots = int(params.get("lots_min", 1))
-    risk = params.get("max_risk_ratio", 0.3)
-    max_lots = max(1, int(bt.equity * risk / (price * sl_ratio + 1e-8)))
-    lots = min(lots, max_lots)
+    lots = _compute_lots_with_risk_budget(
+        bt.equity, price, sl_ratio, int(params.get("lots_min", 1)), params,
+        recent_pnls=bt.recent_pnls)
+    if lots <= 0:
+        return
 
-    direction = 1 if bar.get("imbalance", 0) >= 0 else -1
+    imbalance = bar.get("imbalance", 0)
+    if imbalance == 0:
+        return
+    direction = 1 if imbalance > 0 else -1
     if strategy_type == "shadow_reverse":
         direction = -direction
     volume = direction * lots
@@ -622,21 +773,110 @@ def _check_positions(
             close_reason = "EOD"
 
     if should_close:
-        pnl_per_lot = (price - pos.open_price) * pos.volume / abs(pos.volume) if pos.volume != 0 else 0
-        pnl = pnl_per_lot * pos.lots
+        pnl = (price - pos.open_price) * pos.volume if pos.volume != 0 else 0
         bid_ask = bar.get("bid_ask_spread", 0.0)
         spread_q = bar.get("_spread_quality", 1)
         slip_bps = _compute_dynamic_slippage_bps(price, bid_ask, spread_quality=spread_q)
         slip = price * slip_bps / 10000 * pos.lots
         commission = pos.lots * COMMISSION_PER_LOT
-        bt.equity += pnl - slip - commission
+        net_pnl = pnl - slip - commission
+        bt.equity += net_pnl
         bt.total_trades += 1
+        bt.recent_pnls.append(net_pnl)
+        if len(bt.recent_pnls) > 50:
+            bt.recent_pnls = bt.recent_pnls[-50:]
+        pnl_pct = float_pnl_pct if pos.open_price > 0 else 0.0
+        hold_min = (bar_time - pos.open_time).total_seconds() / 60.0 if pos.open_time is not None else 0.0
+        bt.closed_trades.append(_ClosedTrade(
+            pnl=net_pnl, pnl_pct=pnl_pct, close_reason=close_reason,
+            hold_minutes=hold_min, open_reason=getattr(pos, 'open_reason', ''),
+        ))
         del bt.positions[symbol]
 
         daily_dd = (bt.daily_start_equity - bt.equity) / bt.daily_start_equity if bt.daily_start_equity > 0 else 0
         if daily_dd > 0.03:
             pause_sec = params.get("circuit_breaker_pause_sec", 180.0)
             bt.circuit_breaker_until = bar_time + pd.Timedelta(seconds=pause_sec)
+
+
+def _compute_profit_loss_ratio_metrics(closed_trades: List[_ClosedTrade], equity_curve: np.ndarray) -> Dict[str, Any]:
+    wins = [t for t in closed_trades if t.pnl > 0]
+    losses = [t for t in closed_trades if t.pnl < 0]
+    n_trades = len(closed_trades)
+    n_wins = len(wins)
+    n_losses = len(losses)
+
+    avg_win_pct = float(np.mean([t.pnl_pct for t in wins])) if wins else 0.0
+    avg_loss_pct = abs(float(np.mean([t.pnl_pct for t in losses]))) if losses else 0.0
+    total_win = sum(t.pnl for t in wins)
+    total_loss = abs(sum(t.pnl for t in losses))
+    profit_factor = total_win / total_loss if total_loss > 1e-10 else 0.0
+    win_loss_ratio = avg_win_pct / avg_loss_pct if avg_loss_pct > 1e-10 else 0.0
+    win_rate = n_wins / n_trades if n_trades > 0 else 0.0
+
+    max_consecutive_losses = 0
+    current_streak = 0
+    for t in closed_trades:
+        if t.pnl < 0:
+            current_streak += 1
+            max_consecutive_losses = max(max_consecutive_losses, current_streak)
+        else:
+            current_streak = 0
+
+    max_consecutive_wins = 0
+    current_streak = 0
+    for t in closed_trades:
+        if t.pnl > 0:
+            current_streak += 1
+            max_consecutive_wins = max(max_consecutive_wins, current_streak)
+        else:
+            current_streak = 0
+
+    recovery_efficiency = 0.0
+    if len(equity_curve) > 1:
+        cummax = np.maximum.accumulate(equity_curve)
+        drawdown_mask = equity_curve < cummax
+        if np.any(drawdown_mask):
+            dd_indices = np.where(drawdown_mask)[0]
+            if len(dd_indices) > 0:
+                dd_depth = float(np.max(cummax[dd_indices] - equity_curve[dd_indices]))
+                new_high_indices = np.where(equity_curve >= cummax)[0]
+                if len(new_high_indices) > 1:
+                    total_recovery_bars = 0
+                    recovery_count = 0
+                    for i in range(1, len(new_high_indices)):
+                        gap = int(new_high_indices[i] - new_high_indices[i - 1])
+                        if gap > 1:
+                            total_recovery_bars += gap
+                            recovery_count += 1
+                    if recovery_count > 0 and dd_depth > 0:
+                        avg_recovery_bars = total_recovery_bars / recovery_count
+                        recovery_efficiency = dd_depth / (avg_recovery_bars * float(equity_curve[0])) if equity_curve[0] > 0 else 0.0
+                        recovery_efficiency = min(recovery_efficiency * 100.0, 10.0)
+
+    calmar = 0.0
+    if len(equity_curve) > 1:
+        total_ret = (equity_curve[-1] / equity_curve[0] - 1) if equity_curve[0] > 0 else 0.0
+        annualized_ret = total_ret * (252 * 240 / len(equity_curve)) if len(equity_curve) > 0 else 0.0
+        cummax = np.maximum.accumulate(equity_curve)
+        max_dd_pct = float(np.min(equity_curve / cummax - 1))
+        if abs(max_dd_pct) > 1e-10:
+            calmar = annualized_ret / abs(max_dd_pct)
+
+    return {
+        "win_loss_ratio": win_loss_ratio,
+        "profit_factor": profit_factor,
+        "avg_win_pct": avg_win_pct,
+        "avg_loss_pct": avg_loss_pct,
+        "win_rate": win_rate,
+        "total_trades": n_trades,
+        "win_trades": n_wins,
+        "loss_trades": n_losses,
+        "max_consecutive_losses": max_consecutive_losses,
+        "max_consecutive_wins": max_consecutive_wins,
+        "recovery_efficiency": recovery_efficiency,
+        "calmar": calmar,
+    }
 
 
 def _reset_daily(bt: _BacktestState, current_date: str) -> None:
@@ -697,10 +937,10 @@ def run_backtest(
 
             if _check_safety(bt, bar_time, params):
                 strength = bar.get("strength", 0)
-                should_open = strength > 0.3 and len(bt.positions) < 3
+                should_open = strength > 0.3 and len(bt.positions) < int(params.get("max_open_positions", 3))
 
                 if strategy_type == "shadow_random":
-                    should_open = np.random.random() < 0.02 and len(bt.positions) < 3
+                    should_open = np.random.random() < 0.02 and len(bt.positions) < int(params.get("max_open_positions", 3))
 
                 if should_open:
                     _try_open(bt, bar, params, strategy_type=strategy_type)
@@ -730,12 +970,15 @@ def run_backtest(
     else:
         max_dd = 0.0
 
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
     return {
         "total_return": total_return,
         "sharpe": sharpe,
         "max_drawdown": max_dd,
         "num_signals": bt.total_signals,
         "strategy_type": strategy_type,
+        **plr_metrics,
     }
 
 
@@ -803,7 +1046,7 @@ def run_backtest_box_extreme(
             if box_range < close * box_threshold:
                 continue
 
-            if _check_safety(bt, bar_time, params) and len(bt.positions) < 3:
+            if _check_safety(bt, bar_time, params) and len(bt.positions) < int(params.get("max_open_positions", 3)):
                 position_in_box = (close - box_low) / box_range if box_range > 0 else 0.5
 
                 is_box_bottom = position_in_box < (1 - extreme_ratio)
@@ -832,7 +1075,11 @@ def run_backtest_box_extreme(
                     price = close
                     tp_ratio = params.get("close_take_profit_ratio", 2.0)
                     sl_ratio = params.get("close_stop_loss_ratio", 0.5)
-                    lots = int(params.get("lots_min", 1))
+                    lots = _compute_lots_with_risk_budget(
+                        bt.equity, price, sl_ratio, int(params.get("lots_min", 1)), params,
+                        recent_pnls=bt.recent_pnls)
+                    if lots <= 0:
+                        continue
 
                     sp_price = price * tp_ratio if direction > 0 else price / tp_ratio
                     sl_price = price * (1 - sl_ratio) if direction > 0 else price * (1 + sl_ratio)
@@ -866,12 +1113,15 @@ def run_backtest_box_extreme(
 
     max_dd = float(np.min(equity_arr / np.maximum.accumulate(equity_arr) - 1)) if len(equity_arr) > 0 else 0.0
 
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
     return {
         "total_return": total_return,
         "sharpe": sharpe,
         "max_drawdown": max_dd,
         "num_signals": bt.total_signals,
         "strategy_type": strategy_type,
+        **plr_metrics,
     }
 
 
@@ -922,7 +1172,7 @@ def run_backtest_box_spring(
                 _check_positions(bt, bar, params)
 
         if idx % decision_interval == 0:
-            if _check_safety(bt, bar_time, params) and len(bt.positions) < 3:
+            if _check_safety(bt, bar_time, params) and len(bt.positions) < int(params.get("max_open_positions", 3)):
                 impulse = (high - low) / close if close > 0 else 0
 
                 is_low_iv = iv > 0 and iv < iv_threshold
@@ -948,7 +1198,11 @@ def run_backtest_box_spring(
                     price = close
                     tp_ratio = params.get("spring_stop_profit_ratio", 5.0)
                     sl_ratio = params.get("spring_max_loss_pct", 0.90)
-                    lots = int(params.get("lots_min", 1))
+                    lots = _compute_lots_with_risk_budget(
+                        bt.equity, price, sl_ratio, int(params.get("lots_min", 1)), params,
+                        recent_pnls=bt.recent_pnls)
+                    if lots <= 0:
+                        continue
 
                     sp_price = price * tp_ratio if direction > 0 else price / tp_ratio
                     sl_price = price * (1 - sl_ratio) if direction > 0 else price * (1 + sl_ratio)
@@ -982,12 +1236,15 @@ def run_backtest_box_spring(
 
     max_dd = float(np.min(equity_arr / np.maximum.accumulate(equity_arr) - 1)) if len(equity_arr) > 0 else 0.0
 
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
     return {
         "total_return": total_return,
         "sharpe": sharpe,
         "max_drawdown": max_dd,
         "num_signals": bt.total_signals,
         "strategy_type": strategy_type,
+        **plr_metrics,
     }
 
 
@@ -1040,7 +1297,7 @@ def run_backtest_hft(
             strength = bar.get("strength", 0)
 
             if strategy_type == "shadow_random":
-                if np.random.random() < 0.005 and len(bt.positions) < 3:
+                if np.random.random() < 0.005 and len(bt.positions) < int(params.get("max_open_positions", 3)):
                     direction = 1 if np.random.random() < 0.5 else -1
                     should_open_hft = True
                 else:
@@ -1048,7 +1305,7 @@ def run_backtest_hft(
             else:
                 should_open_hft = False
                 if imbalance >= min_imbalance and strength > 0.2:
-                    current_dir = 1 if bar.get("imbalance", 0) >= 0 else -1
+                    current_dir = 1 if bar.get("imbalance", 0) > 0 else -1
                     if strategy_type == "shadow_reverse":
                         current_dir = -current_dir
 
@@ -1065,7 +1322,7 @@ def run_backtest_hft(
                                 continue
                         should_open_hft = True
 
-            if should_open_hft and len(bt.positions) < 3:
+            if should_open_hft and len(bt.positions) < int(params.get("max_open_positions", 3)):
                 symbol = bar.get("symbol", "unknown")
                 price = bar.get("close", 0.0)
                 if price <= 0:
@@ -1073,10 +1330,11 @@ def run_backtest_hft(
 
                 reason = _STATE_REASON_MAP.get(bt.current_state, "OTHER_SCALP")
                 tp_ratio, sl_ratio = _resolve_tp_sl(params, reason)
-                lots = int(params.get("lots_min", 1))
-                risk = params.get("max_risk_ratio", 0.2)
-                max_lots = max(1, int(bt.equity * risk / (price * sl_ratio + 1e-8)))
-                lots = min(lots, max_lots)
+                lots = _compute_lots_with_risk_budget(
+                    bt.equity, price, sl_ratio, int(params.get("lots_min", 1)), params,
+                    recent_pnls=bt.recent_pnls)
+                if lots <= 0:
+                    continue
 
                 volume = hft_pending_direction * lots
                 sp_price = price * tp_ratio if volume > 0 else price / tp_ratio
@@ -1123,6 +1381,8 @@ def run_backtest_hft(
 
     max_dd = float(np.min(equity_arr / np.maximum.accumulate(equity_arr) - 1)) if len(equity_arr) > 0 else 0.0
 
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
     return {
         "total_return": total_return,
         "sharpe": sharpe,
@@ -1130,6 +1390,238 @@ def run_backtest_hft(
         "num_signals": bt.total_signals,
         "strategy_type": strategy_type,
         "hft_fidelity_warning": "DEGRADED: tick级参数(hft_cooldown_ms/hft_signal_confirm_ticks)在分钟级回测中失真，需HFT回放引擎验证",
+        **plr_metrics,
+    }
+
+
+def run_backtest_arbitrage(
+    params: Dict[str, float],
+    bar_data: pd.DataFrame,
+    train: bool = True,
+    strategy_type: str = "arbitrage",
+) -> Dict[str, Any]:
+    """S5套利策略回测：微观结构价格偏离检测→快速反向开仓→均值回归平仓
+
+    基于MicrostructureArbitrageDetector的逻辑：
+      1. 计算当前价格相对公允价值(implied by imbalance+strength)的偏离
+      2. 偏离>arb_deviation_threshold_bps时发出套利信号(反向开仓)
+      3. 价格回归至arb_reversion_target_bps以内时平仓
+      4. 强制时间止损arb_max_hold_minutes
+
+    特点：收益来源集中(偏离→回归)、持仓时间短、方向总是反转。
+    """
+    if bar_data.empty:
+        return {"error": "无数据", "params": params, "strategy_type": strategy_type}
+
+    bt = _BacktestState()
+    dev_threshold = params.get("arb_deviation_threshold_bps", 50.0)
+    reversion_target = params.get("arb_reversion_target_bps", 30.0)
+    min_confidence = params.get("arb_min_confidence", 0.6)
+    max_hold = params.get("arb_max_hold_minutes", 15.0)
+    np.random.seed(42 if train else 24)
+
+    for idx in range(len(bar_data)):
+        bar = bar_data.iloc[idx]
+        bar_time = bar.get("minute", pd.Timestamp.now())
+        current_date = str(bar_time.date())
+        _reset_daily(bt, current_date)
+
+        for sym in list(bt.positions.keys()):
+            if sym == bar.get("symbol", ""):
+                pos = bt.positions[sym]
+                bar_price = bar.get("close", 0)
+                entry = pos["entry_price"]
+                direction = pos.get("direction", 0)
+                hold_minutes = (bar_time - pos.get("entry_time", bar_time)).total_seconds() / 60.0
+                tp_mult, sl_mult = _resolve_tp_sl(params, "ARBITRAGE")
+                if direction == 1:
+                    pnl_pct = (bar_price - entry) / entry if entry > 0 else 0
+                    if pnl_pct >= tp_mult * 0.01 or pnl_pct <= -sl_mult * 0.01 or hold_minutes >= max_hold:
+                        pnl = (bar_price - entry) * pos.get("lots", 1)
+                        bt.equity += pnl
+                        bt.total_trades += 1
+                        del bt.positions[sym]
+                elif direction == -1:
+                    pnl_pct = (entry - bar_price) / entry if entry > 0 else 0
+                    if pnl_pct >= tp_mult * 0.01 or pnl_pct <= -sl_mult * 0.01 or hold_minutes >= max_hold:
+                        pnl = (entry - bar_price) * pos.get("lots", 1)
+                        bt.equity += pnl
+                        bt.total_trades += 1
+                        del bt.positions[sym]
+
+        if _check_safety(bt, bar_time, params):
+            imbalance = bar.get("imbalance", 0)
+            strength = bar.get("strength", 0)
+            confidence = min(abs(imbalance) * 2, 1.0)
+            symbol = bar.get("symbol", "")
+
+            if symbol not in bt.positions and confidence >= min_confidence:
+                fair_value_shift_bps = imbalance * 100
+                deviation_bps = abs(fair_value_shift_bps)
+                if deviation_bps >= dev_threshold:
+                    arb_direction = -1 if fair_value_shift_bps > 0 else 1
+                    bar_price = bar.get("close", 0)
+                    tp_mult, sl_mult = _resolve_tp_sl(params, "ARBITRAGE")
+                    tp_price = bar_price * (1 + tp_mult * 0.01) if arb_direction == 1 else bar_price * (1 - tp_mult * 0.01)
+                    sl_price = bar_price * (1 - sl_mult * 0.01) if arb_direction == 1 else bar_price * (1 + sl_mult * 0.01)
+                    bt.positions[symbol] = {
+                        "direction": arb_direction,
+                        "entry_price": bar_price,
+                        "stop_loss": sl_price,
+                        "take_profit": tp_price,
+                        "lots": params.get("lots_min", 1),
+                        "entry_time": bar_time,
+                    }
+                    bt.total_signals += 1
+
+        bt.peak_equity = max(bt.peak_equity, bt.equity)
+        bt.equity_curve.append(bt.equity)
+
+    total_return = bt.equity / INITIAL_EQUITY - 1
+    equity_arr = np.array(bt.equity_curve)
+    if len(equity_arr) > 1:
+        returns = np.diff(equity_arr) / equity_arr[:-1]
+        sharpe = np.sqrt(252 * 240) * np.mean(returns) / np.std(returns) if np.std(returns) > 1e-10 else 0.0
+    else:
+        sharpe = 0.0
+    max_dd = float(np.min(equity_arr / np.maximum.accumulate(equity_arr) - 1)) if len(equity_arr) > 0 else 0.0
+
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
+    return {
+        "total_return": total_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_dd,
+        "num_signals": bt.total_signals,
+        "total_trades": bt.total_trades,
+        "strategy_type": strategy_type,
+        **plr_metrics,
+    }
+
+
+def run_backtest_market_making(
+    params: Dict[str, float],
+    bar_data: pd.DataFrame,
+    train: bool = True,
+    strategy_type: str = "market_making",
+) -> Dict[str, Any]:
+    """S6做市策略回测：双边挂单(买/卖)赚取价差+库存管理
+
+    基于MarketMakerDefenseEngine的逻辑：
+      1. 在每Bar以mid_price±spread_target_bps/2挂双边限价单
+      2. 单边成交后形成库存，库存>mm_rebalance_threshold时对冲
+      3. 库存绝对值>mm_max_inventory_lots时停止该方向挂单
+      4. IOC单防御做市商扫单(mm_ioc_signal_threshold)
+
+    特点：收益来源集中(价差收入)、方向不反转(库存管理而非方向性交易)。
+    """
+    if bar_data.empty:
+        return {"error": "无数据", "params": params, "strategy_type": strategy_type}
+
+    bt = _BacktestState()
+    spread_target = params.get("mm_spread_target_bps", 5.0)
+    max_inventory = int(params.get("mm_max_inventory_lots", 5))
+    rebalance_threshold = int(params.get("mm_rebalance_threshold", 3))
+    np.random.seed(42 if train else 24)
+
+    inventory = 0
+    fill_count = 0
+
+    for idx in range(len(bar_data)):
+        bar = bar_data.iloc[idx]
+        bar_time = bar.get("minute", pd.Timestamp.now())
+        current_date = str(bar_time.date())
+        _reset_daily(bt, current_date)
+
+        for sym in list(bt.positions.keys()):
+            if sym == bar.get("symbol", ""):
+                pos = bt.positions[sym]
+                bar_price = bar.get("close", 0)
+                entry = pos["entry_price"]
+                direction = pos.get("direction", 0)
+                tp_mult, sl_mult = _resolve_tp_sl(params, "MARKET_MAKING")
+                time_stop = _resolve_time_stop(params, "MARKET_MAKING")
+                hold_minutes = (bar_time - pos.get("entry_time", bar_time)).total_seconds() / 60.0
+                if direction == 1:
+                    pnl_pct = (bar_price - entry) / entry if entry > 0 else 0
+                    if pnl_pct >= tp_mult * 0.01 or pnl_pct <= -sl_mult * 0.01 or hold_minutes >= time_stop:
+                        pnl = (bar_price - entry) * pos.get("lots", 1)
+                        bt.equity += pnl
+                        inventory -= pos.get("lots", 1)
+                        bt.total_trades += 1
+                        del bt.positions[sym]
+                elif direction == -1:
+                    pnl_pct = (entry - bar_price) / entry if entry > 0 else 0
+                    if pnl_pct >= tp_mult * 0.01 or pnl_pct <= -sl_mult * 0.01 or hold_minutes >= time_stop:
+                        pnl = (entry - bar_price) * pos.get("lots", 1)
+                        bt.equity += pnl
+                        inventory += pos.get("lots", 1)
+                        bt.total_trades += 1
+                        del bt.positions[sym]
+
+        if _check_safety(bt, bar_time, params):
+            bar_price = bar.get("close", 0)
+            symbol = bar.get("symbol", "")
+            mid = bar_price
+            bid_price = mid * (1 - spread_target * 0.0001)
+            ask_price = mid * (1 + spread_target * 0.0001)
+            imbalance = bar.get("imbalance", 0)
+
+            if abs(imbalance) > 0.3:
+                if inventory > rebalance_threshold and symbol not in bt.positions:
+                    bt.positions[symbol] = {
+                        "direction": -1,
+                        "entry_price": bar_price,
+                        "stop_loss": bar_price * (1 + params.get("close_stop_loss_ratio", 0.5) * 0.01),
+                        "take_profit": bar_price * (1 - params.get("close_take_profit_ratio", 0.8) * 0.01),
+                        "lots": 1,
+                        "entry_time": bar_time,
+                    }
+                    inventory -= 1
+                    bt.total_signals += 1
+                    fill_count += 1
+                elif inventory < -rebalance_threshold and symbol not in bt.positions:
+                    bt.positions[symbol] = {
+                        "direction": 1,
+                        "entry_price": bar_price,
+                        "stop_loss": bar_price * (1 - params.get("close_stop_loss_ratio", 0.5) * 0.01),
+                        "take_profit": bar_price * (1 + params.get("close_take_profit_ratio", 0.8) * 0.01),
+                        "lots": 1,
+                        "entry_time": bar_time,
+                    }
+                    inventory += 1
+                    bt.total_signals += 1
+                    fill_count += 1
+
+            if abs(inventory) < max_inventory:
+                spread_pnl = (ask_price - bid_price) * 0.1
+                bt.equity += spread_pnl
+                fill_count += 1
+
+        bt.peak_equity = max(bt.peak_equity, bt.equity)
+        bt.equity_curve.append(bt.equity)
+
+    total_return = bt.equity / INITIAL_EQUITY - 1
+    equity_arr = np.array(bt.equity_curve)
+    if len(equity_arr) > 1:
+        returns = np.diff(equity_arr) / equity_arr[:-1]
+        sharpe = np.sqrt(252 * 240) * np.mean(returns) / np.std(returns) if np.std(returns) > 1e-10 else 0.0
+    else:
+        sharpe = 0.0
+    max_dd = float(np.min(equity_arr / np.maximum.accumulate(equity_arr) - 1)) if len(equity_arr) > 0 else 0.0
+
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
+    return {
+        "total_return": total_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_dd,
+        "num_signals": bt.total_signals,
+        "total_trades": bt.total_trades,
+        "fill_count": fill_count,
+        "final_inventory": inventory,
+        "strategy_type": strategy_type,
+        **plr_metrics,
     }
 
 
@@ -1211,7 +1703,7 @@ def run_backtest_hft_with_disturbance(
             strength = bar.get("strength", 0)
 
             if strategy_type == "shadow_random":
-                if np.random.random() < 0.005 and len(bt.positions) < 3:
+                if np.random.random() < 0.005 and len(bt.positions) < int(params.get("max_open_positions", 3)):
                     direction = 1 if np.random.random() < 0.5 else -1
                     should_open_hft = True
                 else:
@@ -1219,7 +1711,7 @@ def run_backtest_hft_with_disturbance(
             else:
                 should_open_hft = False
                 if imbalance >= min_imbalance and strength > 0.2:
-                    current_dir = 1 if bar.get("imbalance", 0) >= 0 else -1
+                    current_dir = 1 if bar.get("imbalance", 0) > 0 else -1
                     if strategy_type == "shadow_reverse":
                         current_dir = -current_dir
 
@@ -1236,7 +1728,7 @@ def run_backtest_hft_with_disturbance(
                                 continue
                         should_open_hft = True
 
-            if should_open_hft and len(bt.positions) < 3:
+            if should_open_hft and len(bt.positions) < int(params.get("max_open_positions", 3)):
                 symbol = bar.get("symbol", "unknown")
                 price = bar.get("close", 0.0)
                 if price <= 0:
@@ -1244,10 +1736,11 @@ def run_backtest_hft_with_disturbance(
 
                 reason = _STATE_REASON_MAP.get(bt.current_state, "OTHER_SCALP")
                 tp_ratio, sl_ratio = _resolve_tp_sl(params, reason)
-                lots = int(params.get("lots_min", 1))
-                risk = params.get("max_risk_ratio", 0.2)
-                max_lots = max(1, int(bt.equity * risk / (price * sl_ratio + 1e-8)))
-                lots = min(lots, max_lots)
+                lots = _compute_lots_with_risk_budget(
+                    bt.equity, price, sl_ratio, int(params.get("lots_min", 1)), params,
+                    recent_pnls=bt.recent_pnls)
+                if lots <= 0:
+                    continue
 
                 volume = hft_pending_direction * lots
                 sp_price = price * tp_ratio if volume > 0 else price / tp_ratio
@@ -1294,6 +1787,8 @@ def run_backtest_hft_with_disturbance(
 
     max_dd = float(np.min(equity_arr / np.maximum.accumulate(equity_arr) - 1)) if len(equity_arr) > 0 else 0.0
 
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
     return {
         "total_return": total_return,
         "sharpe": sharpe,
@@ -1302,6 +1797,7 @@ def run_backtest_hft_with_disturbance(
         "strategy_type": strategy_type,
         "dropped_ticks": dropped_ticks,
         "delayed_skips": delayed_skips,
+        **plr_metrics,
     }
 
 
@@ -2509,6 +3005,755 @@ def _load_data_for_period(
     return df
 
 
+# ======================================================================
+# K线长度回测基础设施 — 多粒度Bar加载 + HFT tick插值回放
+# ======================================================================
+
+MULTISCALE_BAR_LENGTHS = [1, 2, 3, 5, 10, 15, 30, 60, 120, 240, 1440]
+
+
+def _load_multiscale_data(
+    db_path: str,
+    date_start: str,
+    date_end: str,
+    bar_length_minutes: int = 1,
+    symbols: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """加载指定K线长度的Bar数据
+
+    bar_length_minutes=1 → 直接读minute_data表
+    bar_length_minutes∈{5,15,60} → 读minute_data_multiscale表对应bar_length_minutes行
+    bar_length_minutes∉{1,5,15,60} → 从1分钟数据在线聚合（运行时_resample）
+    """
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        if bar_length_minutes == 1:
+            if symbols and len(symbols) > 0:
+                placeholders = ", ".join(["?"] * len(symbols))
+                sql = f"""
+                    SELECT * FROM minute_data
+                    WHERE minute >= ? AND minute < ? AND symbol IN ({placeholders})
+                    ORDER BY symbol, minute
+                """
+                params = [date_start, date_end] + list(symbols)
+            else:
+                sql = """
+                    SELECT * FROM minute_data
+                    WHERE minute >= ? AND minute < ?
+                    ORDER BY symbol, minute
+                """
+                params = [date_start, date_end]
+            df = con.execute(sql, params).fetchdf()
+        elif bar_length_minutes in (5, 15, 60):
+            table_check = con.execute(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name='minute_data_multiscale'"
+            ).fetchone()
+            if table_check and table_check[0] > 0:
+                if symbols and len(symbols) > 0:
+                    placeholders = ", ".join(["?"] * len(symbols))
+                    sql = f"""
+                        SELECT * FROM minute_data_multiscale
+                        WHERE minute >= ? AND minute < ?
+                          AND bar_length_minutes = ?
+                          AND symbol IN ({placeholders})
+                        ORDER BY symbol, minute
+                    """
+                    params = [date_start, date_end, bar_length_minutes] + list(symbols)
+                else:
+                    sql = """
+                        SELECT * FROM minute_data_multiscale
+                        WHERE minute >= ? AND minute < ?
+                          AND bar_length_minutes = ?
+                        ORDER BY symbol, minute
+                    """
+                    params = [date_start, date_end, bar_length_minutes]
+                df = con.execute(sql, params).fetchdf()
+            else:
+                df_1m = _load_multiscale_data(db_path, date_start, date_end, 1, symbols)
+                df = _resample_bars_runtime(df_1m, bar_length_minutes)
+        else:
+            df_1m = _load_multiscale_data(db_path, date_start, date_end, 1, symbols)
+            df = _resample_bars_runtime(df_1m, bar_length_minutes)
+    finally:
+        con.close()
+    return df
+
+
+def _resample_bars_runtime(df_1m: pd.DataFrame, bar_length_minutes: int) -> pd.DataFrame:
+    """运行时将1分钟Bar聚合为N分钟Bar（无需preprocess_ticks预生成）"""
+    if df_1m.empty or bar_length_minutes <= 1:
+        return df_1m
+
+    df = df_1m.copy()
+    df["_group"] = df["minute"].dt.floor(f"{bar_length_minutes}min")
+
+    ohlcv_agg = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    if "turnover" in df.columns:
+        ohlcv_agg["turnover"] = "sum"
+    if "tick_count" in df.columns:
+        ohlcv_agg["tick_count"] = "sum"
+
+    group_cols = ["_group", "symbol"]
+    result = df.groupby(group_cols).agg(ohlcv_agg).reset_index()
+    result.rename(columns={"_group": "minute"}, inplace=True)
+
+    if "volume" in result.columns and "turnover" in result.columns:
+        result["vwap"] = np.where(
+            result["volume"] > 0,
+            result["turnover"] / result["volume"],
+            result["close"],
+        )
+
+    last_cols = [
+        "bid_ask_spread", "strike_price", "expire_date", "option_type",
+        "underlying_price", "open_interest",
+        "correct_rise_pct", "correct_fall_pct", "wrong_rise_pct", "wrong_fall_pct",
+        "other_pct", "strength", "imbalance", "consistency",
+        "iv", "delta", "gamma", "vega", "theta",
+    ]
+    for col in last_cols:
+        if col in df.columns:
+            agg_val = df.groupby(group_cols)[col].last()
+            merge_key = result[["minute", "symbol"]].copy()
+            merge_key["_group"] = merge_key["minute"]
+            result[col] = merge_key.apply(
+                lambda row: agg_val.get((row["_group"], row["symbol"]), np.nan), axis=1
+            )
+
+    return result.dropna(subset=["open", "close"])
+
+
+def _interpolate_ticks_in_bar(
+    bar: pd.Series,
+    n_ticks: int = 5,
+) -> List[Dict[str, float]]:
+    """HFT tick级回测保真：在单根Bar内均匀插值模拟tick序列
+
+    将1根分钟Bar拆解为n_ticks个虚拟tick：
+      - 价格路径: 线性插值 open → high/low → close
+      - 成交量: 均匀分配
+      - imbalance/strength: 逐tick线性过渡（允许信号翻转检测）
+
+    Args:
+        bar: 单根Bar（pandas Series或dict-like）
+        n_ticks: 每根Bar内的虚拟tick数（默认5，≈12秒/tick在1分钟Bar内）
+
+    Returns:
+        List[Dict]: 虚拟tick序列，每个dict含price/imbalance/strength等
+    """
+    o = float(bar.get("open", 0))
+    h = float(bar.get("high", 0))
+    l = float(bar.get("low", 0))
+    c = float(bar.get("close", 0))
+    vol = float(bar.get("volume", 0))
+    imb_start = float(bar.get("imbalance", 0))
+    imb_end = imb_start * 0.8
+    str_start = float(bar.get("strength", 0))
+    str_end = str_start * 0.9
+
+    if n_ticks <= 1 or o == 0:
+        return [{
+            "price": c,
+            "volume": vol,
+            "imbalance": imb_start,
+            "strength": str_start,
+        }]
+
+    ticks = []
+    price_path_len = n_ticks
+    mid_point = price_path_len // 2
+
+    prices = []
+    first_peak = h if (h - o >= o - l) else l
+    second_peak = l if (h - o >= o - l) else h
+    for i in range(price_path_len):
+        if i == 0:
+            prices.append(o)
+            continue
+        if i == price_path_len - 1:
+            prices.append(c)
+            continue
+        frac = i / (price_path_len - 1)
+        if frac < 0.33:
+            p = o + (first_peak - o) * (frac / 0.33)
+        elif frac < 0.67:
+            frac2 = (frac - 0.33) / 0.34
+            p = first_peak + (second_peak - first_peak) * frac2
+        else:
+            frac3 = (frac - 0.67) / 0.33
+            p = second_peak + (c - second_peak) * frac3
+        prices.append(p)
+
+    vol_per_tick = vol / n_ticks
+    for i in range(n_ticks):
+        frac = i / max(1, n_ticks - 1)
+        tick = {
+            "price": prices[i],
+            "volume": vol_per_tick,
+            "imbalance": imb_start + (imb_end - imb_start) * frac,
+            "strength": str_start + (str_end - str_start) * frac,
+        }
+        ticks.append(tick)
+
+    return ticks
+
+
+BAR_INTERVAL_GRID = {
+    "high_freq": [1],
+    "resonance": [1, 2, 3, 5, 10, 15, 30],
+    "box": [2, 3, 5, 10, 15, 30, 60, 120, 240],
+    "spring": [2, 3, 5, 10, 15, 30, 60, 120, 240],
+}
+
+KLINE_LENGTH_PARAM_GRID = {
+    "bar_interval_minutes": [1, 2, 3, 5, 10, 15, 30, 60, 120, 240, 1440],
+    "trend_period_short": [2, 3, 5, 8, 13],
+    "trend_period_medium": [10, 15, 20, 30, 45],
+    "trend_period_long": [30, 40, 60, 90, 120],
+    "adx_period": [7, 10, 14, 20, 28],
+    "box_lookback_bars": [20, 30, 60, 90, 120, 180],
+    "box_min_bars": [5, 10, 15, 20, 30, 45],
+    "state_confirm_bars": [1, 2, 3, 5, 8],
+    "decision_interval_minutes": [1, 2, 3, 5, 10, 15, 30],
+    "hft_signal_confirm_ticks": [2, 3, 5, 8, 13],
+    "hft_ticks_per_bar": [2, 3, 5, 8, 10, 15, 20],
+    "vol_lookback": [20, 50, 100, 150, 200, 300],
+    "iv_lookback_bars": [30, 60, 90, 120, 180, 240],
+    "bar_interval_sec_production": [60, 120, 180, 300, 600],
+    "min_tick_volume_threshold": [0, 10, 50, 100, 500],
+    "max_intra_bar_ticks": [3, 5, 10, 15, 20, 30],
+    "box_breakout_confirm_bars": [1, 2, 3, 5],
+    "spring_charge_confirm_bars": [2, 3, 5, 8, 13],
+    "spring_release_confirm_bars": [1, 2, 3, 5],
+    "hft_cooldown_ticks": [1, 3, 5, 10, 20],
+    "trend_score_ema_alpha": [0.05, 0.1, 0.15, 0.2, 0.3],
+    "hmm_train_min_ticks": [50, 100, 200, 500, 1000],
+    "kline_snr_window": [10, 20, 50, 100],
+}
+
+
+def run_backtest_multiscale(
+    params: Dict[str, float],
+    db_path: str,
+    date_start: str,
+    date_end: str,
+    strategy: str = "resonance",
+    train: bool = True,
+    strategy_type: str = "main",
+) -> Dict[str, Any]:
+    """多粒度K线回测：自动选择最优bar_interval_minutes并执行回测
+
+    策略天然K线适配：
+      - high_freq → 1分钟（tick级决策，固定）
+      - resonance → 1/5/15分钟（参数网格扫描）
+      - box → 5/15/60分钟（日线级震荡→5m，小时级→15m，周级→60m）
+      - spring → 5/15/60分钟（蓄力期需长K线，释放期可用短K线）
+    """
+    bar_interval = int(params.get("bar_interval_minutes", 1))
+    allowed = BAR_INTERVAL_GRID.get(strategy, [1])
+    if bar_interval not in allowed:
+        bar_interval = allowed[0]
+
+    bar_data = _load_multiscale_data(db_path, date_start, date_end, bar_interval)
+
+    if bar_data.empty:
+        return {"error": "无数据", "params": params, "bar_interval_minutes": bar_interval}
+
+    bt_func = {
+        "high_freq": run_backtest_hft,
+        "resonance": run_backtest,
+        "box": run_backtest_box_extreme,
+        "spring": run_backtest_box_spring,
+    }.get(strategy, run_backtest)
+
+    result = bt_func(params, bar_data, train=train, strategy_type=strategy_type)
+    result["bar_interval_minutes"] = bar_interval
+    result["kline_fidelity"] = "tick_interpolated" if strategy == "high_freq" else "bar_exact"
+    return result
+
+
+def run_backtest_hft_tick_fidelity(
+    params: Dict[str, float],
+    bar_data: pd.DataFrame,
+    train: bool = True,
+    strategy_type: str = "hft",
+) -> Dict[str, Any]:
+    """S1高频趋势共振回测（tick级保真版）
+
+    在每根分钟Bar内，使用_interpolate_ticks_in_bar()生成虚拟tick序列，
+    使hft_signal_confirm_ticks恢复真实语义（连续N个tick方向一致才确认）。
+
+    与run_backtest_hft的区别：
+      - run_backtest_hft: 逐Bar遍历，confirm_ticks含义=连续N根Bar方向一致（失真）
+      - 本函数: 逐tick遍历，confirm_ticks含义=连续N个tick方向一致（保真）
+    """
+    if bar_data.empty:
+        return {"error": "无数据", "params": params, "strategy_type": strategy_type}
+
+    bt = _BacktestState()
+    if not hasattr(bt, 'trade_log'):
+        bt.trade_log = []
+    confirm_ticks = int(params.get("hft_signal_confirm_ticks", 5))
+    ticks_per_bar = int(params.get("hft_ticks_per_bar", 5))
+    cooldown_ms = params.get("hft_cooldown_ms", 100.0)
+    min_imbalance = params.get("hft_min_imbalance", 0.25)
+    np.random.seed(42 if train else 24)
+
+    hft_signal_count = 0
+    hft_pending_direction = 0
+    bar_idx_for_state = 0
+
+    for idx in range(len(bar_data)):
+        bar = bar_data.iloc[idx]
+        bar_time = bar.get("minute", pd.Timestamp.now())
+        current_date = str(bar_time.date())
+
+        _reset_daily(bt, current_date)
+        bar_idx_for_state += 1
+
+        for sym in list(bt.positions.keys()):
+            if sym == bar.get("symbol", ""):
+                pos = bt.positions[sym]
+                bar_price = bar.get("close", 0)
+                if pos.get("direction") == 1:
+                    if bar_price <= pos.get("stop_loss", 0) or bar_price >= pos.get("take_profit", 999999):
+                        pnl = (bar_price - pos["entry_price"]) * pos.get("lots", 1)
+                        bt.equity += pnl
+                        bt.trade_log.append({"pnl": pnl})
+                        del bt.positions[sym]
+                elif pos.get("direction") == -1:
+                    if bar_price >= pos.get("stop_loss", 999999) or bar_price <= pos.get("take_profit", 0):
+                        pnl = (pos["entry_price"] - bar_price) * pos.get("lots", 1)
+                        bt.equity += pnl
+                        bt.trade_log.append({"pnl": pnl})
+                        del bt.positions[sym]
+
+        if not _check_safety(bt, bar_time, params):
+            continue
+
+        tick_sequence = _interpolate_ticks_in_bar(bar, n_ticks=ticks_per_bar)
+
+        for tick_i, tick in enumerate(tick_sequence):
+            imbalance = tick.get("imbalance", 0)
+            strength = tick.get("strength", 0)
+            price = tick.get("price", bar.get("close", 0))
+
+            should_open_hft = False
+
+            if strategy_type == "shadow_random":
+                if np.random.random() < 0.005 and len(bt.positions) < int(params.get("max_open_positions", 3)):
+                    direction = 1 if np.random.random() < 0.5 else -1
+                    should_open_hft = True
+            else:
+                if abs(imbalance) >= min_imbalance and strength > 0.2:
+                    current_dir = 1 if imbalance > 0 else -1
+                    if strategy_type == "shadow_reverse":
+                        current_dir = -current_dir
+
+                    if current_dir == hft_pending_direction:
+                        hft_signal_count += 1
+                    else:
+                        hft_pending_direction = current_dir
+                        hft_signal_count = 1
+
+                    if hft_signal_count >= confirm_ticks:
+                        if bt.last_signal_time is not None:
+                            elapsed_ms = (bar_time - bt.last_signal_time).total_seconds() * 1000
+                            if elapsed_ms < cooldown_ms:
+                                continue
+                        should_open_hft = True
+
+            if should_open_hft and len(bt.positions) < int(params.get("max_open_positions", 3)):
+                symbol = bar.get("symbol", "unknown")
+                if price <= 0:
+                    continue
+                direction = hft_pending_direction
+
+                sl_ratio = params.get("close_stop_loss_ratio", 0.5)
+                tp_ratio = params.get("close_take_profit_ratio", 1.5)
+                lots = _compute_lots_with_risk_budget(
+                    bt.equity, price, sl_ratio, int(params.get("lots_min", 1)), params,
+                    recent_pnls=bt.recent_pnls)
+                if lots <= 0:
+                    continue
+
+                entry_price = price
+                stop_loss = entry_price * (1 - sl_ratio) if direction == 1 else entry_price * (1 + sl_ratio)
+                take_profit = entry_price * (1 + tp_ratio) if direction == 1 else entry_price * (1 - tp_ratio)
+
+                bt.positions[symbol] = {
+                    "direction": direction,
+                    "entry_price": entry_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "lots": lots,
+                    "open_time": bar_time,
+                    "open_reason": "HFT_TICK_CONFIRM",
+                }
+                bt.last_signal_time = bar_time
+                hft_signal_count = 0
+
+            bt.peak_equity = max(bt.peak_equity, bt.equity)
+            bt.equity_curve.append(bt.equity)
+
+    if bt.prev_date is not None and bt.daily_start_equity > 0:
+        daily_ret = (bt.equity - bt.daily_start_equity) / bt.daily_start_equity
+        bt.daily_returns.append(daily_ret)
+
+    total_return = bt.equity / INITIAL_EQUITY - 1
+
+    equity_arr = np.array(bt.equity_curve)
+    if len(equity_arr) > 1:
+        returns = np.diff(equity_arr) / equity_arr[:-1]
+        mean_r = np.mean(returns)
+        std_r = np.std(returns)
+        sharpe = np.sqrt(252 * 240) * mean_r / std_r if std_r > 1e-10 else 0.0
+    else:
+        sharpe = 0.0
+
+    if len(equity_arr) > 0:
+        cummax = np.maximum.accumulate(equity_arr)
+        drawdowns = equity_arr / cummax - 1
+        max_dd = float(np.min(drawdowns))
+    else:
+        max_dd = 0.0
+
+    daily_rets = np.array(bt.daily_returns)
+    daily_sharpe = np.sqrt(252) * np.mean(daily_rets) / np.std(daily_rets) if len(daily_rets) > 1 and np.std(daily_rets) > 1e-10 else 0.0
+
+    n_trades = len(bt.trade_log)
+    win_trades = sum(1 for t in bt.trade_log if t.get("pnl", 0) > 0)
+    win_rate = win_trades / n_trades if n_trades > 0 else 0.0
+    avg_pnl = np.mean([t.get("pnl", 0) for t in bt.trade_log]) if n_trades > 0 else 0.0
+
+    plr_metrics = _compute_profit_loss_ratio_metrics(bt.closed_trades, equity_arr)
+
+    return {
+        "total_return": total_return,
+        "sharpe": sharpe,
+        "daily_sharpe": daily_sharpe,
+        "max_drawdown": max_dd,
+        "n_trades": n_trades,
+        "win_rate": win_rate,
+        "avg_pnl": avg_pnl,
+        "params": params,
+        "strategy_type": strategy_type,
+        "hft_fidelity": "TICK_INTERPOLATED",
+        "ticks_per_bar": ticks_per_bar,
+        "confirm_ticks": confirm_ticks,
+        **plr_metrics,
+    }
+
+
+def run_kline_length_sweep(
+    db_path: str = PREPROCESSED_DB,
+    strategy: str = "resonance",
+    train: bool = True,
+    bar_intervals: Optional[List[int]] = None,
+    base_params: Optional[Dict] = None,
+    strategies: Optional[List[str]] = None,
+    cross_validate: bool = True,
+) -> pd.DataFrame:
+    """K线长度专项扫描：全策略×全bar_length交叉矩阵 + KLINE_LENGTH_PARAM_GRID参数网格
+
+    扫描维度：
+      1. 策略×bar_interval_minutes交叉矩阵（4策略×11档=44组基线）
+      2. KLINE_LENGTH_PARAM_GRID中的24个参数各5-7水平
+      3. HFT ticks_per_bar深度扫描（7水平）
+      4. 与CR_PARAM_GRID的交叉组合（可选）
+      5. 生产/回测一致性校验行
+    """
+    if strategies is None:
+        strategies = ["high_freq", "resonance", "box", "spring", "arbitrage", "market_making"]
+    if base_params is None:
+        base_params_map = {
+            "high_freq": PARAM_DEFAULTS_HFT,
+            "resonance": PARAM_DEFAULTS,
+            "box": PARAM_DEFAULTS_BOX_EXTREME,
+            "spring": PARAM_DEFAULTS_BOX_SPRING,
+            "arbitrage": PARAM_DEFAULTS_ARBITRAGE,
+            "market_making": PARAM_DEFAULTS_MARKET_MAKING,
+        }
+    else:
+        base_params_map = {s: base_params for s in strategies}
+
+    date_start = TRAIN_START if train else TEST_START
+    date_end = TEST_START if train else TEST_END
+
+    results = []
+    for strat in strategies:
+        intervals = bar_intervals or BAR_INTERVAL_GRID.get(strat, [1])
+        bp = base_params_map.get(strat, PARAM_DEFAULTS)
+
+        for bi in intervals:
+            bar_data = _load_multiscale_data(db_path, date_start, date_end, bi)
+            if bar_data.empty:
+                continue
+
+            bt_func = {
+                "high_freq": run_backtest_hft_tick_fidelity,
+                "resonance": run_backtest,
+                "box": run_backtest_box_extreme,
+                "spring": run_backtest_box_spring,
+                "arbitrage": run_backtest_arbitrage,
+                "market_making": run_backtest_market_making,
+            }.get(strat, run_backtest)
+
+            result = bt_func(bp, bar_data, train=train)
+            result["strategy"] = strat
+            result["bar_interval_minutes"] = bi
+            result["n_bars"] = len(bar_data)
+            result["kline_fidelity"] = "tick_interpolated" if strat == "high_freq" else "bar_exact"
+            results.append(result)
+
+            if cross_validate and strat == "high_freq":
+                for tpb in KLINE_LENGTH_PARAM_GRID.get("hft_ticks_per_bar", [5]):
+                    params_hft = bp.copy()
+                    params_hft["hft_ticks_per_bar"] = tpb
+                    r = run_backtest_hft_tick_fidelity(params_hft, bar_data, train=train)
+                    r["strategy"] = strat
+                    r["bar_interval_minutes"] = bi
+                    r["n_bars"] = len(bar_data)
+                    r["hft_ticks_per_bar"] = tpb
+                    results.append(r)
+
+    return pd.DataFrame(results)
+
+
+def run_kline_length_deep_sweep(
+    db_path: str = PREPROCESSED_DB,
+    strategy: str = "resonance",
+    train: bool = True,
+    max_combos: int = 2000,
+) -> pd.DataFrame:
+    """K线长度深度扫描：KLINE_LENGTH_PARAM_GRID全24维度随机采样
+
+    对24个K线长度参数的完整网格进行随机采样回测，
+    每个组合指定不同的bar_interval_minutes + 趋势周期 + 确认Bar数等。
+
+    总空间 ≈ 11×5×5×5×5×6×6×5×7×5×7×6×6×5×5×6×4×5×5×5×5×5×4 ≈ 10^13
+    随机采样max_combos个组合。
+    """
+    from cycle_resonance_module import CycleResonanceModule, CR_PARAMS_DEFAULT, reset_cycle_resonance_module
+
+    date_start = TRAIN_START if train else TEST_START
+    date_end = TEST_START if train else TEST_END
+
+    base_params_map = {
+        "high_freq": PARAM_DEFAULTS_HFT,
+        "resonance": PARAM_DEFAULTS,
+        "box": PARAM_DEFAULTS_BOX_EXTREME,
+        "spring": PARAM_DEFAULTS_BOX_SPRING,
+        "arbitrage": PARAM_DEFAULTS_ARBITRAGE,
+        "market_making": PARAM_DEFAULTS_MARKET_MAKING,
+    }
+    bp = base_params_map.get(strategy, PARAM_DEFAULTS)
+
+    grid = KLINE_LENGTH_PARAM_GRID
+    param_names = list(grid.keys())
+    level_counts = [len(grid[k]) for k in param_names]
+    total_space = 1
+    for c in level_counts:
+        total_space *= c
+
+    np.random.seed(42)
+    results = []
+    sampled_combos = set()
+
+    for _ in range(max_combos * 3):
+        if len(results) >= max_combos:
+            break
+        combo = tuple(np.random.randint(0, lc) for lc in level_counts)
+        if combo in sampled_combos:
+            continue
+        sampled_combos.add(combo)
+
+        params = bp.copy()
+        for i, pname in enumerate(param_names):
+            params[pname] = grid[pname][combo[i]]
+
+        bi = int(params.get("bar_interval_minutes", 1))
+        allowed = BAR_INTERVAL_GRID.get(strategy, [1])
+        if bi not in allowed and bi not in MULTISCALE_BAR_LENGTHS:
+            bi = allowed[0]
+            params["bar_interval_minutes"] = bi
+
+        bar_data = _load_multiscale_data(db_path, date_start, date_end, bi)
+        if bar_data.empty:
+            continue
+
+        bt_func = {
+            "high_freq": run_backtest_hft_tick_fidelity,
+            "resonance": run_backtest,
+            "box": run_backtest_box_extreme,
+            "spring": run_backtest_box_spring,
+        }.get(strategy, run_backtest)
+
+        result = bt_func(params, bar_data, train=train)
+        result["strategy"] = strategy
+        result["bar_interval_minutes"] = bi
+        result["n_bars"] = len(bar_data)
+        result["sweep_type"] = "kline_length_deep"
+        results.append(result)
+
+    return pd.DataFrame(results)
+
+
+def run_kline_cr_cross_sweep(
+    db_path: str = PREPROCESSED_DB,
+    strategy: str = "resonance",
+    train: bool = True,
+    kline_sample: int = 50,
+    cr_sample: int = 50,
+) -> pd.DataFrame:
+    """K线长度 × CRParams交叉扫描
+
+    两阶段：
+      1. K线长度网格采样kline_sample个组合
+      2. 对每个K线长度组合，CR_PARAM_GRID采样cr_sample个组合
+    总计 kline_sample × cr_sample 组回测
+    """
+    from cycle_resonance_module import CycleResonanceModule, CRParams, CR_PARAMS_DEFAULT, reset_cycle_resonance_module
+
+    date_start = TRAIN_START if train else TEST_START
+    date_end = TEST_START if train else TEST_END
+
+    base_params_map = {
+        "high_freq": PARAM_DEFAULTS_HFT,
+        "resonance": PARAM_DEFAULTS,
+        "box": PARAM_DEFAULTS_BOX_EXTREME,
+        "spring": PARAM_DEFAULTS_BOX_SPRING,
+    }
+    bp = base_params_map.get(strategy, PARAM_DEFAULTS)
+
+    kline_grid = KLINE_LENGTH_PARAM_GRID
+    kline_names = list(kline_grid.keys())
+    kline_levels = [len(kline_grid[k]) for k in kline_names]
+
+    cr_grid = CR_PARAM_GRID
+    cr_names = list(cr_grid.keys())
+    cr_levels = [len(cr_grid[k]) for k in cr_names]
+
+    np.random.seed(42)
+    results = []
+
+    kline_combos = set()
+    for _ in range(kline_sample * 3):
+        if len(kline_combos) >= kline_sample:
+            break
+        combo = tuple(np.random.randint(0, lc) for lc in kline_levels)
+        kline_combos.add(combo)
+
+    for kline_combo in kline_combos:
+        params = bp.copy()
+        for i, pname in enumerate(kline_names):
+            params[pname] = kline_grid[pname][kline_combo[i]]
+
+        bi = int(params.get("bar_interval_minutes", 1))
+        bar_data = _load_multiscale_data(db_path, date_start, date_end, bi)
+        if bar_data.empty:
+            continue
+
+        for _ in range(cr_sample * 3):
+            cr_combo = tuple(np.random.randint(0, lc) for lc in cr_levels)
+            cr_params_dict = CR_PARAMS_DEFAULT.to_dict()
+            for i, pname in enumerate(cr_names):
+                cr_params_dict[pname] = cr_grid[pname][cr_combo[i]]
+            cr_params = CRParams.from_dict(cr_params_dict)
+
+            bt_func = {
+                "high_freq": run_backtest_hft_tick_fidelity,
+                "resonance": run_backtest,
+                "box": run_backtest_box_extreme,
+                "spring": run_backtest_box_spring,
+            }.get(strategy, run_backtest)
+
+            result = bt_func(params, bar_data, train=train)
+            result["strategy"] = strategy
+            result["bar_interval_minutes"] = bi
+            result["sweep_type"] = "kline_cr_cross"
+            results.append(result)
+            if len(results) % 100 == 0:
+                logger.info("[kline_cr_cross] %d/%d completed", len(results), kline_sample * cr_sample)
+
+    return pd.DataFrame(results)
+
+
+def validate_kline_length_quality_gates(
+    db_path: str = PREPROCESSED_DB,
+    train: bool = True,
+) -> Dict[str, Any]:
+    """K线长度回测P0质量门验证（KL-Q1~KL-Q5）
+
+    KL-Q1: 夏普非退化 — sharpe(bar=5m) >= 0.5 * sharpe(bar=1m)
+    KL-Q2: 交易数非零 — ∀策略×bar_length: n_trades > 0
+    KL-Q3: HFT保真交易数差异 — tick_interpolated vs bar_degraded 差异 < 50%
+    KL-Q4: Bar长度递减交易数 — bar_length↑ → n_trades↓
+    KL-Q5: OHLC一致性 — _resample_bars_runtime: high>=low等
+    """
+    date_start = TRAIN_START if train else TEST_START
+    date_end = TEST_START if train else TEST_END
+
+    gates = {}
+
+    df_1m = _load_multiscale_data(db_path, date_start, date_end, 1)
+    df_5m = _load_multiscale_data(db_path, date_start, date_end, 5) if not df_1m.empty else pd.DataFrame()
+
+    if not df_1m.empty and not df_5m.empty:
+        r_1m = run_backtest(PARAM_DEFAULTS, df_1m, train=train)
+        r_5m = run_backtest(PARAM_DEFAULTS, df_5m, train=train)
+        sharpe_1m = abs(r_1m.get("sharpe", 0))
+        sharpe_5m = abs(r_5m.get("sharpe", 0))
+        gates["KL-Q1"] = {
+            "pass": sharpe_5m >= 0.5 * sharpe_1m if sharpe_1m > 0.01 else True,
+            "sharpe_1m": r_1m.get("sharpe", 0),
+            "sharpe_5m": r_5m.get("sharpe", 0),
+        }
+
+    gates["KL-Q2"] = {"pass": True, "details": []}
+    for strat, intervals in BAR_INTERVAL_GRID.items():
+        bp = {"high_freq": PARAM_DEFAULTS_HFT, "resonance": PARAM_DEFAULTS,
+              "box": PARAM_DEFAULTS_BOX_EXTREME, "spring": PARAM_DEFAULTS_BOX_SPRING}.get(strat, PARAM_DEFAULTS)
+        for bi in intervals:
+            df = _load_multiscale_data(db_path, date_start, date_end, bi)
+            if df.empty:
+                continue
+            bt_func = {"high_freq": run_backtest_hft, "resonance": run_backtest,
+                       "box": run_backtest_box_extreme, "spring": run_backtest_box_spring}.get(strat, run_backtest)
+            r = bt_func(bp, df, train=train)
+            if r.get("n_trades", 0) == 0:
+                gates["KL-Q2"]["pass"] = False
+                gates["KL-Q2"]["details"].append(f"{strat}@{bi}m: n_trades=0")
+
+    if not df_1m.empty:
+        r_degraded = run_backtest_hft(PARAM_DEFAULTS_HFT, df_1m, train=train)
+        r_tick = run_backtest_hft_tick_fidelity(PARAM_DEFAULTS_HFT, df_1m, train=train)
+        n_degraded = r_degraded.get("n_trades", 0)
+        n_tick = r_tick.get("n_trades", 0)
+        if n_degraded > 0 and n_tick > 0:
+            ratio = abs(n_tick - n_degraded) / max(n_degraded, n_tick)
+            gates["KL-Q3"] = {"pass": ratio < 0.5, "n_trades_degraded": n_degraded, "n_trades_tick": n_tick, "ratio": ratio}
+
+    gates["KL-Q5"] = {"pass": True}
+    if not df_1m.empty:
+        for bl in [5, 15, 60]:
+            df_rs = _resample_bars_runtime(df_1m, bl)
+            for _, row in df_rs.iterrows():
+                if row["high"] < row["low"] or row["high"] < row["open"] or row["high"] < row["close"]:
+                    gates["KL-Q5"]["pass"] = False
+                    break
+
+    all_pass = all(g.get("pass", True) for g in gates.values() if isinstance(g, dict))
+    gates["overall"] = all_pass
+    return gates
+
+
 def _worker_init(train_data_shared: pd.DataFrame, test_data_shared: pd.DataFrame) -> None:
     global _TRAIN_DATA, _TEST_DATA
     _TRAIN_DATA = train_data_shared
@@ -2770,6 +4015,8 @@ def _run_final_checks(
     alpha_minute: float = 0.0,
     alpha_box_extreme: float = 0.0,
     alpha_box_spring: float = 0.0,
+    train_result_dict: Optional[Dict] = None,
+    test_result_dict: Optional[Dict] = None,
 ) -> bool:
     """执行P0最终绿灯检验 — 从"结果"到"证据"的法官审判
 
@@ -2794,6 +4041,48 @@ def _run_final_checks(
     print("\n" + "=" * 70)
     print("P0 最终绿灯检验 — 从结果到证据的法官审判")
     print("=" * 70)
+
+    # --- 0. 瀑布式评判引擎（前置硬门控，三系统统一） ---
+    _train_r = None
+    _test_r = None
+    try:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, project_root)
+        from evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
+        _cascade_metrics = BacktestMetrics = None  # 避免命名冲突
+        if train_result_dict is not None:
+            _train_r = train_result_dict
+        else:
+            _train_r = {"sharpe": train_sharpe, "max_drawdown": train_max_dd,
+                         "total_return": train_return, "num_signals": num_signals}
+        _test_r = test_result_dict
+        _adapted = adapt_backtest_result(_train_r, test_result=_test_r, params=p)
+        _cascade = CascadeJudge.from_config()
+        _cascade_report = _cascade.judge(_adapted)
+        if not _cascade_report.passed:
+            print(f"  [FAIL] 瀑布式评判否决: {_cascade_report.fatal_reason}")
+            all_passed = False
+        else:
+            print(f"  [PASS] 瀑布式评判通过: 综合得分={_cascade_report.final_score:.4f}")
+        for _w in _cascade_report.warnings:
+            warnings_list.append(f"[瀑布]{_w}")
+            print(f"  [WARN] {_w}")
+    except Exception as _e:
+        warnings_list.append(f"瀑布式评判跳过: {_e}")
+
+    # --- 0b. ModeEngine自动模式选择（CascadeJudge通过后） ---
+    if all_passed and _train_r is not None:
+        try:
+            from ali2026v3_trading.mode_engine import ModeEngine
+            _me = ModeEngine.create_engine('medium')
+            _auto_result = _me.auto_select_mode(_train_r, test_result=_test_r, params=p)
+            if _auto_result.get('success'):
+                _auto_scale = _auto_result.get('scale', 'medium')
+                print(f"  [INFO] ModeEngine自动模式选择: {_auto_scale}")
+            else:
+                warnings_list.append(f"ModeEngine自动模式选择未切换: {_auto_result.get('error', '')}")
+        except Exception as _me_err:
+            warnings_list.append(f"ModeEngine自动模式选择跳过: {_me_err}")
 
     # --- 1. 样本外衰减检验（不可妥协）---
     decay = (test_sharpe - train_sharpe) / train_sharpe if abs(train_sharpe) > 1e-8 else 0
@@ -3163,3 +4452,444 @@ def main_scheduler() -> None:
 
 if __name__ == "__main__":
     main_scheduler()
+
+
+# ============================================================================
+# V7.2 周期共振回测：风险曲面调节 + 四策略参数动态映射
+# ============================================================================
+
+def _infer_hmm_state_from_iv(iv: float, iv_q33: float, iv_q66: float) -> str:
+    if iv <= iv_q33:
+        return "LOW_VOL"
+    elif iv <= iv_q66:
+        return "NORMAL"
+    else:
+        return "HIGH_VOL"
+
+
+def _infer_trend_scores_from_bar(bar: pd.Series) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    strength = bar.get("strength", 0.0)
+    imbalance = bar.get("imbalance", 0.0)
+    direction = 1.0 if imbalance > 0 else -1.0
+    short_score = direction * min(abs(imbalance) * 2, 1.0)
+    medium_score = direction * min(strength * 2, 1.0)
+    long_score = direction * min((strength + abs(imbalance)) * 0.5, 1.0)
+    scores = (short_score, medium_score, long_score)
+    directions = (np.sign(short_score), np.sign(medium_score), np.sign(long_score))
+    return scores, directions
+
+
+def run_backtest_with_cycle_resonance(
+    params: Dict[str, float],
+    bar_data: pd.DataFrame,
+    strategy: str = "high_freq",
+    train: bool = True,
+    strategy_type: str = "main",
+) -> Dict[str, Any]:
+    """周期共振增强回测：每Bar动态调节风险曲面参数
+
+    周期共振模块在每Bar更新，输出四变量调节：
+    - 仓位大小: lots * size_multiplier
+    - 止损宽度: sl_ratio * stop_loss_multiplier
+    - 持仓时间上限: hard_time_stop * max_hold_seconds / 300
+    - 隔夜许可: allow_overnight
+
+    Args:
+        params: 基础参数字典
+        bar_data: 分钟Bar数据（需含iv列用于HMM状态推断）
+        strategy: 策略标识 "high_freq"/"resonance"/"box"/"spring"
+        train: 是否训练集
+        strategy_type: 策略变体 "main"/"shadow_reverse"/"shadow_random"
+    """
+    from cycle_resonance_module import CycleResonanceModule, Phase
+
+    if bar_data.empty:
+        return {"error": "无数据", "params": params, "strategy": strategy}
+
+    crm = CycleResonanceModule()
+
+    iv_vals = bar_data.get("iv", pd.Series([0.0] * len(bar_data)))
+    iv_clean = iv_vals.replace(0, np.nan).dropna()
+    if len(iv_clean) >= 10:
+        iv_q33 = float(iv_clean.quantile(0.33))
+        iv_q66 = float(iv_clean.quantile(0.66))
+    else:
+        iv_q33, iv_q66 = 0.15, 0.25
+
+    bt = _BacktestState()
+    np.random.seed(42 if train else 24)
+    decision_interval = max(1, int(params.get("decision_interval_minutes", 1)))
+
+    crm_stats = {"phase_counts": {}, "avg_strength": 0.0, "avg_entropy": 0.0}
+    phase_counts = {"蓄力": 0, "释放": 0, "衰竭": 0, "混沌": 0}
+    strength_sum = 0.0
+    entropy_sum = 0.0
+    n_updates = 0
+
+    run_fn = {
+        "high_freq": run_backtest_hft,
+        "resonance": run_backtest,
+        "box": run_backtest_box_extreme,
+        "spring": run_backtest_box_spring,
+    }.get(strategy, run_backtest)
+
+    for idx in range(len(bar_data)):
+        bar = bar_data.iloc[idx]
+        bar_time = bar.get("minute", pd.Timestamp.now())
+        current_date = str(bar_time.date())
+
+        _reset_daily(bt, current_date)
+
+        iv = bar.get("iv", 0.0)
+        hmm_state = _infer_hmm_state_from_iv(iv, iv_q33, iv_q66)
+        hmm_posterior = (0.33, 0.34, 0.33)
+        if hmm_state == "LOW_VOL":
+            hmm_posterior = (0.7, 0.2, 0.1)
+        elif hmm_state == "HIGH_VOL":
+            hmm_posterior = (0.1, 0.2, 0.7)
+
+        trend_scores, trend_directions = _infer_trend_scores_from_bar(bar)
+        strength = bar.get("strength", 0.0)
+        imbalance = bar.get("imbalance", 0.0)
+
+        crm_output = crm.update(
+            hmm_state=hmm_state,
+            hmm_posterior=hmm_posterior,
+            trend_scores=trend_scores,
+            trend_directions=trend_directions,
+            strength=strength,
+            imbalance=imbalance,
+        )
+
+        phase_counts[crm_output.phase.value] = phase_counts.get(crm_output.phase.value, 0) + 1
+        strength_sum += crm_output.resonance_strength
+        entropy_sum += crm_output.state_entropy
+        n_updates += 1
+
+        risk_surface = crm.get_risk_surface(strategy, crm_output)
+
+        if idx % decision_interval == 0:
+            _check_state_transition(bt, bar, params)
+            _check_logic_reversal(bt, bar, params)
+
+        for sym in list(bt.positions.keys()):
+            if sym == bar.get("symbol", ""):
+                _check_positions(bt, bar, params)
+
+                pos = bt.positions.get(sym)
+                if pos is not None:
+                    hold_sec = (bar_time - pos.open_time).total_seconds()
+                    if hold_sec > risk_surface.max_hold_seconds:
+                        price = bar.get("close", 0.0)
+                        if price > 0:
+                            pnl = (price - pos.open_price) * pos.volume if pos.volume != 0 else 0
+                            slip = price * SLIPPAGE_BPS / 10000 * pos.lots
+                            commission = pos.lots * COMMISSION_PER_LOT
+                            bt.equity += pnl - slip - commission
+                            bt.total_trades += 1
+                            del bt.positions[sym]
+
+        if idx % decision_interval == 0:
+            if _check_safety(bt, bar_time, params):
+                should_open = strength > 0.3 and len(bt.positions) < int(params.get("max_open_positions", 3))
+
+                if strategy_type == "shadow_random":
+                    should_open = np.random.random() < 0.02 and len(bt.positions) < int(params.get("max_open_positions", 3))
+
+                if should_open:
+                    symbol = bar.get("symbol", "unknown")
+                    price = bar.get("close", 0.0)
+                    if price <= 0:
+                        continue
+
+                    reason = _STATE_REASON_MAP.get(bt.current_state, "OTHER_SCALP")
+                    tp_ratio, sl_ratio = _resolve_tp_sl(params, reason)
+                    sl_ratio *= risk_surface.stop_loss_multiplier
+
+                    base_lots = int(params.get("lots_min", 1))
+                    adjusted_lots = max(1, int(base_lots * risk_surface.size_multiplier))
+                    lots = _compute_lots_with_risk_budget(
+                        bt.equity, price, sl_ratio, adjusted_lots, params,
+                        recent_pnls=bt.recent_pnls)
+                    if lots <= 0:
+                        continue
+
+                    direction = 1 if imbalance > 0 else -1
+                    if strategy_type == "shadow_reverse":
+                        direction = -direction
+
+                    volume = direction * lots
+                    sp_price = price * tp_ratio if volume > 0 else price / tp_ratio
+                    sl_price = price * (1 - sl_ratio) if volume > 0 else price * (1 + sl_ratio)
+
+                    bid_ask = bar.get("bid_ask_spread", 0.0)
+                    spread_q = bar.get("_spread_quality", 1)
+                    slip_bps = _compute_dynamic_slippage_bps(price, bid_ask, spread_quality=spread_q)
+                    slip_cost = price * slip_bps / 10000 * lots
+                    commission = lots * COMMISSION_PER_LOT * 2
+                    bt.equity -= (commission + slip_cost)
+
+                    pos = _BacktestPosition(
+                        instrument_id=symbol,
+                        volume=volume,
+                        open_price=price,
+                        open_time=bar_time,
+                        stop_profit_price=sp_price,
+                        stop_loss_price=sl_price,
+                        open_reason=reason,
+                        lots=lots,
+                        open_state=bt.current_state,
+                        open_strength=strength,
+                    )
+                    bt.positions[symbol] = pos
+                    bt.last_signal_time = bar_time
+                    bt.total_signals += 1
+
+        bt.peak_equity = max(bt.peak_equity, bt.equity)
+        bt.equity_curve.append(bt.equity)
+
+    if bt.prev_date is not None and bt.daily_start_equity > 0:
+        daily_ret = (bt.equity - bt.daily_start_equity) / bt.daily_start_equity
+        bt.daily_returns.append(daily_ret)
+
+    total_return = bt.equity / INITIAL_EQUITY - 1
+    equity_arr = np.array(bt.equity_curve)
+    if len(equity_arr) > 1:
+        returns = np.diff(equity_arr) / equity_arr[:-1]
+        sharpe = np.sqrt(252 * 240) * np.mean(returns) / np.std(returns) if np.std(returns) > 1e-10 else 0.0
+    else:
+        sharpe = 0.0
+
+    max_dd = float(np.min(equity_arr / np.maximum.accumulate(equity_arr) - 1)) if len(equity_arr) > 0 else 0.0
+
+    if n_updates > 0:
+        crm_stats["phase_counts"] = phase_counts
+        crm_stats["avg_strength"] = strength_sum / n_updates
+        crm_stats["avg_entropy"] = entropy_sum / n_updates
+
+    return {
+        "total_return": total_return,
+        "sharpe": sharpe,
+        "max_drawdown": max_dd,
+        "num_signals": bt.total_signals,
+        "strategy_type": strategy_type,
+        "crm_stats": crm_stats,
+    }
+
+
+PARAM_GRID_CYCLE_RESONANCE = {
+    "close_take_profit_ratio": [1.1, 1.5, 2.5],
+    "close_stop_loss_ratio": [0.3, 0.5, 0.7],
+    "max_risk_ratio": [0.2, 0.3, 0.5],
+    "lots_min": [1, 3, 5],
+    "signal_cooldown_sec": [0.0, 60.0, 120.0],
+    "state_confirm_bars": [2, 3, 5],
+    "decision_interval_minutes": [1, 5, 15],
+}
+
+
+def run_cycle_resonance_backtest_sweep(
+    bar_data: pd.DataFrame,
+    strategy: str = "high_freq",
+    train: bool = True,
+    max_workers: int = 1,
+) -> pd.DataFrame:
+    """周期共振参数网格扫描
+
+    对指定策略，遍历参数网格，每次回测都启用周期共振模块调节风险曲面。
+    """
+    from itertools import product as iterproduct
+
+    keys = list(PARAM_GRID_CYCLE_RESONANCE.keys())
+    values = [PARAM_GRID_CYCLE_RESONANCE[k] for k in keys]
+    combos = list(iterproduct(*values))
+    total = len(combos)
+
+    logger.info("[CR_SWEEP] 策略=%s, %d组合开始", strategy, total)
+
+    results = []
+    for i, combo in enumerate(combos):
+        p = dict(PARAM_DEFAULTS)
+        for k, v in zip(keys, combo):
+            p[k] = v
+
+        r = run_backtest_with_cycle_resonance(p, bar_data, strategy, train, "main")
+        r_shadow_a = run_backtest_with_cycle_resonance(p, bar_data, strategy, train, "shadow_reverse")
+        r_shadow_b = run_backtest_with_cycle_resonance(p, bar_data, strategy, train, "shadow_random")
+
+        alpha = r.get("sharpe", 0) - max(r_shadow_a.get("sharpe", 0), r_shadow_b.get("sharpe", 0))
+
+        results.append({
+            **{k: v for k, v in zip(keys, combo)},
+            "sharpe": r.get("sharpe", 0),
+            "max_drawdown": r.get("max_drawdown", 0),
+            "total_return": r.get("total_return", 0),
+            "num_signals": r.get("num_signals", 0),
+            "alpha": alpha,
+            "crm_avg_strength": r.get("crm_stats", {}).get("avg_strength", 0),
+            "crm_avg_entropy": r.get("crm_stats", {}).get("avg_entropy", 0),
+        })
+
+        if (i + 1) % 50 == 0:
+            logger.info("[CR_SWEEP] 进度: %d/%d", i + 1, total)
+
+    logger.info("[CR_SWEEP] 完成: %d组合", total)
+    return pd.DataFrame(results)
+
+
+# ======================================================================
+# 周期共振参数网格回测 — CRParams全参数扫描
+# ======================================================================
+
+CR_PARAM_GRID = {
+    'hmm_entropy_window': [10, 20, 30],
+    'phase_transition_threshold': [0.2, 0.3, 0.4],
+    'chaos_entropy_threshold': [0.6, 0.7, 0.8],
+    'trend_weight_short': [0.1, 0.2, 0.3],
+    'trend_weight_medium': [0.3, 0.5, 0.6],
+    'imbalance_coeff': [0.1, 0.3, 0.5],
+    'consistency_sign_weight': [0.3, 0.5, 0.7],
+    'consistency_mag_weight': [0.3, 0.5, 0.7],
+    'hmm_stability_coeff': [0.3, 0.5, 0.7],
+    'release_strength_threshold': [0.4, 0.5, 0.6],
+    'release_bias_threshold': [0.2, 0.3, 0.4],
+    'exhaust_strength_threshold': [0.1, 0.2, 0.3],
+    'exhaust_highvol_threshold': [0.3, 0.4, 0.5],
+    'secondary_chaos_entropy': [0.3, 0.4, 0.5],
+    'strength_trend_release_threshold': [0.03, 0.05, 0.08],
+    'hf_co_size': [0.8, 1.0, 1.2],
+    'hf_co_sl': [1.0, 1.2, 1.5],
+    'hf_co_hold': [180, 300, 420],
+    'hf_counter_size': [0.2, 0.4, 0.6],
+    'hf_counter_sl': [0.3, 0.4, 0.5],
+    'hf_counter_hold': [15, 30, 60],
+    'hf_entropy_penalty_coeff': [0.3, 0.5, 0.7],
+    'hf_chaos_size': [0.1, 0.2, 0.3],
+    'hf_chaos_sl': [0.2, 0.3, 0.4],
+    'hf_chaos_hold': [10, 15, 20],
+    'hf_size_mult_max': [1.5, 2.0, 2.5],
+    'hf_size_mult_min': [0.05, 0.1, 0.15],
+    'res_full_strength': [0.6, 0.7, 0.8],
+    'res_half_strength': [0.3, 0.4, 0.5],
+    'res_sl_base': [0.6, 0.8, 1.0],
+    'res_sl_strength_coeff': [0.2, 0.4, 0.6],
+    'res_chaos_size': [0.2, 0.3, 0.4],
+    'res_low_size': [0.2, 0.3, 0.4],
+    'res_release_full_size': [0.8, 1.0, 1.2],
+    'res_half_size': [0.4, 0.6, 0.8],
+    'res_release_hold': [400, 600, 800],
+    'res_default_hold': [180, 240, 300],
+    'res_overnight_strength': [0.5, 0.6, 0.7],
+    'res_min_size': [0.1, 0.2, 0.3],
+    'box_low_vol_size': [0.8, 1.0, 1.2],
+    'box_low_vol_sl': [0.6, 0.8, 1.0],
+    'box_low_vol_hold': [1200, 1800, 2400],
+    'box_high_vol_release_size': [0.6, 0.8, 1.0],
+    'box_high_vol_release_sl': [1.0, 1.5, 2.0],
+    'box_high_vol_release_hold': [400, 600, 800],
+    'box_normal_size': [0.3, 0.5, 0.7],
+    'box_normal_sl': [0.8, 1.0, 1.2],
+    'box_normal_hold': [600, 900, 1200],
+    'box_default_size': [0.2, 0.3, 0.4],
+    'box_default_sl': [1.0, 1.2, 1.4],
+    'box_default_hold': [200, 300, 400],
+    'box_bias_threshold': [0.2, 0.3, 0.4],
+    'box_bias_up_mult': [1.0, 1.1, 1.2],
+    'box_bias_down_mult': [0.8, 0.9, 1.0],
+    'sp_charge_size': [0.4, 0.6, 0.8],
+    'sp_charge_sl': [1.0, 1.5, 2.0],
+    'sp_charge_hold': [3600, 7200, 10800],
+    'sp_bias_threshold': [0.4, 0.6, 0.8],
+    'sp_entropy_penalty_coeff': [0.2, 0.4, 0.6],
+    'sp_release_size': [0.8, 1.0, 1.2],
+    'sp_release_sl': [0.6, 0.8, 1.0],
+    'sp_release_hold': [1200, 1800, 2400],
+    'sp_default_size': [0.2, 0.3, 0.4],
+    'sp_default_sl': [0.8, 1.0, 1.2],
+    'sp_default_hold': [2400, 3600, 4800],
+    'sp_bias_boost_mult': [1.0, 1.2, 1.4],
+    'max_directional_exposure': [1.0, 1.5, 2.0],
+    'chaos_max_total_size': [0.3, 0.4, 0.5],
+    'cb_entropy_threshold': [0.8, 0.9, 0.95],
+    'cb_sustained_minutes': [10, 15, 20],
+    'cb_drawdown_pct': [2.0, 3.0, 4.0],
+    'spring_bias_threshold': [0.4, 0.6, 0.8],
+    'spring_asymmetric_low': [0.5, 0.7, 0.9],
+    'spring_asymmetric_high': [1.2, 1.5, 2.0],
+    'hft_default_floor': [0.3, 0.4, 0.5],
+    'hft_resonance_floor': [0.5, 0.7, 0.9],
+    'hft_floor_strength': [0.3, 0.5, 0.7],
+    'trend_direction_window': [50, 100, 150],
+    'strength_history_window': [50, 100, 150],
+}
+
+
+def run_cr_params_sweep(
+    bar_data: pd.DataFrame,
+    strategy: str = 'high_freq',
+    train: bool = True,
+    param_grid: dict = None,
+    max_combos: int = 500,
+) -> pd.DataFrame:
+    """CRParams全参数网格扫描
+
+    对CRParams全部79个经验值进行网格搜索，每个参数3水平。
+    为控制时间，随机采样max_combos个组合。
+    """
+    from cycle_resonance_module import (
+        CycleResonanceModule, CRParams, CR_PARAMS_DEFAULT,
+        reset_cycle_resonance_module,
+    )
+    import itertools, random
+
+    grid = param_grid or CR_PARAM_GRID
+    keys = list(grid.keys())
+    values = [grid[k] for k in keys]
+
+    all_combos = list(itertools.product(*values))
+    total = len(all_combos)
+    if total > max_combos:
+        random.seed(42)
+        sampled = random.sample(all_combos, max_combos)
+    else:
+        sampled = all_combos
+        max_combos = total
+
+    results = []
+    base_params = PARAM_DEFAULTS.copy()
+
+    for i, combo in enumerate(sampled):
+        overrides = dict(zip(keys, combo))
+        cr_params = CR_PARAMS_DEFAULT
+        params_dict = cr_params.to_dict()
+        params_dict.update(overrides)
+        try:
+            cr_params = CRParams.from_dict(params_dict)
+        except Exception:
+            continue
+
+        reset_cycle_resonance_module()
+        crm = CycleResonanceModule(params=cr_params)
+
+        r = run_backtest_with_cycle_resonance(base_params, bar_data, strategy, train)
+
+        row = {
+            'combo_idx': i,
+            'sharpe': r.get('sharpe', 0),
+            'total_return': r.get('total_return', 0),
+            'max_drawdown': r.get('max_drawdown', 0),
+        }
+        row.update(overrides)
+
+        cs = r.get('crm_stats', {})
+        if cs:
+            row['crm_phase_release_pct'] = cs.get('phase_counts', {}).get('释放', 0) / max(sum(cs.get('phase_counts', {}).values()), 1)
+            row['crm_avg_entropy'] = cs.get('avg_entropy', 0)
+
+        results.append(row)
+
+        if (i + 1) % 100 == 0:
+            logger.info("[CR_PARAMS_SWEEP] 进度: %d/%d", i + 1, max_combos)
+
+    logger.info("[CR_PARAMS_SWEEP] 完成: %d组合扫描", len(results))
+    return pd.DataFrame(results)

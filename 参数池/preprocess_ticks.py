@@ -34,10 +34,10 @@ try:
 except ImportError:
     _HAS_SCIPY = False
 
-TICK_DATA_DIR = "/data/ticks"
+TICK_DATA_DIR = os.environ.get("TICK_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "ticks"))
 OUTPUT_DB = "preprocessed.duckdb"
 MIN_DATE = "2020-01-01"
-MAX_DATE = "2026-05-09"
+MAX_DATE = os.environ.get("TICK_MAX_DATE", "2026-12-31")
 SYMBOLS = sorted(set([
     "ag", "au", "cu", "al", "zn", "rb", "ru", "m", "y", "p", "c", "cs", "cf",
     "sr", "ta", "ma", "fg", "rm", "oi", "sc", "lu", "fu", "bu", "sp", "eg",
@@ -190,21 +190,56 @@ def compute_option_state_vectorized(df: pd.DataFrame) -> pd.DataFrame:
 def compute_order_flow_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     """向量化订单流指标。
 
-    TODO: 替换为真实订单流分析逻辑。
-    当前为占位实现：基于volume和price变化的简化指标。
+    基于OHLCV数据推断订单流失衡和一致性：
+    - imbalance: 主动买入量vs主动卖出量的归一化失衡，∈[-1,1]
+      正值=买方主导，负值=卖方主导
+    - consistency: imbalance方向的持续性度量，∈[-1,1]
+      高绝对值=连续同向，低=频繁反转
+
+    推断方法：
+    1. 价格位置法：close在(high,low)中的位置推断主动方向
+       close接近high → 主动买入主导, close接近low → 主动卖出主导
+    2. 成交量加权：大成交量bar的信号权重更高
+    3. 指数移动平均平滑：5期EMA消除单bar噪声
     """
     n = len(df)
     if n == 0:
         return pd.DataFrame(np.zeros((0, 2)), columns=["imbalance", "consistency"])
 
-    close = df["close"].values
-    open_ = df["open"].values
+    close = df["close"].values.astype(float)
+    open_ = df["open"].values.astype(float)
+    high = df["high"].values.astype(float) if "high" in df.columns else np.maximum(open_, close)
+    low = df["low"].values.astype(float) if "low" in df.columns else np.minimum(open_, close)
     vol = df["volume"].values.astype(float)
     vol_safe = np.where(vol > 0, vol, 1.0)
 
-    signed_vol = np.where(close >= open_, vol, -vol)
-    imbalance = signed_vol / vol_safe
-    consistency = np.where(vol_safe > 0, np.clip(imbalance * 0.8, -1, 1), 0.0)
+    spread = high - low
+    spread_safe = np.where(spread > 1e-8, spread, 1e-8)
+    price_position = (close - low) / spread_safe
+    price_position = np.clip(price_position, 0.0, 1.0)
+
+    raw_imbalance = 2.0 * price_position - 1.0
+
+    vol_weight = np.log1p(vol_safe)
+    vol_weight_sum = np.sum(vol_weight) + 1e-8
+    weighted_imbalance = raw_imbalance * vol_weight
+
+    alpha = 2.0 / (5.0 + 1.0)
+    imbalance = np.empty(n)
+    imbalance[0] = weighted_imbalance[0] / vol_weight[0] if vol_weight[0] > 0 else 0.0
+    for i in range(1, n):
+        imbalance[i] = alpha * (weighted_imbalance[i] / vol_weight[i] if vol_weight[i] > 0 else 0.0) + (1.0 - alpha) * imbalance[i - 1]
+    imbalance = np.clip(imbalance, -1.0, 1.0)
+
+    signs = np.sign(raw_imbalance)
+    if n >= 3:
+        consistency_ema = np.empty(n)
+        consistency_ema[0] = signs[0]
+        for i in range(1, n):
+            consistency_ema[i] = alpha * signs[i] + (1.0 - alpha) * consistency_ema[i - 1]
+        consistency = np.clip(consistency_ema * np.abs(imbalance), -1.0, 1.0)
+    else:
+        consistency = np.clip(imbalance * 0.8, -1.0, 1.0)
 
     return pd.DataFrame({
         "imbalance": imbalance,

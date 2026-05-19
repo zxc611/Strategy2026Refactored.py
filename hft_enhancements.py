@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ali2026v3_trading.signal_service import (
@@ -49,11 +50,41 @@ from ali2026v3_trading.state_param_manager import (
 )
 
 
+_MODULE_KEYS = [
+    'signal_filter', 'pursuit_engine', 'arbitrage_detector',
+    'volume_weighted_flow', 'transition_capture', 'defense_engine',
+]
+
+_DEFAULT_SAMPLE_RATES = {
+    'signal_filter': 1,
+    'pursuit_engine': 1,
+    'arbitrage_detector': 5,
+    'volume_weighted_flow': 1,
+    'transition_capture': 1,
+    'defense_engine': 10,
+}
+
+_DEFAULT_MIN_INTERVALS = {
+    'signal_filter': 0.0,
+    'pursuit_engine': 0.0,
+    'arbitrage_detector': 0.05,
+    'volume_weighted_flow': 0.0,
+    'transition_capture': 0.0,
+    'defense_engine': 0.1,
+}
+
+
 class HFTEnhancementEngine:
     """HFT增强引擎 - 七大竞争优势统一入口
 
     将7个增强模块统一管理, 提供一站式API。
     各模块实现分散在其架构归属模块中, 本类仅做编排调度。
+    
+    性能优化:
+    - 模块开关: 每个模块可独立启用/禁用
+    - 采样频率: 低优先级模块按采样率执行(如套利每5tick执行1次)
+    - 最小间隔: 模块执行的最小时间间隔(秒)
+    - 条件前置: 不满足前置条件直接跳过
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -94,10 +125,55 @@ class HFTEnhancementEngine:
             offset_max_ticks=cfg.get('offset_max_ticks', 3),
         )
 
-        self._lock = threading.RLock()
-        self._initialized = True
+        self._module_enabled: Dict[str, bool] = {
+            k: cfg.get(f'enable_{k}', True) for k in _MODULE_KEYS
+        }
+        self._sample_rates: Dict[str, int] = {
+            k: cfg.get(f'{k}_sample_rate', _DEFAULT_SAMPLE_RATES.get(k, 1))
+            for k in _MODULE_KEYS
+        }
+        self._min_intervals: Dict[str, float] = {
+            k: cfg.get(f'{k}_min_interval', _DEFAULT_MIN_INTERVALS.get(k, 0.0))
+            for k in _MODULE_KEYS
+        }
+
+        self._tick_counter: int = 0
+        self._last_exec_time: Dict[str, float] = {k: 0.0 for k in _MODULE_KEYS}
+        self._min_plr_for_signal: float = cfg.get('min_plr_for_signal', 0.0)
+        self._plr_filter_enabled: bool = cfg.get('plr_filter_enabled', False)
 
         logging.info("[HFTEnhancementEngine] 七大竞争优势引擎初始化完成(分散架构)")
+
+    def enable_module(self, module_name: str, enabled: bool = True) -> None:
+        if module_name in self._module_enabled:
+            self._module_enabled[module_name] = enabled
+            logging.info("[HFTEnhancementEngine] %s %s", module_name, 'enabled' if enabled else 'disabled')
+
+    def set_sample_rate(self, module_name: str, rate: int) -> None:
+        if module_name in self._sample_rates:
+            self._sample_rates[module_name] = max(1, rate)
+
+    def set_min_interval(self, module_name: str, interval: float) -> None:
+        if module_name in self._min_intervals:
+            self._min_intervals[module_name] = max(0.0, interval)
+
+    def _should_execute(self, module_name: str) -> bool:
+        if not self._module_enabled.get(module_name, False):
+            return False
+        sample_rate = self._sample_rates.get(module_name, 1)
+        if sample_rate > 1 and self._tick_counter % sample_rate != 0:
+            return False
+        min_interval = self._min_intervals.get(module_name, 0.0)
+        if min_interval > 0:
+            now = time.monotonic()
+            if now - self._last_exec_time[module_name] < min_interval:
+                return False
+        return True
+
+    def _mark_executed(self, module_name: str) -> None:
+        min_interval = self._min_intervals.get(module_name, 0.0)
+        if min_interval > 0:
+            self._last_exec_time[module_name] = time.monotonic()
 
     def on_tick_enhanced(
         self, instrument_id: str, price: float, volume: int,
@@ -105,7 +181,17 @@ class HFTEnhancementEngine:
         bid_price: float = 0.0, ask_price: float = 0.0,
         resonance_strength: float = 0.0, prev_resonance_strength: float = 0.0,
         current_state: str = 'other', prev_state: str = 'other',
+        estimated_plr: float = 0.0,
     ) -> Dict[str, Any]:
+        self._tick_counter += 1
+        if self._plr_filter_enabled and self._min_plr_for_signal > 0:
+            if estimated_plr > 0 and estimated_plr < self._min_plr_for_signal:
+                return {
+                    'signal_filter': None, 'pursuit_signal': None,
+                    'pursuit_exit': None, 'arbitrage_signal': None,
+                    'transition_signal': None, 'smart_money_signal': None,
+                    'plr_filtered': True,
+                }
         direction_lower = (direction or '').lower()
         direction_upper = direction_lower.upper()
         result = {
@@ -115,74 +201,133 @@ class HFTEnhancementEngine:
             'arbitrage_signal': None,
             'transition_signal': None,
             'smart_money_signal': None,
+            'defense_signal': None,
         }
 
-        try:
-            if resonance_strength > 0:
-                result['signal_filter'] = self.signal_filter.filter_signal(
-                    instrument_id, resonance_strength
-                )
-        except Exception as e:
-            logging.debug("[HFT] signal_filter error: %s", e)
+        if self._should_execute('signal_filter'):
+            try:
+                if resonance_strength > 0:
+                    result['signal_filter'] = self.signal_filter.filter_signal(
+                        instrument_id, resonance_strength
+                    )
+                # P1-13修复: 使用order_splitter为大单信号生成拆单计划
+                try:
+                    if resonance_strength > 0 and volume > 1:
+                        split_result = self.order_splitter.plan_order_split(
+                            instrument_id, volume, direction_upper,
+                            signal_strength=resonance_strength, estimated_plr=estimated_plr,
+                        )
+                        if split_result and getattr(split_result, 'sub_orders', None):
+                            result['order_split'] = split_result
+                except Exception:
+                    pass
+                self._mark_executed('signal_filter')
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                logging.error("[HFT] signal_filter critical error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.warning("[HFT] signal_filter error: %s", e)
 
-        try:
-            if resonance_strength > 0 and prev_resonance_strength > 0:
-                pursuit = self.pursuit_engine.evaluate_surge(
-                    instrument_id, resonance_strength, prev_resonance_strength,
-                    price, direction_upper
-                )
-                if pursuit:
-                    result['pursuit_signal'] = pursuit
-        except Exception as e:
-            logging.debug("[HFT] pursuit_engine error: %s", e)
+        if self._should_execute('pursuit_engine'):
+            try:
+                if resonance_strength > 0 and prev_resonance_strength > 0:
+                    pursuit = self.pursuit_engine.evaluate_surge(
+                        instrument_id, resonance_strength, prev_resonance_strength,
+                        price, direction_upper
+                    )
+                    if pursuit:
+                        result['pursuit_signal'] = pursuit
+                self._mark_executed('pursuit_engine')
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                logging.error("[HFT] pursuit_engine critical error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.warning("[HFT] pursuit_engine error: %s", e)
 
-        try:
-            if price > 0:
-                if direction_upper in ('BUY', 'SELL'):
-                    self.pursuit_engine.update_trailing_stop(instrument_id, price, direction_upper)
-                exit_sig = self.pursuit_engine.check_exit(instrument_id, price)
-                if exit_sig:
-                    result['pursuit_exit'] = exit_sig
-        except Exception as e:
-            logging.debug("[HFT] pursuit_engine trailing/exit error: %s", e)
+            try:
+                if price > 0:
+                    if direction_upper in ('BUY', 'SELL'):
+                        self.pursuit_engine.update_trailing_stop(instrument_id, price, direction_upper)
+                    exit_sig = self.pursuit_engine.check_exit(instrument_id, price)
+                    if exit_sig:
+                        result['pursuit_exit'] = exit_sig
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                logging.error("[HFT] pursuit_engine trailing/exit critical error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.warning("[HFT] pursuit_engine trailing/exit error: %s", e)
 
-        try:
-            if price > 0:
-                self.arbitrage_detector.update_price(instrument_id, price, product)
-                if resonance_strength != 0:
-                    self.arbitrage_detector.update_resonance_state(product, resonance_strength)
+        if self._should_execute('arbitrage_detector'):
+            try:
+                if price > 0:
+                    self.arbitrage_detector.update_price(instrument_id, price, product)
+                    if resonance_strength != 0:
+                        self.arbitrage_detector.update_resonance_state(product, resonance_strength)
 
-                arb = self.arbitrage_detector.detect_arbitrage(instrument_id, price, product)
-                if arb:
-                    result['arbitrage_signal'] = {
-                        'opportunity_id': arb.opportunity_id,
-                        'direction': arb.direction,
-                        'deviation_bps': arb.deviation_bps,
-                        'confidence': arb.confidence,
-                        'entry_price': arb.entry_price,
-                        'fair_value': arb.fair_value,
-                    }
-        except Exception as e:
-            logging.debug("[HFT] arbitrage_detector error: %s", e)
+                    arb = self.arbitrage_detector.detect_arbitrage(instrument_id, price, product)
+                    if arb:
+                        result['arbitrage_signal'] = {
+                            'opportunity_id': arb.opportunity_id,
+                            'direction': arb.direction,
+                            'deviation_bps': arb.deviation_bps,
+                            'confidence': arb.confidence,
+                            'entry_price': arb.entry_price,
+                            'fair_value': arb.fair_value,
+                        }
+                self._mark_executed('arbitrage_detector')
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                logging.error("[HFT] arbitrage_detector critical error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.warning("[HFT] arbitrage_detector error: %s", e)
 
-        try:
-            if product:
-                self.volume_weighted_flow.on_trade(product, price, volume, direction_lower)
-                smart_money = self.volume_weighted_flow.calc_smart_money_flow(product)
-                if smart_money['signal'] != 'neutral':
-                    result['smart_money_signal'] = smart_money
-        except Exception as e:
-            logging.debug("[HFT] volume_weighted_flow error: %s", e)
+        if self._should_execute('volume_weighted_flow'):
+            try:
+                if product:
+                    self.volume_weighted_flow.on_trade(product, price, volume, direction_lower)
+                    smart_money = self.volume_weighted_flow.calc_smart_money_flow(product)
+                    if smart_money['signal'] != 'neutral':
+                        result['smart_money_signal'] = smart_money
+                self._mark_executed('volume_weighted_flow')
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                logging.error("[HFT] volume_weighted_flow critical error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.warning("[HFT] volume_weighted_flow error: %s", e)
 
-        try:
-            if current_state != prev_state:
-                transition = self.transition_capture.on_state_change(
-                    prev_state, current_state, resonance_strength, price
-                )
-                if transition:
-                    result['transition_signal'] = transition
-        except Exception as e:
-            logging.debug("[HFT] transition_capture error: %s", e)
+        if self._should_execute('transition_capture'):
+            try:
+                if current_state != prev_state:
+                    transition = self.transition_capture.on_state_change(
+                        prev_state, current_state, resonance_strength, price
+                    )
+                    if transition:
+                        result['transition_signal'] = transition
+                self._mark_executed('transition_capture')
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                logging.error("[HFT] transition_capture critical error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.warning("[HFT] transition_capture error: %s", e)
+
+        if self._should_execute('defense_engine'):
+            try:
+                if price > 0 and direction_upper in ('BUY', 'SELL') and resonance_strength > 0:
+                    defensive_orders = self.defense_engine.create_defensive_order(
+                        instrument_id, direction_upper, 1, price,
+                        signal_strength=resonance_strength,
+                    )
+                    if defensive_orders:
+                        result['defense_signal'] = [
+                            {
+                                'order_id': o.order_id,
+                                'instrument_id': o.instrument_id,
+                                'direction': o.direction,
+                                'volume': o.volume,
+                                'price': o.price,
+                                'defense_type': o.defense_type.value if hasattr(o.defense_type, 'value') else str(o.defense_type),
+                            }
+                            for o in defensive_orders
+                        ]
+                self._mark_executed('defense_engine')
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                logging.error("[HFT] defense_engine critical error: %s", e, exc_info=True)
+            except Exception as e:
+                logging.warning("[HFT] defense_engine error: %s", e)
 
         return result
 
@@ -195,6 +340,9 @@ class HFTEnhancementEngine:
             'volume_weighted_flow': self.volume_weighted_flow.get_stats(),
             'transition_capture': self.transition_capture.get_stats(),
             'defense_engine': self.defense_engine.get_stats(),
+            'tick_counter': self._tick_counter,
+            'module_enabled': dict(self._module_enabled),
+            'sample_rates': dict(self._sample_rates),
         }
 
 

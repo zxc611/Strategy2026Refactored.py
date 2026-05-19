@@ -25,6 +25,12 @@ class StrategyScheduler:
     从StrategyCoreService中解耦出来。
     """
     
+    DEFAULT_TRADING_INTERVAL_SEC = 30
+    DEFAULT_POSITION_CHECK_INTERVAL_SEC = 5
+    DEFAULT_PENDING_ORDER_INTERVAL_SEC = 3
+    DEFAULT_DIAGNOSTIC_INTERVAL_MIN = 3
+    DEFAULT_DIAGNOSTIC_INTERVAL_SEC = 30
+    
     def __init__(self):
         self._scheduler = None
         self._state_checker: Optional[Callable[[], bool]] = None
@@ -379,7 +385,7 @@ class StrategyScheduler:
                 strategy_id=strategy_id,
                 run_id=run_id,
                 owner_scope='strategy',
-                seconds=30
+                seconds=self.DEFAULT_TRADING_INTERVAL_SEC
             )
             
             self.add_job_with_owner(
@@ -389,7 +395,7 @@ class StrategyScheduler:
                 strategy_id=strategy_id,
                 run_id=run_id,
                 owner_scope='strategy',
-                seconds=5
+                seconds=self.DEFAULT_POSITION_CHECK_INTERVAL_SEC
             )
             
             if order_service and hasattr(order_service, 'check_pending_orders'):
@@ -400,7 +406,28 @@ class StrategyScheduler:
                     strategy_id=strategy_id,
                     run_id=run_id,
                     owner_scope='strategy',
-                    seconds=3
+                    seconds=self.DEFAULT_PENDING_ORDER_INTERVAL_SEC
+                )
+
+            if order_service and hasattr(order_service, 'mark_virtual_positions_eod'):
+                def _virtual_pos_eod_job():
+                    try:
+                        if not self._can_run_jobs():
+                            return
+                        from datetime import datetime as _dt
+                        now = _dt.now()
+                        if now.hour == 15 and 1 <= now.minute <= 10:
+                            order_service.mark_virtual_positions_eod()
+                    except Exception as e:
+                        logging.error(f"[StrategyScheduler] virtual position eod mark failed: {e}")
+                self.add_job_with_owner(
+                    func=_virtual_pos_eod_job,
+                    trigger='interval',
+                    job_id=f'{strategy_id}_virtual_pos_eod_mark',
+                    strategy_id=strategy_id,
+                    run_id=run_id,
+                    owner_scope='strategy',
+                    minutes=1
                 )
             
             logging.info(
@@ -465,9 +492,9 @@ class StrategyScheduler:
                     strategy_id='GLOBAL',
                     run_id=None,
                     owner_scope='global',
-                    minutes=3
+                    minutes=self.DEFAULT_DIAGNOSTIC_INTERVAL_MIN
                 )
-                logging.info("[StrategyScheduler] ✅ 期权5种状态诊断任务已添加 (每3分钟)")
+                logging.info(f"[StrategyScheduler] ✅ 期权5种状态诊断任务已添加 (每{self.DEFAULT_DIAGNOSTIC_INTERVAL_MIN}分钟)")
             else:
                 logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
         except Exception as e:
@@ -599,9 +626,9 @@ class StrategyScheduler:
                     strategy_id='GLOBAL',
                     run_id=None,
                     owner_scope='global',
-                    seconds=30
+                    seconds=self.DEFAULT_DIAGNOSTIC_INTERVAL_SEC
                 )
-                logging.info("[StrategyScheduler] ✅ %d合约12环节诊断任务已添加 (每30秒)", MONITORED_CONTRACT_COUNT)
+                logging.info("[StrategyScheduler] ✅ %d合约12环节诊断任务已添加 (每%d秒)", MONITORED_CONTRACT_COUNT, self.DEFAULT_DIAGNOSTIC_INTERVAL_SEC)
             else:
                 logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
         except ImportError as e:

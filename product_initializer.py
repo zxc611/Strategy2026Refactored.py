@@ -16,7 +16,67 @@ ensure_products_with_retry 处理品种加载和DB建表，不属于配置服务
 import logging
 import os
 import time
-from typing import Dict
+from typing import Any, Dict, Optional, Tuple
+
+
+_PRODUCT_PARAMS: Dict[str, Dict[str, Any]] = {
+    'IO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'HO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'MO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'EO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'IF': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'IC': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'IH': {'tick_size': 0.2, 'contract_size': 300.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'IM': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'TS': {'tick_size': 0.005, 'contract_size': 10000.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'TF': {'tick_size': 0.005, 'contract_size': 10000.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'T':  {'tick_size': 0.005, 'contract_size': 10000.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'CU': {'tick_size': 10.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'option'},
+    'AL': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'option'},
+    'ZN': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'option'},
+    'AU': {'tick_size': 0.02, 'contract_size': 1000, 'exchange': 'SHFE', 'type': 'option'},
+    'AG': {'tick_size': 1.0, 'contract_size': 15, 'exchange': 'SHFE', 'type': 'option'},
+    'RB': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'option'},
+    'RU': {'tick_size': 5.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'option'},
+    'MA': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option'},
+    'TA': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'OI': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option'},
+    'RM': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option'},
+    'SA': {'tick_size': 1.0, 'contract_size': 20, 'exchange': 'CZCE', 'type': 'option'},
+    'FG': {'tick_size': 1.0, 'contract_size': 20, 'exchange': 'CZCE', 'type': 'option'},
+    'SR': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option'},
+    'CF': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'AP': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option'},
+    'CJ': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'SF': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'SM': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'UR': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'M':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+    'Y':  {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+    'P':  {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+    'A':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+    'L':  {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'V':  {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'PP': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'EB': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'I':  {'tick_size': 0.5, 'contract_size': 100, 'exchange': 'DCE', 'type': 'option'},
+    'EG': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'C':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+    'CS': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+}
+
+_DEFAULT_FUTURE_SPEC = {'tick_size': 0.2, 'contract_size': 1.0}
+_DEFAULT_OPTION_SPEC = {'tick_size': 1.0, 'contract_size': 1.0}
+
+
+def get_product_params(product: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    p = product.upper().rstrip('0123456789')
+    while p and p not in _PRODUCT_PARAMS and len(p) > 1:
+        p = p[:-1]
+    base = dict(_PRODUCT_PARAMS.get(p, _DEFAULT_FUTURE_SPEC))
+    if overrides:
+        base.update(overrides)
+    return base
 
 
 def _get_option_underlying_product(option_product: str) -> str:
@@ -147,10 +207,13 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
             future_id_map = {}
             for product in sorted(future_products_set):
                 exchange = next((f[2] for f in futures_parsed if f[1] == product), 'CFFEX')
+                params = get_product_params(product)
+                tick_size = params.get('tick_size', 0.2)
+                contract_size = params.get('contract_size', 1.0)
                 data_service.upsert_future_product(
                     product=product, exchange=exchange,
                     format_template='{product}{year_month}',
-                    tick_size=0.2, contract_size=1.0, is_active=True
+                    tick_size=tick_size, contract_size=contract_size, is_active=True
                 )
 
             for instrument_id, product, exchange, year_month in futures_parsed:
@@ -173,6 +236,8 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                 )
 
             for instrument_id, product, exchange, year_month, option_type, strike_price, underlying_future_key in options_parsed:
+                if underlying_future_key not in future_id_map:
+                    raise ValueError(f"underlying_future_key {underlying_future_key} not found in future_id_map for option {instrument_id}")
                 underlying_future_id = future_id_map[underlying_future_key]
                 underlying_product = _get_option_underlying_product(product)
                 data_service.upsert_option_instrument(
@@ -185,7 +250,7 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
 
             # ========== 阶段3：硬断言核查（0 个 NULL，否则初始化失败） ==========
 
-            conn = data_service._get_connection()
+            conn = data_service.get_connection()
 
             null_future_count = conn.execute(
                 "SELECT COUNT(*) FROM option_instruments WHERE underlying_future_id IS NULL"

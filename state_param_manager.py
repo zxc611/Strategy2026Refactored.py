@@ -55,9 +55,11 @@ class StateParamManager:
     ):
         self._lock = threading.RLock()
         self._yaml_path = yaml_path or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 'state_param_sets.yaml'
+            os.path.dirname(os.path.abspath(__file__)), '参数池', 'state_param_sets.yaml'
         )
         self._param_sets: Dict[str, Dict[str, Any]] = {}
+        self._capital_scale: Optional[str] = None
+        self._capital_scale_overrides: Dict[str, Dict[str, Any]] = {}
         self._current_state: str = 'other'
         self._prev_state: str = 'other'
         self._state_enter_time: float = time.time()
@@ -108,9 +110,12 @@ class StateParamManager:
         try:
             if os.path.exists(self._yaml_path):
                 with open(self._yaml_path, 'r', encoding='utf-8') as f:
-                    self._param_sets = yaml.safe_load(f) or {}
-                logging.info("[StateParamManager] Loaded %d param sets from %s",
-                             len(self._param_sets), self._yaml_path)
+                    all_data = yaml.safe_load(f) or {}
+                self._capital_scale_overrides = all_data.pop('capital_scale_overrides', {}) or {}
+                self._param_sets = all_data
+                logging.info("[StateParamManager] Loaded %d param sets from %s (capital_scale_overrides: %s)",
+                             len(self._param_sets), self._yaml_path,
+                             list(self._capital_scale_overrides.keys()))
             else:
                 logging.warning("[StateParamManager] YAML file not found: %s, using defaults",
                                 self._yaml_path)
@@ -121,35 +126,8 @@ class StateParamManager:
 
     @staticmethod
     def _default_param_sets() -> Dict[str, Dict[str, Any]]:
-        return {
-            'correct_trending': {
-                'option_width_min_threshold': 2.0,
-                'signal_cooldown_sec': 15,
-                'close_take_profit_ratio': 2.5,
-                'close_stop_loss_ratio': 0.4,
-                'max_risk_ratio': 0.8,
-                'max_signals_per_window': 10,
-                'lots_min': 5,
-            },
-            'incorrect_reversal': {
-                'option_width_min_threshold': 4.0,
-                'signal_cooldown_sec': 120,
-                'close_take_profit_ratio': 1.3,
-                'close_stop_loss_ratio': 0.6,
-                'max_risk_ratio': 0.3,
-                'max_signals_per_window': 3,
-                'lots_min': 2,
-            },
-            'other': {
-                'option_width_min_threshold': 4.0,
-                'signal_cooldown_sec': 300,
-                'close_take_profit_ratio': 1.1,
-                'close_stop_loss_ratio': 0.8,
-                'max_risk_ratio': 0.2,
-                'max_signals_per_window': 2,
-                'lots_min': 1,
-            },
-        }
+        from ali2026v3_trading.config_params import get_default_state_param_sets
+        return get_default_state_param_sets()
 
     def bind_width_cache(self, width_cache: Any) -> None:
         self._width_cache_ref = width_cache
@@ -168,68 +146,64 @@ class StateParamManager:
             self._on_state_switch_callbacks.append(callback)
 
     def should_check_state(self) -> bool:
-        """判断是否到达状态检查间隔"""
-        now = time.time()
-        if now - self._last_check_time >= self._state_check_interval_sec:
-            self._last_check_time = now
-            return True
-        return False
+        """判断是否到达状态检查间隔（纯检查，不修改时间戳，避免TOCTOU）"""
+        with self._lock:
+            now = time.time()
+            return now - self._last_check_time >= self._state_check_interval_sec
 
     def update_state_from_width_cache(self) -> str:
-        now = time.time()
         with self._lock:
+            now = time.time()
             elapsed = now - self._last_check_time
-        if elapsed < self._state_check_interval_sec:
-            return self._current_state
-        with self._lock:
+            if elapsed < self._state_check_interval_sec:
+                return self._current_state
             self._last_check_time = now
 
-        if self._width_cache_ref is None:
-            return self._current_state
-
-        try:
-            snapshot_method = getattr(self._width_cache_ref, 'get_status_counts_snapshot', None)
-            if snapshot_method is not None:
-                status_counts = snapshot_method()
-            else:
-                status_counts = getattr(self._width_cache_ref, '_status_counts', {})
-
-            if not status_counts:
+            if self._width_cache_ref is None:
                 return self._current_state
 
-            total = 0
-            state_tally: Dict[str, int] = {'correct_trending': 0, 'incorrect_reversal': 0, 'other': 0}
+            try:
+                snapshot_method = getattr(self._width_cache_ref, 'get_status_counts_snapshot', None)
+                if snapshot_method is not None:
+                    status_counts = snapshot_method()
+                else:
+                    status_counts = getattr(self._width_cache_ref, '_status_counts', {})
 
-            for future_id, months_data in status_counts.items():
-                if not isinstance(months_data, dict):
-                    continue
-                for month, types_data in months_data.items():
-                    if not isinstance(types_data, dict):
+                if not status_counts:
+                    return self._current_state
+
+                total = 0
+                state_tally: Dict[str, int] = {'correct_trending': 0, 'incorrect_reversal': 0, 'other': 0}
+
+                for future_id, months_data in status_counts.items():
+                    if not isinstance(months_data, dict):
                         continue
-                    for opt_type, counts in types_data.items():
-                        if not isinstance(counts, dict):
+                    for month, types_data in months_data.items():
+                        if not isinstance(types_data, dict):
                             continue
-                        for raw_status, count in counts.items():
-                            if not isinstance(count, (int, float)):
+                        for opt_type, counts in types_data.items():
+                            if not isinstance(counts, dict):
                                 continue
-                            mapped = _STATE_MAP.get(raw_status, 'other')
-                            state_tally[mapped] += count
-                            total += count
+                            for raw_status, count in counts.items():
+                                if not isinstance(count, (int, float)):
+                                    continue
+                                mapped = _STATE_MAP.get(raw_status, 'other')
+                                state_tally[mapped] += count
+                                total += count
 
-            if total == 0:
-                return self._current_state
+                if total == 0:
+                    return self._current_state
 
-            self._stats['state_check_count'] += 1
+                self._stats['state_check_count'] += 1
 
-            non_other_total = state_tally.get('correct_trending', 0) + state_tally.get('incorrect_reversal', 0)
-            if non_other_total > 0 and non_other_total / total >= self._non_other_ratio_threshold:
-                candidates = {k: v for k, v in state_tally.items() if k != 'other'}
-                best_state = max(candidates, key=lambda s: (candidates[s], _STATE_PRIORITY.get(s, 0)))
-            else:
-                best_state = 'other'
+                non_other_total = state_tally.get('correct_trending', 0) + state_tally.get('incorrect_reversal', 0)
+                if non_other_total > 0 and non_other_total / total >= self._non_other_ratio_threshold:
+                    candidates = {k: v for k, v in state_tally.items() if k != 'other'}
+                    best_state = max(candidates, key=lambda s: (candidates[s], _STATE_PRIORITY.get(s, 0)))
+                else:
+                    best_state = 'other'
 
-            if best_state != self._current_state:
-                with self._lock:
+                if best_state != self._current_state:
                     hold_elapsed = time.time() - self._state_enter_time
                     if hold_elapsed < self._min_state_hold_seconds:
                         logging.debug(
@@ -255,8 +229,7 @@ class StateParamManager:
                             self._current_state, best_state,
                             self._pending_confirm_count, self._state_confirm_bars,
                         )
-            else:
-                with self._lock:
+                else:
                     if self._pending_state is not None:
                         self._stats['state_confirm_rejects'] += 1
                         logging.info(
@@ -266,10 +239,10 @@ class StateParamManager:
                     self._pending_state = None
                     self._pending_confirm_count = 0
 
-        except Exception as e:
-            logging.warning("[StateParamManager.update_state_from_width_cache] Error: %s", e)
+            except Exception as e:
+                logging.warning("[StateParamManager.update_state_from_width_cache] Error: %s", e)
 
-        return self._current_state
+            return self._current_state
 
     def _switch_state(self, new_state: str,
                       resonance_strength: float = 0.0,
@@ -305,6 +278,8 @@ class StateParamManager:
 
             if new_state == 'other':
                 logging.warning("[StateParamManager] ⚠️ 进入other状态，触发防御性减仓模式")
+                self._freeze_old_strategy_opening('master')
+                self._freeze_old_strategy_opening('reverse')
 
             if self._hft_transition_capture:
                 try:
@@ -321,10 +296,52 @@ class StateParamManager:
             except Exception as e:
                 logging.warning("[StateParamManager] on_state_switch回调异常: %s", e)
 
+    def _freeze_old_strategy_opening(self, strategy_id: str):
+        try:
+            from ali2026v3_trading.strategy_ecosystem import get_strategy_ecosystem
+            eco = get_strategy_ecosystem()
+            freeze_fn = getattr(eco, 'freeze_strategy_slot', None)
+            if callable(freeze_fn):
+                freeze_fn(strategy_id)
+                logging.info("[StateParamManager] 冻结策略%s新开仓(保留已有仓位按原规则退出)", strategy_id)
+            else:
+                slot = getattr(eco, f'_{strategy_id}', None)
+                if slot is None:
+                    logging.warning("[StateParamManager] 策略生态系统无_%s属性，跳过冻结", strategy_id)
+                    return
+                try:
+                    slot.frozen = True
+                except AttributeError:
+                    logging.warning("[StateParamManager] 策略槽位_%s无frozen属性，无法冻结", strategy_id)
+                    return
+                logging.info("[StateParamManager] 冻结策略%s新开仓(保留已有仓位按原规则退出)", strategy_id)
+        except ImportError:
+            logging.warning("[StateParamManager] strategy_ecosystem模块不可用，跳过冻结%s", strategy_id)
+        except Exception as e:
+            logging.warning("[StateParamManager._freeze_old_strategy_opening] 冻结%s失败: %s", strategy_id, e)
+
     def get_params(self, state: Optional[str] = None) -> Dict[str, Any]:
         target = state or self._current_state
         with self._lock:
-            return dict(self._param_sets.get(target, self._param_sets.get('other', {})))
+            base_params = dict(self._param_sets.get(target, self._param_sets.get('other', {})))
+            if self._capital_scale and self._capital_scale in self._capital_scale_overrides:
+                scale_overrides = self._capital_scale_overrides[self._capital_scale]
+                if target in scale_overrides:
+                    base_params.update(scale_overrides[target])
+            return base_params
+
+    def set_capital_scale(self, capital_scale: str) -> None:
+        with self._lock:
+            self._capital_scale = capital_scale
+            logging.info("[StateParamManager] Capital scale set to: %s", capital_scale)
+
+    def get_capital_scale(self) -> Optional[str]:
+        with self._lock:
+            return self._capital_scale
+
+    def get_capital_scale_overrides(self) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            return dict(self._capital_scale_overrides)
 
     def get_current_state(self) -> str:
         with self._lock:
@@ -367,6 +384,24 @@ class StateParamManager:
     def reload_param_sets(self) -> None:
         with self._lock:
             self._load_param_sets()
+
+    def check_plr_decline_trigger(self, strategy_id: str, current_plr: float, target_plr: float) -> bool:
+        with self._lock:
+            if target_plr <= 0:
+                return False
+            plr_ratio = current_plr / target_plr
+            if plr_ratio < 0.3 and self._current_state != 'other':
+                logging.info(
+                    "[StateParamManager] PLR严重下降触发状态切换: %s plr=%.2f/target=%.2f ratio=%.2f, state=%s->other",
+                    strategy_id, current_plr, target_plr, plr_ratio, self._current_state
+                )
+                self._prev_state = self._current_state
+                self._current_state = 'other'
+                self._state_enter_time = time.time()
+                self._pending_state = None
+                self._pending_confirm_count = 0
+                return True
+            return False
 
 
 _state_param_manager: Optional[StateParamManager] = None

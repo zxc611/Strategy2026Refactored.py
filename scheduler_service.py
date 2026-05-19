@@ -403,11 +403,9 @@ class SchedulerService:
                 if job.job_id in self._jobs:
                     self._jobs[job.job_id].last_error = error_msg
 
-                    # 重试逻辑
                     if job.retry_count < job.max_retries:
                         job.retry_count += 1
                         self._log(f"[Scheduler] Job {job.job_id} retry {job.retry_count}/{job.max_retries}")
-                        # 立即重试
                         self._jobs[job.job_id].last_run = 0
                     else:
                         self._jobs[job.job_id].status = JobStatus.FAILED
@@ -598,7 +596,9 @@ class MarketTimeService:
         return True
     
     def is_market_open(self, exchange: Optional[str] = None) -> bool:
-        now = datetime.now()
+        from datetime import timezone, timedelta
+        cst = timezone(timedelta(hours=8))
+        now = datetime.now(cst)
         now_time = now.time()
         exchanges = [exchange] if exchange else list(self._sessions.keys())
         for exch in exchanges:

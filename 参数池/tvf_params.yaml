@@ -1,0 +1,303 @@
+# TVF (六维仓位调整因子) 参数池配置文件
+# 
+# 说明:
+#   - 本文件所有参数均应当通过量化回测后确定
+#   - 当前值为经验初始值，需在历史数据上验证后更新
+#   - 每次回测优化后，记录优化日期、目标函数、样本外表现
+#
+# 参数层级:
+#   L1: 风险收益层 (三角验证: Sortino + Calmar + Sharpe)
+#   L2: 市场微观层 (订单流: OFI + CVD偏离 + 智能资金流向)
+#   L3: 期权风险层 (希腊字母: Delta + Gamma + Theta + Vega)
+
+# ============================================================
+# 全局开关
+# ============================================================
+tvf_enabled: true
+
+# ============================================================
+# 层间权重 (三层权重之和应当等于1.0)
+# ============================================================
+layer_weights:
+  l1_risk_return: 0.40    # L1 风险收益层权重
+  l2_market_micro: 0.35   # L2 市场微观层权重
+  l3_option_greeks: 0.25  # L3 期权风险层权重
+
+# ============================================================
+# L1: 三角验证参数 (风险收益层)
+# ============================================================
+l1_tri_validation:
+  # Sigmoid center: 指标达到此值时，Sigmoid输出=0.5
+  # 命名规则: {指标}_tri_center/scale，与cascade_config.yaml统一
+  sortino_tri_center: 1.5
+  calmar_tri_center: 0.8
+  sharpe_tri_center: 1.2
+
+  # Sigmoid scale: 控制曲线陡峭度
+  #   scale越小 → 曲线越陡 → 仓位对指标变化越敏感
+  #   scale越大 → 曲线越缓 → 仓位对指标变化越迟钝
+  sortino_tri_scale: 0.50
+  calmar_tri_scale: 0.30
+  sharpe_tri_scale: 0.40
+
+  # 层内权重 (三个指标权重之和应当等于1.0)
+  inner_weights:
+    sortino: 0.40
+    calmar: 0.30
+    sharpe: 0.30
+
+# ============================================================
+# L2: 订单流参数 (市场微观层)
+# ============================================================
+l2_order_flow:
+  # Sigmoid scale for OFI (订单流失衡指数)
+  #   OFI范围通常为[-10, 10]，scale=3.0使OFI=±3时产生明显区分
+  ofi_scale: 3.00
+
+  # Sigmoid scale for SMF (智能资金流向)
+  smf_scale: 2.00
+
+  # 层内权重 (三个指标权重之和应当等于1.0)
+  inner_weights:
+    ofi: 0.40
+    cvd_divergence: 0.30
+    smart_money_flow: 0.30
+
+# ============================================================
+# L3: 希腊字母参数 (期权风险层)
+# ============================================================
+l3_greeks:
+  # 阈值
+  gamma_threshold: 0.05     # Gamma风险阈值
+  theta_threshold: -0.02    # Theta日衰减阈值 (负值表示损耗)
+  vega_threshold: 0.10      # Vega暴露阈值
+
+  # Sigmoid scale
+  gamma_scale: 0.02
+  theta_scale: 0.01
+  vega_scale: 0.05
+
+  # 层内权重 (四个指标权重之和应当等于1.0)
+  inner_weights:
+    delta: 0.30
+    gamma: 0.25
+    theta: 0.25
+    vega: 0.20
+
+# ============================================================
+# 参数优化记录 (每次回测后更新)
+# ============================================================
+optimization_history:
+  - date: "2026-05-17"
+    method: "manual_initial"
+    description: "经验初始值，尚未经过量化回测验证"
+    train_period: null
+    test_period: null
+    objective_function: null
+    best_sortino: null
+    best_max_drawdown: null
+    status: "pending_backtest"
+
+# ============================================================
+# 参数搜索空间 (用于网格搜索/贝叶斯优化)
+# ============================================================
+parameter_search_space:
+  # 网格搜索配置
+  grid_config:
+    total_dimensions: 16
+    estimated_combinations: 497664
+    sampling_strategy: "latin_hypercube"
+    description: "16维参数空间，约49.8万组合；建议拉丁超立方采样1000-5000次或贝叶斯优化"
+  
+  # 层间权重 (2个独立维度，约束: l1+l2+l3=1.0)
+  layer_weights:
+    l1_risk_return:
+      range: [0.30, 0.50]
+      num_points: 3
+      step: 0.10
+      values: [0.30, 0.40, 0.50]
+      description: "L1权重，3个采样点"
+    l2_market_micro:
+      range: [0.25, 0.35]
+      num_points: 2
+      step: 0.10
+      values: [0.25, 0.35]
+      description: "L2权重，2个采样点"
+    l3_option_greeks:
+      derived: true
+      formula: "1.0 - l1_risk_return - l2_market_micro"
+      description: "L3权重由约束计算，约4个有效组合"
+
+  # L1三角验证中心点 (3维)
+  l1_tri_centers:
+    sortino:
+      range: [0.5, 3.0]
+      num_points: 3
+      step: 1.25
+      values: [0.5, 1.5, 2.5]
+      description: "索提诺中心点，3个采样点"
+    calmar:
+      range: [0.3, 2.0]
+      num_points: 3
+      step: 0.85
+      values: [0.3, 1.0, 1.7]
+      description: "卡玛中心点，3个采样点"
+    sharpe:
+      range: [0.5, 3.0]
+      num_points: 3
+      step: 1.25
+      values: [0.5, 1.5, 2.5]
+      description: "夏普中心点，3个采样点"
+
+  # L1三角验证scale (3维)
+  l1_tri_scales:
+    sortino:
+      range: [0.2, 1.0]
+      num_points: 2
+      step: 0.8
+      values: [0.3, 0.8]
+      description: "索提诺scale，2个采样点"
+    calmar:
+      range: [0.1, 0.8]
+      num_points: 2
+      step: 0.7
+      values: [0.2, 0.6]
+      description: "卡玛scale，2个采样点"
+    sharpe:
+      range: [0.2, 1.0]
+      num_points: 2
+      step: 0.8
+      values: [0.3, 0.8]
+      description: "夏普scale，2个采样点"
+
+  # L2订单流scale (2维)
+  l2_scales:
+    ofi:
+      range: [1.0, 10.0]
+      num_points: 3
+      step: 4.5
+      values: [2.0, 5.0, 8.0]
+      description: "OFI scale，3个采样点"
+    smf:
+      range: [0.5, 5.0]
+      num_points: 3
+      step: 2.25
+      values: [1.0, 2.5, 4.0]
+      description: "SMF scale，3个采样点"
+
+  # L3希腊字母阈值 (3维)
+  l3_thresholds:
+    gamma:
+      range: [0.01, 0.15]
+      num_points: 2
+      step: 0.14
+      values: [0.03, 0.10]
+      description: "Gamma阈值，2个采样点"
+    theta:
+      range: [-0.10, -0.005]
+      num_points: 2
+      step: 0.095
+      values: [-0.08, -0.02]
+      description: "Theta阈值，2个采样点"
+    vega:
+      range: [0.02, 0.30]
+      num_points: 2
+      step: 0.28
+      values: [0.05, 0.20]
+      description: "Vega阈值，2个采样点"
+
+  # L3希腊字母scale (3维)
+  l3_scales:
+    gamma:
+      range: [0.005, 0.05]
+      num_points: 2
+      step: 0.045
+      values: [0.01, 0.03]
+      description: "Gamma scale，2个采样点"
+    theta:
+      range: [0.002, 0.02]
+      num_points: 2
+      step: 0.018
+      values: [0.005, 0.015]
+      description: "Theta scale，2个采样点"
+    vega:
+      range: [0.02, 0.10]
+      num_points: 2
+      step: 0.08
+      values: [0.03, 0.07]
+      description: "Vega scale，2个采样点"
+
+  # 层内权重 (不纳入网格搜索，由约束计算)
+  inner_weights:
+    description: "层内权重由约束和=1.0确定，不独立采样"
+    l1:
+      sortino:
+        range: [0.20, 0.60]
+        num_points: 3
+        step: 0.20
+        values: [0.30, 0.40, 0.50]
+      calmar:
+        derived: true
+        formula: "(1.0 - sortino) * 0.5"
+      sharpe:
+        derived: true
+        formula: "(1.0 - sortino) * 0.5"
+    l2:
+      ofi:
+        range: [0.20, 0.60]
+        num_points: 3
+        step: 0.20
+        values: [0.30, 0.40, 0.50]
+      cvd_divergence:
+        derived: true
+        formula: "(1.0 - ofi) * 0.5"
+      smart_money_flow:
+        derived: true
+        formula: "(1.0 - ofi) * 0.5"
+    l3:
+      delta:
+        range: [0.10, 0.50]
+        num_points: 2
+        step: 0.40
+        values: [0.20, 0.40]
+      gamma:
+        range: [0.10, 0.40]
+        num_points: 2
+        step: 0.30
+        values: [0.15, 0.30]
+      theta:
+        derived: true
+        formula: "(1.0 - delta - gamma - vega)"
+      vega:
+        range: [0.05, 0.35]
+        num_points: 2
+        step: 0.30
+        values: [0.10, 0.25]
+
+# ============================================================
+# 网格组合数计算
+# ============================================================
+grid_analysis:
+  dimensions:
+    layer_weights: 4        # l1:3点 × l2:2点 约束剪枝后≈4有效组合
+    l1_tri_centers: 27      # 3 × 3 × 3
+    l1_tri_scales: 8        # 2 × 2 × 2
+    l2_scales: 9            # 3 × 3
+    l3_thresholds: 8        # 2 × 2 × 2
+    l3_scales: 8            # 2 × 2 × 2
+  total_combinations: 497664  # 4 × 27 × 8 × 9 × 8 × 8 = 497,664
+  calculation: "4 × 27 × 8 × 9 × 8 × 8 = 497,664"
+  recommended_sampling:
+    latin_hypercube: 2000
+    bayesian_optuna: 500
+    random_search: 10000
+  description: "约49.8万组合，推荐拉丁超立方采样2000次或Optuna贝叶斯优化500次"
+
+# ============================================================
+# 使用说明
+# ============================================================
+# 1. 首次使用: 直接采用本文件的初始值
+# 2. 回测优化: 使用 parameter_search_space 定义的范围运行网格搜索
+# 3. 参数更新: 将优化后的最优参数更新到上方对应位置
+# 4. 记录历史: 在 optimization_history 中添加新的优化记录
+# 5. 多模式支持: 可为不同资金规模(small/medium/large)创建独立的参数文件

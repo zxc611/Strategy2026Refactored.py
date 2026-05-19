@@ -35,10 +35,14 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-import task_scheduler as _ts
-
-_run_backtest = _ts.run_backtest
-_load_data_for_period = _ts._load_data_for_period
+try:
+    import task_scheduler as _ts
+    _run_backtest = _ts.run_backtest
+    _load_data_for_period = _ts._load_data_for_period
+except ImportError:
+    from ali2026v3_trading.参数池 import task_scheduler as _ts
+    _run_backtest = _ts.run_backtest
+    _load_data_for_period = _ts._load_data_for_period
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,9 @@ class SensitivityResult:
         'base_return', 'low_return', 'high_return',
         'base_max_dd', 'low_max_dd', 'high_max_dd',
         'sharpe_delta_low', 'sharpe_delta_high', 'sharpe_sensitivity',
+        'base_profit_factor', 'low_profit_factor', 'high_profit_factor',
+        'base_win_loss_ratio', 'low_win_loss_ratio', 'high_win_loss_ratio',
+        'plr_sensitivity',
     )
 
     def __init__(self, param_key: str, base_value: float, perturb_pct: float):
@@ -92,11 +99,26 @@ class SensitivityResult:
         self.sharpe_delta_low = 0.0
         self.sharpe_delta_high = 0.0
         self.sharpe_sensitivity = 0.0
+        self.base_profit_factor = 0.0
+        self.low_profit_factor = 0.0
+        self.high_profit_factor = 0.0
+        self.base_win_loss_ratio = 0.0
+        self.low_win_loss_ratio = 0.0
+        self.high_win_loss_ratio = 0.0
+        self.plr_sensitivity = 0.0
 
     def compute_sensitivity(self) -> None:
         self.sharpe_delta_low = self.low_sharpe - self.base_sharpe
         self.sharpe_delta_high = self.high_sharpe - self.base_sharpe
         self.sharpe_sensitivity = abs(self.sharpe_delta_high - self.sharpe_delta_low) / 2.0
+        pf_delta_low = self.low_profit_factor - self.base_profit_factor
+        pf_delta_high = self.high_profit_factor - self.base_profit_factor
+        wlr_delta_low = self.low_win_loss_ratio - self.base_win_loss_ratio
+        wlr_delta_high = self.high_win_loss_ratio - self.base_win_loss_ratio
+        self.plr_sensitivity = (
+            abs(pf_delta_high - pf_delta_low) / 2.0 * 0.6
+            + abs(wlr_delta_high - wlr_delta_low) / 2.0 * 0.4
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -115,6 +137,13 @@ class SensitivityResult:
             'base_max_dd': self.base_max_dd,
             'low_max_dd': self.low_max_dd,
             'high_max_dd': self.high_max_dd,
+            'base_profit_factor': self.base_profit_factor,
+            'low_profit_factor': self.low_profit_factor,
+            'high_profit_factor': self.high_profit_factor,
+            'base_win_loss_ratio': self.base_win_loss_ratio,
+            'low_win_loss_ratio': self.low_win_loss_ratio,
+            'high_win_loss_ratio': self.high_win_loss_ratio,
+            'plr_sensitivity': self.plr_sensitivity,
         }
 
 
@@ -164,7 +193,10 @@ class SensitivityAnalyzer:
         base_sharpe = base_result.get('sharpe', 0.0)
         base_return = base_result.get('total_return', 0.0)
         base_max_dd = base_result.get('max_drawdown', 0.0)
-        logger.info("Base: sharpe=%.4f, return=%.4f, max_dd=%.4f", base_sharpe, base_return, base_max_dd)
+        base_profit_factor = base_result.get('profit_factor', 0.0)
+        base_win_loss_ratio = base_result.get('avg_win_loss_ratio', 0.0)
+        logger.info("Base: sharpe=%.4f, return=%.4f, max_dd=%.4f, pf=%.4f, wlr=%.4f",
+                     base_sharpe, base_return, base_max_dd, base_profit_factor, base_win_loss_ratio)
 
         for key in target_params:
             base_val = self.base_params.get(key)
@@ -179,6 +211,8 @@ class SensitivityAnalyzer:
             sr.base_sharpe = base_sharpe
             sr.base_return = base_return
             sr.base_max_dd = base_max_dd
+            sr.base_profit_factor = base_profit_factor
+            sr.base_win_loss_ratio = base_win_loss_ratio
 
             low_val = _clamp_value(base_val * (1.0 - perturb_pct), attr)
             high_val = _clamp_value(base_val * (1.0 + perturb_pct), attr)
@@ -201,6 +235,10 @@ class SensitivityAnalyzer:
             sr.high_return = res_high.get('total_return', 0.0)
             sr.low_max_dd = res_low.get('max_drawdown', 0.0)
             sr.high_max_dd = res_high.get('max_drawdown', 0.0)
+            sr.low_profit_factor = res_low.get('profit_factor', 0.0)
+            sr.high_profit_factor = res_high.get('profit_factor', 0.0)
+            sr.low_win_loss_ratio = res_low.get('avg_win_loss_ratio', 0.0)
+            sr.high_win_loss_ratio = res_high.get('avg_win_loss_ratio', 0.0)
             sr.compute_sensitivity()
 
             logger.info(
@@ -222,8 +260,9 @@ class SensitivityAnalyzer:
             db_path = self.db_path
         con = duckdb.connect(db_path)
         try:
+            safe_table_name = table_name.replace("'", "''").replace(";", "")
             con.execute(f"""
-                CREATE TABLE IF NOT EXISTS {table_name} (
+                CREATE TABLE IF NOT EXISTS {safe_table_name} (
                     param_key VARCHAR,
                     base_value DOUBLE,
                     perturb_pct DOUBLE,
@@ -246,7 +285,7 @@ class SensitivityAnalyzer:
             for sr in results:
                 d = sr.to_dict()
                 con.execute(
-                    f"INSERT INTO {table_name} VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    f"INSERT INTO {safe_table_name} VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     [
                         d['param_key'], d['base_value'], d['perturb_pct'],
                         d['base_sharpe'], d['low_sharpe'], d['high_sharpe'],
@@ -263,21 +302,21 @@ class SensitivityAnalyzer:
     @staticmethod
     def print_report(results: List[SensitivityResult]) -> None:
         if not results:
-            print("No sensitivity results to display.")
+            logger.info("No sensitivity results to display.")
             return
 
-        print("\n" + "=" * 100)
-        print("参数敏感性分析报告 (OAT: One-At-a-Time ±{:.1%} 扰动)".format(results[0].perturb_pct))
-        print("=" * 100)
-        print(
+        logger.info("\n" + "=" * 100)
+        logger.info("参数敏感性分析报告 (OAT: One-At-a-Time ±{:.1%} 扰动)".format(results[0].perturb_pct))
+        logger.info("=" * 100)
+        logger.info(
             f"{'参数':<30} {'基准值':>10} {'夏普敏感度':>12} "
             f"{'Δ夏普(-%)':>12} {'Δ夏普(+%)':>12} "
             f"{'夏普(-)':>10} {'夏普(0)':>10} {'夏普(+)':>10}"
         )
-        print("-" * 100)
+        logger.info("-" * 100)
 
         for sr in results:
-            print(
+            logger.info(
                 f"{sr.param_key:<30} {sr.base_value:>10.4f} {sr.sharpe_sensitivity:>12.4f} "
                 f"{sr.sharpe_delta_low:>12.4f} {sr.sharpe_delta_high:>12.4f} "
                 f"{sr.low_sharpe:>10.4f} {sr.base_sharpe:>10.4f} {sr.high_sharpe:>10.4f}"
@@ -285,8 +324,8 @@ class SensitivityAnalyzer:
 
         high_sensitivity = [sr for sr in results if sr.sharpe_sensitivity > 0.5]
         if high_sensitivity:
-            print("\n⚠️  高敏感参数 (夏普敏感度 > 0.5):")
+            logger.warning("\n高敏感参数 (夏普敏感度 > 0.5):")
             for sr in high_sensitivity:
-                print(f"  - {sr.param_key}: 敏感度={sr.sharpe_sensitivity:.4f}")
+                logger.warning(f"  - {sr.param_key}: 敏感度={sr.sharpe_sensitivity:.4f}")
 
-        print("=" * 100)
+        logger.info("=" * 100)

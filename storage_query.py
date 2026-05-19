@@ -6,20 +6,17 @@ READ + HELPER + INSTRUMENT + SCHEMA 方法组
 from ali2026v3_trading.subscription_manager import SubscriptionManager, inst_get
 from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
 import logging
-import os
-import re
 import time
 import json
 import math
-import sqlite3
 from contextlib import contextmanager
 from typing import List, Dict, Optional, Any, Tuple, Callable
-from datetime import datetime, time as dt_time
+from datetime import datetime
 
 from ali2026v3_trading.shared_utils import InitPhase, requires_phase
 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class _StorageQueryMixin:
@@ -263,7 +260,7 @@ class _StorageQueryMixin:
         else:
             period_minutes = 1
 
-        return -max(1, int(history_minutes / period_minutes))
+        return max(1, int(history_minutes / period_minutes))
 
     @staticmethod
     def _normalize_kline_period(kline_style: str) -> str:
@@ -356,69 +353,46 @@ class _StorageQueryMixin:
             return list(result)
         return []
 
-    def _get_instrument_info(self, instrument_id: str) -> Optional[dict]:
+    def _query_instrument_by_field(self, lookup_field: str, lookup_value,
+                                    cache_lookup_key: str = None) -> Optional[dict]:
         with self._lock:
-            info = self._params_service.get_instrument_meta_by_id(instrument_id)
+            cache_key = cache_lookup_key or str(lookup_value)
+            info = self._params_service.get_instrument_meta_by_id(cache_key)
             if info:
                 return info
 
-            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM futures_instruments WHERE instrument_id=?", [instrument_id])
+            rows = self._q(
+                f"SELECT internal_id, instrument_id, product_code, shard_key FROM futures_instruments WHERE {lookup_field}=?",
+                [lookup_value],
+            )
             if rows:
                 r = rows[0]
                 info = self._make_instrument_info(r['internal_id'], r['instrument_id'], 'future')
                 if r.get('shard_key') is not None:
                     info['shard_key'] = r['shard_key']
                     info['product_code'] = r.get('product_code') or info.get('product_code', '')
-                self._cache_to_params_service(instrument_id, info)
+                self._cache_to_params_service(r['instrument_id'], info)
                 return info
 
-            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM option_instruments WHERE instrument_id=?", [instrument_id])
+            rows = self._q(
+                f"SELECT internal_id, instrument_id, product_code, shard_key FROM option_instruments WHERE {lookup_field}=?",
+                [lookup_value],
+            )
             if rows:
                 r = rows[0]
                 info = self._make_instrument_info(r['internal_id'], r['instrument_id'], 'option')
                 if r.get('shard_key') is not None:
                     info['shard_key'] = r['shard_key']
                     info['product_code'] = r.get('product_code') or info.get('product_code', '')
-                self._cache_to_params_service(instrument_id, info)
+                self._cache_to_params_service(r['instrument_id'], info)
                 return info
             return None
+
+    def _get_instrument_info(self, instrument_id: str) -> Optional[dict]:
+        return self._query_instrument_by_field('instrument_id', instrument_id)
 
     def _get_info_by_id(self, internal_id: int) -> Optional[dict]:
-        with self._lock:
-            info = self._params_service.get_instrument_meta_by_id(str(internal_id))
-            if info:
-                return info
-
-            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM futures_instruments WHERE internal_id=?", [internal_id])
-            row = rows[0] if rows else None
-            if row:
-                info = self._make_instrument_info(
-                    row['internal_id'],
-                    row['instrument_id'],
-                    'future',
-                )
-                if row.get('shard_key') is not None:
-                    info['shard_key'] = row['shard_key']
-                    info['product_code'] = row.get('product_code') or info.get('product_code', '')
-                instrument_id = row['instrument_id']
-                self._cache_to_params_service(instrument_id, info)
-                return info
-
-            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM option_instruments WHERE internal_id=?", [internal_id])
-            row = rows[0] if rows else None
-            if row:
-                info = self._make_instrument_info(
-                    row['internal_id'],
-                    row['instrument_id'],
-                    'option',
-                )
-                if row.get('shard_key') is not None:
-                    info['shard_key'] = row['shard_key']
-                    info['product_code'] = row.get('product_code') or info.get('product_code', '')
-                instrument_id = row['instrument_id']
-                self._cache_to_params_service(instrument_id, info)
-                return info
-            return None
+        return self._query_instrument_by_field('internal_id', internal_id, cache_lookup_key=str(internal_id))
 
     @requires_phase(InitPhase.EXTERNAL_SERVICES)
     def get_registered_instrument_ids(self, instrument_ids: Optional[List[str]] = None) -> List[str]:
@@ -843,13 +817,23 @@ class _StorageQueryMixin:
     def query_kline(self, instrument_id: str, start_time: str, end_time: str,
                     limit: Optional[int] = None) -> List[Dict]:
         internal_id = self.register_instrument(instrument_id)
-        return self.query_kline_by_id(internal_id, start_time, end_time, limit)
+        sql = "SELECT * FROM klines_raw WHERE internal_id=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp ASC"
+        params: list = [internal_id, start_time, end_time]
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return self._query_rows(sql, params)
 
     @requires_phase(InitPhase.DB_SCHEMA)
     def query_tick(self, instrument_id: str, start_time: str, end_time: str,
                    limit: Optional[int] = None) -> List[Dict]:
         internal_id = self.register_instrument(instrument_id)
-        return self.query_tick_by_id(internal_id, start_time, end_time, limit)
+        sql = "SELECT * FROM ticks_raw WHERE internal_id=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp ASC"
+        params: list = [internal_id, start_time, end_time]
+        if limit:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return self._query_rows(sql, params)
 
     @requires_phase(InitPhase.DB_SCHEMA)
     def get_option_chain(self, ts: float, underlying: str, expiration: str) -> List[Dict[str, Any]]:
@@ -871,7 +855,36 @@ class _StorageQueryMixin:
             return []
 
     def get_latest_underlying(self, underlying: str, expiration: str) -> Optional[Dict[str, Any]]:
+        """获取标的期货最新数据
+        
+        Args:
+            underlying: 标的产品代码 (如 'IF')
+            expiration: 到期月份 (如 '2605')
+            
+        Returns:
+            标的期货数据字典，包含最新价格等信息；如果未找到返回None
+            
+        Note:
+            此方法需要根据实际数据源实现。当前为占位符实现。
+        """
         logging.debug("get_latest_underlying called: %s %s", underlying, expiration)
+        try:
+            future_id = f"{underlying}{expiration}"
+            klines = self._query_rows(
+                "SELECT close, high, low, volume FROM klines_raw WHERE internal_id=(SELECT internal_id FROM futures_instruments WHERE instrument_id=? LIMIT 1) ORDER BY timestamp DESC LIMIT 1",
+                [future_id],
+            )
+            if klines:
+                latest = klines[0]
+                return {
+                    'instrument_id': future_id,
+                    'close': latest.get('close', 0),
+                    'high': latest.get('high', 0),
+                    'low': latest.get('low', 0),
+                    'volume': latest.get('volume', 0),
+                }
+        except Exception as e:
+            logging.warning("get_latest_underlying error: %s", e)
         return None
 
     @staticmethod
@@ -1219,9 +1232,9 @@ class _StorageQueryMixin:
             self._data_service.query("DELETE FROM option_instruments WHERE instrument_id=?", [instrument_id], raise_on_error=True)
         logging.info(f"已删除合约 {instrument_id} (ID={internal_id})")
 
-    def batch_add_future_instruments(self, instruments: List[Dict]) -> None:
+    def _batch_import_contracts(self, contracts_data: List[Dict], contract_type: str) -> None:
         try:
-            for inst in instruments:
+            for inst in contracts_data:
                 exchange = inst.get('exchange', 'AUTO')
                 instrument_id = inst.get('instrument_id')
                 if not instrument_id:
@@ -1231,29 +1244,17 @@ class _StorageQueryMixin:
                                            expire_date=inst.get('expire_date'),
                                            listing_date=inst.get('listing_date'))
                 except Exception as e:
-                    logging.warning("批量导入期货失败 %s: %s", instrument_id, e)
-            logging.info("批量导入 %d 个期货合约", len(instruments))
+                    logging.warning("批量导入%s失败 %s: %s", contract_type, instrument_id, e)
+            logging.info("批量导入 %d 个%s合约", len(contracts_data), contract_type)
         except Exception as e:
-            logging.error("批量导入期货失败：%s", e)
+            logging.error("批量导入%s失败：%s", contract_type, e)
             raise
 
+    def batch_add_future_instruments(self, instruments: List[Dict]) -> None:
+        self._batch_import_contracts(instruments, '期货')
+
     def batch_add_option_instruments(self, instruments: List[Dict]) -> None:
-        try:
-            for inst in instruments:
-                exchange = inst.get('exchange', 'AUTO')
-                instrument_id = inst.get('instrument_id')
-                if not instrument_id:
-                    continue
-                try:
-                    self.register_instrument(instrument_id, exchange,
-                                           expire_date=inst.get('expire_date'),
-                                           listing_date=inst.get('listing_date'))
-                except Exception as e:
-                    logging.warning("批量导入期权失败 %s: %s", instrument_id, e)
-            logging.info("批量导入 %d 个期权合约", len(instruments))
-        except Exception as e:
-            logging.error("批量导入期权失败：%s", e)
-            raise
+        self._batch_import_contracts(instruments, '期权')
 
     def _migrate_legacy_schema(self):
         migrated = False
