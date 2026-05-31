@@ -7,19 +7,13 @@ from dataclasses import dataclass, field
 
 from ali2026v3_trading.shared_utils import RingBuffer
 
+__all__ = ['MicrostructureAnalyzer', 'MicrostructureConfig', 'VolumeWeightedOrderFlow',
+           'ProductMicroData', 'FootprintBar']
+
 logger = logging.getLogger(__name__)
 
-# 设置日志级别为DEBUG，便于调试
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
 
-
-@dataclass
+@dataclass(slots=True)
 class MicrostructureConfig:
     """微结构分析器配置"""
     large_order_threshold: int = 50
@@ -30,6 +24,20 @@ class MicrostructureConfig:
     cvd_lookback_seconds: int = 600
     imbalance_depth_levels: int = 5
     vwap_lookback_seconds: int = 60
+    
+    IMBALANCE_SCORE_MULTIPLIER = 1.5
+    OFI_SHORT_TERM_WEIGHT = 0.6
+    OFI_LONG_TERM_WEIGHT = 0.4
+    DEVIATION_THRESHOLD = 0.3
+    SLIPPAGE_THRESHOLD_BPS = 0.5
+    SCORE_INCREMENT = 0.5
+    BASE_CONFIDENCE = 0.5
+    MODERATE_CONFIDENCE = 0.6
+    CONFIDENCE_ADJUSTMENT = 0.3
+    LARGE_ORDER_RATIO_THRESHOLD = 0.3
+    VOLUME_NORMALIZATION_FACTOR = 0.5
+    SMART_MONEY_WEIGHT = 3.0
+    LARGE_ORDER_WEIGHT = 2.0
 
 # 延迟导入 data_service，避免循环依赖
 def _get_data_service():
@@ -42,7 +50,7 @@ def _get_data_service():
         return None
 
 
-@dataclass
+@dataclass(slots=True)
 class FootprintBar:
     """Footprint K线数据结构"""
     timestamp: float
@@ -168,6 +176,9 @@ class ProductMicroData:
 
             # 更新价格分布（根据品种精度动态取整）
             # P2 Bug #79修复：使用整数key避免float精度问题
+            # NP-P2-09: price极大时price_key溢出保护
+            if abs(price) > 1e8:
+                price = round(price, self.price_precision)
             price_key = int(round(price * (10 ** self.price_precision)))
             current.price_volume[price_key] = current.price_volume.get(price_key, 0) + volume
 
@@ -258,30 +269,48 @@ class ProductMicroData:
             depth_levels = self.config.imbalance_depth_levels
             
         with self._lock:
+            # MS-P2修复: 深度快照过期检测——若深度数据超过60秒未更新，
+            # 说明订单簿数据已失效，返回指数衰减后的值
+            now = time.time()
+            depth_age = now - self._depth_timestamp
+            if depth_age > 60.0:
+                decay = math.exp(-depth_age / 60.0)  # 每60秒衰减到1/e≈37%
+                logger.warning(f"Depth snapshot stale ({depth_age:.0f}s old), returning decayed imbalance")
+                # 如果深度数据存在，计算实际值后衰减；否则返回0
+                if not self._bids or not self._asks:
+                    return 0.0
+                raw_imb = self._calc_raw_imbalance(bid_levels=min(len(self._bids), depth_levels or self.config.imbalance_depth_levels),
+                                                    ask_levels=min(len(self._asks), depth_levels or self.config.imbalance_depth_levels))
+                return raw_imb * decay
+            
             if not self._bids or not self._asks:
                 return 0.0
             
-            bid_levels = min(len(self._bids), depth_levels)
-            ask_levels = min(len(self._asks), depth_levels)
+            bid_levels = min(len(self._bids), depth_levels or self.config.imbalance_depth_levels)
+            ask_levels = min(len(self._asks), depth_levels or self.config.imbalance_depth_levels)
             
             if bid_levels == 0 or ask_levels == 0:
                 return 0.0
                 
-            bid_weighted = 0.0
-            ask_weighted = 0.0
+            return self._calc_raw_imbalance(bid_levels, ask_levels)
+
+    def _calc_raw_imbalance(self, bid_levels: int, ask_levels: int) -> float:
+        """MS-P2: 提取为独立方法，供calc_instant_imbalance正常路径和过期衰减路径共用"""
+        bid_weighted = 0.0
+        ask_weighted = 0.0
+        
+        for i in range(bid_levels):
+            _, vol = self._bids[i]
+            bid_weighted += vol * (1.0 / (i + 1))
             
-            for i in range(bid_levels):
-                _, vol = self._bids[i]
-                bid_weighted += vol * (1.0 / (i + 1))
-                
-            for i in range(ask_levels):
-                _, vol = self._asks[i]
-                ask_weighted += vol * (1.0 / (i + 1))
-                
-            total = bid_weighted + ask_weighted
-            if total == 0:
-                return 0.0
-            return (bid_weighted - ask_weighted) / total
+        for i in range(ask_levels):
+            _, vol = self._asks[i]
+            ask_weighted += vol * (1.0 / (i + 1))
+            
+        total = bid_weighted + ask_weighted
+        if total == 0:
+            return 0.0
+        return (bid_weighted - ask_weighted) / total
 
     # ========================================================================
     # 订单流失衡指数 (OFI - Order Flow Imbalance)
@@ -345,7 +374,8 @@ class ProductMicroData:
                 best_bid = self._bids[0][0] if self._bids else 0.0
                 best_ask = self._asks[0][0] if self._asks else float('inf')
                 
-                if best_bid == 0.0 or best_ask == float('inf'):
+                MIN_PRICE_THRESHOLD = 1e-6  # NP-P2-26: 极小值保护
+                if best_bid == 0.0 or best_ask == float('inf') or best_bid < MIN_PRICE_THRESHOLD or best_ask < MIN_PRICE_THRESHOLD:
                     return {'error': 'invalid_depth'}
                     
                 mid_price = (best_bid + best_ask) / 2
@@ -391,7 +421,7 @@ class ProductMicroData:
                 vwap_bps = (vwap_slippage / vwap_60) * 10000 if vwap_60 > 0 else 0
 
                 # 效率评级
-                if abs(slippage_bps) <= 0.5:
+                if abs(slippage_bps) <= MicrostructureConfig.SLIPPAGE_THRESHOLD_BPS:
                     efficiency = 'excellent'
                 elif abs(slippage_bps) <= 2:
                     efficiency = 'good'
@@ -445,7 +475,7 @@ class ProductMicroData:
                 # 2. 即时订单流不平衡（-1~1，映射到 -1.5 ~ 1.5）
                 imb = self.calc_instant_imbalance(depth_levels=5)
                 details['instant_imbalance'] = imb
-                imb_score = imb * 1.5
+                imb_score = imb * MicrostructureConfig.IMBALANCE_SCORE_MULTIPLIER
                 score += imb_score
                 reasons.append(f"order_book imbalance={imb:.2f}")
 
@@ -466,10 +496,10 @@ class ProductMicroData:
                 if vwap > 0 and current_price > 0:
                     deviation_pct = (current_price - vwap) / vwap * 100
                     details['vwap_deviation_pct'] = deviation_pct
-                    if deviation_pct > 0.3:
+                    if deviation_pct > MicrostructureConfig.DEVIATION_THRESHOLD:
                         score += 1.0
                         reasons.append(f"price above VWAP by {deviation_pct:.2f}%")
-                    elif deviation_pct < -0.3:
+                    elif deviation_pct < -MicrostructureConfig.DEVIATION_THRESHOLD:
                         score -= 1.0
                         reasons.append(f"price below VWAP by {abs(deviation_pct):.2f}%")
                     else:
@@ -487,10 +517,10 @@ class ProductMicroData:
                         details['footprint_poc'] = poc_price
                         details['footprint_volume'] = vol_profile[poc_price]
                         if current_price > poc_price:
-                            score += 0.5
+                            score += MicrostructureConfig.SCORE_INCREMENT
                             reasons.append(f"price above footprint POC={poc_price}")
                         elif current_price < poc_price:
-                            score -= 0.5
+                            score -= MicrostructureConfig.SCORE_INCREMENT
                             reasons.append(f"price below footprint POC={poc_price}")
 
                 # 5. 价格动量（基于CVD变化率，增加epsilon防除零）
@@ -511,8 +541,8 @@ class ProductMicroData:
                 ofi_60s = self.calc_ofi(lookback_seconds=60)
                 details['ofi_10s'] = ofi_10s
                 details['ofi_60s'] = ofi_60s
-                ofi_weighted = ofi_10s * 0.6 + ofi_60s * 0.4
-                ofi_score = ofi_weighted * 1.5
+                ofi_weighted = ofi_10s * MicrostructureConfig.OFI_SHORT_TERM_WEIGHT + ofi_60s * MicrostructureConfig.OFI_LONG_TERM_WEIGHT
+                ofi_score = ofi_weighted * MicrostructureConfig.IMBALANCE_SCORE_MULTIPLIER
                 score += ofi_score
                 reasons.append(f"OFI(10s)={ofi_10s:.2f}, OFI(60s)={ofi_60s:.2f}")
 
@@ -522,19 +552,19 @@ class ProductMicroData:
                 # 信号判定
                 if final_score >= 5:
                     signal = "strong_buy"
-                    confidence = min(1.0, (final_score - 5) / 5 + 0.5)
+                    confidence = min(1.0, (final_score - 5) / 5 + MicrostructureConfig.BASE_CONFIDENCE)
                 elif final_score >= 2:
                     signal = "buy"
-                    confidence = 0.6 + (final_score - 2) / 3 * 0.3
+                    confidence = MicrostructureConfig.MODERATE_CONFIDENCE + (final_score - 2) / 3 * MicrostructureConfig.CONFIDENCE_ADJUSTMENT
                 elif final_score <= -5:
                     signal = "strong_sell"
-                    confidence = min(1.0, (-final_score - 5) / 5 + 0.5)
+                    confidence = min(1.0, (-final_score - 5) / 5 + MicrostructureConfig.BASE_CONFIDENCE)
                 elif final_score <= -2:
                     signal = "sell"
-                    confidence = 0.6 + (-final_score - 2) / 3 * 0.3
+                    confidence = MicrostructureConfig.MODERATE_CONFIDENCE + (-final_score - 2) / 3 * MicrostructureConfig.CONFIDENCE_ADJUSTMENT
                 else:
                     signal = "neutral"
-                    confidence = 0.5
+                    confidence = MicrostructureConfig.BASE_CONFIDENCE
 
                 return {
                     'product': self.product,
@@ -839,3 +869,171 @@ if __name__ == "__main__":
     print("✓ CVD变化率计算增加epsilon防除零")
     print("✓ 修复了 _get_current_price 方法中的 data._asks 引用错误")
     print("✓ 新增MicrostructureConfig配置对象，替代硬编码")
+
+
+import math as _math
+
+
+class VolumeWeightedOrderFlow:
+    def __init__(self, large_order_threshold: int = 50, smart_money_threshold: int = 100,
+                 lookback_seconds: int = 300, decay_factor: float = 0.95):
+        self._large_threshold = large_order_threshold
+        self._smart_money_threshold = smart_money_threshold
+        self._lookback = lookback_seconds
+        self._decay = decay_factor
+        self._trades: Dict[str, deque] = {}
+        self._cumulative_weighted_flow: Dict[str, float] = {}
+        self._lock = threading.RLock()
+        self._stats = {
+            'total_trades': 0, 'large_trades': 0,
+            'smart_money_trades': 0, 'noise_filtered': 0,
+        }
+
+    def on_trade(self, product: str, price: float, volume: int, direction: str) -> Dict[str, Any]:
+        self._stats['total_trades'] += 1
+        with self._lock:
+            if product not in self._trades:
+                self._trades[product] = deque(maxlen=5000)
+            is_large = volume >= self._large_threshold
+            is_smart_money = volume >= self._smart_money_threshold
+            if is_smart_money:
+                self._stats['smart_money_trades'] += 1
+            elif is_large:
+                self._stats['large_trades'] += 1
+            else:
+                self._stats['noise_filtered'] += 1
+            weight = self._calc_volume_weight(volume)
+            self._trades[product].append({
+                'timestamp': time.time(), 'price': price, 'volume': volume,
+                'direction': direction, 'weight': weight,
+                'is_large': is_large, 'is_smart_money': is_smart_money,
+            })
+            delta = volume * weight if direction == 'buy' else -volume * weight
+            self._cumulative_weighted_flow[product] = (
+                self._cumulative_weighted_flow.get(product, 0.0) * self._decay + delta)
+            return {
+                'product': product, 'volume': volume, 'weight': weight,
+                'is_large': is_large, 'is_smart_money': is_smart_money,
+                'cumulative_flow': self._cumulative_weighted_flow[product],
+            }
+
+    def calc_volume_weighted_imbalance(self, product: str, depth_levels: int = 5) -> float:
+        with self._lock:
+            history = self._trades.get(product)
+            if not history:
+                return 0.0
+            now = time.time()
+            cutoff = now - self._lookback
+            weighted_buy = weighted_sell = 0.0
+            for trade in history:
+                if trade['timestamp'] < cutoff:
+                    continue
+                if trade['direction'] == 'buy':
+                    weighted_buy += trade['volume'] * trade['weight']
+                else:
+                    weighted_sell += trade['volume'] * trade['weight']
+            total = weighted_buy + weighted_sell
+            if total == 0:
+                return 0.0
+            return (weighted_buy - weighted_sell) / total
+
+    def calc_smart_money_flow(self, product: str) -> Dict[str, Any]:
+        with self._lock:
+            history = self._trades.get(product)
+            if not history:
+                return {'smart_buy': 0.0, 'smart_sell': 0.0, 'net_flow': 0.0, 'signal': 'neutral'}
+            now = time.time()
+            cutoff = now - self._lookback
+            smart_buy = smart_sell = 0.0
+            for trade in history:
+                if trade['timestamp'] < cutoff or not trade['is_smart_money']:
+                    continue
+                if trade['direction'] == 'buy':
+                    smart_buy += trade['volume']
+                else:
+                    smart_sell += trade['volume']
+            net = smart_buy - smart_sell
+            total = smart_buy + smart_sell
+            if total > 0 and net / total > MicrostructureConfig.LARGE_ORDER_RATIO_THRESHOLD:
+                signal = 'strong_buy'
+            elif total > 0 and net / total > 0.1:
+                signal = 'buy'
+            elif total > 0 and net / total < -MicrostructureConfig.LARGE_ORDER_RATIO_THRESHOLD:
+                signal = 'strong_sell'
+            elif total > 0 and net / total < -0.1:
+                signal = 'sell'
+            else:
+                signal = 'neutral'
+            return {'smart_buy': smart_buy, 'smart_sell': smart_sell, 'net_flow': net, 'signal': signal}
+
+    def _calc_volume_weight(self, volume: int) -> float:
+        if volume >= self._smart_money_threshold:
+            return _math.log(volume + 1) / _math.log(self._smart_money_threshold + 1) * MicrostructureConfig.SMART_MONEY_WEIGHT
+        elif volume >= self._large_threshold:
+            return _math.log(volume + 1) / _math.log(self._large_threshold + 1) * MicrostructureConfig.LARGE_ORDER_WEIGHT
+        return _math.log(volume + 1) / _math.log(self._large_threshold + 1) * MicrostructureConfig.VOLUME_NORMALIZATION_FACTOR
+
+    def get_cumulative_flow(self, product: str) -> float:
+        with self._lock:
+            return self._cumulative_weighted_flow.get(product, 0.0)
+
+    def get_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                'service_name': 'VolumeWeightedOrderFlow', **self._stats,
+                'tracked_products': len(self._trades),
+                'noise_filter_ratio': self._stats['noise_filtered'] / max(1, self._stats['total_trades']),
+            }
+
+
+class LiquidityConsumptionTracker:
+    """流动性消耗追踪：实时计算大单对订单簿的消耗速率
+
+    原理：追踪大单成交后订单簿深度的变化，
+    计算liquidity_consumption_rate（0-1），
+    以及trade_size_factor（单笔成交/平均成交的倍数）。
+    """
+
+    def __init__(self, large_order_threshold: int = 50,
+                 depth_lookback: int = 20):
+        self._large_threshold = large_order_threshold
+        self._depth_lookback = depth_lookback
+        self._recent_sizes: Deque[float] = deque(maxlen=depth_lookback)
+        self._recent_depth_consumed: Deque[float] = deque(maxlen=depth_lookback)
+        self._stats = {'total_trades': 0, 'large_trades': 0, 'total_consumption': 0.0}
+
+    def on_trade(self, volume: float, depth_before: float = 0.0,
+                 depth_after: float = 0.0) -> Dict[str, float]:
+        self._recent_sizes.append(volume)
+        self._stats['total_trades'] += 1
+
+        avg_size = sum(self._recent_sizes) / max(1, len(self._recent_sizes))
+        trade_size_factor = volume / max(avg_size, 1.0)
+
+        consumption = 0.0
+        if depth_before > 0:
+            consumed = max(0.0, depth_before - depth_after)
+            consumption = min(1.0, consumed / depth_before)
+            self._recent_depth_consumed.append(consumption)
+            self._stats['total_consumption'] += consumption
+
+        is_large = volume >= self._large_threshold
+        if is_large:
+            self._stats['large_trades'] += 1
+
+        return {
+            'liquidity_consumption': round(consumption, 4),
+            'trade_size_factor': round(trade_size_factor, 4),
+            'is_large_order': is_large,
+        }
+
+    def get_avg_consumption(self) -> float:
+        if not self._recent_depth_consumed:
+            return 0.0
+        return sum(self._recent_depth_consumed) / len(self._recent_depth_consumed)
+
+    def get_stats(self) -> Dict[str, Any]:
+        return {
+            'service_name': 'LiquidityConsumptionTracker', **self._stats,
+            'avg_consumption': round(self.get_avg_consumption(), 4),
+        }

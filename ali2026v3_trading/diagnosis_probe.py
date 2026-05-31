@@ -11,13 +11,13 @@ import os
 import re
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 
-from ali2026v3_trading.shared_utils import normalize_instrument_id
+from ali2026v3_trading.shared_utils import normalize_instrument_id, CHINA_TZ
 
 
-MONITORED_CONTRACTS = {
+_DEFAULT_MONITORED_CONTRACTS = {
     'IH2605': {'exchange': 'CFFEX', 'name': '上证50股指期货', 'type': 'future'},
     'IF2605': {'exchange': 'CFFEX', 'name': '沪深300股指期货', 'type': 'future'},
     'IM2605': {'exchange': 'CFFEX', 'name': '中证1000股指期货', 'type': 'future'},
@@ -51,9 +51,9 @@ def _load_monitored_contracts_from_config() -> Dict[str, Dict]:
                 logging.info(f"Loaded {len(custom)} monitored contracts from MONITORED_CONTRACTS_LIST env")
                 return custom
     except Exception as e:
-        logging.warning(f"Failed to load MONITORED_CONTRACTS from env, using hardcoded fallback ({len(MONITORED_CONTRACTS)} contracts): {e}")
-    logging.debug(f"Using {len(MONITORED_CONTRACTS)} hardcoded monitored contracts as fallback")
-    return MONITORED_CONTRACTS
+        logging.warning(f"Failed to load MONITORED_CONTRACTS from env, using hardcoded fallback ({len(_DEFAULT_MONITORED_CONTRACTS)} contracts): {e}")
+    logging.warning(f"Using {len(_DEFAULT_MONITORED_CONTRACTS)} hardcoded monitored contracts as fallback")  # R24-P1-DF-03修复: debug→warning
+    return _DEFAULT_MONITORED_CONTRACTS
 
 
 MONITORED_CONTRACTS = _load_monitored_contracts_from_config()
@@ -67,6 +67,7 @@ _PARSE_TRACE_LOCK = threading.RLock()
 _is_monitored_cache_result: Optional[bool] = None
 _is_monitored_cache_time: float = 0.0
 _IS_MONITORED_CACHE_TTL = 1.0
+_is_monitored_cache_lock = threading.Lock()
 
 _get_cached_params_fn = None
 _get_cached_params_lock = threading.Lock()
@@ -89,8 +90,9 @@ def _get_config_cached_params():
 def is_monitored_contract(instrument_id: str) -> bool:
     global _is_monitored_cache_result, _is_monitored_cache_time
     now = time.monotonic()
-    if _is_monitored_cache_result is not None and (now - _is_monitored_cache_time) < _IS_MONITORED_CACHE_TTL:
-        return _is_monitored_cache_result
+    with _is_monitored_cache_lock:
+        if _is_monitored_cache_result is not None and (now - _is_monitored_cache_time) < _IS_MONITORED_CACHE_TTL:
+            return _is_monitored_cache_result
     try:
         cached_params = _get_config_cached_params()
         if cached_params and isinstance(cached_params, dict):
@@ -99,16 +101,19 @@ def is_monitored_contract(instrument_id: str) -> bool:
                 params = getattr(strategy, 'params', None)
                 if params:
                     result = bool(getattr(params, 'diagnostic_output', False))
-                    _is_monitored_cache_result = result
-                    _is_monitored_cache_time = now
+                    with _is_monitored_cache_lock:
+                        _is_monitored_cache_result = result
+                        _is_monitored_cache_time = now
                     return result
-        _is_monitored_cache_result = False
-        _is_monitored_cache_time = now
+        with _is_monitored_cache_lock:
+            _is_monitored_cache_result = False
+            _is_monitored_cache_time = now
         return False
     except Exception as e:
         logging.debug(f"is_monitored_contract check failed: {e}")
-        _is_monitored_cache_result = False
-        _is_monitored_cache_time = now
+        with _is_monitored_cache_lock:
+            _is_monitored_cache_result = False
+            _is_monitored_cache_time = now
         return False
 
 
@@ -154,7 +159,7 @@ def diagnose_parse_failure(stage: str, instrument_id: str, reason: str) -> None:
 _CONTRACT_PATTERN = re.compile(r'^([A-Za-z]{2,4})(\d{4})(?:-([CP])-(\d+)|([CP])(\d+))?$')
 
 
-def validate_contract_format(instrument_id: str) -> tuple:
+def validate_contract_format(instrument_id: str) -> Tuple[bool, str]:  # [R22-P2-TS21]
     info = MONITORED_CONTRACTS.get(instrument_id)
     if not info:
         return False, "未知合约", instrument_id
@@ -182,8 +187,8 @@ def validate_contract_format(instrument_id: str) -> tuple:
                         return False, "股指期权应使用MO代码（IM→MO）", instrument_id
                     return True, "股指期权标准格式: XX####-C/P-#####", instrument_id
                 return True, "商品期权标准格式: xx####C/P#####", instrument_id
-        except (ValueError, KeyError, TypeError):
-            pass
+        except (ValueError, KeyError, TypeError) as _parse_err:
+            logging.debug("[R22-EP-05-残留] SubscriptionManager.parse_option解析异常: %s", _parse_err)
         if exchange == 'CFFEX':
             return False, "股指期权标准格式: XX####-C/P-#####", instrument_id
         return False, "商品期权标准格式: xx####C/P#####", instrument_id
@@ -341,8 +346,26 @@ def diagnose_duckdb_insert(instrument_id: str, success: bool, reason: str = None
 class DiagnosisProbeManager:
     """12环节诊断探针统一管理器"""
 
-    _shard_enqueue_counts: Dict[int, int] = {}
     _shard_enqueue_lock = threading.Lock()
+
+    def __init__(self):
+        self._shard_enqueue_counts: Dict[int, int] = {}
+        # R21-NET-P1-05修复: 上线监控回调 — 诊断探针可注册回调，在检测到异常时主动通知上层
+        self._online_monitor_callbacks: List[Any] = []  # List[Callable[[str, Dict], None]]
+
+    # R21-NET-P1-05修复: 注册上线监控回调
+    def register_online_monitor_callback(self, callback):
+        """注册上线监控回调函数，签名: callback(event_type: str, detail: Dict)"""
+        if callable(callback) and callback not in self._online_monitor_callbacks:
+            self._online_monitor_callbacks.append(callback)
+
+    # R21-NET-P1-05修复: 触发上线监控回调
+    def _fire_online_monitor(self, event_type: str, detail: Dict):
+        for _cb in self._online_monitor_callbacks:
+            try:
+                _cb(event_type, detail)
+            except Exception as _e:
+                logging.debug("[R21-NET-P1-05修复] 上线监控回调异常: %s", _e)
 
     @staticmethod
     def on_subscribe(instrument_id: str, contract_type: str, success: bool, reason: str = None):
@@ -358,12 +381,11 @@ class DiagnosisProbeManager:
         diagnose_tick_entry(instrument_id, price, volume, open_interest, contract_type)
         DiagnosisProbeManager.record_contract_tick(instrument_id, price, volume, open_interest, contract_type)
 
-    @staticmethod
-    def on_storage_enqueue(instrument_id: str, success: bool, reason: str = None, shard_idx: int = -1):
+    def on_storage_enqueue(self, instrument_id: str, success: bool, reason: str = None, shard_idx: int = -1):
         diagnose_storage_enqueue(instrument_id, success, reason)
         if shard_idx >= 0:
             with DiagnosisProbeManager._shard_enqueue_lock:
-                DiagnosisProbeManager._shard_enqueue_counts[shard_idx] = DiagnosisProbeManager._shard_enqueue_counts.get(shard_idx, 0) + 1
+                self._shard_enqueue_counts[shard_idx] = self._shard_enqueue_counts.get(shard_idx, 0) + 1
 
     @staticmethod
     def on_async_write(instrument_id: str, func_name: str, data_count: int):
@@ -401,7 +423,7 @@ class DiagnosisProbeManager:
             })
         run = {
             'run_id': f"contract-watch-{int(time.time())}", 'label': label,
-            'started_at': time.time(), 'started_wall': datetime.now().isoformat(),
+            'started_at': time.time(), 'started_wall': datetime.now(CHINA_TZ).isoformat(),
             'timeout_seconds': float(timeout_seconds),
             'summary_interval_seconds': max(1.0, float(summary_interval_seconds)),
             'contracts': {item['instrument_id']: item for item in watch_targets},
@@ -502,6 +524,17 @@ class DiagnosisProbeManager:
         for item in no_tick:
             logging.warning("[ContractWatch] NO_TICK contract=%s type=%s waited=%.3fs name=%s",
                             item['instrument_id'], item['type'], elapsed, item['name'])
+        # R21-NET-P1-05修复: 检测到无tick合约时触发上线监控回调
+        if no_tick:
+            try:
+                self._fire_online_monitor('contract_no_tick', {
+                    'run_id': run.get('run_id', ''),
+                    'no_tick_count': len(no_tick),
+                    'no_tick_instruments': [item['instrument_id'] for item in no_tick],
+                    'elapsed': elapsed,
+                })
+            except Exception as _fire_err:
+                logging.debug("[R22-EP-05] 上线监控回调触发失败: %s", _fire_err)
         for item in not_subscribed:
             logging.warning("[ContractWatch] NOT_IN_SUBSCRIBE_LIST contract=%s type=%s name=%s",
                             item['instrument_id'], item['type'], item['name'])
@@ -525,7 +558,7 @@ class DiagnosisProbeManager:
                 cls._startup_seq += 1
                 run = {'run_id': f"startup-{cls._startup_seq}", 'source': source,
                        'strategy_id': strategy_id or '', 'started_at': time.perf_counter(),
-                       'started_wall': datetime.now().isoformat(), 'spans': [], 'events': [], 'finished': False}
+                       'started_wall': datetime.now(CHINA_TZ).isoformat(), 'spans': [], 'events': [], 'finished': False}
                 cls._startup_run = run
                 logging.info("[StartupProbe] begin run=%s source=%s strategy_id=%s", run['run_id'], source, strategy_id or '-')
             else:
@@ -544,7 +577,7 @@ class DiagnosisProbeManager:
         if run is None:
             return
         elapsed = time.perf_counter() - run['started_at']
-        event = {'name': name, 'detail': detail or '', 'elapsed': elapsed, 'wall_time': datetime.now().isoformat()}
+        event = {'name': name, 'detail': detail or '', 'elapsed': elapsed, 'wall_time': datetime.now(CHINA_TZ).isoformat()}
         with cls._startup_lock:
             current = cls._startup_run
             if current is None:
@@ -555,6 +588,9 @@ class DiagnosisProbeManager:
         else:
             logging.info("[StartupProbe] event run=%s t=%.3fs name=%s", run['run_id'], elapsed, name)
 
+    # R21-MEM-P2-17修复: startup_step()为@contextmanager生成器，
+    # with语句保证GeneratorExit触发finally块执行，自动调用生成器.close()。
+    # 当前实现已有try/finally保护，确保step计时和状态记录在异常时也能完成。
     @classmethod
     @contextmanager
     def startup_step(cls, name: str, detail: str = None):
@@ -576,7 +612,7 @@ class DiagnosisProbeManager:
             span = {'name': name, 'detail': detail or '', 'elapsed': elapsed,
                     'status': 'error' if exc is not None else 'ok',
                     'error': str(exc) if exc is not None else '',
-                    'finished_at': datetime.now().isoformat(), 'total_elapsed': total_elapsed}
+                    'finished_at': datetime.now(CHINA_TZ).isoformat(), 'total_elapsed': total_elapsed}
             with cls._startup_lock:
                 current = cls._startup_run
                 if current is not None:
@@ -624,7 +660,7 @@ class DiagnosisProbeManager:
                 ('SHFE', 'al2605C25200', 'AL期权-有tick'), ('SHFE', 'au2605C1032', 'AU期权-无tick'),
                 ('SHFE', 'cu2605C104000', 'CU期权-无tick'), ('SHFE', 'zn2605C20000', 'ZN期权-无tick'),
             ]
-        results = {'timestamp': datetime.now().isoformat(), 'contracts': {},
+        results = {'timestamp': datetime.now(CHINA_TZ).isoformat(), 'contracts': {},
                    'summary': {'total': 0, 'success': 0, 'failed': 0, 'no_return': 0}}
         logging.info("=" * 80)
         logging.info("[SubscribeReturnDiag] 开始诊断 sub_market_data 返回值")
@@ -678,7 +714,7 @@ class DiagnosisProbeManager:
         test_contracts = [('al2605C25200', 'AL期权-有tick'), ('au2605C1032', 'AU期权-无tick'),
                           ('cu2605C104000', 'CU期权-无tick'), ('zn2605C20000', 'ZN期权-无tick'),
                           ('HO2605-C-2800', 'HO指数期权-有tick')]
-        results = {'timestamp': datetime.now().isoformat(), 'contracts': {}, 'diff_fields': {}}
+        results = {'timestamp': datetime.now(CHINA_TZ).isoformat(), 'contracts': {}, 'diff_fields': {}}
         logging.info("=" * 80)
         logging.info("[OptionMetaDiff] 开始诊断期权元数据差异")
         logging.info("=" * 80)

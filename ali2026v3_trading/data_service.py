@@ -14,12 +14,23 @@ DataService = DBConnectionMixin + QueryCacheMixin + OptionSyncMixin + DataWriter
 """
 
 # 1. 顶层imports (保留原有)
-import duckdb
-import pyarrow as pa
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
+
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
 import pandas as pd
 from collections import OrderedDict, deque
 import collections
-import logging, os, threading, atexit, psutil, hashlib, time, tempfile
+import logging, os, threading, atexit, hashlib, time, tempfile
+try:
+    import psutil
+except ImportError:
+    psutil = None
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, date, timezone
 
@@ -35,6 +46,7 @@ from ali2026v3_trading.ds_query_cache import QueryCacheMixin
 from ali2026v3_trading.ds_option_sync import OptionSyncMixin
 from ali2026v3_trading.ds_data_writer import DataWriterMixin
 from ali2026v3_trading.ds_schema_manager import SchemaManagerMixin
+from ali2026v3_trading.shared_utils import CHINA_TZ
 
 # 3. 全局配置变量（保留，因为外部可能直接引用）
 logger = logging.getLogger(__name__)
@@ -42,8 +54,10 @@ logger = logging.getLogger(__name__)
 DB_FILE = _resolve_duckdb_file()
 PARQUET_PATH = _resolve_parquet_path()
 
-import psutil
-_total_mem = psutil.virtual_memory().total
+if psutil is not None:
+    _total_mem = psutil.virtual_memory().total
+else:
+    _total_mem = 8 * (1024 ** 3)
 DUCKDB_MAX_MEMORY = os.getenv('DUCKDB_MAX_MEMORY', f'{int(_total_mem * 0.75 / (1024**3))}GB')
 DUCKDB_THREADS = int(os.getenv('DUCKDB_THREADS', str(os.cpu_count() or 4)))
 PREAGGREGATE_DAILY = os.getenv('PREAGGREGATE_DAILY', 'true').lower() == 'true'
@@ -69,9 +83,13 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
     _thread_local = threading.local()
     _table_initialized = False
     _stop_monitor = threading.Event()
+    _subscribe_fn = None
+    _unsubscribe_fn = None
+    _subscribe_api_bound = False
 
     def __init__(self):
         """DataService 初始化 — 仅由 get_data_service() 工厂函数调用"""
+        super().__init__()  # API-P1-15修复: 调用所有Mixin的__init__
         self.DB_FILE = DB_FILE
         self.PARQUET_PATH = PARQUET_PATH
         self.DUCKDB_MAX_MEMORY = DUCKDB_MAX_MEMORY
@@ -86,6 +104,91 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
         self._all_connections_lock = threading.RLock()
         self._cache_lock = threading.RLock()
         self._initialize()
+
+    def check_data_source_ready(self) -> Tuple[bool, str]:
+        """R23-IN-06-FIX: 数据源就绪检查
+        
+        检查DuckDB连接和RealTimeCache状态，确保数据管道可用。
+        Returns:
+            (is_ready, message) 元组
+        """
+        issues = []
+        
+        # 检查DuckDB连接
+        try:
+            if not hasattr(self, '_duckdb_conn') or self._duckdb_conn is None:
+                issues.append("DuckDB连接未建立")
+            else:
+                self._duckdb_conn.execute("SELECT 1").fetchone()
+        except Exception as e:
+            issues.append(f"DuckDB连接异常: {e}")
+        
+        # 检查RealTimeCache
+        if not hasattr(self, 'realtime_cache') or self.realtime_cache is None:
+            issues.append("RealTimeCache未初始化")
+        
+        if issues:
+            msg = "; ".join(issues)
+            logger.warning("[R23-IN-06-FIX] 数据源未就绪: %s", msg)
+            # R27-P0-DR-06修复: 主数据源不可用时尝试降级到缓存模式
+            try:
+                if self._try_fallback_to_cache_only():
+                    logger.warning("[R27-P0-DR-06] 主数据源不可用，已降级为纯缓存模式")
+                    return True, "fallback_to_cache"
+            except Exception as fb_err:
+                logger.error("[R27-P0-DR-06] 降级到缓存模式失败: %s", fb_err)
+            return False, msg
+        return True, "OK"
+
+    def _try_fallback_to_cache_only(self) -> bool:
+        """R27-P0-DR-06修复: 主数据源不可用时降级到纯缓存模式
+        仅使用RealTimeCache中的最新数据，不依赖DuckDB。
+        策略基于缓存中的最后tick运行，精度降低但不中断。
+        """
+        if hasattr(self, 'realtime_cache') and self.realtime_cache is not None:
+            _cache_size = 0
+            try:
+                if hasattr(self.realtime_cache, '_cache'):
+                    _cache_size = len(self.realtime_cache._cache)
+                elif hasattr(self.realtime_cache, 'size'):
+                    _cache_size = self.realtime_cache.size()
+            except Exception:
+                pass
+            if _cache_size > 0:
+                logger.info("[R27-P0-DR-06] 纯缓存降级: 缓存中有%d条记录", _cache_size)
+                return True
+        return False
+
+    @classmethod
+    def bind_subscribe_api(cls, subscribe_fn, unsubscribe_fn):
+        cls._subscribe_fn = subscribe_fn
+        cls._unsubscribe_fn = unsubscribe_fn
+        cls._subscribe_api_bound = subscribe_fn is not None
+        logger.info("[DataService] subscribe API bound: subscribe=%s, unsubscribe=%s", subscribe_fn, unsubscribe_fn)
+
+    def subscribe(self, instrument_id, callback=None):
+        _fn = DataService._subscribe_fn
+        if _fn is None:
+            logger.warning("[DataService] subscribe called but no subscribe_fn bound")
+            return None
+        try:
+            if callback is not None:
+                return _fn(instrument_id, callback)
+            return _fn(instrument_id)
+        except Exception as e:
+            logger.warning("[DataService] subscribe(%s) failed: %s", instrument_id, e)
+            return None
+
+    def request_realtime(self, instrument_id, fields=None):
+        _fn = DataService._subscribe_fn
+        if _fn is None:
+            logger.warning("[DataService] request_realtime called but no subscribe_fn bound")
+            return False
+        try:
+            return _fn(instrument_id)
+        except Exception as e:
+            logger.warning("[DataService] request_realtime(%s) failed: %s", instrument_id, e)
+            return False
 
     def _initialize(self):
         """初始化 DataService"""
@@ -182,7 +285,7 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
                     self.realtime_cache.update_tick(
                         symbol=row.instrument_id,
                         price=float(row.last_price),
-                        timestamp=row.timestamp if hasattr(row, 'timestamp') else datetime.now(),
+                        timestamp=row.timestamp if hasattr(row, 'timestamp') else datetime.now(CHINA_TZ),
                         volume=0,
                         bid_price=0.0,
                         ask_price=0.0

@@ -9,7 +9,10 @@
 - WAL截断
 - 分表同步
 """
-import pyarrow as pa
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
 import logging
 import os
 import time
@@ -22,6 +25,22 @@ logger = logging.getLogger(__name__)
 
 class DataWriterMixin:
     """数据写入与upsert方法Mixin - 由DataService组合使用"""
+
+    # R15-P1-RES-07修复: DB写操作失败重试方法
+    # [ID-P1-07-FIX] 批量写入失败重试去重: 已写入行跳过逻辑
+    def _db_write_retry(self, write_func, max_retries: int = 3, written_tracker: set = None):
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                return write_func(skip_rows=written_tracker)
+            except Exception as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    import time as _t
+                    _delay = min(0.5 * (2 ** attempt), 5.0)
+                    logging.warning("R15-P1-RES-07: DB写失败第%d次, %.1fs后重试: %s", attempt + 1, _delay, e)
+                    _t.sleep(_delay)
+        raise last_exc
 
     def _enrich_tick_option_metadata(self, ticks_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """复用统一解析器，为批量 Tick 插入补齐期权元数据。
@@ -46,10 +65,11 @@ class DataWriterMixin:
                 try:
                     info = self.params_service.get_instrument_meta_by_id(instrument_id)
                     if info and info.get('type') == 'option':
-                        raw_opt = info.get('option_type', '')
-                        raw_opt_upper = raw_opt.upper() if raw_opt else ''
-                        tick_row['option_type'] = 'CALL' if raw_opt_upper in ('C', 'CALL') else 'PUT' if raw_opt_upper in ('P', 'PUT') else None
-                        tick_row['strike_price'] = float(info.get('strike_price') or 0.0)
+                        from ali2026v3_trading.shared_utils import normalize_option_type
+                        nt = normalize_option_type(info.get('option_type', ''))
+                        tick_row['option_type'] = nt if nt in ('CALL', 'PUT') else None
+                        raw_sp = info.get('strike_price')
+                        tick_row['strike_price'] = float(raw_sp) if raw_sp is not None else None
                         enriched = True
                 except Exception:
                     pass
@@ -60,7 +80,8 @@ class DataWriterMixin:
                     if not tick_row.get('option_type'):
                         tick_row['option_type'] = 'CALL' if parsed.get('option_type') == 'C' else 'PUT'
                     if not tick_row.get('strike_price'):
-                        tick_row['strike_price'] = float(parsed.get('strike_price') or 0.0)
+                        raw_sp = parsed.get('strike_price')
+                        tick_row['strike_price'] = float(raw_sp) if raw_sp is not None else None
                 except Exception:
                     pass
 
@@ -122,8 +143,24 @@ class DataWriterMixin:
             if ts_str is None:
                 continue
             try:
-                ts = datetime.fromisoformat(str(ts_str).split('.')[0]).timestamp()
-                dt = datetime.fromtimestamp(ts)
+                ts_raw = str(ts_str)
+                if ts_raw.endswith('Z'):
+                    ts_raw = ts_raw[:-1] + '+00:00'
+                dot_idx = ts_raw.find('.')
+                if dot_idx >= 0:
+                    tz_start = -1
+                    for i in range(dot_idx + 1, len(ts_raw)):
+                        if ts_raw[i] in ('+', '-'):
+                            tz_start = i
+                            break
+                    if tz_start >= 0:
+                        ts_raw = ts_raw[:dot_idx] + ts_raw[tz_start:]
+                    else:
+                        ts_raw = ts_raw[:dot_idx]
+                ts = datetime.fromisoformat(ts_raw).timestamp()
+                # R23-P1-10修复: 添加时区参数，确保时间转换一致性
+                from datetime import timezone
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 normalized_ticks.append({
                     'timestamp': dt,
                     'instrument_id': instrument_id,
@@ -246,6 +283,7 @@ class DataWriterMixin:
                     INSERT INTO ticks_raw ({columns_str})
                     SELECT {columns_str}
                     FROM temp_ticks
+                    ON CONFLICT (instrument_id, timestamp) DO NOTHING
                 """)
                 conn.unregister('temp_ticks')
                 if not in_transaction:
@@ -259,6 +297,11 @@ class DataWriterMixin:
                 logger.error(f"Arrow batch insert failed, rolled back: {e}")
                 if self._is_fatal_database_error(e):
                     self._mark_connection_unhealthy()
+                    # R30-P0-08修复: FATAL错误后尝试降级到内存数据库
+                    try:
+                        self._handle_fatal_db_error(e)
+                    except Exception as hfe:
+                        logger.warning("[R30-P0-08] 降级处理失败: %s", hfe)
                 raise
             
             if row_count >= 100:
@@ -389,7 +432,7 @@ class DataWriterMixin:
                     updates.append("option_type = ?")
                     params.append(option_type)
 
-                if strike_price and float(existing[6] or 0.0) != float(strike_price):
+                if strike_price and (existing[6] is None or float(existing[6]) != float(strike_price)):
                     updates.append("strike_price = ?")
                     params.append(strike_price)
 
@@ -469,6 +512,14 @@ class DataWriterMixin:
                     ])
                 
                 conn.execute("COMMIT")
+                # R26-P0-DI-08: 写入后checksum验证——读回计数与写入数比对
+                _verify_count = conn.execute(
+                    "SELECT COUNT(*) FROM klines_raw WHERE trade_date = ?",
+                    [klines_data[-1].get('trade_date')]
+                ).fetchone()[0] if klines_data else 0
+                if _verify_count < len(klines_data):
+                    logger.error("[R26-P0-DI-08] 写入验证失败: 读回%d条 < 写入%d条", _verify_count, len(klines_data))
+                    raise ValueError(f"[R26-P0-DI-08] 写入验证失败: 读回{_verify_count}条 < 写入{len(klines_data)}条")
                 logger.info(f"Batch inserted {len(klines_data)} klines")
                 return len(klines_data)
             except Exception as e:
@@ -479,6 +530,11 @@ class DataWriterMixin:
                 logger.error(f"Kline batch insert failed, rolled back: {e}")
                 if self._is_fatal_database_error(e):
                     self._mark_connection_unhealthy()
+                    # R30-P0-08修复: FATAL错误后尝试降级到内存数据库
+                    try:
+                        self._handle_fatal_db_error(e)
+                    except Exception as hfe:
+                        logger.warning("[R30-P0-08] 降级处理失败: %s", hfe)
                 raise
         except Exception as e:
             logger.error(f"Batch insert klines failed: {e}")
@@ -640,26 +696,8 @@ class DataWriterMixin:
             tables = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_name='ticks_raw'").fetchall()
             if not tables:
                 logger.info("[SyncTicks] Creating ticks_raw table...")
-                conn.execute("""
-                    CREATE TABLE ticks_raw (
-                        timestamp TIMESTAMP,
-                        instrument_id VARCHAR,
-                        last_price DOUBLE,
-                        volume BIGINT,
-                        open_interest DOUBLE,
-                        bid_price DOUBLE,
-                        ask_price DOUBLE,
-                        date DATE,
-                        option_type VARCHAR,
-                        strike_price DOUBLE,
-                        is_otm BOOLEAN,
-                        sync_status VARCHAR,
-                        future_sync_status VARCHAR,
-                        is_same_rise BOOLEAN,
-                        is_same_fall BOOLEAN,
-                        is_diff_sync BOOLEAN
-                    )
-                """)
+                from ali2026v3_trading.ds_schema_manager import get_ticks_raw_create_sql
+                conn.execute(get_ticks_raw_create_sql())
                 logger.info("[SyncTicks] ticks_raw table created")
 
             option_tables = conn.execute("""
@@ -736,3 +774,59 @@ class DataWriterMixin:
             if external_conn is not None:
                 external_conn.close()
             self._tick_sync_lock.release()
+
+
+def verify_bar_tick_consistency(conn, instrument_id: str, trade_date: str,
+                                volume_tolerance: float = 0.01,
+                                price_tolerance: float = 0.001) -> Dict[str, Any]:
+    """R27-P1-DI-03: bar/tick一致性校验——检查K线聚合与原始tick数据的一致性
+
+    Args:
+        conn: DuckDB连接
+        instrument_id: 合约ID
+        trade_date: 交易日期
+        volume_tolerance: 成交量容差比例(默认1%)
+        price_tolerance: 价格容差比例(默认0.1%)
+
+    Returns:
+        Dict: {is_consistent: bool, bar_count: int, tick_count: int,
+               volume_diff_ratio: float, low_diff_ratio: float, high_diff_ratio: float}
+    """
+    result = {'is_consistent': True, 'bar_count': 0, 'tick_count': 0,
+              'volume_diff_ratio': 0.0, 'low_diff_ratio': 0.0, 'high_diff_ratio': 0.0}
+    try:
+        bar_row = conn.execute(
+            "SELECT SUM(volume) as total_vol, MIN(low) as bar_low, MAX(high) as bar_high "
+            "FROM klines_raw WHERE instrument_id=? AND trade_date=?",
+            [instrument_id, trade_date]
+        ).fetchone()
+        tick_row = conn.execute(
+            "SELECT COUNT(*) as tick_count, SUM(volume) as total_vol, "
+            "MIN(price) as tick_low, MAX(price) as tick_high "
+            "FROM ticks_raw WHERE instrument_id=? AND CAST(timestamp AS DATE)=?",
+            [instrument_id, trade_date]
+        ).fetchone()
+        if not bar_row or not tick_row:
+            return result
+        bar_vol, bar_low, bar_high = bar_row
+        tick_count, tick_vol, tick_low, tick_high = tick_row
+        result['bar_count'] = 1
+        result['tick_count'] = tick_count or 0
+        if bar_vol and tick_vol and tick_vol > 0:
+            result['volume_diff_ratio'] = abs(bar_vol - tick_vol) / tick_vol
+            if result['volume_diff_ratio'] > volume_tolerance:
+                result['is_consistent'] = False
+                logger.warning("[R27-P1-DI-03] volume不一致: bar=%.0f tick=%.0f diff=%.4f",
+                               bar_vol, tick_vol, result['volume_diff_ratio'])
+        if bar_low and tick_low and tick_low > 0:
+            result['low_diff_ratio'] = abs(bar_low - tick_low) / tick_low
+            if result['low_diff_ratio'] > price_tolerance:
+                result['is_consistent'] = False
+        if bar_high and tick_high and tick_high > 0:
+            result['high_diff_ratio'] = abs(bar_high - tick_high) / tick_high
+            if result['high_diff_ratio'] > price_tolerance:
+                result['is_consistent'] = False
+    except Exception as e:
+        logger.error("[R27-P1-DI-03] bar/tick一致性校验异常: %s", e)
+        result['is_consistent'] = False
+    return result

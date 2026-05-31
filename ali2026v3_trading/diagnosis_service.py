@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
 import os
 import queue
@@ -23,8 +24,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Protocol, Set, Tuple, runtime_checkable
 from collections import deque
+from ali2026v3_trading.serialization_utils import json_dumps
 
-from ali2026v3_trading.shared_utils import normalize_instrument_id
+from ali2026v3_trading.shared_utils import normalize_instrument_id, CHINA_TZ
 
 from ali2026v3_trading.diagnosis_probe import (
     MONITORED_CONTRACTS, MONITORED_CONTRACT_COUNT, MONITORED_DIAG_LABEL,
@@ -54,7 +56,7 @@ from ali2026v3_trading.diagnosis_periodic import (
 # 核心类定义
 # ============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class DiagnoserConfig:
     """诊断器配置类"""
     max_logs: int = 100
@@ -72,6 +74,7 @@ class DiagnoserConfig:
     enable_incremental_diagnosis: bool = False
 
 
+@runtime_checkable
 class StrategyProtocol(Protocol):
     """策略协议接口（类型约束）"""
     infini: Optional[Any]
@@ -93,7 +96,7 @@ class DiagnosisReport(object):
 
     def __init__(self, config: Optional[DiagnoserConfig] = None):
         self.config = config or DiagnoserConfig()
-        self.timestamp = datetime.now().isoformat()
+        self.timestamp = datetime.now(CHINA_TZ).isoformat()
         self.breakpoints: List[Dict] = []
         self.warnings: List[str] = []
         self.errors: List[str] = []
@@ -127,7 +130,7 @@ class DiagnosisReport(object):
         self.recommendations.append(msg)
 
     def add_log(self, msg: str, level: str = "INFO") -> None:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        timestamp = datetime.now(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         log_entry = f"[{timestamp}] [{level}] {msg}"
 
         if self._log_queue is not None:
@@ -136,14 +139,13 @@ class DiagnosisReport(object):
             except queue.Full:
                 logging.warning("[Diagnoser] Log queue full, discarding old logs")
 
+        max_logs = self.config.max_logs
         with self._logs_lock:
-            max_logs = self.config.max_logs
             if len(self.logs) >= max_logs:
                 critical_logs = [l for l in self.logs if '[ERROR]' in l or '[WARN]' in l]
                 other_logs = [l for l in self.logs if '[ERROR]' not in l and '[WARN]' not in l]
                 retained = critical_logs + other_logs[-(max_logs//2):]
                 self.logs = retained
-
             self.logs.append(log_entry)
 
     def add_metric(self, key: str, value: Any) -> None:
@@ -214,6 +216,16 @@ class StrategyDiagnoser:
         if self.config.enable_async_log and self.report._log_queue:
             self._start_log_worker()
 
+        # DFG-P1-10修复: 订阅信号过滤统计事件，持久化到诊断服务
+        self._last_filter_stats: Optional[Dict[str, Any]] = None
+        try:
+            from ali2026v3_trading.event_bus import get_global_event_bus
+            _bus = get_global_event_bus()
+            if _bus is not None:
+                _bus.subscribe_weak('signal.filter_stats', self._on_filter_stats_event)
+        except Exception:
+            pass
+
     def _check_strategy_initialization(self) -> bool:
         if self.strategy is None:
             return False
@@ -229,6 +241,96 @@ class StrategyDiagnoser:
 
         return True
 
+    # DFG-P1-10修复: 信号过滤统计事件消费者
+    def _on_filter_stats_event(self, event: Any) -> None:
+        """DFG-P1-10修复: 消费信号过滤统计事件，持久化到诊断服务
+
+        当信号过滤统计更新时，缓存到诊断服务，
+        供诊断报告和健康检查使用。
+        """
+        try:
+            if isinstance(event, dict):
+                self._last_filter_stats = event.get('stats')
+            elif hasattr(event, 'stats'):
+                self._last_filter_stats = event.stats
+            if self._last_filter_stats:
+                self.report.add_metric('signal_filter_stats', self._last_filter_stats)
+                # P2修复: 信号过滤统计持久化 — 将统计写入磁盘文件
+                self._persist_filter_stats(self._last_filter_stats)
+        except Exception:
+            pass
+
+    # P2修复: 信号过滤统计持久化
+    _FILTER_STATS_PERSIST_DIR: Optional[str] = None
+
+    def _persist_filter_stats(self, stats: Dict[str, Any]) -> None:
+        """P2修复: 将信号过滤统计持久化到磁盘
+
+        每次统计更新时追加写入JSONL文件，确保重启后可恢复历史统计。
+
+        Args:
+            stats: 信号过滤统计数据
+        """
+        try:
+            if self._FILTER_STATS_PERSIST_DIR is None:
+                self._FILTER_STATS_PERSIST_DIR = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), 'logs', 'filter_stats'
+                )
+            persist_dir = self._FILTER_STATS_PERSIST_DIR
+            if not os.path.exists(persist_dir):
+                os.makedirs(persist_dir, exist_ok=True)
+
+            from datetime import date
+            today = date.today().isoformat()
+            persist_file = os.path.join(persist_dir, f'filter_stats_{today}.jsonl')
+
+            import json
+            record = {
+                'timestamp': datetime.now(CHINA_TZ).isoformat(),
+                'stats': stats,
+            }
+            with open(persist_file, 'a', encoding='utf-8') as f:
+                f.write(json_dumps(record) + '\n')
+        except Exception as e:
+            logging.debug("[DiagnosisService] P2修复: 过滤统计持久化失败: %s", e)
+
+    def load_persisted_filter_stats(self, days: int = 7) -> List[Dict[str, Any]]:
+        """P2修复: 加载持久化的信号过滤统计
+
+        Args:
+            days: 加载最近N天的统计
+
+        Returns:
+            统计记录列表
+        """
+        records = []
+        try:
+            if self._FILTER_STATS_PERSIST_DIR is None:
+                self._FILTER_STATS_PERSIST_DIR = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), 'logs', 'filter_stats'
+                )
+            persist_dir = self._FILTER_STATS_PERSIST_DIR
+            if not os.path.exists(persist_dir):
+                return records
+
+            import json
+            from datetime import date, timedelta
+            for i in range(days):
+                day_str = (date.today() - timedelta(days=i)).isoformat()
+                persist_file = os.path.join(persist_dir, f'filter_stats_{day_str}.jsonl')
+                if os.path.exists(persist_file):
+                    with open(persist_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                try:
+                                    records.append(json.loads(line))
+                                except json.JSONDecodeError:
+                                    pass
+        except Exception as e:
+            logging.debug("[DiagnosisService] P2修复: 加载持久化统计失败: %s", e)
+        return records
+
     def _publish_event_with_retry(self, event_type: str, data: Dict[str, Any], max_retries: int = 3) -> None:
         if not self._event_bus:
             return
@@ -240,7 +342,7 @@ class StrategyDiagnoser:
             try:
                 event = type(event_type, (), {
                     'type': event_type,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': datetime.now(CHINA_TZ).isoformat(),
                     **data
                 })()
 
@@ -386,7 +488,7 @@ class StrategyDiagnoser:
         modules = ['threading', 'datetime', 'collections', 'typing']
         for mod in modules:
             try:
-                __import__(mod)
+                importlib.import_module(mod)
                 self._log(f"模块 {mod}: OK")
             except ImportError as e:
                 error_msg = f"模块 {mod} 不可用"
@@ -571,7 +673,7 @@ class StrategyDiagnoser:
     def get_quick_report(self) -> Dict[str, Any]:
         with self._lock:
             return {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(CHINA_TZ).isoformat(),
                 "health_score": self.report.get_health_score(),
                 "breakpoint_count": len(self.report.breakpoints),
                 "warning_count": len(self.report.warnings),

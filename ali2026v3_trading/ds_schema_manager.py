@@ -11,16 +11,28 @@
 - _execute_backfill_batch: 批量回填UPDATE
 - _create_indexes_and_views: 创建索引和视图
 """
-import duckdb
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
 import logging
 import os
 from datetime import datetime
+from typing import Any, Dict
+from ali2026v3_trading.shared_utils import CHINA_TZ
 
 logger = logging.getLogger(__name__)
 
 
 class SchemaManagerMixin:
     """数据库Schema初始化与迁移Mixin - 由DataService组合使用"""
+
+    SCHEMA_VERSION = '2.0'
+    DATA_SCHEMA_VERSION = '1.0'
+    CHECKPOINT_SCHEMA_VERSION = '1.0'
+
+    def get_schema_version(self) -> str:
+        return self.SCHEMA_VERSION
 
     def _load_or_create_table(self) -> bool:
         """加载 Parquet 数据到表。返回 True 表示成功加载/已存在，False 表示文件不存在需创建空表。"""
@@ -63,15 +75,15 @@ class SchemaManagerMixin:
                 instrument_id VARCHAR,
                 last_price DOUBLE,
                 volume BIGINT,
-                open_interest DOUBLE,
-                bid_price DOUBLE,
-                ask_price DOUBLE,
+                open_interest DOUBLE,  -- P1-8: 预留BI查询字段，生产SELECT引用存在
+                bid_price DOUBLE,  -- P1-8: 预留BI查询字段，仅测试SELECT引用
+                ask_price DOUBLE,  -- P1-8: 预留BI查询字段，仅测试SELECT引用
                 date DATE,
                 option_type VARCHAR,
                 strike_price DOUBLE,
-                is_otm BOOLEAN,
+                is_otm BOOLEAN,  -- P1-8: 预留BI查询字段，暂无SELECT消费
                 sync_status VARCHAR,
-                future_sync_status VARCHAR,
+                future_sync_status VARCHAR,  -- P1-8: 预留BI查询字段，暂无SELECT消费
                 is_same_rise BOOLEAN,
                 is_same_fall BOOLEAN,
                 is_diff_sync BOOLEAN
@@ -223,6 +235,78 @@ class SchemaManagerMixin:
 
         logger.info("[DataService] 元数据表已创建/验证完成")
 
+    def verify_referential_integrity(self, conn: duckdb.DuckDBPyConnection = None) -> Dict[str, Any]:
+        """R26-P0-DI-07修复: 引用完整性验证——检查订单/信号/持仓记录是否引用了不存在的合约/策略
+
+        Returns:
+            Dict: {is_valid: bool, violations: [{table, column, orphan_count, sample_ids}]}
+        """
+        _conn = conn or getattr(self, '_conn', None)
+        if _conn is None:
+            _conn = self._get_connection()
+        result = {'is_valid': True, 'violations': []}
+        try:
+            integrity_checks = [
+                {
+                    'child_table': 'klines_raw',
+                    'child_column': 'internal_id',
+                    'parent_table': 'option_instruments',
+                    'parent_column': 'internal_id',
+                    'description': 'klines_raw引用不存在的instrument'
+                },
+                {
+                    'child_table': 'klines_raw',
+                    'child_column': 'internal_id',
+                    'parent_table': 'futures_instruments',
+                    'parent_column': 'internal_id',
+                    'description': 'klines_raw引用不存在的future_instrument'
+                },
+            ]
+            _ALLOWED_TABLES = frozenset(['klines_raw', 'option_instruments', 'futures_instruments',
+                                          'ticks_raw', 'signals', 'orders', 'positions'])
+            _ALLOWED_COLS = frozenset(['internal_id', 'instrument_id', 'strategy_id', 'signal_id', 'order_id'])
+            for check in integrity_checks:
+                try:
+                    child_tbl = check['child_table']
+                    child_col = check['child_column']
+                    parent_tbl = check['parent_table']
+                    parent_col = check['parent_column']
+                    # R27-P2-HZ-03: 标识符白名单校验(防止SQL注入, 虽值来自hardcoded字典)
+                    for _tbl in (child_tbl, parent_tbl):
+                        if _tbl not in _ALLOWED_TABLES:
+                            raise ValueError(f"verify_referential_integrity: 不允许的表名 '{_tbl}'")
+                    for _col in (child_col, parent_col):
+                        if _col not in _ALLOWED_COLS:
+                            raise ValueError(f"verify_referential_integrity: 不允许的列名 '{_col}'")
+                    sql = f"""SELECT c.{child_col}, COUNT(*) as cnt
+                             FROM {child_tbl} c
+                             LEFT JOIN {parent_tbl} p ON c.{child_col} = p.{parent_col}
+                             WHERE p.{parent_col} IS NULL
+                             GROUP BY c.{child_col}
+                             LIMIT 10"""
+                    orphan_rows = _conn.execute(sql).fetchall()
+                    if orphan_rows:
+                        orphan_count = sum(r[1] for r in orphan_rows)
+                        sample_ids = [r[0] for r in orphan_rows[:5]]
+                        result['violations'].append({
+                            'table': child_tbl,
+                            'column': child_col,
+                            'orphan_count': orphan_count,
+                            'sample_ids': sample_ids,
+                            'description': check['description']
+                        })
+                        result['is_valid'] = False
+                except Exception as e:
+                    logger.warning("[R26-P0-DI-07] 完整性检查跳过(%s→%s): %s", child_tbl, parent_tbl, e)
+            if not result['is_valid']:
+                total_orphans = sum(v['orphan_count'] for v in result['violations'])
+                logger.warning("[R26-P0-DI-07] 引用完整性违反: %d组孤立记录, 共%d条",
+                              len(result['violations']), total_orphans)
+        except Exception as e:
+            logger.error("[R26-P0-DI-07] 引用完整性验证异常: %s", e)
+            result['is_valid'] = False
+        return result
+
     def _ensure_ticks_raw_schema(self, conn: duckdb.DuckDBPyConnection):
         """兼容旧版 DuckDB：为 ticks_raw 自动补齐新版本依赖的列。"""
         existing_columns = {
@@ -303,31 +387,43 @@ class SchemaManagerMixin:
         except Exception:
             pass
 
+        renamed = 0
         dropped = 0
         try:
             tables = conn.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'tick_future_%' OR table_name LIKE 'tick_option_%' OR table_name LIKE 'kline_future_%' OR table_name LIKE 'kline_option_%'"
             ).fetchall()
-            for (table_name,) in tables:
+            legacy_tables_to_drop = conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_name LIKE '_legacy_%'"
+            ).fetchall()
+            for (table_name,) in legacy_tables_to_drop:
                 try:
                     conn.execute(f"DROP TABLE IF EXISTS {table_name}")
                     dropped += 1
-                    logger.info("[DataService] Dropped legacy table: %s", table_name)
+                    logger.info("[DataService] Dropped previously renamed legacy table: %s", table_name)
                 except Exception as e:
                     logger.warning("[DataService] Failed to drop %s: %s", table_name, e)
+            for (table_name,) in tables:
+                try:
+                    renamed_name = f"_legacy_{table_name}"
+                    conn.execute(f"ALTER TABLE {table_name} RENAME TO {renamed_name}")
+                    renamed += 1
+                    logger.info("[DataService] Renamed legacy table: %s -> %s (pending next-startup drop)", table_name, renamed_name)
+                except Exception as e:
+                    logger.warning("[DataService] Failed to rename %s: %s", table_name, e)
         except Exception as e:
             logger.warning("[DataService] _cleanup_legacy_tables scan failed: %s", e)
 
         try:
             conn.execute(
                 "INSERT OR REPLACE INTO app_kv_store (key, value, updated_at) VALUES (?, ?, ?)",
-                ['schema_version_shard_key', '1', datetime.now().isoformat()],
+                ['schema_version_shard_key', '1', datetime.now(CHINA_TZ).isoformat()],
             )
         except Exception:
             pass
 
-        if dropped > 0:
-            logger.info("[DataService] _cleanup_legacy_tables: dropped %d legacy per-instrument tables", dropped)
+        if renamed > 0 or dropped > 0:
+            logger.info("[DataService] _cleanup_legacy_tables: renamed %d, dropped %d legacy per-instrument tables", renamed, dropped)
 
     def _backfill_option_metadata(self, conn: duckdb.DuckDBPyConnection):
         """为旧库中的期权 Tick 回填 option_type/strike_price。
@@ -377,10 +473,11 @@ class SchemaManagerMixin:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_instrument ON ticks_raw (instrument_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON ticks_raw (timestamp)")
 
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_instrument_time
-            ON ticks_raw (instrument_id, timestamp DESC)
-        """)
+        # P1-10修复: 移除idx_instrument_time，idx_covering_price已覆盖(instrument_id, timestamp)前缀
+        # conn.execute("""
+        #     CREATE INDEX IF NOT EXISTS idx_instrument_time
+        #     ON ticks_raw (instrument_id, timestamp DESC)
+        # """)
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_covering_price
@@ -441,7 +538,7 @@ class SchemaManagerMixin:
         logger.info("Created view: latest_prices")
 
         logger.info("Creating materialized view: option_sync_otm_stats (physical table implementation)")
-
+        # P1-9: 预留BI查询表(option_sync_otm_stats)，暂无业务SELECT消费
         conn.execute("DROP TABLE IF EXISTS option_sync_otm_stats")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS option_sync_otm_stats (

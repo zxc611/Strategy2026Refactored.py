@@ -7,13 +7,20 @@
 - 各种查询接口（最新价格、时间范围、K线等）
 - 缓存清理
 """
-import pyarrow as pa
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
 import pandas as pd
 import logging
 import hashlib
 import time
 from typing import Optional, List, Dict, Any
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
+from ali2026v3_trading.event_bus import _lazy_repr
+from ali2026v3_trading.config_params import _DATA_SOURCE_TAG_FIELD
+
+_CHINA_TZ = timezone(timedelta(hours=8))
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +40,7 @@ class QueryCacheMixin:
             self.realtime_cache.update_tick(symbol, price, timestamp, volume, bid_price, ask_price)
         
         with self._cache_lock:
-            keys_to_delete = [k for k in self._query_cache.keys() if k == symbol or (isinstance(k, str) and k.startswith(symbol + '.'))]
+            keys_to_delete = [k for k in self._query_cache.keys() if k == symbol or (isinstance(k, str) and k.startswith(symbol + '.') and len(k) > len(symbol) + 1 and k[len(symbol) + 1].isdigit())]
             for k in keys_to_delete:
                 del self._query_cache[k]
 
@@ -50,9 +57,10 @@ class QueryCacheMixin:
     @staticmethod
     def _to_utc_naive(dt: datetime) -> datetime:
         """将可能有时区的 datetime 转换为 UTC naive，并发出警告。"""
-        if dt.tzinfo is not None:
-            logger.warning(f"Converting timezone-aware datetime {dt} to UTC naive. "
-                           "Ensure your table's timestamp column is UTC.")
+        if dt.tzinfo is None:
+            logger.warning("[R22-TIME-02] Naive datetime %s assumed to be UTC, "
+                           "consider using timezone-aware datetime", dt)
+        else:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
 
@@ -90,15 +98,27 @@ class QueryCacheMixin:
                     norm_params.append(self._normalize_datetime_for_cache(p))
                 else:
                     norm_params.append(p)
-        key = hashlib.md5((sql + repr(norm_params) + str(arrow)).encode()).hexdigest()
+        key = hashlib.md5((sql + _lazy_repr(norm_params) + str(arrow)).encode()).hexdigest()
         with self._cache_lock:
             if key in self._query_cache:
                 result, expire = self._query_cache[key]
                 if time.time() < expire:
+                    if hasattr(result, 'column_names') and _DATA_SOURCE_TAG_FIELD not in result.column_names:
+                        try:
+                            import pyarrow as _pa
+                            result = result.append_column(_DATA_SOURCE_TAG_FIELD, _pa.array(['cache'] * result.num_rows))
+                        except Exception:
+                            pass
                     return result
                 else:
                     del self._query_cache[key]
         result = self.query(sql, params, use_cache=False, arrow=arrow)
+        if hasattr(result, 'column_names') and _DATA_SOURCE_TAG_FIELD not in result.column_names:
+            try:
+                import pyarrow as _pa
+                result = result.append_column(_DATA_SOURCE_TAG_FIELD, _pa.array(['duckdb'] * result.num_rows))
+            except Exception:
+                pass
         with self._cache_lock:
             self._query_cache[key] = (result, time.time() + self.QUERY_CACHE_TTL)
             self._query_cache.move_to_end(key)
@@ -140,7 +160,7 @@ class QueryCacheMixin:
             for s in symbols:
                 price = self.realtime_cache.get_latest_price(s)
                 if price is not None:
-                    cached_results.append({'instrument_id': s, 'last_price': price, 'timestamp': datetime.now()})
+                    cached_results.append({'instrument_id': s, 'last_price': price, 'timestamp': datetime.now(_CHINA_TZ)})
                 else:
                     missing_symbols.append(s)
             
@@ -173,7 +193,17 @@ class QueryCacheMixin:
         """
         start_utc = self._to_utc_naive(start)
         end_utc = self._to_utc_naive(end)
+        # R24-P1-IV-04修复: BETWEEN参数顺序检查
+        if start_utc is not None and end_utc is not None and start_utc > end_utc:
+            start_utc, end_utc = end_utc, start_utc
+            logging.warning("[R24-P1-IV-04] BETWEEN parameters swapped: start > end in get_time_range")
         if columns is None:
+            columns = ['timestamp', 'last_price', 'volume']
+        # R24-P1-IV-03修复: 列名白名单验证，防止SQL注入
+        _ALLOWED_COLUMNS = {'timestamp', 'last_price', 'volume', 'open_interest', 'amount',
+                            'bid_price1', 'ask_price1', 'instrument_id'}
+        columns = [c for c in columns if c in _ALLOWED_COLUMNS]
+        if not columns:
             columns = ['timestamp', 'last_price', 'volume']
         cols = ', '.join(columns)
         sql = f"""
@@ -185,10 +215,18 @@ class QueryCacheMixin:
         return self.query(sql, [instrument_id, start_utc, end_utc])
 
     def get_daily_aggregates(self, start_date: date, end_date: date) -> pa.Table:
+        # R24-P1-IV-04修复: BETWEEN参数顺序检查
+        if start_date is not None and end_date is not None and start_date > end_date:
+            start_date, end_date = end_date, start_date
+            logging.warning("[R24-P1-IV-04] BETWEEN parameters swapped: start > end in get_daily_aggregates")
         sql = "SELECT * FROM daily_aggregates WHERE date BETWEEN ? AND ? ORDER BY date"
         return self.query(sql, [start_date, end_date])
 
     def get_symbol_daily_ohlc(self, symbol: str, start_date: date, end_date: date) -> pa.Table:
+        # R24-P1-IV-04修复: BETWEEN参数顺序检查
+        if start_date is not None and end_date is not None and start_date > end_date:
+            start_date, end_date = end_date, start_date
+            logging.warning("[R24-P1-IV-04] BETWEEN parameters swapped: start > end in get_symbol_daily_ohlc")
         sql = """
             SELECT * FROM symbol_daily_aggregates
             WHERE instrument_id = ? AND date BETWEEN ? AND ?
@@ -217,6 +255,10 @@ class QueryCacheMixin:
         """
         start_utc = self._to_utc_naive(start)
         end_utc = self._to_utc_naive(end)
+        # R24-P1-IV-04修复: BETWEEN参数顺序检查
+        if start_utc is not None and end_utc is not None and start_utc > end_utc:
+            start_utc, end_utc = end_utc, start_utc
+            logging.warning("[R24-P1-IV-04] BETWEEN parameters swapped: start > end in get_kline_range")
         
         sql = """
             SELECT timestamp, open, high, low, close, volume, open_interest
@@ -227,7 +269,7 @@ class QueryCacheMixin:
         params = [instrument_id, start_utc, end_utc]
         
         if limit is not None:
-            sql += " LIMIT ?"
+            sql += " LIMIT ?"  # R21-MEM-P2-04修复: SQL条件拼接，单次+=可接受
             params.append(limit)
         
         return self.query(sql, params)
@@ -258,7 +300,8 @@ class QueryCacheMixin:
         
         if hasattr(result, 'to_pandas'):
             df = result.to_pandas()
-            df = df.iloc[::-1].reset_index(drop=True)
+            # R17-P1-PERF-10修复: iloc[::-1]产生完整副本，reset_index改为inplace避免二次拷贝
+            df = df.iloc[::-1]; df.reset_index(drop=True, inplace=True)
             return pa.Table.from_pandas(df)
         
         return result
@@ -332,4 +375,3 @@ class QueryCacheMixin:
         with self._cache_lock:
             self._query_cache.clear()
         logger.info("Query cache cleared.")
-        logging.info('[DataService] Cache cleared')

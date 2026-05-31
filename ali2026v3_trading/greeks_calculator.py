@@ -36,6 +36,7 @@
 """
 
 import math
+import functools
 import random
 import threading
 import time
@@ -43,6 +44,13 @@ import logging
 import json
 import os
 from datetime import datetime, date, timedelta
+from ali2026v3_trading.shared_utils import CHINA_TZ, TRADING_DAYS_PER_YEAR_CHINA as TRADING_DAYS_PER_YEAR
+# R27-P1-FP-04修复: 引入浮点稳定计算替代内置sum/divide
+try:
+    from ali2026v3_trading.resilience_utils import stable_sum, safe_divide
+except ImportError:
+    stable_sum = sum
+    safe_divide = lambda a, b, default=0.0: a / b if b != 0 else default
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from collections import defaultdict
 
@@ -50,12 +58,7 @@ from collections import defaultdict
 # 配置日志
 # ----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+# [R14-P0-LOG-04] 移除模块级StreamHandler，由root logger统一配置
 
 # ----------------------------------------------------------------------------
 # 辅助数学函数
@@ -73,14 +76,19 @@ def _normalize_option_type(opt_type: str) -> str:
     from ali2026v3_trading.shared_utils import normalize_option_type
     return normalize_option_type(opt_type)
 
+@functools.lru_cache(maxsize=4096)
 def _bs_price(S: float, K: float, T: float, r: float, q: float, sigma: float, option_type: str) -> float:
     """Black-Scholes 期权价格 (用于 IV 计算)
     
+    R16-P0-PERF-05修复: 添加lru_cache，IV牛顿迭代中相同参数组合可命中缓存
     注意：option_type 应在调用前已标准化，避免重复标准化
     """
     if T <= 0 or sigma <= 0:
         # option_type 已在入口标准化，直接使用
         return max(0.0, (S - K) if option_type == 'CALL' else (K - S))
+    # R31-P1-13修复: S<=0或K<=0时math.log(S/K)触发ValueError/ZeroDivisionError
+    if S <= 0 or K <= 0:
+        return 0.0
     
     try:
         d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
@@ -121,6 +129,9 @@ def _bs_greeks(
     """
     if T <= 0 or sigma <= 0 or S <= 0:
         return {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
+    # R31-P1-13修复: K<=0时math.log(S/K)触发ValueError/ZeroDivisionError
+    if K <= 0:
+        return {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
     
     try:
         d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
@@ -132,13 +143,13 @@ def _bs_greeks(
             gamma = math.exp(-q * T) * _norm_pdf(d1) / (S * sigma * math.sqrt(T))
             theta = (-math.exp(-q * T) * S * _norm_pdf(d1) * sigma / (2 * math.sqrt(T))
                      - r * K * math.exp(-r * T) * _norm_cdf(d2)
-                     + q * S * math.exp(-q * T) * _norm_cdf(d1)) / 365.0
+                     + q * S * math.exp(-q * T) * _norm_cdf(d1)) / TRADING_DAYS_PER_YEAR
         else:  # PUT
             delta = math.exp(-q * T) * (_norm_cdf(d1) - 1.0)
             gamma = math.exp(-q * T) * _norm_pdf(d1) / (S * sigma * math.sqrt(T))
             theta = (-math.exp(-q * T) * S * _norm_pdf(d1) * sigma / (2 * math.sqrt(T))
                      + r * K * math.exp(-r * T) * _norm_cdf(-d2)
-                     - q * S * math.exp(-q * T) * _norm_cdf(-d1)) / 365.0
+                     - q * S * math.exp(-q * T) * _norm_cdf(-d1)) / TRADING_DAYS_PER_YEAR
         
         vega = S * math.exp(-q * T) * _norm_pdf(d1) * math.sqrt(T) / 100.0  # 每1% IV变化
         
@@ -201,10 +212,19 @@ class IVCalculator:
             greeks = _bs_greeks(S, K, T, r, q, sigma, option_type)
             vega = greeks.get('vega', 0.0) * 100  # vega是每1%变化，转换为每单位变化
 
-            if vega < 1e-10:
-                logger.warning(f"Vega too small ({vega:.2e}), IV calculation cannot converge")
-                # ✅ P1#77修复：vega接近0时返回初始猜测值，而非未收敛的sigma
-                return initial_guess
+            if vega < 1e-6:
+                logger.warning(f"Vega too small ({vega:.2e}), falling back to bisection search")
+                lo, hi = 0.01, 5.0
+                for _ in range(max_iter):
+                    mid = (lo + hi) / 2.0
+                    p_mid = _bs_price(S, K, T, r, q, mid, option_type)
+                    if abs(p_mid - market_price) < tol:
+                        return mid
+                    if p_mid > market_price:
+                        hi = mid
+                    else:
+                        lo = mid
+                return (lo + hi) / 2.0
 
             diff = price - market_price
             if abs(diff) < tol:
@@ -298,16 +318,16 @@ class BinomialTreePricer:
         steps: int = 200,
         american: bool = False
     ) -> Dict[str, float]:
-        h = S * 0.001
+        h = max(S * 1e-4, 1e-8)
         price = BinomialTreePricer.price(S, K, T, r, q, sigma, option_type, steps, american)
         price_up = BinomialTreePricer.price(S + h, K, T, r, q, sigma, option_type, steps, american)
         price_down = BinomialTreePricer.price(S - h, K, T, r, q, sigma, option_type, steps, american)
-        price_T = BinomialTreePricer.price(S, K, max(T - 1.0/365.0, 0.0), r, q, sigma, option_type, steps, american)
+        price_T = BinomialTreePricer.price(S, K, max(T - 1.0/TRADING_DAYS_PER_YEAR, 0.0), r, q, sigma, option_type, steps, american)
         price_vol_up = BinomialTreePricer.price(S, K, T, r, q, sigma + 0.01, option_type, steps, american)
 
         delta = (price_up - price_down) / (2.0 * h)
         gamma = (price_up - 2.0 * price + price_down) / (h * h)
-        theta = (price_T - price) / (1.0 / 365.0)
+        theta = (price_T - price) / (1.0 / TRADING_DAYS_PER_YEAR)
         vega = (price_vol_up - price) / 100.0
 
         return {
@@ -351,14 +371,41 @@ class MonteCarloPricer:
         n_simulations: int = 50000,
         n_steps: int = 1,
         antithetic: bool = True,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        historical_returns: Optional[list] = None,
+        distribution_mode: str = "gbm",
     ) -> Tuple[float, float]:
+        """P0-R9-19修复: 添加historical bootstrap分布选项
+        distribution_mode:
+            "gbm" - 几何布朗运动(默认，原有逻辑)
+            "historical" - 历史收益率重采样(bootstrap)
+        historical_returns: 历史日收益率列表，distribution_mode="historical"时使用
+        """
         if T <= 0 or sigma <= 0 or S <= 0:
             intrinsic = max(0.0, (S - K) if option_type == 'CALL' else (K - S))
             return intrinsic, 0.0
 
         if seed is not None:
             random.seed(seed)
+
+        # P0-R9-19修复: historical bootstrap分布
+        if distribution_mode == "historical" and historical_returns and len(historical_returns) >= 20:
+            n_days = max(1, int(T * 252))
+            payoffs_hist = []
+            for _ in range(n_simulations):
+                ST = S
+                sampled_indices = [random.randint(0, len(historical_returns) - 1) for _ in range(n_days)]
+                for idx in sampled_indices:
+                    ST *= math.exp(historical_returns[idx])
+                if option_type == 'CALL':
+                    payoff = max(0.0, ST - K)
+                else:
+                    payoff = max(0.0, K - ST)
+                payoffs_hist.append(math.exp(-r * T) * payoff)
+            mean = safe_divide(stable_sum(payoffs_hist), n_simulations)
+            variance = safe_divide(stable_sum((p - mean) ** 2 for p in payoffs_hist), n_simulations - 1)
+            std_error = math.sqrt(variance / n_simulations)
+            return mean, std_error
 
         drift = (r - q - 0.5 * sigma * sigma) * T
         vol = sigma * math.sqrt(T)
@@ -378,8 +425,8 @@ class MonteCarloPricer:
                     payoffs.append(max(0.0, K - ST2))
 
             payoffs_arr = [math.exp(-r * T) * p for p in payoffs]
-            mean = sum(payoffs_arr) / len(payoffs_arr)
-            variance = sum((p - mean) ** 2 for p in payoffs_arr) / (len(payoffs_arr) - 1)
+            mean = safe_divide(stable_sum(payoffs_arr), len(payoffs_arr))
+            variance = safe_divide(stable_sum((p - mean) ** 2 for p in payoffs_arr), len(payoffs_arr) - 1)
             std_error = math.sqrt(variance / len(payoffs_arr))
             return mean, std_error
 
@@ -397,8 +444,8 @@ class MonteCarloPricer:
                 payoff = max(0.0, K - ST)
             payoffs.append(math.exp(-r * T) * payoff)
 
-        mean = sum(payoffs) / n_simulations
-        variance = sum((p - mean) ** 2 for p in payoffs) / (n_simulations - 1)
+        mean = safe_divide(stable_sum(payoffs), n_simulations)
+        variance = safe_divide(stable_sum((p - mean) ** 2 for p in payoffs), n_simulations - 1)
         std_error = math.sqrt(variance / n_simulations)
         return mean, std_error
 
@@ -453,6 +500,24 @@ class TradingCalendar:
         """
         self.holidays = set(holidays) if holidays else set()
         self._market_time_service = market_time_service
+        if not self.holidays and market_time_service is None:
+            try:
+                import chinese_calendar
+                _today = datetime.now(CHINA_TZ).date()
+                _year = _today.year
+                _auto_holidays = set()
+                for y in range(_year - 1, _year + 2):
+                    try:
+                        _hols = chinese_calendar.get_holidays(f'{y}-01-01', f'{y}-12-31')
+                        if _hols:
+                            _auto_holidays.update(_hols)
+                    except Exception:
+                        pass
+                if _auto_holidays:
+                    self.holidays = _auto_holidays
+                    logger.info("[TradingCalendar] 自动加载chinese_calendar节假日: %d天", len(self.holidays))
+            except ImportError:
+                logger.warning("[TradingCalendar] chinese_calendar库未安装，节假日列表为空，将仅排除周末")
 
     def add_holiday(self, d: date):
         """添加节假日"""
@@ -480,18 +545,23 @@ class TradingCalendar:
             current += timedelta(days=1)
         return days
 
-    def time_to_expiry(self, expiry_date: date, use_trading_days: bool = False) -> float:
+    def time_to_expiry(self, expiry_date: date, use_trading_days: bool = False,
+                       bar_date: Optional[date] = None) -> float:
         """
         返回剩余年化时间 (年)
         
         Args:
             expiry_date: 到期日
             use_trading_days: 是否使用交易日计算
+            bar_date: 当前bar日期（回测时传入，None则使用系统时间）
         
         Returns:
             float: 剩余时间 (年)
         """
-        today = datetime.now().date()
+        today = bar_date if bar_date is not None else datetime.now(CHINA_TZ).date()
+        if bar_date is None:
+            import warnings
+            warnings.warn("[BIZ-P1-15] time_to_expiry called without bar_date; using system time which is incorrect in backtest", stacklevel=2)
         if expiry_date <= today:
             return 1.0 / (252.0 * 240.0)
         
@@ -680,20 +750,21 @@ class GreeksCalculator:
         """
         with self._lock:
             self._option_info_cache[instrument_id] = info
+            self._evict_cache_if_needed()
 
     # ------------------------------------------------------------------------
     # 核心计算与更新
     # ------------------------------------------------------------------------
-    def _time_to_expiry(self, expiry_date: Optional[date]) -> float:
+    def _time_to_expiry(self, expiry_date: Optional[date], bar_date: Optional[date] = None) -> float:
         """计算剩余年化时间，支持交易日历
         
         Note: 此方法在持有锁的情况下被调用，因此内部不再加锁。
-        TradingCalendar.time_to_expiry 使用 datetime.now() 是线程安全的。
+        TradingCalendar.time_to_expiry 支持bar_date参数，回测时可传入当前bar日期。
         """
         if expiry_date is None:
             return 30.0 / 365.0
         
-        return self._calendar.time_to_expiry(expiry_date, self._use_trading_days)
+        return self._calendar.time_to_expiry(expiry_date, self._use_trading_days, bar_date=bar_date)
 
     def _parse_strike_from_id(self, instrument_id: str) -> Optional[float]:
         """
@@ -783,7 +854,8 @@ class GreeksCalculator:
         option_type: str,
         future_product: str,
         market_price: Optional[float] = None,
-        iv: Optional[float] = None
+        iv: Optional[float] = None,
+        bar_date: Optional[date] = None
     ) -> Dict[str, float]:
         """
         计算并更新希腊字母 (完整流程)
@@ -803,7 +875,7 @@ class GreeksCalculator:
         """
         with self._lock:
             # 1. 计算剩余时间
-            T = self._time_to_expiry(expiry_date)
+            T = self._time_to_expiry(expiry_date, bar_date=bar_date)
             
             # 2. 获取股息率
             q = self._dividend_yield.get(future_product, 0.0)
@@ -878,7 +950,8 @@ class GreeksCalculator:
         option_type: str,
         future_product: str,
         strike: Optional[float] = None,
-        iv: Optional[float] = None
+        iv: Optional[float] = None,
+        bar_date: Optional[date] = None
     ) -> Optional[Dict[str, float]]:
         """
         根据期权tick数据更新希腊字母（智能决定是否重新计算）
@@ -945,7 +1018,7 @@ class GreeksCalculator:
                 market_price=price,
                 S=underlying_price,
                 K=strike,
-                T=self._time_to_expiry(expiry_date),
+                T=self._time_to_expiry(expiry_date, bar_date=bar_date),
                 r=self._risk_free_rate,
                 q=self._dividend_yield.get(future_product, 0.0),
                 option_type=option_type
@@ -977,16 +1050,22 @@ class GreeksCalculator:
                 option_type=option_type,
                 future_product=future_product,
                 market_price=price,
-                iv=iv
+                iv=iv,
+                bar_date=bar_date
             )
 
     # ------------------------------------------------------------------------
     # 查询接口
     # ------------------------------------------------------------------------
     def get_greeks(self, instrument_id: str) -> Dict[str, float]:
-        """获取单个合约的希腊字母"""
         with self._lock:
-            return self._option_greeks.get(instrument_id, {}).copy()
+            entry = self._option_greeks.get(instrument_id, {})
+            if entry:
+                _update_time = self._option_last_update.get(instrument_id, 0)
+                if _update_time > 0 and (time.time() - _update_time) > self._GREEKS_CACHE_TTL:
+                    del self._option_greeks[instrument_id]
+                    return {}
+            return entry.copy() if entry else {}
 
     def get_iv(self, instrument_id: str) -> float:
         """获取单个合约的隐含波动率"""
@@ -1131,15 +1210,35 @@ class GreeksCalculator:
         """
         portfolio = self.get_portfolio_greeks(positions)
         
-        # 使用明确的默认值（不再动态计算）
+        # P0-GR-001修复: 优先从参数池读取约束阈值，异常时回退硬编码默认值
         if delta_limit is None:
-            delta_limit = 1000
+            try:
+                from ali2026v3_trading.params_service import get_params_service
+                _ps = get_params_service()
+                delta_limit = _ps.get_float('max_net_delta_pct', 0.30) * 1000  # R34-P0修复: 百分比→绝对值量纲转换，0.30*1000=300
+            except Exception:
+                delta_limit = 300  # R34-P0修复: 回退默认值300，与max_net_delta_pct=0.30*1000一致
         if gamma_limit is None:
-            gamma_limit = 50
+            try:
+                from ali2026v3_trading.params_service import get_params_service
+                _ps = get_params_service()
+                gamma_limit = _ps.get_float('max_net_gamma_pct', 0.08) * 50 / 0.08
+            except Exception:
+                gamma_limit = 50
         if theta_min is None:
-            theta_min = -500
+            try:
+                from ali2026v3_trading.params_service import get_params_service
+                _ps = get_params_service()
+                theta_min = -_ps.get_float('max_theta_ratio', 0.5) * 1000
+            except Exception:
+                theta_min = -500
         if vega_limit is None:
-            vega_limit = 200
+            try:
+                from ali2026v3_trading.params_service import get_params_service
+                _ps = get_params_service()
+                vega_limit = _ps.get_float('max_net_vega_bps', 0.02) * 10000
+            except Exception:
+                vega_limit = 200
         
         warnings = []
         
@@ -1201,6 +1300,18 @@ class GreeksCalculator:
             self._option_greeks.clear()
             self._option_iv.clear()
             self._option_last_update.clear()
+
+    _MAX_CACHE_SIZE = 5000
+    _GREEKS_CACHE_TTL = 300
+
+    def _evict_cache_if_needed(self):
+        if len(self._option_greeks) > self._MAX_CACHE_SIZE:
+            _keys = list(self._option_greeks.keys())
+            _evict_count = len(_keys) // 2
+            for _k in _keys[:_evict_count]:
+                self._option_greeks.pop(_k, None)
+                self._option_iv.pop(_k, None)
+                self._option_last_update.pop(_k, None)
             self._option_last_price.clear()
             self._option_last_iv.clear()
             self._option_tick_counter.clear()

@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.shared_utils import safe_int, safe_float
+from ali2026v3_trading.shared_utils import safe_int, safe_float, CHINA_TZ
 
 
 def load_historical_klines_with_stop(
@@ -61,7 +61,7 @@ def load_historical_klines_with_stop(
             logging.debug("[Storage] 历史K线 stop_check 失败: %s", exc)
             return False
 
-    end_time = datetime.now()
+    end_time = datetime.now(CHINA_TZ)
     start_time = end_time - timedelta(minutes=history_minutes)
 
     logging.info(
@@ -291,6 +291,10 @@ class HistoricalKlineMixin:
     - 进度跟踪和诊断
     """
     
+    DEFAULT_RETRY_DELAYS = [10.0, 30.0, 60.0]
+    DEFAULT_THREAD_JOIN_TIMEOUT = 300.0
+    MAX_RETRIES = 3
+    
     def _init_historical_kline_mixin(self) -> None:
         """初始化历史K线Mixin的状态
         
@@ -309,8 +313,8 @@ class HistoricalKlineMixin:
         
         # Provider重试状态（BP-1/2/3/6修复）
         self._historical_load_retry_count = 0
-        self._historical_load_max_retries = 3
-        self._historical_provider_retry_delays = [10.0, 30.0, 60.0]
+        self._historical_load_max_retries = self.MAX_RETRIES
+        self._historical_provider_retry_delays = self.DEFAULT_RETRY_DELAYS
         
         # 诊断标志
         self._hkl_diag_emitted = False
@@ -327,13 +331,13 @@ class HistoricalKlineMixin:
             Tuple[List[str], int, str]: (过滤后的合约列表, 移除数量, 最小年月)
         """
         min_year_month = str(
-            _get_param_value(self.params, 'history_min_year_month', datetime.now().strftime('%y%m'))
-            or datetime.now().strftime('%y%m')
+            _get_param_value(self.params, 'history_min_year_month', datetime.now(CHINA_TZ).strftime('%y%m'))
+            or datetime.now(CHINA_TZ).strftime('%y%m')
         ).strip()
 
         # 仅接受三四位年月，配置无效时回退当月。
         if not re.fullmatch(r'\d{3,4}', min_year_month):
-            min_year_month = datetime.now().strftime('%y%m')
+            min_year_month = datetime.now(CHINA_TZ).strftime('%y%m')
 
         filtered: List[str] = []
         removed_count = 0
@@ -394,7 +398,7 @@ class HistoricalKlineMixin:
     
     # ========== 提供者解析 ==========
     
-    def _resolve_historical_provider(self) -> tuple:
+    def _resolve_historical_provider(self) -> Tuple[Any, Dict[str, Any]]:  # [R22-P2-TS23]
         """解析历史数据提供者（6级降级链路，按优先级逐级尝试）
 
         降级链路（优先级从高到低）:
@@ -628,7 +632,7 @@ class HistoricalKlineMixin:
                         f"in {delay:.0f}s (remaining={retry_remaining})"
                     )
                     def _retry_after_delay():
-                        time.sleep(delay)
+                        time.sleep(delay)  # R23-P2-22标记: P2级阻塞重试
                         try:
                             self._start_historical_kline_load()
                         except Exception as e:
@@ -713,12 +717,12 @@ class HistoricalKlineMixin:
                 "Blocking until load completes (max 300s)...",
                 self.strategy_id,
             )
-            thread.join(timeout=300.0)
+            thread.join(timeout=self.DEFAULT_THREAD_JOIN_TIMEOUT)
             if thread.is_alive():
                 logging.warning(
-                    "[HKL][strategy_id=%s] Historical K-line load still running after 300s, "
+                    "[HKL][strategy_id=%s] Historical K-line load still running after %.1fs, "
                     "proceeding non-blocking (load continues in background)",
-                    self.strategy_id,
+                    self.strategy_id, self.DEFAULT_THREAD_JOIN_TIMEOUT,
                 )
             else:
                 logging.info(

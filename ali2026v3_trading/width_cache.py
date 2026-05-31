@@ -28,14 +28,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from dataclasses import dataclass, field
-from ali2026v3_trading.shared_utils import to_float32
+from ali2026v3_trading.shared_utils import to_float32, CHINA_TZ
 
 
 # ============================================================================
 # SortEntry - 排序桶条目（by_sort_bucket 索引结构）
 # ============================================================================
 
-@dataclass(order=True)
+@dataclass(order=True, slots=True)
 class SortEntry:
     """
     ✅ 分组D准备：排序桶条目，用于 by_sort_bucket 索引
@@ -129,6 +129,13 @@ try:
 except ImportError:
     EventBusKLineEvent = None
 
+MAX_OPTION_CACHE_SIZE = 5000
+MAX_INSTRUMENT_ID_MAP_SIZE = 10000
+MAX_FUTURE_CACHE_SIZE = 500
+MAX_STATUS_COUNTS_SIZE = 5000
+MAX_SORT_BUCKETS_FUTURES = 100
+_CACHE_TTL_SECONDS = 86400
+
 class WidthStrengthCache:
     """内存字典：实时计算宽度强度（同步虚值期权计数）
     
@@ -152,8 +159,9 @@ class WidthStrengthCache:
     - 期货 tick: O(N) 重算（但 N 可优化）
     """
 
-    def __init__(self, tracked_option_tick_ids: Optional[set] = None, params_service=None):
+    def __init__(self, tracked_option_tick_ids: Optional[set] = None, params_service=None, strategy_id: Optional[str] = None):
         self._lock = threading.RLock()
+        self._strategy_id = strategy_id or 'global'
         self._tracked_option_tick_ids = set(tracked_option_tick_ids) if tracked_option_tick_ids else set()
         self._params_service = params_service
         
@@ -221,12 +229,73 @@ class WidthStrengthCache:
         # 每个桶的最大容量（只保留前N个）
         self._sort_bucket_max_size: int = 50
 
+        self._buckets_dirty: set = set()
+
+        self._option_info_timestamps: Dict[int, float] = {}
+        self._instrument_id_timestamps: Dict[str, float] = {}
+        self._last_cache_cleanup: float = time.time()
+
+    def _enforce_cache_size_limit(self) -> None:
+        _now = time.time()
+        if _now - self._last_cache_cleanup < 60:
+            return
+        self._last_cache_cleanup = _now
+        _expired_cutoff = _now - _CACHE_TTL_SECONDS
+        _expired_ids = [k for k, ts in self._option_info_timestamps.items() if ts < _expired_cutoff]
+        for _eid in _expired_ids:
+            self._option_info.pop(_eid, None)
+            self._option_prev_price.pop(_eid, None)
+            self._option_last_distinct_price.pop(_eid, None)
+            self._option_last_direction.pop(_eid, None)
+            self._option_volume.pop(_eid, None)
+            self._option_daily_volume.pop(_eid, None)
+            self._sync_flag.pop(_eid, None)
+            self._current_status.pop(_eid, None)
+            del self._option_info_timestamps[_eid]
+        if len(self._option_info) > MAX_OPTION_CACHE_SIZE:
+            _sorted_keys = sorted(self._option_info_timestamps, key=self._option_info_timestamps.get)
+            _to_remove = _sorted_keys[:len(self._option_info) - MAX_OPTION_CACHE_SIZE]
+            for _eid in _to_remove:
+                self._option_info.pop(_eid, None)
+                self._option_info_timestamps.pop(_eid, None)
+        _expired_iids = [k for k, ts in self._instrument_id_timestamps.items() if ts < _expired_cutoff]
+        for _iid in _expired_iids:
+            self._instrument_id_to_internal_id.pop(_iid, None)
+            del self._instrument_id_timestamps[_iid]
+        if len(self._instrument_id_to_internal_id) > MAX_INSTRUMENT_ID_MAP_SIZE:
+            _sorted_keys = sorted(self._instrument_id_timestamps, key=self._instrument_id_timestamps.get)
+            _to_remove = _sorted_keys[:len(self._instrument_id_to_internal_id) - MAX_INSTRUMENT_ID_MAP_SIZE]
+            for _iid in _to_remove:
+                self._instrument_id_to_internal_id.pop(_iid, None)
+                self._instrument_id_timestamps.pop(_iid, None)
+        # RES-P1-08修复: 期货缓存上限控制
+        if len(self._future_prev_price) > MAX_FUTURE_CACHE_SIZE:
+            _oldest_fids = list(self._future_prev_price.keys())[:len(self._future_prev_price) - MAX_FUTURE_CACHE_SIZE]
+            for _fid in _oldest_fids:
+                self._future_prev_price.pop(_fid, None)
+                self._future_rising.pop(_fid, None)
+                self._future_initialized.pop(_fid, None)
+                self._status_counts.pop(_fid, None)
+                self._sync_otm_count.pop(_fid, None)
+                self._sort_buckets.pop(_fid, None)
+                self._months.pop(_fid, None)
+                self._options_by_future_type.pop(_fid, None)
+        if len(self._sort_buckets) > MAX_SORT_BUCKETS_FUTURES:
+            _excess = list(self._sort_buckets.keys())[MAX_SORT_BUCKETS_FUTURES:]
+            for _fid in _excess:
+                self._sort_buckets.pop(_fid, None)
+
     def _get_params(self):
         if self._params_service is not None:
             return self._params_service
         from ali2026v3_trading.params_service import get_params_service as _get_ps
         self._params_service = _get_ps()
         return self._params_service
+
+
+    def _mk(self, key):
+        """P1-R11-21: strategy_id namespace composite key for cache isolation"""
+        return (self._strategy_id, key)
 
     @staticmethod
     def _new_status_bucket() -> Dict[str, int]:
@@ -274,6 +343,7 @@ class WidthStrengthCache:
             if iid is not None:
                 logging.debug("[_resolve_internal_id] ParamsService回退命中: %s -> %d (配置文件外合约?)", normalized, iid)
                 self._instrument_id_to_internal_id[normalized] = iid
+                self._instrument_id_timestamps[normalized] = time.time()
                 self._internal_id_to_instrument_id[iid] = normalized
                 return iid
         except Exception as e:
@@ -657,6 +727,7 @@ class WidthStrengthCache:
             
             # 维护双向映射
             self._instrument_id_to_internal_id[instrument_id] = internal_id
+            self._instrument_id_timestamps[instrument_id] = time.time()
             self._internal_id_to_instrument_id[internal_id] = instrument_id
 
             existing_info = self._option_info.get(internal_id)
@@ -678,6 +749,8 @@ class WidthStrengthCache:
                 'strike_price': float(strike_price),
                 'option_type': opt_type_upper,
             }
+            self._option_info_timestamps[internal_id] = time.time()
+            self._enforce_cache_size_limit()
             _info_count = getattr(self.__class__, '_option_info_count', 0) + 1
             self.__class__._option_info_count = _info_count
             if _info_count <= 5 or _info_count % 500 == 0:
@@ -761,7 +834,7 @@ class WidthStrengthCache:
 
     def _get_current_trading_date(self) -> str:
         """获取当前交易日（P1-4.3修复：提取为独立方法，便于测试时mock）"""
-        return datetime.now().strftime('%Y%m%d')
+        return datetime.now(CHINA_TZ).strftime('%Y%m%d')
 
     def on_option_tick(self, instrument_id: str, price: float, volume: float = 0):
         """更新期权价格，增量更新同步虚值计数
@@ -852,6 +925,7 @@ class WidthStrengthCache:
                     prev_price=prev_price,
                     current_price=price,
                 )
+            self._enforce_cache_size_limit()
 
     def _get_future_price_for_month(self, product: str, month: str) -> float:
         """✅ 获取指定产品在指定月份的期货价格（ID语义版本）"""
@@ -1278,20 +1352,18 @@ class WidthStrengthCache:
                     break
             
             if existing_idx is not None:
-                # 使用heapq公共API：先移除旧条目再重新堆化
                 bucket[existing_idx] = bucket[-1]
                 bucket.pop()
-                heapq.heapify(bucket)  # O(n) 重新堆化，使用公共API避免内部函数
+                self._buckets_dirty.add((future_internal_id, month, opt_type))
             
-            # 插入新的
             if len(bucket) < self._sort_bucket_max_size:
                 heapq.heappush(bucket, entry)
+                self._buckets_dirty.add((future_internal_id, month, opt_type))
             else:
-                # 桶满时：找最差元素（sort_key最大），如果新条目更优则替换最差
                 worst_idx = max(range(len(bucket)), key=lambda i: bucket[i])
                 if entry < bucket[worst_idx]:
                     bucket[worst_idx] = entry
-                    heapq.heapify(bucket)
+                    self._buckets_dirty.add((future_internal_id, month, opt_type))
                 
         except Exception as e:
             logging.warning(f"[_update_sort_bucket] Error updating sort bucket for {internal_id}: {e}")
@@ -1310,15 +1382,13 @@ class WidthStrengthCache:
             self._do_remove_from_sort_bucket(internal_id, future_internal_id, month, opt_type)
 
     def _do_remove_from_sort_bucket(self, internal_id: int, future_internal_id: int, month: str, opt_type: str):
-        """_remove_from_sort_bucket实际逻辑（在锁内调用）"""
         try:
-            # ✅ 使用 future_internal_id 作为键
             bucket = self._sort_buckets.get(future_internal_id, {}).get(month, {}).get(opt_type, [])
             for i, entry in enumerate(bucket):
                 if entry.internal_id == internal_id:
                     bucket[i] = bucket[-1]
                     bucket.pop()
-                    heapq.heapify(bucket)
+                    self._buckets_dirty.add((future_internal_id, month, opt_type))
                     break
         except Exception as e:
             logging.warning(f"[_remove_from_sort_bucket] Error removing {internal_id}: {e}")
@@ -1341,7 +1411,13 @@ class WidthStrengthCache:
         """
         with self._lock:
             try:
-                # ✅ 使用 future_internal_id 作为键
+                bucket_key = (future_internal_id, month, opt_type)
+                if bucket_key in self._buckets_dirty:
+                    bucket = self._sort_buckets.get(future_internal_id, {}).get(month, {}).get(opt_type, [])
+                    if bucket:
+                        heapq.heapify(bucket)
+                    self._buckets_dirty.discard(bucket_key)
+
                 bucket = self._sort_buckets.get(future_internal_id, {}).get(month, {}).get(opt_type, [])
                 if not bucket:
                     return []
@@ -1556,7 +1632,7 @@ class WidthStrengthCache:
                 'moneyness_percent': to_float32(moneyness),
                 'is_otm': is_otm,
                 'is_itm': not is_otm,
-                'calculated_at': datetime.now(),
+                'calculated_at': datetime.now(CHINA_TZ),
                 'source': source,
             }
 
@@ -1631,7 +1707,7 @@ class WidthStrengthCache:
                     'month_details': month_details,
                     'all_sync': width_strength > 0,
                     'total_months': len(specified_months),
-                    'calculated_at': datetime.now()
+                    'calculated_at': datetime.now(CHINA_TZ)
                 }
             except Exception as e:
                 logging.error(f"[WidthStrengthCache] WidthStrengthCache calculation failed: {e}")
@@ -1650,7 +1726,7 @@ class WidthStrengthCache:
             'month_details': month_details,
             'all_sync': False,
             'total_months': len(months),
-            'calculated_at': datetime.now(),
+            'calculated_at': datetime.now(CHINA_TZ),
             'source': 'empty_fallback'
         }
 

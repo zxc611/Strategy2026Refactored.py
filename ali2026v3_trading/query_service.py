@@ -25,11 +25,15 @@ query_service.py - 数据查询服务 (DuckDB 版本)
 from __future__ import annotations
 
 import logging
+import os
 import csv
 import time
 import threading
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+
+_CHINA_TZ = timezone(timedelta(hours=8))
 
 
 def _normalize_code(code: str) -> str:
@@ -53,6 +57,11 @@ except ImportError as e:
     _HAS_DATA_SERVICE = False
     DataService = None
     get_data_service = None
+
+try:
+    from ali2026v3_trading.config_params import DATA_EXPORT_FORMAT
+except ImportError:
+    DATA_EXPORT_FORMAT = 'parquet'
 
 
 def _result_to_pylist(result: Any) -> List[Dict[str, Any]]:
@@ -137,6 +146,9 @@ class _KlineAggregator:
         # 当前 K 线开始时间
         self.kline_start_time: Optional[float] = None
         
+        # R15-P0-DATA-04修复: tick乱序检测，记录上一个tick时间戳
+        self._last_tick_ts: Optional[float] = None
+        
         # 周期转换为秒
         self.period_seconds = self._parse_period(period)
     
@@ -171,8 +183,27 @@ class _KlineAggregator:
     
     def _update_impl(self, tick_ts: float, price: float, 
                volume: int = 0, amount: float = 0.0,
-               open_interest: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        """update的锁内实现"""
+               open_interest: Optional[int] = None,
+               _out_of_order: bool = False) -> Optional[Dict[str, Any]]:
+        """update的锁内实现
+        
+        Args:
+            _out_of_order: R15-P0-DATA-04修复，标记该tick为乱序tick
+        """
+        import math as _kline_math
+        if isinstance(price, float) and (_kline_math.isnan(price) or _kline_math.isinf(price) or price <= 0):
+            self.logger.warning("[CC-05] K线聚合拒绝NaN/Inf/负价格: instrument_id=%s price=%s", self.instrument_id, price)
+            return None
+        # R16-P0-DATA-04修复: tick乱序时不聚合到当前K线，避免Bar数据失真
+        if self._last_tick_ts is not None and tick_ts < self._last_tick_ts:
+            self.logger.warning(
+                "Tick乱序检测: instrument_id=%s, "
+                "当前tick_ts=%s < 上一个tick_ts=%s, 丢弃乱序tick不聚合",
+                self.instrument_id, tick_ts, self._last_tick_ts
+            )
+            return None
+        self._last_tick_ts = tick_ts
+        
         if self.kline_start_time is None:
             # 初始化第一根 K 线
             self.kline_start_time = (tick_ts // self.period_seconds) * self.period_seconds
@@ -288,7 +319,7 @@ class QueryService:
             storage_instance: InstrumentDataManager 实例（用于访问数据库和缓存）
         """
         self._storage = storage_instance
-        # M23-Bug2: 反向索引缓存 {internal_id: instrument_id} 加速O(1)查找
+        self._futures_file_path = ""
         self._internal_id_to_instrument_idx: Dict[int, str] = {}
         self._idx_built = False
         self._idx_lock = threading.Lock()
@@ -299,6 +330,7 @@ class QueryService:
             from ali2026v3_trading.params_service import get_params_service
             return get_params_service()
         except Exception:
+            logging.warning("[R22-EP-P1] QueryService exception swallowed")
             return None
 
     def _get_cached_instruments(self) -> Dict[str, Dict[str, Any]]:
@@ -508,6 +540,11 @@ class QueryService:
         """
         import time as _time
         MAX_RETRIES = 3
+
+        self._futures_file_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'subscription_futures_fixed.txt',
+        )
 
         # ========== 阶段1：从TXT合约配置文件加载合约列表（重试3次） ==========
         selected_futures_list: List[str] = []
@@ -847,7 +884,7 @@ class QueryService:
         Returns:
             List[str]: 当月合约 ID 列表
         """
-        current_month = datetime.now().strftime('%y%m')
+        current_month = datetime.now(_CHINA_TZ).strftime('%y%m')
         
         all_instruments = self.get_active_instruments_by_product(product)
         current_month_contracts = []
@@ -962,8 +999,19 @@ class QueryService:
     
     def _migrate_instrument_ids_to_global_namespace(self) -> int:
         """[DEPRECATED] 已迁移到 StorageMaintenanceService。
-        此方法不再可用，调用将直接抛出异常。
+
+        UPG-P1-05修复: 添加migration_guide
+        Migration guide: replace _migrate_instrument_ids_to_global_namespace()
+        → StorageMaintenanceService.migrate_instrument_ids_to_global_namespace()
         """
+        import warnings
+        warnings.warn(
+            "_migrate_instrument_ids_to_global_namespace is deprecated. "
+            "Migration guide: Use StorageMaintenanceService.migrate_instrument_ids_to_global_namespace() instead. "
+            "Import: from ali2026v3_trading.maintenance_service import StorageMaintenanceService",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         raise NotImplementedError(
             "_migrate_instrument_ids_to_global_namespace is deprecated. "
             "Use StorageMaintenanceService instead."
@@ -991,7 +1039,7 @@ class QueryService:
             if _HAS_DATA_SERVICE:
                 return get_data_service().get_kline_count(instrument_id)
         except Exception as e:
-            logging.error("[QueryService] get_kline_count failed: %s", e)
+            logging.error("[R22-EP-P1] get_kline_count failed(数据库异常→0，调用方无法区分无数据/故障): %s", e, exc_info=True)
         return 0
     
     def get_tick_count(self, instrument_id: str) -> int:
@@ -1019,7 +1067,7 @@ class QueryService:
                 if result is not None and hasattr(result, 'iloc') and len(result) > 0:
                     return int(result.iloc[0]['cnt'])
         except Exception as e:
-            logging.error("[QueryService] get_tick_count failed: %s", e)
+            logging.error("[R22-EP-P1] get_tick_count failed(数据库异常→0，调用方无法区分无数据/故障): %s", e, exc_info=True)
         return 0
     
     # ✅ 接口唯一：委托data_service.get_kline_range，不再独立SQL查询
@@ -1152,8 +1200,8 @@ class QueryService:
             'total_size_bytes': total_size,
             'total_size_mb': round(total_size / (1024 * 1024), 2),
             'tables': tables,
-            'num_futures': len([k for k, v in self._get_cached_instruments().items() if v.get('type') == 'future']),
-            'num_options': len([k for k, v in self._get_cached_instruments().items() if v.get('type') == 'option'])
+            'num_futures': sum(1 for v in self._get_cached_instruments().values() if v.get('type') == 'future'),  # R21-MEM-P2-03修复: 生成器替代列表推导式
+            'num_options': sum(1 for v in self._get_cached_instruments().values() if v.get('type') == 'option')  # R21-MEM-P2-03修复: 生成器替代列表推导式
         }
     
     # ========================================================================
@@ -1194,12 +1242,16 @@ class QueryService:
                 start_dt = stats.get('first_time')
                 end_dt = stats.get('last_time')
             
-            klines = ds.get_kline_range(instrument_id, start_dt, end_dt)
+            klines = ds.get_klines(instrument_id, start=start_dt, end=end_dt)
             
             df = klines.to_pandas()
-            df.to_csv(output_file, index=False)
-            
-            logging.info("导出 K 线 %d 条到 %s", len(df), output_file)
+            if DATA_EXPORT_FORMAT == 'parquet':
+                _output_file = output_file if output_file.endswith('.parquet') else output_file.rsplit('.', 1)[0] + '.parquet'
+                df.to_parquet(_output_file, index=False)
+                logging.info("导出 K 线 %d 条到 %s (parquet)", len(df), _output_file)
+            else:
+                df.to_csv(output_file, index=False, encoding='utf-8')
+                logging.info("导出 K 线 %d 条到 %s (csv)", len(df), output_file)
             return len(df)
             
         except ImportError:
@@ -1244,8 +1296,13 @@ class QueryService:
                 
                 if hasattr(result, 'to_pandas'):
                     df = result.to_pandas()
-                    df.to_csv(output_file, index=False)
-                    logging.info("导出 Tick %d 条到 %s", len(df), output_file)
+                    if DATA_EXPORT_FORMAT == 'parquet':
+                        _output_file = output_file if output_file.endswith('.parquet') else output_file.rsplit('.', 1)[0] + '.parquet'
+                        df.to_parquet(_output_file, index=False)
+                        logging.info("导出 Tick %d 条到 %s (parquet)", len(df), _output_file)
+                    else:
+                        df.to_csv(output_file, index=False, encoding='utf-8')
+                        logging.info("导出 Tick %d 条到 %s (csv)", len(df), output_file)
                     return len(df)
                 elif hasattr(result, 'to_pylist'):
                     rows = result.read_all().to_pylist()

@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 
 from ali2026v3_trading.scheduler_service import is_market_open
 from ali2026v3_trading import InstrumentDataManager
+from ali2026v3_trading.shared_utils import CHINA_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ def safe_getattr_int(obj: Any, attr: str, default: int = 0, min_val: int = 0) ->
 # 数据类
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class UIEvent:
     """UI事件记录"""
     timestamp: datetime
@@ -1074,7 +1075,7 @@ class StrategyUI:
         try:
             text = self._widgets.get("log_text")
             if text:
-                timestamp = datetime.now().strftime("%H:%M:%S")
+                timestamp = datetime.now(CHINA_TZ).strftime("%H:%M:%S")
                 text.insert("end", f"[{timestamp}] {msg}\n")
                 text.see("end")
         except Exception as e:
@@ -1084,7 +1085,7 @@ class StrategyUI:
         """记录事件"""
         with self._lock:
             self.event_log.append(UIEvent(
-                timestamp=datetime.now(),
+                timestamp=datetime.now(CHINA_TZ),
                 event_type=event_type,
                 data=data or {}
             ))
@@ -1168,7 +1169,7 @@ class UIDiagnosisTool:
         return {
             "tkinter": UIDiagnosisTool.check_tkinter(),
             "thread_safety": UIDiagnosisTool.check_thread_safety(),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(CHINA_TZ).isoformat()
         }
 
 

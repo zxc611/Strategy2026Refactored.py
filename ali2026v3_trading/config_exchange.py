@@ -9,9 +9,11 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 
 from ali2026v3_trading.shared_utils import normalize_year_month
+from ali2026v3_trading.subscription_manager import SubscriptionManager
+import re
 
 
-@dataclass
+@dataclass(slots=True)
 class ExchangeConfig:
     """交易所配置"""
     exchanges: List[str] = field(default_factory=lambda: ["CFFEX", "SHFE", "DCE", "CZCE"])
@@ -160,13 +162,22 @@ class ExchangeConfig:
 
 
 def _get_option_underlying_product(option_product: str) -> str:
-    from ali2026v3_trading.product_initializer import _get_option_underlying_product as _impl
-    return _impl(option_product)
+    try:
+        from ali2026v3_trading.product_initializer import _get_option_underlying_product as _impl
+        return _impl(option_product)
+    except (ImportError, AttributeError) as e:
+        logging.warning(f"[config_exchange._get_option_underlying_product] 导入失败: {e}")
+        m = re.match(r'^[A-Za-z]+', option_product)
+        return m.group(0) if m else ''
 
 
 def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, int]:
-    from ali2026v3_trading.product_initializer import ensure_products_with_retry as _impl
-    return _impl(data_service, max_retries)
+    try:
+        from ali2026v3_trading.product_initializer import ensure_products_with_retry as _impl
+        return _impl(data_service, max_retries)
+    except (ImportError, AttributeError) as e:
+        logging.warning(f"[config_exchange.ensure_products_with_retry] 导入失败: {e}")
+        return {}
 
 
 def build_exchange_mapping(custom_mapping: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
@@ -184,7 +195,6 @@ def resolve_product_exchange(
     exchange_mapping: Optional[Dict[str, Any]] = None,
     default_exchange: str = "CFFEX",
 ) -> str:
-    from ali2026v3_trading.subscription_manager import SubscriptionManager
     normalized_mapping = build_exchange_mapping(exchange_mapping)
     token = str(product_or_instrument or "")
     product_code = token
@@ -195,8 +205,8 @@ def resolve_product_exchange(
         else:
             parsed = SubscriptionManager.parse_future(token)
             product_code = parsed.get('product', token)
-    except (ValueError, KeyError):
-        pass
+    except (ValueError, KeyError) as e:
+        logging.warning(f"[resolve_product_exchange] 解析合约失败 token={token}: {e}")
     result = None
     for key in normalized_mapping:
         if str(key).upper() == product_code.upper():

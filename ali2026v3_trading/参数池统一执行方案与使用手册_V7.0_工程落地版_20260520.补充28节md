@@ -1,0 +1,107 @@
+
+
+---
+
+## 二十八、V7.3阈值参数化体系与期权盈亏比网格（顶级基金验证水准）
+
+> **核心认知：阈值是量化研究中最重要的内容，几乎达到策略生死分界的程度。硬编码魔数=不可审计=不可复现=不可验证。所有阈值必须参数化，所有参数必须有量化来源。**
+
+### 28.1 阈值参数化三层架构
+
+| 层级 | 存储位置 | 覆盖范围 | 可调性 |
+|:---|:---|:---|:---|
+| **P0铁律层** | `P0_IRON_RULES` (task_scheduler.py) | 6个不可妥协的准入阈值 | 可审计不可降低 |
+| **评判系数层** | `SCORING_COEFFICIENTS` (strategy_judgment_engine.py) | 30+评分公式系数+阈值 | 可调，影响评判分布 |
+| **诊断阈值层** | `StrategyBehaviorDiagnosis` 类常量 | 40+诊断阈值+评分系数 | 可调，影响诊断灵敏度 |
+
+### 28.2 P0铁律阈值（不可妥协，但必须参数化可审计）
+
+```python
+P0_IRON_RULES = {
+    "max_oos_decay": -0.30,           # 样本外衰减铁律
+    "oos_decay_warn": -0.20,          # 样本外衰减警告
+    "min_train_sharpe": 0.5,          # 训练夏普铁律
+    "min_test_sharpe": 0.3,           # 样本外夏普铁律
+    "min_lr_threshold": 0.8,          # 逻辑反转阈值铁律
+    "lr_threshold_warn": 1.0,         # 逻辑反转阈值警告
+}
+```
+
+**铁律纪律：** P0铁律值只能在量化证据充分时上调（更严格），不得下调。任何修改必须附带p值报告和反事实检验结果。
+
+### 28.3 期权盈亏比核心网格（顶级基金验证水准）
+
+期权权利金盈亏比从0.5:1到5:1全覆盖，覆盖实盘常见状态：
+
+| 网格常量 | 覆盖策略类型 | 止盈范围 | 止损范围 | 设计依据 |
+|:---|:---|:---|:---|:---|
+| `OPTION_TAKE_PROFIT_GRID` | 全策略通用 | [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0] | — | 期权权利金1.5:1正常，2:1/4:1常见 |
+| `OPTION_STOP_LOSS_GRID` | 全策略通用 | — | [0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95] | 期权时间价值衰减特性 |
+| `MOMENTUM_TAKE_PROFIT_GRID` | S1/S2动量 | [1.0→5.0] | — | 偏右侧，止盈高止损低 |
+| `MOMENTUM_STOP_LOSS_GRID` | S1/S2动量 | — | [0.2→0.6] | 快速止损保护本金 |
+| `REVERSION_TAKE_PROFIT_GRID` | S3/S4均值回归 | [1.5→5.0] | — | 偏左侧，高盈亏比 |
+| `REVERSION_STOP_LOSS_GRID` | S3/S4均值回归 | — | [0.5→0.95] | 期权买方宽止损 |
+| `ARB_TAKE_PROFIT_GRID` | S5套利 | [0.5→1.5] | — | 窄幅，快速止盈 |
+| `MM_TAKE_PROFIT_GRID` | S6做市 | [0.4→1.2] | — | 极窄幅，高频小利 |
+| `SPRING_STOP_PROFIT_GRID` | S4弹簧 | [2.0→12.0] | — | 期权权利金杠杆特性 |
+| `SPRING_MAX_LOSS_GRID` | S4弹簧 | — | [0.50→0.98] | 从保守到激进全覆盖 |
+
+### 28.4 评判引擎评分系数参数化
+
+`SCORING_COEFFICIENTS` 字典包含12个评判维度的评分公式系数，每个系数可调：
+
+| 维度 | 关键系数 | 默认值 | 含义 |
+|:---|:---|:---|:---|
+| profitability | win_rate_full_score_at | 0.6 | win_rate满分锚点 |
+| profitability | profit_sharpe_w / calmar_w / win_w / pl_w | 0.3/0.3/0.2/0.2 | 四指标权重 |
+| extreme_survival | extreme_dd_norm | 30.0 | 最大回撤归一化因子 |
+| extreme_survival | extreme_survival_w / recovery_w | 0.70/0.30 | 生存+恢复权重 |
+| parameter_stability | skewness_norm / kurtosis_norm | 2.0/5.0 | 分布偏离归一化 |
+| drawdown_recovery | dd_max_rec_w / mean_rec_w / rec_rate_w | 0.40/0.30/0.30 | 三指标权重 |
+| verdict | near_threshold_margin | 0.1 | 接近阈值警告边界 |
+| verdict | conditional_pass_max_conditions | 2 | CONDITIONAL_PASS最大条件数 |
+| deep_validation | bh_significance_level | 0.05 | BH校正显著性水平 |
+| deep_validation | l2_accuracy_threshold | 0.6 | L2准确率判定阈值 |
+
+### 28.5 行为诊断器阈值参数化
+
+`StrategyBehaviorDiagnosis` 类常量覆盖5大诊断维度共40+参数：
+
+| 维度 | 关键参数 | 默认值 | 含义 |
+|:---|:---|:---|:---|
+| 信号 | SIGNAL_JUMP_THRESHOLD | 0.5 | 信号跳变判定 |
+| 信号 | SIGNAL_DECAY_STRONG / WEAK | 0.6 / 0.5 | 衰减模式判定 |
+| 仓位 | POSITION_CRITICAL_OSC | 0.3 | 仓位CRITICAL震荡率 |
+| PnL | PNL_CLIFF_THRESHOLD | 0.3 | 断崖回吐判定 |
+| Greeks | GREEKS_DELTA_ANOMALY | 0.8 | Delta异常阈值 |
+| 跨策略 | CROSS_CRITICAL_CORR | 0.5 | 跨策略CRITICAL相关率 |
+| 评分 | DIAGNOSIS_WEIGHTS | [0.30,0.25,0.20,0.10,0.15] | 5维度权重 |
+
+### 28.6 回测阈值参数化
+
+`BACKTEST_THRESHOLDS` 字典包含18个回测逻辑判定阈值：
+
+| 阈值 | 默认值 | 含义 |
+|:---|:---|:---|
+| logic_reversal_min_wrong_pct | 0.3 | 逻辑反转平仓最低wrong_pct |
+| correct_resonance_min_strength | 0.3 | CORRECT_RESONANCE信号最低强度 |
+| circuit_breaker_daily_dd | 0.03 | 熔断触发日回撤阈值 |
+| shadow_random_open_prob | 0.02 | shadow_random开仓概率 |
+| hft_shadow_random_open_prob | 0.005 | HFT shadow_random开仓概率 |
+| hft_open_min_strength | 0.2 | HFT开仓最低信号强度 |
+| ci_width_eliminate / reduce / flag | 2.0 / 1.0 / 0.5 | Sharpe CI三级阈值 |
+
+### 28.7 参数变化幅度审查结论
+
+| 参数类别 | 扩展前覆盖 | 扩展后覆盖 | 增幅 |
+|:---|:---|:---|:---|
+| close_take_profit_ratio | 3值 [1.1-2.5] | 14值 [0.5-5.0] | 4.7x |
+| close_stop_loss_ratio | 4值 [0.3-0.6] | 11值 [0.25-0.95] | 2.8x |
+| spring_stop_profit_ratio | 3值 [3-8] | 8值 [2-12] | 2.7x |
+| spring_max_loss_pct | 3值 [0.85-0.95] | 9值 [0.50-0.98] | 3.0x |
+| hard_time_stop_minutes | 0值(缺失) | 6值 | inf |
+| 评判评分系数 | 0值(硬编码) | 30+值(参数化) | inf |
+| 诊断阈值 | 0值(硬编码) | 40+值(参数化) | inf |
+| P0铁律 | 0值(硬编码) | 6值(参数化) | inf |
+
+**结论：** 所有验证阈值已全部参数化，无残留硬编码魔数。期权盈亏比网格覆盖0.5:1到5:1，达到顶级基金验证水准。

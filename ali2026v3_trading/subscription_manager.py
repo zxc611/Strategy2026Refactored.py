@@ -22,12 +22,50 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from ali2026v3_trading.serialization_utils import json_dumps
+
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
+
+try:
+    import msvcrt
+    _HAS_MSVCRT = True
+except ImportError:
+    _HAS_MSVCRT = False
 
 from ali2026v3_trading.shared_utils import safe_float, normalize_instrument_id
 
-import pyarrow as pa
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
 
 logger = logging.getLogger(__name__)
+
+
+def _acquire_file_lock(f):
+    """EC-P1-05修复: 跨进程文件锁"""
+    try:
+        if _HAS_FCNTL:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        elif _HAS_MSVCRT:
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+    except (OSError, IOError) as e:
+        logger.warning("[EC-P1-05] 文件锁获取失败: %s，继续执行但跨进程安全无保障", e)
+
+
+def _release_file_lock(f):
+    """EC-P1-05修复: 释放跨进程文件锁"""
+    try:
+        if _HAS_FCNTL:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        elif _HAS_MSVCRT:
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+    except (OSError, IOError) as e:
+        logger.warning("[EC-P1-05] 文件锁释放失败: %s", e)
 
 
 def classify_registered_instruments(storage) -> Tuple[List[str], Dict[int, List[str]]]:
@@ -66,7 +104,7 @@ try:
     from ali2026v3_trading.event_bus import get_global_event_bus, EventBus
     _HAS_EVENT_BUS = get_global_event_bus() is not None
 except ImportError as e:
-    logger.warning(f"[SubscriptionManagerV2] EventBus import failed: {e}")
+    logger.warning("[SubscriptionManagerV2] EventBus import failed: %s", e)  # R13-P2-LOG-01修复
     EventBus = None
     get_global_event_bus = None
     _HAS_EVENT_BUS = False
@@ -85,7 +123,7 @@ def inst_get(inst: Any, *keys: str, default: Any = '') -> Any:
         try:
             val = getattr(inst, k, None)
         except (AttributeError, TypeError) as e:
-            logger.debug(f"[SubscriptionManagerV2] Failed to get attribute {k}: {e}")
+            logger.debug("[SubscriptionManagerV2] Failed to get attribute %s: %s", k, e)  # R13-P2-LOG-01修复
             val = None
         if val not in (None, ''):
             return val
@@ -94,7 +132,10 @@ def inst_get(inst: Any, *keys: str, default: Any = '') -> Any:
 
 # ========== 配置对象 (替代硬编码) ==========
 
-@dataclass
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@dataclass(slots=True)
 class SubscriptionConfig:
     """订阅管理器配置 - 借鉴 OrderFlowConfig 设计"""
     
@@ -106,12 +147,11 @@ class SubscriptionConfig:
     
     # 批量写入
     db_batch_size: int = 100                      # DuckDB批量大小
-    handshake_timeout: float = 10.0               # 握手超时(秒)
     throttle_window: float = 1.0                  # 节流窗口(秒)
     
     # 异步落盘 (WAL保护)
     enable_wal: bool = True                       # 启用WAL文件
-    wal_path: str = "subscription_wal.jsonl"      # WAL文件路径
+    wal_path: str = os.path.join(_MODULE_DIR, "subscription_wal.jsonl")
     wal_max_size_mb: int = 50                     # WAL最大文件大小(MB)
     wal_max_rotations: int = 3                    # WAL轮转数量
     recover_on_start: bool = True                 # 启动时恢复WAL
@@ -125,8 +165,8 @@ class SubscriptionConfig:
     enable_cleanup_thread: bool = True            # 启用独立清理线程
     cleanup_interval: float = 60.0                # 清理检查间隔(秒)
     
-    # 告警回调
-    alert_callback: Optional[Callable[[int, str], None]] = None
+    # R14-P1-LOG-13修复: alert_callback默认非None(空日志回调)
+    alert_callback: Optional[Callable[[int, str], None]] = None  # 初始化时设为_default_alert_callback
     alert_threshold: int = 10                     # 累计失败超过此值触发告警
     failure_rate_threshold: float = 0.1           # 失败率超过10%触发告警
     
@@ -151,11 +191,17 @@ class SubscriptionManager:
     
     def __init__(self, data_manager: Any, config: SubscriptionConfig = None):
         self._config = config or SubscriptionConfig()
+        # R14-P1-LOG-13修复: alert_callback为None时设默认日志回调
+        if self._config.alert_callback is None:
+            self._config.alert_callback = lambda count, msg: logging.warning("[SubscriptionManager] 告警: count=%d msg=%s", count, msg)
         self.data_manager = data_manager
         
         # 线程安全锁
         self._lock = threading.RLock()
-        self._tick_lock = threading.RLock()
+        # R15-P0-PERF-01修复: _tick_lock拆为per-instrument分片锁(16个)，减少锁竞争
+        self._lock_shard_count = 16
+        self._lock_shards = [threading.RLock() for _ in range(self._lock_shard_count)]
+        self._tick_lock = self._lock_shards[0]  # backward compat
         self._retry_lock = threading.Lock()
         self._wal_lock = threading.Lock()
         
@@ -179,8 +225,22 @@ class SubscriptionManager:
         self._subscription_success_lock = threading.Lock()
         self._submgr_tick_summary_interval = 60.0
         self._submgr_tick_last_output_time = 0.0
+        # R15-P0-DATA-03修复: tick序列号去重，防止重复tick被处理
+        self._last_tick_seq: Dict[str, int] = {}
+        self._tick_dedup_drop_count = 0
         self._submgr_tick_accum_count = 0
         self._submgr_tick_accum_lock = threading.Lock()
+        # R15-P1-DATA-04修复: tick断流检测
+        self._last_tick_time: Dict[str, float] = {}
+        self._tick_timeout_sec: float = 30.0
+        # R27-P0-DR-05修复: tick看门狗线程，检测tick断流并触发告警/重连
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._stop_watchdog = threading.Event()
+        self._watchdog_interval_sec: float = 10.0
+        self._tick_stale_instruments: Dict[str, float] = {}  # instrument_id -> stale_since
+        # R15-P1-RES-13修复: 并发连接数上限
+        self._max_concurrent_connections: int = 100
+        self._active_connection_count: int = 0
         
         # 重试队列 (task_data, retry_count, next_retry_time, enqueue_time)
         self._retry_queue: deque = deque(maxlen=self._config.retry_queue_max_size)
@@ -195,6 +255,10 @@ class SubscriptionManager:
         
         # WAL文件管理
         self._wal_file = None
+        # R13-P2-LOG-08修复: 显式初始化属性，替代hasattr检查
+        self._wal_queue: deque = deque(maxlen=10000)
+        self._pending_subscriptions: Dict[str, Any] = {}
+        self._op_error_circuit: Dict[str, Dict] = {}
         self._async_thread: Optional[threading.Thread] = None
         self._stop_async = threading.Event()
         self._retry_thread: Optional[threading.Thread] = None
@@ -214,6 +278,11 @@ class SubscriptionManager:
             "ON" if self._config.enable_wal else "OFF"
         )
     
+    # R15-P0-PERF-01修复: 分片锁获取方法
+    def _get_shard_lock(self, instrument_id: str) -> threading.RLock:
+        """R15-P0-PERF-01修复: 根据instrument_id获取分片锁，减少全局锁竞争"""
+        return self._lock_shards[hash(instrument_id) % self._lock_shard_count]
+    
     # ========================================================================
     # WAL文件管理 (异步落盘防止状态丢失)
     # ========================================================================
@@ -222,27 +291,38 @@ class SubscriptionManager:
         """初始化WAL文件"""
         if not self._config.enable_wal:
             return
-        
+
         try:
-            os.makedirs(os.path.dirname(self._config.wal_path) if os.path.dirname(self._config.wal_path) else '.', exist_ok=True)
-            self._wal_file = open(self._config.wal_path, 'a', encoding='utf-8')
+            _wal_dir = os.path.dirname(os.path.abspath(self._config.wal_path))
+            os.makedirs(_wal_dir, exist_ok=True)
+        except Exception as e:
+            logger.error("[SubscriptionManagerV2] WAL directory creation failed: %s", e)
+            self._wal_file = None
+            return
+
+        try:
+            self._wal_file = open(self._config.wal_path, 'a', encoding='utf-8', buffering=1)
+        except Exception as e:
+            logger.error("[SubscriptionManagerV2] WAL file open failed: %s", e)
+            self._wal_file = None
+            return
+
+        try:
             logger.info("[SubscriptionManagerV2] WAL enabled: %s", self._config.wal_path)
-            
-            # P1 Bug #36修复：注册atexit关闭WAL文件，防止进程退出时文件泄漏
             atexit.register(self._close_wal)
-            
-            # 启动时恢复
+
             if self._config.recover_on_start:
                 self._recover_from_wal()
         except Exception as e:
-            logger.error("[SubscriptionManagerV2] WAL init failed: %s", e)
-            self._wal_file = None
+            logger.error("[SubscriptionManagerV2] WAL post-init failed: %s", e)
+            self._close_wal()
+            return
     
     def _rotate_wal(self):
         """WAL文件轮转"""
         if not self._config.enable_wal or not self._wal_file:
             return
-        
+
         try:
             if not os.path.exists(self._config.wal_path):
                 return
@@ -261,16 +341,54 @@ class SubscriptionManager:
         except Exception as e:
             logger.error("[SubscriptionManagerV2] WAL rotation failed: %s", e)
     
-    def _write_wal_async(self, record: dict):
-        """异步写入WAL - 使用队列缓冲"""
+    # R15-P0-RES-10修复: WAL心跳方法
+    def _wal_heartbeat(self):
+        """R15-P0-RES-10修复: 定期写入心跳记录，重启时检测异常退出"""
+        if not self._config.enable_wal:
+            return
+        try:
+            self._write_wal_async({'type': 'heartbeat', 'ts': time.time()})
+        except Exception as e:
+            logger.debug("[SubscriptionManagerV2] R15-P0-RES-10: _wal_heartbeat failed: %s", e)
+
+    def _check_last_heartbeat(self):
+        """R15-P0-RES-10修复: 重启时检测最后心跳时间判断异常退出"""
+        if not self._config.enable_wal or not os.path.exists(self._config.wal_path):
+            return False
+        try:
+            last_heartbeat_ts = None
+            with open(self._config.wal_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        record = json.loads(line.strip())
+                        if record.get('type') == 'heartbeat':
+                            last_heartbeat_ts = record.get('ts')
+                    except Exception:
+                        continue
+            if last_heartbeat_ts is not None:
+                gap = time.time() - last_heartbeat_ts
+                if gap > 120:
+                    logger.warning("[SubscriptionManagerV2] R15-P0-RES-10: 检测到异常退出(心跳间隔%.0f秒>120)", gap)
+                    return True
+            return False
+        except Exception as e:
+            logger.debug("[SubscriptionManagerV2] R15-P0-RES-10: _check_last_heartbeat failed: %s", e)
+            return False
+
+    def _write_wal_async(self, record: Dict[str, Any]):  # [R22-P2-TS27]
+        """异步写入WAL - 使用队列缓冲
+
+        EC-P1-05: 已有进程级锁保护 - self._wal_lock (threading.Lock)，
+        在_write_wal_async和_wal_writer_loop中均使用with self._wal_lock保护，
+        满足进程内线程安全；跨进程场景需依赖文件系统锁(待规划)。
+        """
         if not self._config.enable_wal:
             return
         
         with self._wal_lock:
             try:
                 # 直接写入内存队列,由后台线程批量落盘
-                if not hasattr(self, '_wal_queue'):
-                    self._wal_queue = deque(maxlen=1000)
+                # R13-P2-LOG-08修复: 已在__init__中显式初始化_wal_queue，无需hasattr检查
                 self._wal_queue.append(record)
             except Exception as e:
                 logger.error("[SubscriptionManagerV2] WAL queue write failed: %s", e)
@@ -287,8 +405,26 @@ class SubscriptionManager:
                     line = line.strip()
                     if not line:
                         continue
+                    # R15-P1-DATA-07修复: WAL读取时验证CRC32校验和
+                    _crc_verify_ok = True
+                    if '\t#crc:' in line:
+                        _parts = line.rsplit('\t#crc:', 1)
+                        _data_part = _parts[0]
+                        _crc_hex = _parts[1]
+                        try:
+                            import binascii as _ba
+                            _expected = _ba.crc32(_data_part.encode('utf-8')) & 0xFFFFFFFF
+                            if f'{_expected:08x}' != _crc_hex:
+                                logger.warning("R15-P1-DATA-07: WAL CRC校验失败 line=%s", _data_part[:80])
+                                _crc_verify_ok = False
+                            line = _data_part
+                        except Exception:
+                            pass
                     try:
                         record = json.loads(line)
+                        if not _crc_verify_ok:
+                            logger.warning("R15-P1-DATA-07: CRC校验失败的记录被跳过: type=%s", record.get('type'))
+                            continue
                         task_type = record.get('type')
                         
                         if task_type == 'subscribe':
@@ -304,14 +440,14 @@ class SubscriptionManager:
                                         self._dropped_count += 1
                                         self._check_alert()
                     except Exception as e:
-                        logger.error(f"[SubscriptionManagerV2] Failed to process WAL record: {e}")
+                        logger.error("[SubscriptionManagerV2] Failed to process WAL record: %s", e)  # R13-P2-LOG-01修复
             
             logger.info("[SubscriptionManagerV2] Recovered %d subscription tasks from WAL", recovered)
             
             # 恢复后重命名文件（如果失败则保留原文件）
             try:
                 # Windows上可能因文件锁定导致重命名失败，尝试多种方式
-                recovered_path = self._config.wal_path + ".recovered"
+                recovered_path = os.path.splitext(self._config.wal_path)[0] + ".recovered"  # EC-P2-01: 用os.path.splitext替代硬拼接
                 if os.path.exists(recovered_path):
                     try:
                         os.remove(recovered_path)
@@ -320,12 +456,12 @@ class SubscriptionManager:
                 os.rename(self._config.wal_path, recovered_path)
             except OSError as e:
                 # Windows上文件锁定时重命名失败是常见情况，不影响功能
-                if e.winerror == 32:  # ERROR_SHARING_VIOLATION
-                    logger.warning(f"[SubscriptionManagerV2] WAL file locked by another process, skipping rename")
+                if getattr(e, 'winerror', None) == 32:  # ERROR_SHARING_VIOLATION
+                    logger.warning("[SubscriptionManagerV2] WAL file locked by another process, skipping rename")  # R13-P2-LOG-01修复
                 else:
-                    logger.warning(f"[SubscriptionManagerV2] WAL rename failed: {e}")
+                    logger.warning("[SubscriptionManagerV2] WAL rename failed: %s", e)  # R13-P2-LOG-01修复
             except Exception as e:
-                logger.warning(f"[SubscriptionManagerV2] WAL rename failed: {e}")
+                logger.warning("[SubscriptionManagerV2] WAL rename failed: %s", e)  # R13-P2-LOG-01修复
         except Exception as e:
             logger.error("[SubscriptionManagerV2] WAL recovery failed: %s", e)
     
@@ -388,6 +524,17 @@ class SubscriptionManager:
                 self._config.cleanup_interval
             )
 
+        # R27-P0-DR-05修复: 启动tick看门狗线程
+        self._stop_watchdog.clear()
+        self._watchdog_thread = threading.Thread(
+            target=self._tick_watchdog_loop,
+            name="TickWatchdog[shared-service]",
+            daemon=True
+        )
+        self._watchdog_thread.start()
+        logger.info("[R27-P0-DR-05] Tick看门狗线程已启动(interval=%.1fs, timeout=%.1fs)",
+                     self._watchdog_interval_sec, self._tick_timeout_sec)
+
     def ensure_background_threads(self) -> None:
         """确保后台线程处于运行状态，供 stop 后重启复用。"""
         with self._lock:
@@ -417,29 +564,39 @@ class SubscriptionManager:
             )
             self._start_background_threads()
 
-    def stop_background_threads(self, join_timeout: float = 2.0) -> None:
+    def stop_background_threads(self, join_timeout: float = 2.0, silent: bool = False) -> None:
+        """优雅停止所有后台线程
+
+        Args:
+            join_timeout: 线程等待超时（秒）
+            silent: 为True时抑制日志输出（用于atexit清理）
+        """
         self._stop_async.set()
         self._stop_retry.set()
         self._stop_cleanup.set()
+        self._stop_watchdog.set()  # R27-P0-DR-05修复: 停止看门狗
 
-        logger.info(
-            "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
-            "Stopping background threads (close_reason=strategy-stop, close_policy=graceful-join)"
-        )
+        if not silent:
+            logger.info(
+                "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
+                "Stopping background threads (close_reason=strategy-stop, close_policy=graceful-join)"
+            )
 
-        for t in [self._async_thread, self._retry_thread, self._cleanup_thread]:
+        # R27-P1修复: join列表补充看门狗线程，防止策略重启时旧看门狗不停止
+        for t in [self._async_thread, self._retry_thread, self._cleanup_thread, self._watchdog_thread]:
             if t and t.is_alive():
                 t.join(timeout=join_timeout)
-                if t.is_alive():
-                    logger.warning(
-                        "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
-                        "Thread %s did not exit within timeout (close_policy=graceful-failed)", t.name
-                    )
-                else:
-                    logger.info(
-                        "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
-                        "Thread %s exited cleanly (close_policy=graceful-join)", t.name
-                    )
+                if not silent:
+                    if t.is_alive():
+                        logger.warning(
+                            "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
+                            "Thread %s did not exit within timeout (close_policy=graceful-failed)", t.name
+                        )
+                    else:
+                        logger.info(
+                            "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
+                            "Thread %s exited cleanly (close_policy=graceful-join)", t.name
+                        )
     
     def _wal_writer_loop(self):
         """WAL写入线程 - 批量异步落盘"""
@@ -448,16 +605,25 @@ class SubscriptionManager:
                 # 批量取出记录
                 batch = []
                 with self._wal_lock:
-                    if hasattr(self, '_wal_queue'):
-                        while self._wal_queue and len(batch) < 50:
-                            batch.append(self._wal_queue.popleft())
+                    # R13-P2-LOG-08修复: 已在__init__中显式初始化_wal_queue，无需hasattr检查
+                    while self._wal_queue and len(batch) < 50:
+                        batch.append(self._wal_queue.popleft())
                 
                 # 批量写入文件
                 if batch and self._wal_file:
                     self._rotate_wal()
-                    for record in batch:
-                        self._wal_file.write(json.dumps(record, ensure_ascii=False) + '\n')
-                    self._wal_file.flush()
+                    _acquire_file_lock(self._wal_file)
+                    try:
+                        for record in batch:
+                            # R15-P1-DATA-07修复: WAL写入添加CRC32校验和
+                            _line = json_dumps(record)
+                            import binascii as _ba
+                            _crc = _ba.crc32(_line.encode('utf-8')) & 0xFFFFFFFF
+                            self._wal_file.write(f'{_line}\t#crc:{_crc:08x}\n')
+                        self._wal_file.flush()
+                        os.fsync(self._wal_file.fileno())  # R14-P1-LOG-15修复: WAL写入加fsync确保持久化
+                    finally:
+                        _release_file_lock(self._wal_file)
                 
                 time.sleep(0.05)  # 50ms批次间隔
             except Exception as e:
@@ -472,24 +638,76 @@ class SubscriptionManager:
                 self._process_retry_queue()
             except Exception as e:
                 logger.error("[SubscriptionManagerV2] Retry loop error: %s", e)
+
+    # R27-P0-DR-05修复: tick看门狗循环 — 检测tick断流并告警
+    def _tick_watchdog_loop(self):
+        """定期检查所有已订阅合约的tick是否断流，超时则触发告警"""
+        while not self._stop_watchdog.is_set():
+            self._stop_watchdog.wait(timeout=self._watchdog_interval_sec)
+            if self._stop_watchdog.is_set():
+                break
+            try:
+                now = time.time()
+                stale_instruments = []
+                with self._lock:
+                    for inst_id, last_t in self._last_tick_time.items():
+                        if now - last_t > self._tick_timeout_sec:
+                            stale_instruments.append((inst_id, now - last_t))
+                    # 清理已恢复的合约
+                    self._tick_stale_instruments = {
+                        k: v for k, v in self._tick_stale_instruments.items()
+                        if now - self._last_tick_time.get(k, now) > self._tick_timeout_sec
+                    }
+                for inst_id, stale_sec in stale_instruments:
+                    if inst_id not in self._tick_stale_instruments:
+                        self._tick_stale_instruments[inst_id] = now
+                        logger.warning(
+                            "[R27-P0-DR-05] Tick断流告警: instrument=%s 已%.1f秒无tick(阈值=%.1fs)",
+                            inst_id, stale_sec, self._tick_timeout_sec
+                        )
+                        if hasattr(self, '_event_bus') and self._event_bus is not None:
+                            try:
+                                self._event_bus.publish(type('TickStaleEvent', (), {
+                                    'instrument_id': inst_id,
+                                    'stale_seconds': stale_sec,
+                                    'timeout_seconds': self._tick_timeout_sec,
+                                })())
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.error("[R27-P0-DR-05] 看门狗循环异常: %s", e)
     
     def _atexit_cleanup(self):
-        """进程退出清理"""
-        self.close()
-    
-    def close(self):
-        """关闭所有资源"""
-        self.stop_background_threads(join_timeout=2.0)
-        
+        """进程退出清理 - 静默模式避免测试退出时I/O错误"""
+        try:
+            # 在atexit时，stdout/stderr可能已关闭，使用静默模式
+            import sys
+            if sys.stderr is None or sys.stderr.closed:
+                return
+            self.close(silent=True)
+        except Exception:
+            # atexit阶段忽略所有错误，避免进程退出异常
+            pass
+
+    def close(self, silent: bool = False):
+        """关闭所有资源
+
+        Args:
+            silent: 为True时抑制日志输出（用于atexit清理）
+        """
+        self.stop_background_threads(join_timeout=2.0, silent=silent)
+
         if self._wal_file:
             try:
                 self._wal_file.flush()
                 self._wal_file.close()
                 self._wal_file = None
             except Exception as e:
-                logger.error(f"[SubscriptionManagerV2] Operation failed: {e}", exc_info=True)
-        
-        logger.info("[SubscriptionManagerV2] Closed")
+                if not silent:
+                    logger.error("[SubscriptionManagerV2] WAL close failed: %s", e, exc_info=True)
+
+        if not silent:
+            logger.info("[SubscriptionManagerV2] Closed")
     
     # ========================================================================
     # 退避策略实现
@@ -515,7 +733,7 @@ class SubscriptionManager:
     # 重试队列管理
     # ========================================================================
     
-    def _enqueue_for_retry(self, task_data: dict, retry_count: int = 0):
+    def _enqueue_for_retry(self, task_data: Dict[str, Any], retry_count: int = 0):  # [R22-P2-TS28]
         """将失败任务加入重试队列"""
         now = time.time()
         delay = self._calc_backoff_delay(retry_count)
@@ -570,9 +788,6 @@ class SubscriptionManager:
                     if task_type == 'subscribe':
                         self._retry_subscribe(task)
                         success_count += 1
-                    elif task_type == 'handshake':
-                        self._retry_handshake(task)
-                        success_count += 1
                 except Exception as e:
                     logger.error("[SubscriptionManagerV2] Retry failed: %s", e)
                     if count < self._config.max_retries:
@@ -620,27 +835,25 @@ class SubscriptionManager:
             instrument_id: 合约ID
             data_type: 数据类型 ('tick', 'kline'等)
         """
+        # R13-P1-API-02修复: data_manager为None时入队等待，避免bind_platform_apis()前崩溃
+        if self.data_manager is None:
+            logger.warning("[SubscriptionManagerV2] data_manager未绑定，订阅请求入队等待: %s", instrument_id)
+            if not hasattr(self, '_pending_subscriptions'):
+                self._pending_subscriptions = []
+            self._pending_subscriptions.append({'instrument_id': instrument_id, 'data_type': data_type})
+            return
         subscribe_method = getattr(self.data_manager, 'subscribe', None)
         if subscribe_method and callable(subscribe_method):
             subscribe_method(instrument_id, data_type)
         else:
             raise AttributeError("InstrumentDataManager 缺少 subscribe 方法")
     
-    def _retry_subscribe(self, task: dict):
+    def _retry_subscribe(self, task: Dict[str, Any]):  # [R22-P2-TS29]
         instrument_id = task.get('instrument_id')
         data_type = task.get('data_type', 'tick')
         
         logger.info("[SubscriptionManagerV2] Retrying subscribe: %s", instrument_id)
         self._do_subscribe(instrument_id, data_type)
-    
-    def _retry_handshake(self, task: dict):
-        """重试握手"""
-        underlying = task.get('underlying')
-        expiration = task.get('expiration')
-        
-        logger.info("[SubscriptionManagerV2] Retrying handshake: %s_%s", underlying, expiration)
-        # TODO: 调用实际握手逻辑
-        self._handshake(underlying, expiration)
     
     # ========================================================================
     # 独立清理线程 (借鉴 OrderFlowAnalyzer 设计)
@@ -821,7 +1034,7 @@ class SubscriptionManager:
         if len(normalized) != 3 or not normalized.isdigit():
             raise ValueError(f"非法期权月份编码：{year_month_raw}")
         
-        current_year = datetime.now().year % 100
+        current_year = datetime.now(CHINA_TZ).year % 100
         year_digit = int(normalized[0])
         month_digits = normalized[1:]
         
@@ -912,7 +1125,7 @@ class SubscriptionManager:
             return False
             
         except Exception as e:
-            logger.error(f"[SubscriptionManagerV2._ensure_instruments_loaded] Error: {e}")
+            logger.error("[SubscriptionManagerV2._ensure_instruments_loaded] Error: %s", e)  # R13-P2-LOG-01修复
             return False
     
     def subscribe_all_instruments(self, futures_list: List[str], 
@@ -923,6 +1136,14 @@ class SubscriptionManager:
         Returns:
             bool: 是否全部成功
         """
+        # RES-P2-09: 合约订阅容量检查
+        from ali2026v3_trading.config_params import CAPACITY_LIMITS
+        _max_instruments = CAPACITY_LIMITS.get('max_instruments', 500)
+        _total_instruments = len(futures_list) + sum(len(opts) for opts in options_dict.values())
+        if _total_instruments >= _max_instruments:
+            logging.warning("[RES-P2-09] 合约订阅已达上限: %d/%d", _total_instruments, _max_instruments)
+            return False
+
         started_at = time.perf_counter()
         total_count = len(futures_list) + sum(len(opts) for opts in options_dict.values())
         self._total_subscriptions = total_count
@@ -973,16 +1194,7 @@ class SubscriptionManager:
             try:
                 # 握手
                 if option_ids:
-                    parsed = self.parse_option(option_ids[0])
-                    expiration = parsed['year_month']
-                    if not self._handshake_with_retry(underlying, expiration):
-                        logger.error("[SubscriptionManagerV2] Handshake failed: %s_%s", underlying, expiration)
-                        failed_tasks.append({
-                            'type': 'handshake',
-                            'underlying': underlying,
-                            'expiration': expiration
-                        })
-                        continue
+                    logger.debug("[SubscriptionManagerV2] Handshake removed: all subscriptions via _do_subscribe only")
                 
                 # 订阅期权合约
                 for opt_id in option_ids:
@@ -1006,7 +1218,9 @@ class SubscriptionManager:
                         from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
                         DiagnosisProbeManager.on_subscribe(opt_id, 'option', False, str(e))
             except Exception as e:
+                # R13-P1-API-05修复: 期权批次订阅失败时返回False阻断，而非仅log
                 logger.error("[SubscriptionManagerV2] Option batch failed: %s - %s", underlying, e)
+                return False
         
         # P1 Bug #38修复：累加失败计数，而非覆盖
         self._total_failures += len(failed_tasks)
@@ -1041,24 +1255,6 @@ class SubscriptionManager:
                 'data_type': data_type
             })
             logger.warning("[SubscriptionManagerV2] 订阅失败已入重试队列: %s (%s)", instrument_id, data_type)
-    
-    def _handshake_with_retry(self, underlying: str, expiration: str) -> bool:
-        """握手 (带重试)"""
-        try:
-            return self._handshake(underlying, expiration)
-        except Exception as e:
-            logger.error("[SubscriptionManagerV2] Handshake error: %s", e)
-            self._enqueue_for_retry({
-                'type': 'handshake',
-                'underlying': underlying,
-                'expiration': expiration
-            })
-            return False
-    
-    def _handshake(self, underlying: str, expiration: str) -> bool:
-        """握手协议 (未实现 - 返回True以兼容现有调用方)"""
-        logger.debug("[SubscriptionManagerV2] Handshake not implemented for %s/%s", underlying, expiration)
-        return True
     
     # ========================================================================
     # 查询接口
@@ -1107,17 +1303,55 @@ class SubscriptionManager:
                 'failure_rate': self._total_failures / max(self._total_subscriptions, 1)
             }
     
-    def on_tick(self, instrument_id: str, last_price: float, volume: float = 0) -> None:
+    def on_tick(self, instrument_id: str, last_price: float, volume: float = 0,
+                is_replay: bool = False) -> None:
         """Tick 路由入口：先查 metadata 决定期权/期货，再转发到 TTypeService。
-        
+
         改造后不再每笔 Tick 先 parse_option/parse_future 再路由，
         而是先查 instrument_id -> internal_id -> meta，
         由 metadata 中的 type 字段决定走哪条路径。
+        
+        R23-ID-04-FIX: 添加is_replay参数，回放tick直接跳过处理
         """
+        if is_replay:
+            self._tick_dedup_drop_count += 1
+            return
+        # R24-P0-IV-02修复: volume NaN/Inf/负值过滤
+        import math as _math
+        if not isinstance(volume, (int, float)) or _math.isnan(volume) or _math.isinf(volume) or volume < 0:
+            volume = 0
+
+        # R25-P2-IV-ext修复: last_price NaN/Inf/负值过滤（防止绕过_process_tick直接调用时源头污染）
+        if (not isinstance(last_price, (int, float))
+                or _math.isnan(last_price) or _math.isinf(last_price) or last_price <= 0):
+            return
+
         if not instrument_id or last_price in (None, ''):
             return
         
-        with self._tick_lock:
+        # R15-P0-PERF-01修复: 使用分片锁替代全局_tick_lock
+        with self._get_shard_lock(instrument_id):
+            # R15-P0-DATA-03修复: tick序列号去重，基于(instrument_id, volume)组合键
+            tick_seq_key = (instrument_id, volume)
+            last_seq = self._last_tick_seq.get(instrument_id, -1)
+            current_seq = int(volume) if volume is not None else 0
+            # R23-ID-06-FIX: 换日volume归零误判保护
+            # 当current_seq远小于last_seq时，判定为换日重置而非重复tick
+            # 条件1: last_seq>1000且current_seq<last_seq*0.1 (高流动性品种换日)
+            # 条件2: last_seq>0且current_seq==0 (volume归零，任何品种换日)
+            if current_seq <= last_seq and last_seq >= 0:
+                _is_day_reset = (last_seq > 1000 and current_seq < last_seq * 0.1) or (last_seq > 0 and current_seq == 0)
+                if _is_day_reset:
+                    logger.info("[R23-ID-06-FIX] 换日volume重置检测: inst=%s last_seq=%d current_seq=%d, 视为新日首tick",
+                               instrument_id, last_seq, current_seq)
+                    self._last_tick_seq[instrument_id] = current_seq
+                else:
+                    self._tick_dedup_drop_count += 1
+                    if self._tick_dedup_drop_count % 1000 == 1:
+                        logger.warning("[R15-P0-DATA-03] tick去重丢弃: instrument_id=%s seq=%d last_seq=%d total_dropped=%d",
+                                       instrument_id, current_seq, last_seq, self._tick_dedup_drop_count)
+                    return
+            self._last_tick_seq[instrument_id] = current_seq
             if not self._bg_threads_started:
                 self._start_background_threads()
             return self._on_tick_impl(instrument_id, last_price, volume)
@@ -1131,14 +1365,15 @@ class SubscriptionManager:
             from ali2026v3_trading.diagnosis_service import is_monitored_contract
             diag_on = is_monitored_contract(normalized_id)
         except Exception:
-            logger.debug(f"[SubscriptionManagerV2] Failed to check monitored contract for {normalized_id}")
+            logger.debug("[SubscriptionManagerV2] Failed to check monitored contract for %s", normalized_id)  # R13-P2-LOG-01修复
         if diag_on:
             now = time.time()
             with self._submgr_tick_accum_lock:
                 self._submgr_tick_accum_count += 1
                 if now - self._submgr_tick_last_output_time >= self._submgr_tick_summary_interval:
-                    logging.info(f"[SUBMGR_TICK_ALL_SUMMARY] ticks={self._submgr_tick_accum_count} "
-                                f"sample=({instrument_id} -> {normalized_id} P={last_price} V={volume})")
+                    logging.info("[SUBMGR_TICK_ALL_SUMMARY] ticks=%d sample=(%s -> %s P=%s V=%s)",
+                                self._submgr_tick_accum_count,
+                                instrument_id, normalized_id, last_price, volume)  # R13-P2-LOG-01修复
                     self._submgr_tick_accum_count = 0
                     self._submgr_tick_last_output_time = now
         
@@ -1165,7 +1400,7 @@ class SubscriptionManager:
                         if internal_id is not None:
                             tts.on_future_instrument_tick(int(internal_id), float(last_price))
                         else:
-                            logging.warning(f"[SubMgr] Missing internal_id for future {normalized_id}")
+                            logging.warning("[SubMgr] Missing internal_id for future %s", normalized_id)  # R13-P2-LOG-01修复
                         routed = True
             except Exception as e:
                 err_key = str(e)
@@ -1176,10 +1411,11 @@ class SubscriptionManager:
                     self._op_error_circuit[err_key] = {'count': 0, 'first_seen': now, 'last_logged': 0}
                 self._op_error_circuit[err_key]['count'] += 1
                 if self._op_error_circuit[err_key]['count'] <= 3 or now - self._op_error_circuit[err_key]['last_logged'] > 300:
-                    logger.error(f"[SubscriptionManagerV2] Operation failed: {e}", exc_info=True)
+                    logger.error("[SubscriptionManagerV2] Operation failed: %s", e, exc_info=True)  # R13-P2-LOG-01修复
                     self._op_error_circuit[err_key]['last_logged'] = now
                 elif self._op_error_circuit[err_key]['count'] % 1000 == 0:
-                    logger.warning(f"[SubscriptionManagerV2] Operation failed '{err_key}' suppressed (count={self._op_error_circuit[err_key]['count']})")
+                    logger.warning("[SubscriptionManagerV2] Operation failed '%s' suppressed (count=%d)",
+                                  err_key, self._op_error_circuit[err_key]['count'])  # R13-P2-LOG-01修复
             
             # metadata miss：配置文件未覆盖的合约tick，记录告警，不做回退路由
             # 设计约束：合约配置文件是订阅唯一来源，无增量注册/降级路由回退
@@ -1357,9 +1593,9 @@ class SubscriptionManager:
         if stats['tick_missing_count'] > 0 and stats['tick_missing']:
             logger.warning("[Tick未收到合约] 前20个:")
             for inst in stats['tick_missing'][:20]:
-                logger.warning(f"  {inst}")
+                logger.warning("  %s", inst)  # R13-P2-LOG-01修复
             if stats['tick_missing_count'] > 20:
-                logger.warning(f"  ... 还有 {stats['tick_missing_count'] - 20} 个")
+                logger.warning("  ... 还有 %d 个", stats['tick_missing_count'] - 20)  # R13-P2-LOG-01修复
         
         logger.info("=" * 80)
 

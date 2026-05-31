@@ -32,7 +32,6 @@ class _InstrumentHelperMixin:
         if meta and meta.get('year_month'):
             return meta['year_month']
 
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
         if SubscriptionManager.is_option(instrument_id):
             try:
                 parsed = SubscriptionManager.parse_option(instrument_id)
@@ -72,8 +71,9 @@ class _InstrumentHelperMixin:
             from ali2026v3_trading.params_service import get_params_service
             params_service = get_params_service()
             class TempParams:
-                future_instruments = []
-                option_instruments = {}
+                def __init__(self):
+                    self.future_instruments = []
+                    self.option_instruments = {}
 
             temp_params = TempParams()
             result = params_service.load_instrument_list(temp_params, source='output_files')
@@ -108,7 +108,7 @@ class _InstrumentHelperMixin:
                     )
                 except Exception:
                     pass
-            except (ValueError, Exception) as e:
+            except Exception as e:
                 logging.warning(f"[Helper] 跳过无效期货合约: {contract}, error: {e}")
                 try:
                     from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
@@ -146,7 +146,7 @@ class _InstrumentHelperMixin:
                         )
                     except Exception:
                         pass
-                except (ValueError, Exception) as e:
+                except Exception as e:
                     logging.warning(f"[Helper] 跳过无效期权合约: {contract}, error: {e}")
                     try:
                         from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
@@ -167,42 +167,50 @@ class _InstrumentHelperMixin:
         return sum(len(contracts) for contracts in options_dict.values())
 
     def _derive_underlying_futures_from_options(self, options_dict: Dict[str, List[str]]) -> List[str]:
-        """从期权字典推导标的期货列表（去重）"""
+        """从期权字典推导标的期货列表（去重）
+        
+        优化：批量查询而非N次DB查询，避免大量期权时性能灾难
+        """
         underlying_set = set()
-
+        product_month_set = set()
+        
         for product, contracts in options_dict.items():
             for contract in contracts:
                 try:
                     parsed = SubscriptionManager.parse_option(contract)
-                    from ali2026v3_trading.data_service import get_data_service
-                    rows = get_data_service().query(
-                        "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
-                        [parsed['product'], parsed['year_month']]
-                    ).to_pylist()
-                    if rows:
-                        underlying = rows[0]['instrument_id']
-                    else:
-                        underlying = f"{parsed['product']}{parsed['year_month']}"
-                        logging.debug(f"[Helper] 标的期货未注册，使用解析值: {underlying}")
+                    product_month_set.add((parsed['product'], parsed['year_month']))
+                except Exception as e:
+                    logging.warning(f"[Helper] 无法解析期权合约: {contract}, error: {e}")
+        
+        if not product_month_set:
+            return []
+        
+        underlying_cache = {}
+        try:
+            from ali2026v3_trading.data_service import get_data_service
+            ds = get_data_service()
+            for product, year_month in product_month_set:
+                rows = ds.query(
+                    "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
+                    [product, year_month]
+                ).to_pylist()
+                if rows:
+                    underlying_cache[(product, year_month)] = rows[0]['instrument_id']
+                else:
+                    underlying_cache[(product, year_month)] = f"{product}{year_month}"
+                    logging.debug(f"[Helper] 标的期货未注册，使用解析值: {product}{year_month}")
+        except Exception as e:
+            logging.warning(f"[Helper] 批量查询标的期货失败: {e}")
+        
+        for product, contracts in options_dict.items():
+            for contract in contracts:
+                try:
+                    parsed = SubscriptionManager.parse_option(contract)
+                    key = (parsed['product'], parsed['year_month'])
+                    underlying = underlying_cache.get(key, f"{parsed['product']}{parsed['year_month']}")
                     underlying_set.add(underlying)
-                    try:
-                        from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
-                        DiagnosisProbeManager.on_parse_transform(
-                            'core.derive_underlying_future',
-                            str(contract or '').strip(),
-                            underlying,
-                            detail=f"option_format={parsed.get('format')}",
-                            level='INFO',
-                        )
-                    except Exception:
-                        pass
                 except Exception as e:
                     logging.warning(f"[Helper] 无法提取标的期货: {contract}, error: {e}")
-                    try:
-                        from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
-                        DiagnosisProbeManager.on_parse_failure('core.derive_underlying_future', str(contract or '').strip(), str(e))
-                    except Exception:
-                        pass
 
         result = sorted(underlying_set)
         if result:

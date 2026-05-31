@@ -1,0 +1,52 @@
+# UPG-07修复: 添加format_version字段
+format_version: "1.0"
+
+plr_thresholds:
+  small:
+    min_estimated_plr: 2.0
+    target_plr: 2.5
+    plr_filter_enabled: true
+    consecutive_loss_limit: 5
+    dynamic_tp_sl_enabled: true
+    asymmetric_risk_enabled: true
+    profit_multiplier: 1.5
+    loss_multiplier: 0.7
+    max_drawdown_pct: 0.15
+    time_stop_plr_extension: 1.5
+    pursuit_min_plr: 1.5
+    pyramid_min_plr: 1.5
+    order_split_high_plr: 3.0
+    order_split_low_plr: 1.5
+    plr_decline_trigger_ratio: 0.3
+  medium:
+    min_estimated_plr: 1.5
+    target_plr: 2.0
+    plr_filter_enabled: true
+    consecutive_loss_limit: 7
+    dynamic_tp_sl_enabled: false
+    asymmetric_risk_enabled: false
+    profit_multiplier: 1.0
+    loss_multiplier: 1.0
+    max_drawdown_pct: 0.10
+    time_stop_plr_extension: 1.0
+    pursuit_min_plr: 0.0
+    pyramid_min_plr: 0.0
+    order_split_high_plr: 3.0
+    order_split_low_plr: 1.5
+    plr_decline_trigger_ratio: 0.2
+  large:
+    min_estimated_plr: 1.0    # T4修复: 大资金也需要PLR过滤
+    target_plr: 1.5
+    plr_filter_enabled: true  # T4修复: 大资金也启用PLR过滤
+    consecutive_loss_limit: 10
+    dynamic_tp_sl_enabled: false
+    asymmetric_risk_enabled: false
+    profit_multiplier: 1.0
+    loss_multiplier: 1.0
+    max_drawdown_pct: 0.08
+    time_stop_plr_extension: 1.0
+    pursuit_min_plr: 0.0
+    pyramid_min_plr: 0.0
+    order_split_high_plr: 3.0
+    order_split_low_plr: 1.5
+    plr_decline_trigger_ratio: 0.1

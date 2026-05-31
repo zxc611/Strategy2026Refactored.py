@@ -1,0 +1,38 @@
+{
+    "$schema": "参数默认值JSON覆盖层 v1.0 — R17-PAR-P1-05修复",
+    "description": "此文件为DEFAULT_PARAM_TABLE的JSON覆盖层。运维可编辑此文件覆盖代码默认值。",
+    "updated_at": "2026-05-28",
+    "version": "17.0",
+    "params": {
+        "max_risk_ratio": {"default": 0.8, "type": "float", "min": 0.1, "max": 1.0, "description": "单边最大风险占比 (R16-P0-DF-01修复: 0.3→0.8)"},
+        "lots_min": {"default": 3, "type": "int", "min": 1, "max": 100, "description": "最小手数 (R24-P1-DF-08修复: 5→3)"},
+        "signal_cooldown_sec": {"default": 60.0, "type": "float", "min": 0.0, "max": 3600.0, "description": "信号冷却秒数"},
+        "close_take_profit_ratio": {"default": 1.8, "type": "float", "min": 0.5, "max": 5.0, "description": "止盈倍率"},
+        "option_buy_lots_min": {"default": 1, "type": "int", "min": 1, "max": 100, "description": "期权最小买入手数"},
+        "option_buy_lots_max": {"default": 100, "type": "int", "min": 1, "max": 1000, "description": "期权最大买入手数"},
+        "option_contract_multiplier": {"default": 10000, "type": "int", "min": 1000, "max": 100000, "description": "期权合约乘数"},
+        "position_limit_max_ratio": {"default": 0.2, "type": "float", "min": 0.05, "max": 0.5, "description": "持仓上限占总资金比例"},
+        "circuit_breaker_pause_sec": {"default": 180.0, "type": "float", "min": 0.0, "max": 7200.0, "description": "熔断暂停秒数"},
+        "circuit_breaker_trigger_sigma": {"default": 3.0, "type": "float", "min": 1.0, "max": 10.0, "description": "熔断触发Sigma倍数"},
+        "daily_drawdown_multiplier": {"default": 2.0, "type": "float", "min": 0.5, "max": 10.0, "description": "日回撤乘数"},
+        "kline_max_age_sec": {"default": 60, "type": "int", "min": 10, "max": 600, "description": "K线最大年龄秒"},
+        "signal_max_age_sec": {"default": 180, "type": "int", "min": 10, "max": 3600, "description": "信号最大年龄秒"},
+        "tvf_enabled": {"default": true, "type": "bool", "description": "TVF三层加权模型开关 (R17-PAR-02修复: 三源统一为True)"},
+        "tvf_l1_weight": {"default": 0.40, "type": "float", "min": 0.0, "max": 1.0, "description": "TVF L1权重"},
+        "tvf_l2_weight": {"default": 0.35, "type": "float", "min": 0.0, "max": 1.0, "description": "TVF L2权重"},
+        "tvf_l3_weight": {"default": 0.25, "type": "float", "min": 0.0, "max": 1.0, "description": "TVF L3权重"},
+        "subscription_batch_size": {"default": 10, "type": "int", "min": 1, "max": 100, "description": "订阅批次大小"},
+        "rate_limit_min_interval_sec": {"default": 1, "type": "int", "min": 0, "max": 60, "description": "下单最小间隔秒"},
+        "enforce_trading_session_boundary": {"default": true, "type": "bool", "description": "强制交易时间边界检查"},
+        "last_trading_day_close_ahead_days": {"default": 3, "type": "int", "min": 0, "max": 10, "description": "到期日平仓提前天数"},
+        "delivery_slippage_multiplier_max": {"default": 3.0, "type": "float", "min": 1.0, "max": 10.0, "description": "交割月滑点最大倍数"},
+        "default_slippage_bps": {"default": 0.0, "type": "float", "min": 0.0, "max": 100.0, "description": "默认滑点基点"},
+        "intraday_max_total_ticks": {"default": 5000000, "type": "int", "min": 100000, "max": 50000000, "description": "日内最大tick总数"},
+        "tick_shard_count": {"default": 16, "type": "int", "min": 1, "max": 64, "description": "Tick分片数"},
+        "CACHE_TTL": {"default": 60.0, "type": "float", "min": 1.0, "max": 3600.0, "description": "参数缓存TTL秒 (与state_param_manager对齐)"}
+    },
+    "constraints": {
+        "tvf_weights_sum": {"rule": "tvf_l1_weight + tvf_l2_weight + tvf_l3_weight must equal 1.0", "strict": false, "description": "TVF权重之和建议为1.0"},
+        "max_risk_positions": {"rule": "max_risk_ratio * position_limit_max_ratio must not exceed allowed risk budget", "strict": false}
+    }
+}

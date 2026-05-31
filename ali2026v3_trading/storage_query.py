@@ -5,6 +5,7 @@ READ + HELPER + INSTRUMENT + SCHEMA 方法组
 
 from ali2026v3_trading.subscription_manager import SubscriptionManager, inst_get
 from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
+from ali2026v3_trading.config_params import DATA_CLEANING_RULES
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from contextlib import contextmanager
 from typing import List, Dict, Optional, Any, Tuple, Callable
 from datetime import datetime, time as dt_time
 
-from ali2026v3_trading.shared_utils import InitPhase, requires_phase
+from ali2026v3_trading.shared_utils import InitPhase, requires_phase, CHINA_TZ
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -163,6 +164,7 @@ class _StorageQueryMixin:
         return result
 
     def _validate_tick(self, tick: Dict[str, Any]) -> bool:
+        _rules = DATA_CLEANING_RULES
         if not isinstance(tick, dict):
             logging.error("save_tick 参数不是字典：%s", type(tick))
             return False
@@ -180,11 +182,24 @@ class _StorageQueryMixin:
         if ts_value is None:
             logging.error("save_tick 缺少时间戳字段 (ts、timestamp 或 UpdateTime)")
             return False
-        if not isinstance(last_price, (int, float)) or last_price < 0:
-            logging.warning("save_tick 价格无效（结算tick可能为0）：%s", last_price)
-            return True
+        if _rules.get('remove_zero_price', True) and (not isinstance(last_price, (int, float)) or last_price <= 0):
+            logging.warning("save_tick 价格无效(<=0)：%s", last_price)
+            return False
+        bid_price1 = tick.get('bid_price1') or tick.get('BidPrice1')
+        ask_price1 = tick.get('ask_price1') or tick.get('AskPrice1')
+        if bid_price1 is not None and ask_price1 is not None:
+            if isinstance(bid_price1, (int, float)) and isinstance(ask_price1, (int, float)):
+                if bid_price1 > 0 and ask_price1 > 0 and bid_price1 >= ask_price1:
+                    _max_spread_pct = _rules.get('max_spread_pct', 5.0)
+                    _spread_pct = abs(bid_price1 - ask_price1) / ask_price1 * 100.0
+                    if _spread_pct > _max_spread_pct:
+                        logging.warning("save_tick 盘口价差异常: spread_pct=%.2f%% > max=%.2f%%, bid=%.4f, ask=%.4f, instrument=%s",
+                                        _spread_pct, _max_spread_pct, bid_price1, ask_price1, instrument_id)
+                    logging.warning("save_tick 盘口交叉异常: bid=%.4f >= ask=%.4f instrument=%s",
+                                    bid_price1, ask_price1, instrument_id)
+                    return False
         volume = tick.get('volume', tick.get('Volume', 0))
-        if volume is not None and (not isinstance(volume, (int, float)) or volume < 0):
+        if _rules.get('remove_negative_volume', True) and volume is not None and (not isinstance(volume, (int, float)) or volume < 0):
             logging.error("save_tick 成交量无效：%s", volume)
             return False
         return True
@@ -638,7 +653,7 @@ class _StorageQueryMixin:
         from datetime import timedelta
         import time as time_module
 
-        end_time = datetime.now()
+        end_time = datetime.now(CHINA_TZ)
         start_time = end_time - timedelta(minutes=history_minutes)
 
         logging.info(
@@ -867,7 +882,7 @@ class _StorageQueryMixin:
             chain = self.get_option_chain_for_future(future_instrument_id)
             return chain.get('options', [])
         except Exception as e:
-            logging.error("get_option_chain failed: %s", e)
+            logging.error("[R22-EP-P1] get_option_chain failed(数据库异常→空列表，调用方无法区分无数据/故障): %s", e, exc_info=True)
             return []
 
     def get_latest_underlying(self, underlying: str, expiration: str) -> Optional[Dict[str, Any]]:
@@ -980,7 +995,7 @@ class _StorageQueryMixin:
             return futures_list, options_dict
 
         except Exception as e:
-            logger.error("load_all_instruments 异常：%s", e)
+            logger.error("[R22-EP-P1] load_all_instruments 异常(数据库异常→空结果，调用方无法区分无数据/故障): %s", e, exc_info=True)
             return [], {}
 
     def load(self, key: str) -> Optional[Any]:
@@ -1019,10 +1034,10 @@ class _StorageQueryMixin:
         raise RuntimeError("[Storage] _maintenance_service is None, cannot reserve global ID")
 
     def _create_future_tables_by_id(self, instrument_id: int):
-        logging.debug("_create_future_tables_by_id is deprecated, using unified klines_raw")
+        logging.warning("[DEPRECATED] _create_future_tables_by_id is deprecated, using unified klines_raw")  # R16-P1-DOC-P1-10修复: debug→warning确保废弃标记可见
 
     def _create_option_tables_by_id(self, instrument_id: int):
-        logging.debug("_create_option_tables_by_id is deprecated, using unified klines_raw")
+        logging.warning("[DEPRECATED] _create_option_tables_by_id is deprecated, using unified klines_raw")  # R16-P1-DOC-P1-10修复: debug→warning确保废弃标记可见
 
     @requires_phase(InitPhase.EXTERNAL_SERVICES)
     def register_instrument(self, instrument_id: str, exchange: str = "AUTO",
@@ -1067,11 +1082,11 @@ class _StorageQueryMixin:
                         self._data_service.query("""
                             INSERT INTO futures_instruments
                             (internal_id, exchange, instrument_id, product, year_month, format,
-                             expire_date, listing_date, kline_table, tick_table, product_code, shard_key)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             expire_date, listing_date, kline_table, tick_table, product_code, shard_key, is_active)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, [new_id, exchange, normalized_instrument_id, parsed['product'], parsed['year_month'],
                               prod['format_template'], expire_date, listing_date, kline_table, tick_table,
-                              parsed['product'].lower(), ShardRouter._deterministic_hash(parsed['product'].lower())], raise_on_error=True)
+                              parsed['product'].lower(), ShardRouter._deterministic_hash(parsed['product'].lower()), 1], raise_on_error=True)
                         self._create_future_tables_by_id(new_id)
                         # 更新缓存
                         info = self._make_instrument_info(
@@ -1129,12 +1144,12 @@ class _StorageQueryMixin:
                             INSERT INTO option_instruments
                             (internal_id, exchange, instrument_id, product, underlying_future_id, underlying_product,
                             year_month, option_type, strike_price, format,
-                            expire_date, listing_date, kline_table, tick_table, product_code, shard_key)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            expire_date, listing_date, kline_table, tick_table, product_code, shard_key, is_active)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, [new_id, exchange, normalized_instrument_id, parsed['product'], new_future_id, prod['product'], parsed['year_month'],
                               parsed['option_type'], parsed['strike_price'], prod['format_template'],
                               expire_date, listing_date, kline_table, tick_table,
-                              opt_product_code, opt_shard_key], raise_on_error=True)
+                              opt_product_code, opt_shard_key, 1], raise_on_error=True)
                         self._create_option_tables_by_id(new_id)
                         # 更新缓存
                         info = self._make_instrument_info(

@@ -1,0 +1,164 @@
+# CascadeJudge 瀑布式评判引擎 — 期权阈值扫描网格
+# UPG-07修复: 添加format_version字段
+format_version: "1.0"
+# 用途：参数池Round2辅助参数精扫 + 策略类型自适应阈值搜索
+# 扫描总组合数: 17×15×13×15×10×9×10 = 4,009,500 (需分批或采样)
+#
+# 期权策略盈亏比参考：
+#   危险期权卖方(裸卖Call/Put): PR≈1.5  Sharpe≈0.8-1.5
+#   铁鹰/蝶式卖方:              PR≈2.0  Sharpe≈1.2-2.0
+#   垂直价差卖方:               PR≈2.5  Sharpe≈1.5-2.5
+#   日历价差:                   PR≈3.0  Sharpe≈2.0-3.0
+#   单腿买权(趋势):            PR≈4.0  Sharpe≈2.5-4.0
+#   买权+Gamma Scalping:       PR≈5.0  Sharpe≈3.0-5.0
+#
+# 创建日期: 2026-05-20
+# 来源: parameter_attribute_matrix.yaml grid定义
+
+# =============================================================================
+# 第一关：盈亏比验证 — 期权权利金盈亏比从0.5:1到6:1全覆盖
+# =============================================================================
+gate1_min_profit_ratio_grid:
+  values: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0]
+  count: 17
+  option_strategy_anchors:
+    naked_short: 1.5
+    iron_condor: 2.0
+    vertical_spread: 2.5
+    calendar_spread: 3.0
+    long_call_trend: 4.0
+    gamma_scalping: 5.0
+
+# =============================================================================
+# 第二关：三角验证 — Sortino/Calmar/Sharpe
+# =============================================================================
+gate2_min_sortino_grid:
+  values: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0]
+  count: 15
+
+gate2_min_calmar_grid:
+  values: [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0]
+  count: 13
+
+gate2_min_sharpe_grid:
+  values: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0]
+  count: 15
+
+# =============================================================================
+# 第三关：小资金约束
+# =============================================================================
+gate3_max_consecutive_losses_grid:
+  values: [2, 3, 4, 5, 6, 7, 8, 10, 12, 15]
+  count: 10
+
+gate3_max_flat_days_grid:
+  values: [3, 5, 10, 15, 20, 30, 45, 60, 90]
+  count: 9
+
+gate3_max_margin_ratio_grid:
+  values: [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
+  count: 10
+
+# =============================================================================
+# 策略类型推荐阈值预设（期权适配）
+# =============================================================================
+strategy_preset_thresholds:
+  high_freq:
+    gate1_min_profit_ratio: 1.8
+    gate2_min_sortino: 1.5
+    gate2_min_calmar: 0.8
+    gate2_min_sharpe: 1.2
+    gate3_max_consecutive_losses: 5
+    gate3_max_flat_days: 20
+    gate3_max_margin_ratio: 0.50
+
+  resonance:
+    gate1_min_profit_ratio: 2.0
+    gate2_min_sortino: 1.5
+    gate2_min_calmar: 1.0
+    gate2_min_sharpe: 1.2
+    gate3_max_consecutive_losses: 6
+    gate3_max_flat_days: 30
+    gate3_max_margin_ratio: 0.50
+
+  box:
+    gate1_min_profit_ratio: 2.5
+    gate2_min_sortino: 1.75
+    gate2_min_calmar: 1.0
+    gate2_min_sharpe: 1.5
+    gate3_max_consecutive_losses: 5
+    gate3_max_flat_days: 15
+    gate3_max_margin_ratio: 0.60
+
+  spring:
+    gate1_min_profit_ratio: 2.5
+    gate2_min_sortino: 1.75
+    gate2_min_calmar: 1.0
+    gate2_min_sharpe: 1.5
+    gate3_max_consecutive_losses: 5
+    gate3_max_flat_days: 15
+    gate3_max_margin_ratio: 0.60
+
+  arbitrage:
+    gate1_min_profit_ratio: 1.5
+    gate2_min_sortino: 1.0
+    gate2_min_calmar: 0.5
+    gate2_min_sharpe: 0.75
+    gate3_max_consecutive_losses: 8
+    gate3_max_flat_days: 10
+    gate3_max_margin_ratio: 0.80
+
+  market_making:
+    gate1_min_profit_ratio: 1.5
+    gate2_min_sortino: 1.25
+    gate2_min_calmar: 0.75
+    gate2_min_sharpe: 1.0
+    gate3_max_consecutive_losses: 7
+    gate3_max_flat_days: 10
+    gate3_max_margin_ratio: 0.70
+
+  correct_trending_defensive:
+    gate1_min_profit_ratio: 2.0
+    gate2_min_sortino: 1.75
+    gate2_min_calmar: 1.0
+    gate2_min_sharpe: 1.5
+    gate3_max_consecutive_losses: 4
+    gate3_max_flat_days: 15
+    gate3_max_margin_ratio: 0.40
+
+  incorrect_reversal_defensive:
+    gate1_min_profit_ratio: 2.5
+    gate2_min_sortino: 1.75
+    gate2_min_calmar: 1.25
+    gate2_min_sharpe: 1.5
+    gate3_max_consecutive_losses: 4
+    gate3_max_flat_days: 20
+    gate3_max_margin_ratio: 0.40
+
+# =============================================================================
+# Sigmoid中心点扫描网格（center=gate阈值，同步扫描）
+# =============================================================================
+sigmoid_center_grids:
+  pr_tri_center: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0]
+  sortino_tri_center: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0]
+  calmar_tri_center: [0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0]
+  sharpe_tri_center: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0]
+
+# =============================================================================
+# 组合扫描策略（避免全组合爆炸）
+# =============================================================================
+scan_strategies:
+  fixed_defaults_scan_sensitivity:
+    description: "固定其他参数为默认值，逐个扫描单参数敏感性"
+    total_runs: 89
+    usage: "Round2辅助参数精扫"
+
+  strategy_preset_scan_margin:
+    description: "按策略预设固定gate1-2，仅扫描gate3保证金阈值"
+    total_runs: 60
+    usage: "期权保证金适配"
+
+  full_orthogonal_sampling:
+    description: "全正交拉丁超方采样，覆盖高维空间"
+    total_runs: 500
+    usage: "最终验证扫描"

@@ -1,0 +1,378 @@
+{
+  "audit_summary": {
+    "project_path": "C:/Users/xu/AppData/Roaming/InfiniTrader_SimulationX64/pyStrategy/demo/ali2026v3_trading/",
+    "audit_date": "2026-05-28",
+    "audit_round": "第23轮",
+    "total_files_scanned": 100,
+    "p1_count": 10,
+    "p2_count": 22,
+    "audit_dimensions": ["类型安全", "错误传播与异常处理", "资源生命周期", "时间处理"]
+  },
+  "p1_issues": [
+    {
+      "issue_id": "P1-01",
+      "priority": "P1",
+      "dimension": "错误传播与异常处理",
+      "file": "risk_service.py",
+      "line": "240-251",
+      "description": "影子引擎EV暂停/降级检查被except Exception: pass完全静默，异常时开仓被放行而非阻断",
+      "impact": "风控关键路径异常静默，可能导致应阻断的交易被错误放行，影响资金安全",
+      "fix_solution": "改为fail-safe模式：except Exception时返回block_result(CRITICAL级别)，记录logging.error并触发告警回调",
+      "verification_method": "grep确认L240-251块，unittest模拟raise Exception验证返回is_block=True"
+    },
+    {
+      "issue_id": "P1-02",
+      "priority": "P1",
+      "dimension": "错误传播与异常处理",
+      "file": "signal_service.py",
+      "line": "179-196",
+      "description": "初始化和配置加载路径中多个except Exception: pass，ConfigService读取失败时静默降级",
+      "impact": "配置加载失败无感知，可能导致关键参数使用错误默认值，信号过滤失效",
+      "fix_solution": "改为except Exception as e: logging.warning记录异常详情，设置降级标志self._config_load_failed=True",
+      "verification_method": "grep确认L179、L195两处，验证异常时日志输出包含[R22-EP-P1]标记"
+    },
+    {
+      "issue_id": "P1-03",
+      "priority": "P1",
+      "dimension": "资源生命周期",
+      "file": "shadow_strategy_engine.py",
+      "line": "323-331",
+      "description": "ThreadPoolExecutor(max_workers=1)创建后，daemon设置依赖线程内部属性_threads，可能失败",
+      "impact": "若daemon设置失败，进程退出时线程阻塞，资源泄漏",
+      "fix_solution": "L323-331已尝试设置daemon，需验证有效性；建议在shutdown()中强制shutdown(wait=True, cancel_futures=True)",
+      "verification_method": "运行测试test_shadow_strategy_engine.py:432-444验证线程在进程退出时正确终止"
+    },
+    {
+      "issue_id": "P1-04",
+      "priority": "P1",
+      "dimension": "资源生命周期",
+      "file": "position_service.py",
+      "line": "1652-1655",
+      "description": "类级ThreadPoolExecutor(_close_retry_executor)永不显式shutdown，虽有L1647 atexit清理但不覆盖所有退出场景",
+      "impact": "频繁创建PositionService实例时线程池累积，资源泄漏",
+      "fix_solution": "在PositionService类中添加__del__方法调用cls._close_retry_executor.shutdown(wait=False)",
+      "verification_method": "psutil.ThreadPoolExecutor实例计数，验证多次实例化后线程数不增长"
+    },
+    {
+      "issue_id": "P1-05",
+      "priority": "P1",
+      "dimension": "错误传播与异常处理",
+      "file": "event_bus.py",
+      "line": "95-98",
+      "description": "ThreadPoolExecutor创建时未显式注册到生命周期管理器，shutdown依赖外部调用",
+      "impact": "EventBus实例泄漏时线程池不释放，事件分发线程僵尸",
+      "fix_solution": "在__init__中注册atexit.register(self.shutdown)或集成到SingletonManager",
+      "verification_method": "grep确认L95-98后，搜索atexit.register或shutdown调用链"
+    },
+    {
+      "issue_id": "P1-06",
+      "priority": "P1",
+      "dimension": "时间处理",
+      "file": "ProductionQuantSystem.py",
+      "line": "610",
+      "description": "主循环while True: time.sleep(1.0)无进程守护，崩溃后无自动重启",
+      "impact": "进程异常退出时系统停止运行，影响实盘交易连续性",
+      "fix_solution": "使用supervisor/systemd守护进程，或内部实现自动重启机制（捕获Exception后重启而非return）",
+      "verification_method": "模拟raise Exception验证进程是否重启而非退出"
+    },
+    {
+      "issue_id": "P1-07",
+      "priority": "P1",
+      "dimension": "时间处理",
+      "file": "order_service.py",
+      "line": "3151",
+      "description": "_retry_send_order中time.sleep(backoff_delay)在持锁上下文中可能被调用，阻塞整个订单服务",
+      "impact": "重试期间订单服务全局阻塞，影响其他订单处理",
+      "fix_solution": "释放锁后再sleep，或使用ThreadPoolExecutor异步重试",
+      "verification_method": "grep搜索with self._lock后是否调用time.sleep"
+    },
+    {
+      "issue_id": "P1-08",
+      "priority": "P1",
+      "dimension": "类型安全",
+      "file": "storage_query.py",
+      "line": "151-240",
+      "description": "isinstance(price, (int, float))对numpy.int64/numpy.float64返回False，可能导致有效数据被拒绝",
+      "impact": "numpy类型数据被错误过滤，影响数据查询正确性",
+      "fix_solution": "改为try: price = float(price) except: return False或检查hasattr(obj, '__float__')",
+      "verification_method": "unittest传入numpy.int64验证通过"
+    },
+    {
+      "issue_id": "P1-09",
+      "priority": "P1",
+      "dimension": "错误传播与异常处理",
+      "file": "strategy_tick_handler.py",
+      "line": "192-193",
+      "description": "_route_shard_index中except Exception未记录异常详情，fallback路由可能掩盖真实错误",
+      "impact": "分片路由异常时静默降级，可能导致负载不均衡",
+      "fix_solution": "改为except Exception as _e: logging.debug记录异常详情和instrument_id",
+      "verification_method": "模拟params_service抛出异常，验证日志输出"
+    },
+    {
+      "issue_id": "P1-10",
+      "priority": "P1",
+      "dimension": "时间处理",
+      "file": "ds_data_writer.py",
+      "line": "157",
+      "description": "datetime.fromtimestamp(ts)无tz参数，返回naive datetime对象",
+      "impact": "时区不明确，跨时区部署时时间判断错误",
+      "fix_solution": "改为datetime.fromtimestamp(ts, tz=timezone.utc)或使用CHINA_TZ",
+      "verification_method": "grep搜索datetime.fromtimestamp后检查tz参数"
+    }
+  ],
+  "p2_issues": [
+    {
+      "issue_id": "P2-01",
+      "priority": "P2",
+      "dimension": "错误传播与异常处理",
+      "file": "signal_service.py",
+      "line": "293-295",
+      "description": "EventBus订阅失败时except Exception: pass，可能导致事件订阅缺失",
+      "impact": "HMM/E13事件订阅失败无感知，信号过滤功能降级",
+      "fix_solution": "改为except Exception as e: logging.warning记录订阅失败详情",
+      "verification_method": "模拟EventBus.subscribe抛出异常，验证日志输出"
+    },
+    {
+      "issue_id": "P2-02",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "storage_core.py",
+      "line": "581",
+      "description": "time.sleep(0.001)忙等，Windows下实际精度约15.6ms，远超预期",
+      "impact": "tick writer唤醒延迟，影响高频数据处理吞吐",
+      "fix_solution": "使用threading.Event.wait(timeout=0.001)或queue.get(timeout=0.001)",
+      "verification_method": "性能测试对比time.sleep vs Event.wait延迟精度"
+    },
+    {
+      "issue_id": "P2-03",
+      "priority": "P2",
+      "dimension": "资源生命周期",
+      "file": "ds_db_connection.py",
+      "line": "63-75",
+      "description": "ThreadPoolExecutor(max_workers=1)在函数内创建，依赖contextmanager管理",
+      "impact": "数据库连接池生命周期管理不明确",
+      "fix_solution": "确认with语句确保shutdown，或使用模块级单例",
+      "verification_method": "grep检查with ThreadPoolExecutor上下文"
+    },
+    {
+      "issue_id": "P2-04",
+      "priority": "P2",
+      "dimension": "类型安全",
+      "file": "box_spring_strategy.py",
+      "line": "337-339",
+      "description": "isinstance(high, float)检查后直接使用math.isnan，若high为int类型会跳过检查",
+      "impact": "int类型的NaN/Inf值未被检测",
+      "fix_solution": "改为isinstance(high, (int, float)) and not math.isfinite(high)",
+      "verification_method": "unittest传入int值验证检查覆盖"
+    },
+    {
+      "issue_id": "P2-05",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "quant_platform.py",
+      "line": "68",
+      "description": "datetime.fromtimestamp(epoch_ms / 1000.0, tz=self._CST)，epoch_ms需校验是否为毫秒",
+      "impact": "若epoch_ms单位错误，时间计算偏差1000倍",
+      "fix_solution": "添加参数校验：if epoch_ms > 1e12: epoch_ms /= 1000.0",
+      "verification_method": "unittest传入秒/毫秒两种格式验证输出时间正确"
+    },
+    {
+      "issue_id": "P2-06",
+      "priority": "P2",
+      "dimension": "错误传播与异常处理",
+      "file": "config_service.py",
+      "line": "948",
+      "description": "time.sleep(0.1)重试等待，阻塞配置加载线程",
+      "impact": "配置加载延迟，影响启动时间",
+      "fix_solution": "使用异步重试或减少重试次数",
+      "verification_method": "测量配置加载总耗时"
+    },
+    {
+      "issue_id": "P2-07",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "maintenance_service.py",
+      "line": "1671",
+      "description": "datetime.fromtimestamp(now)无tz参数",
+      "impact": "维护服务时间戳时区不明确",
+      "fix_solution": "改为datetime.fromtimestamp(now, tz=_CHINA_TZ)",
+      "verification_method": "grep检查tz参数"
+    },
+    {
+      "issue_id": "P2-08",
+      "priority": "P2",
+      "dimension": "资源生命周期",
+      "file": "strategy_core_service.py",
+      "line": "116",
+      "description": "ThreadPoolExecutor在__init__创建，依赖atexit清理",
+      "impact": "若atexit未触发，线程池泄漏",
+      "fix_solution": "在stop()方法中显式调用self._strategy_executor.shutdown(wait=False)",
+      "verification_method": "grep检查stop()方法中shutdown调用"
+    },
+    {
+      "issue_id": "P2-09",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "scheduler_service.py",
+      "line": "118, 491, 495",
+      "description": "time.sleep用于调度等待，无漂移补偿",
+      "impact": "长时间运行后调度时间漂移累积",
+      "fix_solution": "使用time.perf_counter计算实际间隔，动态调整sleep时长",
+      "verification_method": "长时间运行测试验证调度时间漂移<1%"
+    },
+    {
+      "issue_id": "P2-10",
+      "priority": "P2",
+      "dimension": "错误传播与异常处理",
+      "file": "subscription_manager.py",
+      "line": "620-628",
+      "description": "订阅重试使用time.sleep阻塞，可能导致订阅延迟",
+      "impact": "订阅失败时重试阻塞其他订阅处理",
+      "fix_solution": "使用异步重试队列",
+      "verification_method": "模拟订阅失败验证重试不阻塞其他订阅"
+    },
+    {
+      "issue_id": "P2-11",
+      "priority": "P2",
+      "dimension": "类型安全",
+      "file": "causal_chain_utils.py",
+      "line": "143",
+      "description": "isinstance(price, (int, float))检查，未处理numpy类型",
+      "impact": "numpy价格数据可能被拒绝",
+      "fix_solution": "添加hasattr(price, '__float__')检查",
+      "verification_method": "unittest传入numpy.float64验证通过"
+    },
+    {
+      "issue_id": "P2-12",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "performance_monitor.py",
+      "line": "171",
+      "description": "datetime.fromtimestamp(counter._start_time)无tz参数",
+      "impact": "性能监控时间戳时区不明确",
+      "fix_solution": "改为datetime.fromtimestamp(counter._start_time, tz=timezone.utc)",
+      "verification_method": "grep检查tz参数"
+    },
+    {
+      "issue_id": "P2-13",
+      "priority": "P2",
+      "dimension": "资源生命周期",
+      "file": "diagnosis_service.py",
+      "line": "387",
+      "description": "线程join(timeout=2.0)可能超时后线程仍在运行",
+      "impact": "诊断服务停止时线程未完全终止",
+      "fix_solution": "join超时后检查thread.is_alive()，若True则记录warning",
+      "verification_method": "模拟线程阻塞验证超时处理"
+    },
+    {
+      "issue_id": "P2-14",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "strategy_scheduler.py",
+      "line": "83, 211, 224",
+      "description": "time.sleep用于APScheduler初始化重试和调度等待",
+      "impact": "调度器初始化阻塞和漂移累积",
+      "fix_solution": "使用指数退避和漂移补偿",
+      "verification_method": "测量调度器初始化总耗时和漂移"
+    },
+    {
+      "issue_id": "P2-15",
+      "priority": "P2",
+      "dimension": "错误传播与异常处理",
+      "file": "product_initializer.py",
+      "line": "396",
+      "description": "time.sleep(0.5 * attempt)重试等待",
+      "impact": "产品初始化重试阻塞",
+      "fix_solution": "使用异步初始化或并发重试",
+      "verification_method": "测量初始化总耗时"
+    },
+    {
+      "issue_id": "P2-16",
+      "priority": "P2",
+      "dimension": "类型安全",
+      "file": "t_type_service.py",
+      "line": "254",
+      "description": "isinstance(underlying_future_id, int)检查，未处理numpy.int64",
+      "impact": "numpy类型的underlying_future_id可能被拒绝",
+      "fix_solution": "改为try: underlying_future_id = int(underlying_future_id)",
+      "verification_method": "unittest传入numpy.int64验证通过"
+    },
+    {
+      "issue_id": "P2-17",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "resilience_utils.py",
+      "line": "136, 246, 286",
+      "description": "多处thread.join(timeout)无超时后检查",
+      "impact": "线程可能未完全终止",
+      "fix_solution": "join后检查is_alive()并记录日志",
+      "verification_method": "grep检查join后is_alive检查"
+    },
+    {
+      "issue_id": "P2-18",
+      "priority": "P2",
+      "dimension": "错误传播与异常处理",
+      "file": "strategy_lifecycle_mixin.py",
+      "line": "880",
+      "description": "time.sleep(5.0 * attempt)重试等待，阻塞策略重启",
+      "impact": "策略重启延迟",
+      "fix_solution": "使用异步重启机制",
+      "verification_method": "测量重启总耗时"
+    },
+    {
+      "issue_id": "P2-19",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "storage_core.py",
+      "line": "1749",
+      "description": "time.sleep(_retry_delay)数据库重试等待",
+      "impact": "数据库操作阻塞",
+      "fix_solution": "使用异步数据库连接池",
+      "verification_method": "测量数据库操作总耗时"
+    },
+    {
+      "issue_id": "P2-20",
+      "priority": "P2",
+      "dimension": "类型安全",
+      "file": "state_param_manager.py",
+      "line": "313",
+      "description": "isinstance(count, (int, float))检查",
+      "impact": "numpy类型count可能被拒绝",
+      "fix_solution": "添加numpy类型处理",
+      "verification_method": "unittest传入numpy类型验证"
+    },
+    {
+      "issue_id": "P2-21",
+      "priority": "P2",
+      "dimension": "错误传播与异常处理",
+      "file": "order_persistence.py",
+      "line": "102",
+      "description": "time.sleep(interval)重试等待",
+      "impact": "订单持久化重试阻塞",
+      "fix_solution": "使用异步持久化队列",
+      "verification_method": "测量持久化总耗时"
+    },
+    {
+      "issue_id": "P2-22",
+      "priority": "P2",
+      "dimension": "时间处理",
+      "file": "strategy_historical.py",
+      "line": "635",
+      "description": "time.sleep(delay)历史数据加载重试等待",
+      "impact": "历史数据加载延迟",
+      "fix_solution": "使用异步加载",
+      "verification_method": "测量加载总耗时"
+    }
+  ],
+  "verification_summary": {
+    "代码存在": "✅ 100个Python文件，py_compile可通过",
+    "代码可用": "⚠️ 10处P1异常处理问题可能导致运行时错误",
+    "代码被调用": "✅ 核心模块grep确认有调用方",
+    "参数传递链路": "⚠️ 需进一步验证跨模块参数传递",
+    "参数改变结果改变": "⚠️ 需单元测试验证参数敏感性",
+    "默认值在扫描网格": "⚠️ 需验证参数扫描覆盖默认值",
+    "排序指标一致性": "⚠️ 需验证扫描目标与排序指标对齐",
+    "三系统代码对齐": "⚠️ 需比对生产/测试/评判代码一致性",
+    "全链路通畅性": "❌ 10项P1问题需优先修复"
+  }
+}

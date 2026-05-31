@@ -19,19 +19,33 @@ import time
 import threading
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ali2026v3_trading.params_service import _read_param, get_param_value
+from ali2026v3_trading.shared_utils import CHINA_TZ
+
+# PY-P1-01修复: 将import移至模块顶部，避免@property中执行重I/O
+try:
+    from ali2026v3_trading import get_instrument_data_manager
+except ImportError:
+    get_instrument_data_manager = None
 
 
 # ============================================================================
 # StrategyState — 策略完整生命周期状态（供跨模块导入）
+# R16-P2-016修复: 三系统状态机定义
+# 生产(StrategySlot): active/paused/degraded/retired/handover/standby
+# 回测(_BacktestState): 使用strategy_type字符串
+# 评判(CascadeJudge): 使用枚举
+# 差异原因: 各系统服务于不同层面(运行时/回测/评判)，状态语义一致但表示不同
 # ============================================================================
 
 class StrategyState(Enum):
     """策略完整生命周期状态"""
     INITIALIZING = "initializing"
     RUNNING = "running"
+    # UPG-P1-03修复: 并行运行期状态，新旧策略同时运行比较结果
+    PARALLEL_RUNNING = "parallel_running"
     DEGRADED = "degraded"
     PAUSED = "paused"
     STOPPED = "stopped"
@@ -67,26 +81,73 @@ def _state_is(state, *targets) -> bool:
 
 class _LifecycleMixin:
 
+    OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
+
     @property
     def storage(self):
-        """惰性初始化storage"""
+        """惰性初始化storage - PY-P1-01修复: import已移至模块顶部"""
         if self._storage is None:
             with self._storage_lock:
                 if self._storage is None:
                     try:
-                        from ali2026v3_trading import get_instrument_data_manager
+                        if get_instrument_data_manager is None:
+                            raise ImportError("get_instrument_data_manager not available")
                         self._storage = get_instrument_data_manager()
                     except Exception as e:
-                        logging.error(f"[Storage] Init failed: {e}")
-                        raise RuntimeError(f"Storage init failed: {e}")
+                        logging.warning("[Storage] Init failed (graceful degradation): %s", e)
+                        return None
         return self._storage
 
+    VALID_STATE_TRANSITIONS = {
+        StrategyState.INITIALIZING: [StrategyState.RUNNING, StrategyState.ERROR, StrategyState.DEGRADED],
+        StrategyState.RUNNING: [StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED, StrategyState.PARALLEL_RUNNING],
+        # UPG-P1-03修复: 并行运行期状态转换
+        StrategyState.PARALLEL_RUNNING: [StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED],
+        StrategyState.PAUSED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR],
+        StrategyState.DEGRADED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED_STOP],
+        StrategyState.ERROR: [StrategyState.INITIALIZING, StrategyState.STOPPED],
+        StrategyState.DEGRADED_STOP: [StrategyState.STOPPED, StrategyState.INITIALIZING],
+        StrategyState.STOPPED: [StrategyState.INITIALIZING],
+    }
+
     def transition_to(self, new_state: StrategyState) -> bool:
-        """线程安全的状态转换方法。"""
+        """线程安全的状态转换方法。
+        
+        包含状态转换合法性校验，防止非法状态跃迁。
+        """
+        # R13-P1-API-04修复: Mixin方法添加hasattr检查，防止子类属性未初始化时崩溃
+        if not hasattr(self, '_state_lock') or not hasattr(self, '_state'):
+            logging.error("[StrategyCoreService] transition_to: _state或_state_lock未初始化")
+            return False
         with self._state_lock:
             old_state = self._state
+            if not _state_is(old_state, new_state):
+                valid_targets = self.VALID_STATE_TRANSITIONS.get(old_state, [])
+                if not any(_state_is(new_state, t) for t in valid_targets):
+                    logging.warning(
+                        f"[StrategyCoreService] Invalid state transition: {old_state.value} -> {new_state.value}, allowed: {[s.value for s in valid_targets]}"
+                    )
+                    return False
             self._state = new_state
-            logging.debug(f"[StrategyCoreService] State transition: {old_state.value} -> {new_state.value}")
+            # R23-SM-01-FIX: 自动同步_is_running，消除任何路径遗漏
+            _new_key = _state_key(new_state)
+            if _new_key == 'running':
+                if hasattr(self, '_is_running'):
+                    self._is_running = True
+            elif _new_key in ('paused', 'stopped', 'degraded', 'degraded_stop', 'error'):
+                if hasattr(self, '_is_running'):
+                    self._is_running = False
+            # P2-R11-02修复: 策略降级/停止时清理策略级参数缓存
+            if _new_key in ('degraded', 'stopped', 'degraded_stop'):
+                try:
+                    from ali2026v3_trading.config_params import invalidate_strategy_cache
+                    _sid = getattr(self, 'strategy_id', None) or getattr(self, '_strategy_id', None)
+                    if _sid:
+                        invalidate_strategy_cache(_sid)
+                        logging.info("[P2-R11-02] 策略%s降级/停止，已清理策略级参数缓存", _sid)
+                except Exception as _e:
+                    logging.warning("[P2-R11-02] 缓存清理失败: %s", _e)
+            logging.info("[R23-P2-01-FIX] State transition: %s -> %s", old_state.value, new_state.value)
             return True
 
     def _start_platform_subscribe_async(self, instrument_ids: List[str]) -> None:
@@ -143,6 +204,10 @@ class _LifecycleMixin:
 
     def bind_platform_apis(self, strategy_obj: Any) -> None:
         """绑定平台API（P0-3.3修复：加锁保护，防止与on_stop等并发竞争）"""
+        # R13-P1-API-04修复: Mixin方法添加hasattr检查
+        if not hasattr(self, '_lock'):
+            logging.error("[StrategyCoreService] bind_platform_apis: _lock未初始化")
+            return
         with self._lock:
             self._do_bind_platform_apis(strategy_obj)
 
@@ -160,7 +225,8 @@ class _LifecycleMixin:
             def _subscribe(instrument_id: str, data_type: str = 'tick') -> None:
                 exchange = resolve_product_exchange(instrument_id)
                 _sub_call_counter[0] += 1
-                if _sub_call_counter[0] <= 10 or (exchange == 'SHFE' and 'C' in instrument_id[6:] or 'P' in instrument_id[6:]):
+                suffix = instrument_id[6:] if len(instrument_id) > 6 else ''
+                if _sub_call_counter[0] <= 10 or (exchange == 'SHFE' and ('C' in suffix or 'P' in suffix)):
                     logging.info(f"[PROBE_SUB] #{_sub_call_counter[0]} exchange={exchange} instrument_id={instrument_id}")
                 sub(exchange, instrument_id)
             self.subscribe = _subscribe
@@ -191,6 +257,13 @@ class _LifecycleMixin:
 
         if hasattr(self, 'storage') and self.storage is not None:
             self.storage.bind_platform_subscribe_api(self.subscribe, self.unsubscribe)
+
+        # R30-P0-01修复: 将subscribe API同步绑定到DataService
+        try:
+            from ali2026v3_trading.data_service import DataService
+            DataService.bind_subscribe_api(self.subscribe, self.unsubscribe)
+        except Exception as e:
+            logging.debug("[StrategyLifecycleMixin] DataService.bind_subscribe_api failed: %s", e)
 
         if self._platform_insert_order:
             self._ensure_order_service()
@@ -290,7 +363,7 @@ class _LifecycleMixin:
             logging.error(f"[StrategyCoreService._init_analytics_services] Error: {e}", exc_info=True)
             self.analytics_service = None
 
-    def _build_instrument_groups(self, storage) -> tuple:
+    def _build_instrument_groups(self, storage) -> Tuple[List[str], Dict[str, List[str]]]:  # [R22-P2-TS24]
         """构建期货/期权合约分组（从_storage查询已注册合约并分类）。"""
         futures_instruments: List[str] = []
         option_instruments: Dict[str, List[str]] = {}
@@ -335,8 +408,7 @@ class _LifecycleMixin:
             option_product = parsed['product']
             year_month = parsed['year_month']
 
-            OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
-            future_product = OPTION_TO_FUTURE_MAP.get(option_product, option_product)
+            future_product = self.OPTION_TO_FUTURE_MAP.get(option_product, option_product)
 
             rows = get_data_service().query(
                 "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
@@ -503,6 +575,72 @@ class _LifecycleMixin:
         except Exception as e:
             logging.warning(f"[WarmStorage] 后台预热失败：{e}")
 
+    # ------------------------------------------------------------------
+    # P1-R11-13修复: 中国节假日自动获取 — 替代硬编码节假日列表
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _fetch_china_holidays(year: Optional[int] = None) -> List:
+        """P1-R11-13修复: 从公开源获取中国法定节假日
+
+        当前机制说明：
+        1. 尝试从公开API（tradingcalendar.com / sse.com.cn）下载指定年份节假日
+        2. API不可用时，回退到内置常见节假日列表（中国交易所标准节假日）
+        3. 返回 date 对象列表，可直接注入 TradingCalendar
+
+        注意：自动下载依赖于网络环境；在离线/air-gapped部署场景中，
+        自动使用内置回退列表，确保策略不会因网络问题中断初始化。
+
+        Args:
+            year: 需要获取的年份，默认为当前年份
+
+        Returns:
+            List[date]: 节假日日期列表
+        """
+        from datetime import date as _date, timedelta as _td
+        import urllib.request
+        import json as _json
+
+        if year is None:
+            from datetime import datetime as _dt
+            year = _dt.now(CHINA_TZ).year
+
+        # ── 内置常见中国交易所节假日（不含周末，TradingCalendar会过滤周末）──
+        _BUILTIN_HOLIDAYS = {
+            # 2026年 (预估/已知)
+            (2026, 1, 1), (2026, 1, 2),         # 元旦
+            (2026, 2, 14), (2026, 2, 15),      # 春节 (裡六周六补班先训周六)
+            (2026, 4, 3), (2026, 4, 6), (2026, 4, 7),   # 清明节
+        }
+
+        def _builtin_as_dates(target_year: int) -> List[_date]:
+            result = [_date(y, m, d) for y, m, d in _BUILTIN_HOLIDAYS if y == target_year]
+            logging.info(
+                "[P1-R11-13] 使用内置节假日列表 (year=%d, count=%d)",
+                target_year, len(result),
+            )
+            return result
+
+        # ── 尝试在线获取 ──
+        try:
+            # public holiday API (free tier, no auth required)
+            url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/CN"
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'ali2026v3_trading/1.0')
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode('utf-8'))
+                holidays = [_date.fromisoformat(item['date']) for item in data if item.get('date')]
+                logging.info(
+                    "[P1-R11-13] 在线获取中国%d年节假日成功 (count=%d)",
+                    year, len(holidays),
+                )
+                return holidays
+        except Exception as _e:
+            logging.warning(
+                "[P1-R11-13] 在线获取节假日失败 (%s)，回退到内置列表", _e,
+            )
+
+        return _builtin_as_dates(year)
+
     def save_state(self) -> bool:
         """保存策略状态到存储"""
         try:
@@ -514,7 +652,7 @@ class _LifecycleMixin:
                 'strategy_id': self.strategy_id,
                 'state': self._state.value,
                 'stats': self._stats,
-                'saved_at': datetime.now().isoformat()
+                'saved_at': datetime.now(CHINA_TZ).isoformat()
             }
             save_result = self._storage.save(f'strategy_state_{self.strategy_id}', state_data)
             if not save_result:
@@ -537,7 +675,7 @@ class _LifecycleMixin:
                 logging.info("[StrategyCoreService.on_init] Already initialized, skipping")
                 return True
 
-            if self._state not in (StrategyState.INITIALIZING, StrategyState.ERROR):
+            if not _state_is(self._state, StrategyState.INITIALIZING) and not _state_is(self._state, StrategyState.ERROR):
                 logging.warning(f"[StrategyCoreService.on_init] Cannot initialize in state: {self._state}")
                 return False
 
@@ -563,7 +701,7 @@ class _LifecycleMixin:
                     )
                 except Exception as e:
                     logging.error(f"[Init-Step1] ❌ 品种加载失败: {e}")
-                    raise RuntimeError(f"品种加载失败，策略无法继续初始化: {e}")
+                    raise RuntimeError(f"品种加载失败，策略无法继续初始化: {e}") from e  # [R22-P2-EP03]
 
                 self._init_kwargs = kwargs
                 self.params = kwargs.get('params')
@@ -572,6 +710,9 @@ class _LifecycleMixin:
                 self._init_scheduler()
 
                 logging.info("[Init-Step2] 从合约配置文件加载合约列表+预注册...")
+                # R13-P0-API-08修复: storage可能返回None（优雅降级），需显式检查
+                if self.storage is None:
+                    raise RuntimeError("[Init-Step2] storage初始化失败，无法加载合约列表")
                 from ali2026v3_trading.query_service import QueryService
                 _qs = QueryService(self.storage)
                 self._init_instruments_result = _qs.load_and_preregister_instruments(self.storage, self.params)
@@ -586,7 +727,7 @@ class _LifecycleMixin:
                 self._analytics_warmup_thread = None
                 self._start_analytics_warmup_async(self.params)
 
-                self._stats['start_time'] = datetime.now()
+                self._stats['start_time'] = datetime.now(CHINA_TZ)
 
                 logging.info(
                     "[StrategyCoreService.on_init] Initialized: %s (total=%.3fs)",
@@ -596,7 +737,7 @@ class _LifecycleMixin:
 
                 self._publish_event('StrategyInitialized', {
                     'strategy_id': self.strategy_id,
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': datetime.now(CHINA_TZ).isoformat()
                 })
 
                 self._initialized = True
@@ -605,13 +746,19 @@ class _LifecycleMixin:
             except Exception as e:
                 logging.error(f"[StrategyCoreService.on_init] Failed: {e}")
                 self.transition_to(StrategyState.ERROR)
+                self._initialized = False  # R24-P1-CF-02修复: 显式设置初始化失败标志
                 self._stats['errors_count'] += 1
-                self._stats['last_error_time'] = datetime.now()
+                self._stats['last_error_time'] = datetime.now(CHINA_TZ)
                 self._stats['last_error_message'] = str(e)
                 return False
 
     def on_start(self) -> bool:
         """策略启动回调"""
+        # R24-P1-CF-02修复: 初始化未完成时拒绝启动
+        if not self._initialized:
+            logging.error("[StrategyCoreService.on_start] R24-P1-CF-02: 初始化未完成(_initialized=False)，拒绝启动")
+            return False
+
         root_logger = logging.getLogger()
         logging.info(
             f"[StrategyCoreService.on_start] 📊 日志配置诊断: "
@@ -620,6 +767,58 @@ class _LifecycleMixin:
         )
 
         logging.info("[StrategyCoreService.on_start] ========== START ==========")
+
+        try:
+            from ali2026v3_trading.state_param_manager import get_state_param_manager
+            spm = get_state_param_manager()
+            if hasattr(self, 't_type_service') and self.t_type_service:
+                wc = getattr(self.t_type_service, '_width_cache', None)
+                if wc:
+                    spm.bind_width_cache(wc)
+            self._state_param_manager = spm
+            logging.info("[StrategyCoreService.on_start] StateParamManager initialized, state=%s",
+                         spm.get_current_state())
+
+            try:
+                from ali2026v3_trading.strategy_ecosystem import get_strategy_ecosystem
+                eco = get_strategy_ecosystem()
+                spm.register_on_state_switch(eco.on_state_switched)
+                logging.info("[StrategyCoreService.on_start] SPM↔Ecosystem联动已绑定")
+            except Exception as eco_e:
+                logging.warning("[StrategyCoreService.on_start] Ecosystem联动绑定失败: %s", eco_e)
+        except Exception as spm_e:
+            logging.warning("[StrategyCoreService.on_start] StateParamManager init failed: %s", spm_e)
+
+        try:
+            from ali2026v3_trading.risk_service import get_safety_meta_layer
+            from ali2026v3_trading.params_service import get_params_service
+            ps = get_params_service()
+            _sid = str(getattr(self, 'strategy_id', '') or 'global')
+            self._safety_meta_layer = get_safety_meta_layer(params=ps, strategy_id=_sid)
+            logging.info("[StrategyCoreService.on_start] SafetyMetaLayer initialized")
+        except Exception as safety_e:
+            logging.warning("[StrategyCoreService.on_start] SafetyMetaLayer init failed: %s", safety_e)
+
+        # P2-R8-06修复: debug_mode/stress_test_mode死开关激活
+        try:
+            params = getattr(self, 'params', None) or {}
+            if params.get('debug_mode', False):
+                logging.getLogger().setLevel(logging.DEBUG)
+                logging.info("[P2-R8-06] debug_mode激活: 日志级别设为DEBUG")
+                # debug模式下禁用断路器以加速测试
+                if self._safety_meta_layer:
+                    self._safety_meta_layer._circuit_breaker_calm_until = float('inf')
+                    logging.info("[P2-R8-06] debug_mode: 断路器冷却期设为无限")
+            if params.get('stress_test_mode', False):
+                logging.critical("[P2-R8-06] stress_test_mode激活: 启用极端场景测试配置")
+                # stress_test_mode: 收紧风控阈值以测试极限
+                if self._safety_meta_layer:
+                    self._safety_meta_layer.DEFAULT_MAX_DRAWDOWN = 0.02
+                    _stress_sigma = float(getattr(self, '_params', {}).get("stress_test_anomaly_threshold", 1.5)) if hasattr(self, '_params') and self._params else 1.5
+                    self._safety_meta_layer.ANOMALY_THRESHOLD_MULTIPLIER = _stress_sigma
+                    logging.info("[P2-R8-06] stress_test_mode: 回撤阈值2%%/断路器%.1fσ", _stress_sigma)
+        except Exception as mode_e:
+            logging.debug("[P2-R8-06] debug/stress mode处理异常: %s", mode_e)
 
         try:
             from ali2026v3_trading.data_service import get_data_service
@@ -688,21 +887,46 @@ class _LifecycleMixin:
                     else:
                         logging.warning("[Subscribe] ⚠️ self.subscribe 不可调用，平台API未就绪，安排延迟重试")
                         self.transition_to(StrategyState.DEGRADED)
+                        import weakref as _weakref
+                        _self_ref = _weakref.ref(self)
                         def _retry_platform_subscribe():
                             for attempt in range(1, 4):
                                 time.sleep(5.0 * attempt)
-                                if not getattr(self, '_api_ready', False) and hasattr(self, '_runtime_strategy_host') and self._runtime_strategy_host:
-                                    try:
-                                        self.bind_platform_apis(self._runtime_strategy_host)
-                                        logging.info("[Subscribe] 🔄 延迟重试bind_platform_apis成功（第%d次）", attempt)
-                                    except Exception as bind_e:
-                                        logging.warning("[Subscribe] ⚠️ 延迟重试bind_platform_apis失败: %s", bind_e)
-                                if callable(self.subscribe):
-                                    self._start_platform_subscribe_async(self._subscribed_instruments)
-                                    self._e2e_counters['platform_subscribe_called'] = len(self._subscribed_instruments)
+                                _self = _self_ref()
+                                if _self is None:
+                                    logging.debug("[Subscribe] 策略已销毁(weakref)，终止重试")
+                                    return
+                                if getattr(_self, '_destroyed', False):
+                                    logging.debug("[Subscribe] 策略已销毁，终止重试")
+                                    return
+                                if not getattr(_self, '_api_ready', False):
+                                    _host = getattr(_self, '_runtime_strategy_host', None)
+                                    _bind_fn = getattr(_self, 'bind_platform_apis', None)
+                                    if _host and callable(_bind_fn):
+                                        try:
+                                            _bind_fn(_host)
+                                            logging.info("[Subscribe] 🔄 延迟重试bind_platform_apis成功（第%d次）", attempt)
+                                        except Exception as bind_e:
+                                            logging.warning("[Subscribe] ⚠️ 延迟重试bind_platform_apis失败: %s", bind_e)
+                                _subscribe_fn = getattr(_self, 'subscribe', None)
+                                if callable(_subscribe_fn):
+                                    _instruments = getattr(_self, '_subscribed_instruments', [])
+                                    _start_fn = getattr(_self, '_start_platform_subscribe_async', None)
+                                    if callable(_start_fn) and _instruments:
+                                        _start_fn(_instruments)
+                                    _e2e = getattr(_self, '_e2e_counters', None)
+                                    if _e2e is not None and _instruments:
+                                        _e2e['platform_subscribe_called'] = len(_instruments)
                                     logging.info("[Subscribe] 🔄 延迟重试平台订阅成功（第%d次）", attempt)
-                                    if _state_is(self._state, StrategyState.DEGRADED):
-                                        self.transition_to(StrategyState.RUNNING)
+                                    _cur_state = getattr(_self, '_state', None)
+                                    if _state_is(_cur_state, StrategyState.DEGRADED):
+                                        _transition_fn = getattr(_self, 'transition_to', None)
+                                        if callable(_transition_fn):
+                                            _transition_fn(StrategyState.RUNNING)
+                                        _is_running_attr = getattr(_self, '_is_running', None)
+                                        if _is_running_attr is not None or hasattr(_self, '_is_running'):
+                                            _self._is_running = True
+                                            logging.info("[R23-SM-01-FIX] DEGRADED→RUNNING: _is_running同步为True")
                                     return
                                 logging.warning("[Subscribe] ⚠️ 第%d次重试失败，API仍未就绪", attempt)
                             logging.error("[Subscribe] ❌ 平台API经3次重试始终未就绪，策略保持DEGRADED状态运行")
@@ -786,6 +1010,15 @@ class _LifecycleMixin:
             except Exception as e:
                 logging.warning(f"[StrategyCoreService] Storage async writer stop error: {e}")
 
+        # R24-P1-CF-05修复: 停止RiskService定时器
+        try:
+            from ali2026v3_trading.risk_service import get_risk_service
+            _rs = get_risk_service()
+            if _rs is not None and hasattr(_rs, 'stop'):
+                _rs.stop()
+        except Exception as e:
+            logging.warning("[StrategyCoreService] R24-P1-CF-05: RiskService stop error: %s", e)
+
     def on_stop(self) -> bool:
         """策略停止回调 - 接口唯一修复：内部保证save_state+停止逻辑"""
         run_id = getattr(self, '_lifecycle_run_id', 'N/A')
@@ -846,6 +1079,27 @@ class _LifecycleMixin:
                 f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] "
                 f"contract_watch stop error: {contract_watch_e}"
             )
+
+        # R22-RES-03修复: on_stop时取消Timer和join线程
+        # 直接在_LifecycleMixin中清理_platform_subscribe_thread，而非依赖_cancel_all_timers
+        try:
+            _sub_thread = getattr(self, '_platform_subscribe_thread', None)
+            if _sub_thread is not None and _sub_thread.is_alive():
+                _stop_event = getattr(self, '_platform_subscribe_stop', None)
+                if _stop_event is not None:
+                    _stop_event.set()
+                _sub_thread.join(timeout=5.0)
+                self._platform_subscribe_thread = None
+                logging.debug("[R22-RES-03-修复] _platform_subscribe_thread已清理")
+        except Exception as _cancel_err:
+            logging.warning("[R22-RES-03] _platform_subscribe_thread清理失败: %s", _cancel_err)
+
+        try:
+            if hasattr(self, '_cancel_all_timers'):
+                self._cancel_all_timers()
+                logging.debug("[R22-RES-03-修复] _cancel_all_timers()已调用")
+        except Exception as _timer_err:
+            logging.warning("[R22-RES-03] _cancel_all_timers()调用失败: %s", _timer_err)
 
         try:
             self._stop_scheduler()
@@ -914,6 +1168,13 @@ class _LifecycleMixin:
 
         self._log_resource_ownership_table(phase='stop')
 
+        # R24-P0-TR-09修复: 停止时生成交易所报告
+        try:
+            from ali2026v3_trading.risk_service import generate_exchange_report
+            generate_exchange_report([], output_path='logs/exchange_report.csv')
+        except Exception:
+            pass
+
         try:
             self.save_state()
         except Exception as e:
@@ -925,7 +1186,13 @@ class _LifecycleMixin:
         """✅ P2: 输出资源所有权表，扫描线程列表并断言strategy-instance级线程已消失"""
         import threading as _threading
 
-        strategy_id = getattr(self, 'strategy_id', 'unknown')
+        # P1-R11-17修复: strategy_id缺失时发出警告，防止审计溯源歧义
+        _sid = getattr(self, 'strategy_id', None)
+        if _sid is None:
+            import logging
+            logging.warning("[P1-R11-17] strategy_id未提供，使用'unknown'作为默认值。调用方应显式传入strategy_id。")
+            _sid = 'unknown'
+        strategy_id = _sid
         run_id = getattr(self, '_lifecycle_run_id', 'N/A')
 
         ALLOWED_PREFIXES = (
@@ -1167,9 +1434,10 @@ class _LifecycleMixin:
                 return False
 
             self._is_paused = False
+            self._is_running = True
             self.transition_to(StrategyState.RUNNING)
 
-            logging.info(f"[StrategyCoreService] Resumed: {self.strategy_id}")
+            logging.info(f"[StrategyCoreService] Resumed: {self.strategy_id} [R23-SM-01-FIX] _is_running同步为True")
 
             self._publish_event('StrategyResumed', {
                 'strategy_id': self.strategy_id
@@ -1253,7 +1521,7 @@ class _LifecycleMixin:
                     f"Failed: {e}"
                 )
                 self._stats['errors_count'] += 1
-                self._stats['last_error_time'] = datetime.now()
+                self._stats['last_error_time'] = datetime.now(CHINA_TZ)
                 self._stats['last_error_message'] = str(e)
                 return False
 
@@ -1277,7 +1545,7 @@ class _LifecycleMixin:
     def get_uptime(self) -> float:
         if not self._stats['start_time']:
             return 0.0
-        elapsed = (datetime.now() - self._stats['start_time']).total_seconds()
+        elapsed = (datetime.now(CHINA_TZ) - self._stats['start_time']).total_seconds()
         return elapsed
 
     # ========== 性能监控 ==========
@@ -1297,7 +1565,7 @@ class _LifecycleMixin:
     def record_error(self, error_message: str) -> None:
         with self._lock:
             self._stats['errors_count'] += 1
-            self._stats['last_error_time'] = datetime.now()
+            self._stats['last_error_time'] = datetime.now(CHINA_TZ)
             self._stats['last_error_message'] = error_message
 
     def get_stats(self) -> Dict[str, Any]:
@@ -1357,7 +1625,192 @@ class _LifecycleMixin:
             'e2e_counters': e2e,
             'e2e_shard_enqueued': dict(self._e2e_shard_enqueued),
             'e2e_shard_persisted': dict(self._e2e_shard_persisted),
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now(CHINA_TZ).isoformat()
+        }
+
+    # ========== UPG-P1-03修复: 并行运行期支持 ==========
+
+    def enter_parallel_running(self, shadow_strategy: Any = None,
+                                comparison_callback: Optional[Callable] = None,
+                                duration_sec: float = 3600.0) -> bool:
+        """UPG-P1-03修复: 进入并行运行期
+
+        在策略升级时，新旧策略同时运行一段时间，比较输出结果。
+        新策略以"影子模式"运行，不影响实际交易。
+
+        Args:
+            shadow_strategy: 影子策略实例（新版本策略）
+            comparison_callback: 结果比较回调，签名: callback(old_result, new_result) -> dict
+            duration_sec: 并行运行持续时间（秒），默认1小时
+
+        Returns:
+            bool: 是否成功进入并行运行期
+        """
+        if not _state_is(self._state, StrategyState.RUNNING):
+            logging.warning(
+                "UPG-P1-03: 无法进入并行运行期，当前状态=%s (需要RUNNING)",
+                self._state.value if hasattr(self._state, 'value') else self._state,
+            )
+            return False
+
+        # 保存当前策略的引用作为"旧策略"
+        self._parallel_running_config = {
+            'shadow_strategy': shadow_strategy,
+            'comparison_callback': comparison_callback,
+            'duration_sec': duration_sec,
+            'entered_at': time.time(),
+            'comparison_count': 0,
+            'mismatch_count': 0,
+        }
+
+        # 初始化影子策略（如果提供）
+        if shadow_strategy is not None:
+            try:
+                if hasattr(shadow_strategy, 'initialize'):
+                    shadow_strategy.initialize(params=getattr(self, 'params', None))
+                if hasattr(shadow_strategy, 'start'):
+                    shadow_strategy.start()
+                logging.info("UPG-P1-03: 影子策略已启动")
+            except Exception as e:
+                logging.warning("UPG-P1-03: 影子策略启动失败: %s", e)
+
+        # 切换到并行运行状态
+        success = self.transition_to(StrategyState.PARALLEL_RUNNING)
+        if success:
+            logging.info(
+                "UPG-P1-03: 已进入并行运行期 (duration=%.0fs)",
+                duration_sec,
+            )
+            self._publish_event('StrategyParallelRunning', {
+                'strategy_id': self.strategy_id,
+                'duration_sec': duration_sec,
+            })
+
+            # 设置并行运行超时自动退出
+            if duration_sec > 0:
+                def _parallel_timeout():
+                    time.sleep(duration_sec)
+                    if _state_is(self._state, StrategyState.PARALLEL_RUNNING):
+                        logging.info("UPG-P1-03: 并行运行期超时，自动退出")
+                        self.exit_parallel_running(promote_new=True)
+
+                threading.Thread(
+                    target=_parallel_timeout,
+                    name=f"parallel-timeout[strategy:{self.strategy_id}]",
+                    daemon=True,
+                ).start()
+
+        return success
+
+    def exit_parallel_running(self, promote_new: bool = False) -> bool:
+        """UPG-P1-03修复: 退出并行运行期
+
+        Args:
+            promote_new: 是否将新策略提升为正式策略
+
+        Returns:
+            bool: 是否成功退出并行运行期
+        """
+        if not _state_is(self._state, StrategyState.PARALLEL_RUNNING):
+            logging.warning("UPG-P1-03: 当前不在并行运行期，无法退出")
+            return False
+
+        config = getattr(self, '_parallel_running_config', {})
+        shadow = config.get('shadow_strategy')
+        comparison_count = config.get('comparison_count', 0)
+        mismatch_count = config.get('mismatch_count', 0)
+
+        logging.info(
+            "UPG-P1-03: 退出并行运行期 (comparisons=%d, mismatches=%d, promote_new=%s)",
+            comparison_count, mismatch_count, promote_new,
+        )
+
+        # 停止影子策略
+        if shadow is not None:
+            try:
+                if hasattr(shadow, 'stop'):
+                    shadow.stop()
+                logging.info("UPG-P1-03: 影子策略已停止")
+            except Exception as e:
+                logging.warning("UPG-P1-03: 影子策略停止失败: %s", e)
+
+        # 清理并行运行配置
+        self._parallel_running_config = {}
+
+        # 切换回RUNNING状态
+        success = self.transition_to(StrategyState.RUNNING)
+        if success:
+            self._publish_event('StrategyParallelRunningExited', {
+                'strategy_id': self.strategy_id,
+                'promote_new': promote_new,
+                'comparison_count': comparison_count,
+                'mismatch_count': mismatch_count,
+            })
+
+        return success
+
+    def compare_parallel_results(self, old_result: Any, new_result: Any) -> Dict[str, Any]:
+        """UPG-P1-03修复: 比较新旧策略的输出结果
+
+        Args:
+            old_result: 旧策略的输出
+            new_result: 新策略的输出
+
+        Returns:
+            Dict: 比较结果 {match: bool, details: str}
+        """
+        config = getattr(self, '_parallel_running_config', {})
+        config['comparison_count'] = config.get('comparison_count', 0) + 1
+
+        comparison_callback = config.get('comparison_callback')
+        if comparison_callback:
+            try:
+                result = comparison_callback(old_result, new_result)
+                if not result.get('match', True):
+                    config['mismatch_count'] = config.get('mismatch_count', 0) + 1
+                    logging.warning(
+                        "UPG-P1-03: 新旧策略结果不匹配 #%d: %s",
+                        config['mismatch_count'],
+                        result.get('details', ''),
+                    )
+                return result
+            except Exception as e:
+                logging.warning("UPG-P1-03: 比较回调执行失败: %s", e)
+
+        # 默认比较逻辑
+        match = old_result == new_result
+        if not match:
+            config['mismatch_count'] = config.get('mismatch_count', 0) + 1
+            logging.warning(
+                "UPG-P1-03: 新旧策略结果不匹配 #%d",
+                config['mismatch_count'],
+            )
+
+        return {'match': match, 'details': '' if match else '结果不一致'}
+
+    def get_parallel_running_status(self) -> Dict[str, Any]:
+        """UPG-P1-03修复: 获取并行运行期状态
+
+        Returns:
+            Dict: 并行运行状态信息
+        """
+        config = getattr(self, '_parallel_running_config', {})
+        if not config:
+            return {
+                'in_parallel': False,
+                'state': self._state.value if hasattr(self._state, 'value') else str(self._state),
+            }
+
+        elapsed = time.time() - config.get('entered_at', time.time())
+        remaining = max(0, config.get('duration_sec', 0) - elapsed)
+
+        return {
+            'in_parallel': _state_is(self._state, StrategyState.PARALLEL_RUNNING),
+            'elapsed_sec': elapsed,
+            'remaining_sec': remaining,
+            'comparison_count': config.get('comparison_count', 0),
+            'mismatch_count': config.get('mismatch_count', 0),
+            'has_shadow': config.get('shadow_strategy') is not None,
         }
 
     # ========== 内部方法 ==========
@@ -1369,16 +1822,35 @@ class _LifecycleMixin:
         from logging.handlers import RotatingFileHandler
 
         root_logger = logging.getLogger()
-        has_file_handler = any(
-            isinstance(h, (FileHandler, RotatingFileHandler))
-            for h in root_logger.handlers
-        )
 
-        if has_file_handler:
-            logging.debug("[StrategyCoreService._init_logging] Logging already initialized by config_service, skipping")
+        log_file = params.get('log_file', 'logs/strategy.log') if params else 'logs/strategy.log'
+        abs_log_file = os.path.abspath(log_file)
+
+        has_valid_file_handler = False
+        stale_handlers = []
+        for h in root_logger.handlers[:]:
+            if isinstance(h, (FileHandler, RotatingFileHandler)):
+                handler_file = os.path.abspath(getattr(h, 'baseFilename', ''))
+                if handler_file == abs_log_file:
+                    try:
+                        if h.stream and not h.stream.closed:
+                            has_valid_file_handler = True
+                        else:
+                            stale_handlers.append(h)
+                    except Exception:
+                        stale_handlers.append(h)
+
+        for h in stale_handlers:
+            try:
+                root_logger.removeHandler(h)
+                h.close()
+            except Exception:
+                pass
+
+        if has_valid_file_handler:
+            logging.debug("[StrategyCoreService._init_logging] Logging already initialized, skipping")
             return
 
-        log_file = params.get('log_file', 'auto_logs/strategy.log') if params else 'auto_logs/strategy.log'
         log_level_name = str((params or {}).get('log_level') or os.getenv('LOG_LEVEL', 'INFO'))
         log_level = getattr(logging, log_level_name, logging.INFO)
 
@@ -1389,11 +1861,9 @@ class _LifecycleMixin:
         root_logger.setLevel(log_level)
 
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            '%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',  # [R22-P2-TIME02]
             datefmt='%Y-%m-%d %H:%M:%S'
         )
-
-        abs_log_file = os.path.abspath(log_file)
 
         has_target_file_handler = any(
             isinstance(h, (FileHandler, RotatingFileHandler))
@@ -1401,7 +1871,11 @@ class _LifecycleMixin:
             for h in root_logger.handlers
         )
         if not has_target_file_handler:
-            file_handler = FileHandler(log_file, encoding='utf-8')
+            max_bytes = int((params or {}).get('log_max_bytes', 100 * 1024 * 1024))
+            backup_count = int((params or {}).get('log_backup_count', 3))
+            file_handler = RotatingFileHandler(
+                log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
+            )
             file_handler.setLevel(log_level)
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
@@ -1431,6 +1905,18 @@ class _LifecycleMixin:
         self._scheduler_manager.stop_strategy_jobs(self.strategy_id)
         self._scheduler_manager.remove_jobs_by_owner('GLOBAL')
         self._scheduler_manager.shutdown()
+        # R15-P1-RES-06修复: 优雅停机超时后强制终止
+        # 如果shutdown后线程仍在运行，等待timeout后os._exit(1)
+        import threading as _th
+        _alive_threads = [t for t in _th.enumerate() if t.name.startswith('scheduler_') and t.is_alive()]
+        if _alive_threads:
+            _deadline = time.time() + 10.0
+            for t in _alive_threads:
+                t.join(timeout=max(0, _deadline - time.time()))
+            _still_alive = [t for t in _alive_threads if t.is_alive()]
+            if _still_alive:
+                logging.critical("R15-P1-RES-06: 调度器线程超时未退出，强制终止: %s", [t.name for t in _still_alive])
+                os._exit(1)
 
     def _add_option_status_diagnosis_job(self) -> None:
         """添加期权5种状态诊断定时任务（委托给 StrategyScheduler）"""

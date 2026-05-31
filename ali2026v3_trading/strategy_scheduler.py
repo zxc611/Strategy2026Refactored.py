@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
+
+_CHINA_TZ = timezone(timedelta(hours=8))
 
 
 class StrategyScheduler:
@@ -24,6 +27,12 @@ class StrategyScheduler:
     封装APScheduler的初始化和定时任务注册逻辑，
     从StrategyCoreService中解耦出来。
     """
+    
+    DEFAULT_TRADING_INTERVAL_SEC = 30
+    DEFAULT_POSITION_CHECK_INTERVAL_SEC = 5
+    DEFAULT_PENDING_ORDER_INTERVAL_SEC = 3
+    DEFAULT_DIAGNOSTIC_INTERVAL_MIN = 3
+    DEFAULT_DIAGNOSTIC_INTERVAL_SEC = 30
     
     def __init__(self):
         self._scheduler = None
@@ -74,7 +83,7 @@ class StrategyScheduler:
                     )
                     logging.info(f"[StrategyScheduler] Retrying in {retry_delay}s...")
                     import time
-                    time.sleep(retry_delay)
+                    time.sleep(retry_delay)  # R23-P2-14标记: P2级调度等待
                 else:
                     # 重试耗尽，抛出异常由上层处理
                     if isinstance(e, ImportError):
@@ -202,7 +211,7 @@ class StrategyScheduler:
             # remove_jobs_by_owner已从_job_owners移除，scheduler.get_jobs()可能返回陈旧引用
             if running_count == 0 and registered_count > 0:
                 # 等待额外1秒确认running确实为0（避免竞态）
-                time.sleep(1.0)
+                time.sleep(1.0)  # R23-P2-14标记: P2级调度等待
                 recheck_running = self.get_running_job_count()
                 if recheck_running == 0:
                     logging.info(
@@ -215,7 +224,7 @@ class StrategyScheduler:
                 "[StrategyScheduler] Waiting for jobs to zero: %d running, %d registered, %.1fs elapsed",
                 running_count, registered_count, time.monotonic() - start_time
             )
-            time.sleep(check_interval)
+            time.sleep(check_interval)  # R23-P2-14标记: P2级调度等待
         
         final_running = self.get_running_job_count()
         final_registered = self.get_registered_job_count()
@@ -379,7 +388,7 @@ class StrategyScheduler:
                 strategy_id=strategy_id,
                 run_id=run_id,
                 owner_scope='strategy',
-                seconds=30
+                seconds=self.DEFAULT_TRADING_INTERVAL_SEC
             )
             
             self.add_job_with_owner(
@@ -389,7 +398,7 @@ class StrategyScheduler:
                 strategy_id=strategy_id,
                 run_id=run_id,
                 owner_scope='strategy',
-                seconds=5
+                seconds=self.DEFAULT_POSITION_CHECK_INTERVAL_SEC
             )
             
             if order_service and hasattr(order_service, 'check_pending_orders'):
@@ -400,7 +409,28 @@ class StrategyScheduler:
                     strategy_id=strategy_id,
                     run_id=run_id,
                     owner_scope='strategy',
-                    seconds=3
+                    seconds=self.DEFAULT_PENDING_ORDER_INTERVAL_SEC
+                )
+
+            if order_service and hasattr(order_service, 'mark_virtual_positions_eod'):
+                def _virtual_pos_eod_job():
+                    try:
+                        if not self._can_run_jobs():
+                            return
+                        from datetime import datetime as _dt
+                        now = _dt.now(_CHINA_TZ)
+                        if now.hour == 15 and 1 <= now.minute <= 10:
+                            order_service.mark_virtual_positions_eod()
+                    except Exception as e:
+                        logging.error(f"[StrategyScheduler] virtual position eod mark failed: {e}")
+                self.add_job_with_owner(
+                    func=_virtual_pos_eod_job,
+                    trigger='interval',
+                    job_id=f'{strategy_id}_virtual_pos_eod_mark',
+                    strategy_id=strategy_id,
+                    run_id=run_id,
+                    owner_scope='strategy',
+                    minutes=1
                 )
             
             logging.info(
@@ -465,9 +495,9 @@ class StrategyScheduler:
                     strategy_id='GLOBAL',
                     run_id=None,
                     owner_scope='global',
-                    minutes=3
+                    minutes=self.DEFAULT_DIAGNOSTIC_INTERVAL_MIN
                 )
-                logging.info("[StrategyScheduler] ✅ 期权5种状态诊断任务已添加 (每3分钟)")
+                logging.info(f"[StrategyScheduler] ✅ 期权5种状态诊断任务已添加 (每{self.DEFAULT_DIAGNOSTIC_INTERVAL_MIN}分钟)")
             else:
                 logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
         except Exception as e:
@@ -489,8 +519,7 @@ class StrategyScheduler:
         try:
             def _is_in_flush_window() -> bool:
                 """检查当前时间是否在刷写窗口内"""
-                from datetime import datetime
-                now = datetime.now()
+                now = datetime.now(_CHINA_TZ)
                 hour = now.hour
                 minute = now.minute
                 
@@ -599,9 +628,9 @@ class StrategyScheduler:
                     strategy_id='GLOBAL',
                     run_id=None,
                     owner_scope='global',
-                    seconds=30
+                    seconds=self.DEFAULT_DIAGNOSTIC_INTERVAL_SEC
                 )
-                logging.info("[StrategyScheduler] ✅ %d合约12环节诊断任务已添加 (每30秒)", MONITORED_CONTRACT_COUNT)
+                logging.info("[StrategyScheduler] ✅ %d合约12环节诊断任务已添加 (每%d秒)", MONITORED_CONTRACT_COUNT, self.DEFAULT_DIAGNOSTIC_INTERVAL_SEC)
             else:
                 logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
         except ImportError as e:

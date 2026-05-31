@@ -1,0 +1,23 @@
+# R15-P2-SEC-06修复: Bandit安全扫描配置
+# 运行: bandit -c .bandit -r ali2026v3_trading/
+
+[bandit]
+# 跳过的目录
+exclude_dirs = [
+    "tests",
+    "backup_20260521",
+    "backup_20260524",
+    "__pycache__",
+    ".git",
+]
+
+# 跳过的检查项(按项目实际情况调整)
+skips = [
+    "B101",  # assert语句(测试中广泛使用)
+    "B311",  # random模块(量化策略必需)
+    "B603",  # subprocess无shell=True(项目未使用subprocess)
+]
+
+# 确认的严重级别阈值
+severity = "low"
+confidence = "low"

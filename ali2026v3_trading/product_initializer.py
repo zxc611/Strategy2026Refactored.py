@@ -16,7 +16,129 @@ ensure_products_with_retry 处理品种加载和DB建表，不属于配置服务
 import logging
 import os
 import time
-from typing import Dict
+from typing import Any, Dict, Optional, Tuple
+
+
+_PRODUCT_PARAMS: Dict[str, Dict[str, Any]] = {
+    'IO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'HO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'MO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'EO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+    'IF': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future', 'price_limit_pct': 0.10, 'margin_ratio': 0.12},
+    'IC': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future', 'price_limit_pct': 0.10, 'margin_ratio': 0.12},
+    'IH': {'tick_size': 0.2, 'contract_size': 300.0, 'exchange': 'CFFEX', 'type': 'future', 'price_limit_pct': 0.10, 'margin_ratio': 0.12},
+    'IM': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future', 'price_limit_pct': 0.10, 'margin_ratio': 0.12},
+    'TS': {'tick_size': 0.005, 'contract_size': 10000.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'TF': {'tick_size': 0.005, 'contract_size': 10000.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'T':  {'tick_size': 0.005, 'contract_size': 10000.0, 'exchange': 'CFFEX', 'type': 'future'},
+    'CU': {'tick_size': 10.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'option', 'price_limit_pct': 0.06},
+    'AL': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'option', 'price_limit_pct': 0.06},
+    'ZN': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'option', 'price_limit_pct': 0.06},
+    'AU': {'tick_size': 0.02, 'contract_size': 1000, 'exchange': 'SHFE', 'type': 'option', 'price_limit_pct': 0.07},
+    'AG': {'tick_size': 1.0, 'contract_size': 15, 'exchange': 'SHFE', 'type': 'option', 'price_limit_pct': 0.07},
+    'RB': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'option', 'price_limit_pct': 0.07},
+    'RU': {'tick_size': 5.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'option', 'price_limit_pct': 0.07},
+    'MA': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'TA': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'OI': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'RM': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'SA': {'tick_size': 1.0, 'contract_size': 20, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'FG': {'tick_size': 1.0, 'contract_size': 20, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'SR': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'CF': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option', 'price_limit_pct': 0.05},
+    'AP': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'option'},
+    'CJ': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'SF': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'SM': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'UR': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'option'},
+    'M':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option', 'price_limit_pct': 0.07},
+    'Y':  {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option', 'price_limit_pct': 0.07},
+    'P':  {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option', 'price_limit_pct': 0.07},
+    'A':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option', 'price_limit_pct': 0.07},
+    'L':  {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'V':  {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'PP': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'EB': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'I':  {'tick_size': 0.5, 'contract_size': 100, 'exchange': 'DCE', 'type': 'option', 'price_limit_pct': 0.07},
+    'EG': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
+    'C':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+    'CS': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
+    # EX-P2-01: 补充SHFE/DCE/CZCE/INE主要品种tick_size配置（期货类型）
+    # EX-P2-02: 同时添加price_limit_pct涨跌停幅度
+    'CU_F': {'tick_size': 10.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
+    'AL_F': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
+    'ZN_F': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
+    'PB_F': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
+    'NI_F': {'tick_size': 10.0, 'contract_size': 1, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.12},
+    'SN_F': {'tick_size': 10.0, 'contract_size': 1, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.12},
+    'SS_F': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
+    'AU_F': {'tick_size': 0.02, 'contract_size': 1000, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.08},
+    'AG_F': {'tick_size': 1.0, 'contract_size': 15, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.08},
+    'RB_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'RU_F': {'tick_size': 5.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'HC_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'WR_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'BU_F': {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'SP_F': {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'FU_F': {'tick_size': 5.0, 'contract_size': 30, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'BC_F': {'tick_size': 10.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
+    'NR_F': {'tick_size': 5.0, 'contract_size': 10, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.07, 'margin_ratio': 0.10},
+    'I_F':  {'tick_size': 0.5, 'contract_size': 100, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'J_F':  {'tick_size': 0.5, 'contract_size': 100, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'JM_F': {'tick_size': 0.5, 'contract_size': 60, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'M_F':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'Y_F':  {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'A_F':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'P_F':  {'tick_size': 2.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'C_F':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'CS_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'L_F':  {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'V_F':  {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'PP_F': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'EG_F': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'EB_F': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'B_F':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'FB_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'RR_F': {'tick_size': 1.0, 'contract_size': 20, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'JD_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'LH_F': {'tick_size': 1.0, 'contract_size': 16, 'exchange': 'DCE', 'type': 'future', 'price_limit_pct': 0.07},
+    'CF_F': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'SR_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'TA_F': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'MA_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'OI_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'FG_F': {'tick_size': 1.0, 'contract_size': 20, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'SA_F': {'tick_size': 1.0, 'contract_size': 20, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'RM_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'AP_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'CJ_F': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'PF_F': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'SF_F': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'SM_F': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'UR_F': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'SH_F': {'tick_size': 1.0, 'contract_size': 30, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'PX_F': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    'PK_F': {'tick_size': 2.0, 'contract_size': 5, 'exchange': 'CZCE', 'type': 'future', 'price_limit_pct': 0.05},
+    # EX-P2-01: 补充INE能源交易中心品种
+    'SC_F': {'tick_size': 0.1, 'contract_size': 1000, 'exchange': 'INE', 'type': 'future', 'price_limit_pct': 0.05},
+    'NR_F': {'tick_size': 5.0, 'contract_size': 10, 'exchange': 'INE', 'type': 'future', 'price_limit_pct': 0.07},
+    'LU_F': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'INE', 'type': 'future', 'price_limit_pct': 0.07},
+    'BC_F': {'tick_size': 10.0, 'contract_size': 5, 'exchange': 'INE', 'type': 'future', 'price_limit_pct': 0.06},
+    'EC_F': {'tick_size': 1.0, 'contract_size': 30, 'exchange': 'INE', 'type': 'future', 'price_limit_pct': 0.05},
+}
+
+_DEFAULT_FUTURE_SPEC = {'tick_size': 0.2, 'contract_size': 1.0, 'price_limit_pct': 0.10, 'margin_ratio': 0.12}  # EX-P2-06: 添加margin_ratio
+_DEFAULT_OPTION_SPEC = {'tick_size': 1.0, 'contract_size': 1.0, 'price_limit_pct': 0.10, 'margin_ratio': 0.10}  # EX-P2-06: 添加margin_ratio
+
+
+def get_product_params(product: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    p = product.upper().rstrip('0123456789')
+    while p and p not in _PRODUCT_PARAMS and len(p) > 1:
+        p = p[:-1]
+    base = dict(_PRODUCT_PARAMS.get(p, _DEFAULT_FUTURE_SPEC))
+    if overrides:
+        base.update(overrides)
+    return base
 
 
 def _get_option_underlying_product(option_product: str) -> str:
@@ -147,10 +269,13 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
             future_id_map = {}
             for product in sorted(future_products_set):
                 exchange = next((f[2] for f in futures_parsed if f[1] == product), 'CFFEX')
+                params = get_product_params(product)
+                tick_size = params.get('tick_size', 0.2)
+                contract_size = params.get('contract_size', 1.0)
                 data_service.upsert_future_product(
                     product=product, exchange=exchange,
                     format_template='{product}{year_month}',
-                    tick_size=0.2, contract_size=1.0, is_active=True
+                    tick_size=tick_size, contract_size=contract_size, is_active=True
                 )
 
             for instrument_id, product, exchange, year_month in futures_parsed:
@@ -173,6 +298,8 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                 )
 
             for instrument_id, product, exchange, year_month, option_type, strike_price, underlying_future_key in options_parsed:
+                if underlying_future_key not in future_id_map:
+                    raise ValueError(f"underlying_future_key {underlying_future_key} not found in future_id_map for option {instrument_id}")
                 underlying_future_id = future_id_map[underlying_future_key]
                 underlying_product = _get_option_underlying_product(product)
                 data_service.upsert_option_instrument(
@@ -185,7 +312,7 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
 
             # ========== 阶段3：硬断言核查（0 个 NULL，否则初始化失败） ==========
 
-            conn = data_service._get_connection()
+            conn = data_service.get_connection()
 
             null_future_count = conn.execute(
                 "SELECT COUNT(*) FROM option_instruments WHERE underlying_future_id IS NULL"
@@ -238,8 +365,8 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                 ps = get_params_service()
                 ps.load_caches_from_db(data_service)
                 all_cache = ps.get_all_instrument_cache()
-                futures_cached = len([k for k in all_cache if '-' not in k])
-                options_cached = len([k for k in all_cache if '-' in k])
+                futures_cached = sum(1 for k in all_cache if '-' not in k)  # R21-MEM-P2-03修复: 生成器替代列表推导式
+                options_cached = sum(1 for k in all_cache if '-' in k)  # R21-MEM-P2-03修复: 生成器替代列表推导式
                 logging.info(
                     f"[ensure_products] ParamsService 缓存已加载: "
                     f"期货={futures_cached}, 期权={options_cached}"
@@ -266,6 +393,6 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
             last_error = e
             logging.warning("[ensure_products] 第%d次尝试失败: %s", attempt, e)
             if attempt < max_retries:
-                time.sleep(0.5 * attempt)
+                time.sleep(0.5 * attempt)  # R23-P2-15标记: P2级阻塞重试
 
     raise RuntimeError(f"[ensure_products] 合约初始化失败，已重试{max_retries}次，最后错误: {last_error}。策略无法继续初始化。")
