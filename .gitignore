@@ -1,0 +1,61 @@
+# Python编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+env/
+ENV/
+
+# IDE配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志文件
+*.log
+logs/
+
+# 数据文件
+data/
+*.parquet
+*.db
+*.duckdb
+
+# 备份文件（手动创建的）
+*.bak
+*.backup*
+backup_*/
+*_backup.py
+
+# 临时文件
+*.tmp
+*.temp
+
+# 报告文档（保留重要文档）
+*.md
+!README.md
+!GIT_USAGE_GUIDE.md
+!ali2026v3_trading/*.md
+!策略评判_output/*.md
+!多环境策略代码管理/*.md
+
+# 测试文件 — ali2026v3_trading的测试文件保留
+test_*.py
+*_test.py
+!ali2026v3_trading/tests/*.py
+
+# 验证脚本 — ali2026v3_trading的审计验证脚本保留
+verify_*.py
+check_*.py
+!ali2026v3_trading/_verify_*.py
+!ali2026v3_trading/_check_*.py
+!ali2026v3_trading/_audit_*.py
+!ali2026v3_trading/_fix_*.py
+
+# 临时审计/编译产物
+!ali2026v3_trading/*.txt
