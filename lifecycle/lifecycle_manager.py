@@ -27,8 +27,8 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from ali2026v3_trading.strategy_lifecycle_mixin import StrategyState, _state_key, _state_is
-from ali2026v3_trading.shared_utils import CHINA_TZ
+from ali2026v3_trading.strategy.strategy_lifecycle_mixin import StrategyState, _state_key, _state_is
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 
 
 class LifecycleManager:
@@ -120,7 +120,7 @@ class LifecycleManager:
                 self._is_running = False
             if _new_key in ('degraded', 'stopped', 'degraded_stop'):
                 try:
-                    from ali2026v3_trading.config_params import invalidate_strategy_cache
+                    from ali2026v3_trading.config.config_params import invalidate_strategy_cache
                     _sid = None
                     if self._provider:
                         _sid = getattr(self._provider, 'strategy_id', None) or getattr(self._provider, '_strategy_id', None)
@@ -143,7 +143,7 @@ class LifecycleManager:
 
     def is_trading_check(self) -> bool:
         try:
-            from ali2026v3_trading.scheduler_service import is_market_open
+            from ali2026v3_trading.infra.scheduler_service import is_market_open
             if is_market_open():
                 return True
         except Exception:

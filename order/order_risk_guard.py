@@ -17,7 +17,7 @@ import time
 import numpy as np
 from typing import Dict, Optional
 
-from ali2026v3_trading.shared_utils import compute_slippage_bps
+from ali2026v3_trading.infra.shared_utils import compute_slippage_bps
 
 
 class OrderRiskGuard:
@@ -53,7 +53,7 @@ class OrderRiskGuard:
 
     def check_cross_strategy_risk(self) -> float:
         try:
-            from ali2026v3_trading.strategy_ecosystem import get_strategy_ecosystem
+            from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
             _eco = get_strategy_ecosystem()
             if _eco is None:
                 return 0.0
@@ -147,7 +147,7 @@ class OrderRiskGuard:
 
     def release_margin_reservation(self, order_id: str) -> None:
         try:
-            from ali2026v3_trading.risk_service import get_risk_service
+            from ali2026v3_trading.risk.risk_service import get_risk_service
             rs = get_risk_service()
             rs.release_margin(order_id)
         except Exception as e:

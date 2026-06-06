@@ -8,8 +8,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict
 
-from ali2026v3_trading.shared_utils import CHINA_TZ
-from ali2026v3_trading.lifecycle_state import StrategyState
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState
 
 
 class LifecycleMonitor:
@@ -26,7 +26,7 @@ class LifecycleMonitor:
         return self.p._is_paused
 
     def is_trading(self) -> bool:
-        from ali2026v3_trading.scheduler_service import is_market_open
+        from ali2026v3_trading.infra.scheduler_service import is_market_open
         if is_market_open():
             return True
         return self.p._is_trading

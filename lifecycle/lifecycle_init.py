@@ -9,9 +9,9 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.shared_utils import CHINA_TZ
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.params_service import _read_param, get_param_value
-from ali2026v3_trading.lifecycle_state import StrategyState, _state_is
+from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState, _state_is
 
 
 class LifecycleInit:
@@ -34,8 +34,8 @@ class LifecycleInit:
                     logging.info("[StrategyCoreService.on_init] 日志级别已修正为INFO")
                 logging.info("[StrategyCoreService.on_init] Initializing...")
                 init_started_at = time.perf_counter()
-                from ali2026v3_trading.config_service import ensure_products_with_retry
-                from ali2026v3_trading.data_service import get_data_service
+                from ali2026v3_trading.config.config_service import ensure_products_with_retry
+                from ali2026v3_trading.data.data_service import get_data_service
                 ds = get_data_service()
                 logging.info("[Init-Step1] 加载品种配置...")
                 try:
@@ -196,7 +196,7 @@ class LifecycleInit:
             pass
         try:
             from ali2026v3_trading.subscription_manager import SubscriptionManager
-            from ali2026v3_trading.data_service import get_data_service
+            from ali2026v3_trading.data.data_service import get_data_service
             parsed = SubscriptionManager.parse_option(inst_id)
             option_product = parsed['product']
             year_month = parsed['year_month']
@@ -234,7 +234,7 @@ class LifecycleInit:
         futures_metadata = instruments_result.get('futures_metadata', {})
         options_metadata = instruments_result.get('options_metadata', {})
         futures_list = instruments_result.get('futures_list', [])
-        from ali2026v3_trading.data_service import get_latest_price
+        from ali2026v3_trading.data.data_service import get_latest_price
         futures_registered = 0
         for inst_id in futures_list:
             try:

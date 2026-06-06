@@ -4,3 +4,5 @@
 {"direction": "BUY", "instrument_id": "IF2606", "order_id": "ORD_1780724025450_b539aaa0", "price": 3980.0, "state": "CONFIRMED", "ts": 1780724025.4876206, "volume": 1}
 {"direction": "BUY", "instrument_id": "IF2606", "order_id": "ORD_1780724027147_5968c095", "price": 4000.0, "state": "SUBMITTED", "ts": 1780724027.1638331, "volume": 1}
 {"direction": "BUY", "instrument_id": "IF2606", "order_id": "ORD_1780724027147_5968c095", "price": 4000.0, "state": "CONFIRMED", "ts": 1780724027.1808348, "volume": 1}
+{"direction": "BUY", "instrument_id": "IF2606-C-4000", "order_id": "ORD_1780727001473_6aead8b2", "price": 50.0, "state": "SUBMITTED", "ts": 1780727001.4862988, "volume": 1}
+{"direction": "BUY", "instrument_id": "IF2606-C-4000", "order_id": "ORD_1780727001473_6aead8b2", "price": 50.0, "state": "CONFIRMED", "ts": 1780727001.5056293, "volume": 1}

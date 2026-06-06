@@ -1,0 +1,22 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.1, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading
+configfile: pytest.ini
+testpaths: tests
+plugins: hypothesis-6.155.1, cov-7.1.0
+collected 827 items / 1 error
+
+============================== warnings summary ===============================
+config\config_service.py:1571
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\config\config_service.py:1571: DeprecationWarning: ConfigService() direct construction is deprecated; use get_config_service() instead
+    _config_service_instance = ConfigService()
+
+..\..\..\..\..\Local\Programs\Python\Python312\Lib\site-packages\_hypothesis_pytestplugin.py:481
+  C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\_hypothesis_pytestplugin.py:481: UserWarning: Skipping collection of '.hypothesis' directory - this usually means you've explicitly set the `norecursedirs` pytest config option, replacing rather than extending the default ignores.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+ERROR tests/test_phase1_managers.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+======================== 2 warnings, 1 error in 7.17s =========================

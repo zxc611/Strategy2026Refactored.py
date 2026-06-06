@@ -158,6 +158,7 @@ INITIAL_EQUITY = 1_000_000.0
 ENABLE_QUEUE_SIMULATION = False          # BF-P1-02: 是否启用限价单排队模拟
 QUEUE_TIMEOUT_SECONDS = 300              # BF-P1-02: 限价单排队超时(秒)
 MARKET_ORDER_SLIPPAGE_BPS = 5.0          # BF-P1-03: 市价单滑点基点(默认5bps)
+SLIPPAGE_BPS = MARKET_ORDER_SLIPPAGE_BPS  # Alias for backward compatibility
 MARKET_ORDER_PRICE_MODE = "weighted"     # BF-P1-03: 成交价模式(close/weighted/open/high/low/random)
 INSTRUMENT_SLIPPAGE_MULTIPLIER = {       # BF-P1-07: 品种滑点乘数(期权使用更大滑点)
     "ETF": 1.0,

@@ -8,7 +8,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ali2026v3_trading.params_service import _read_param
-from ali2026v3_trading.lifecycle_state import StrategyState
+from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState
 
 
 class LifecycleBind:
@@ -26,7 +26,7 @@ class LifecycleBind:
     def _do_bind_platform_apis(self, strategy_obj: Any) -> None:
         p = self.p
         p._runtime_strategy_host = strategy_obj
-        from ali2026v3_trading.config_service import resolve_product_exchange
+        from ali2026v3_trading.config.config_service import resolve_product_exchange
         sub = getattr(strategy_obj, 'sub_market_data', None)
         unsub = getattr(strategy_obj, 'unsub_market_data', None)
         if callable(sub):
@@ -63,7 +63,7 @@ class LifecycleBind:
         if hasattr(p, 'storage') and p.storage is not None:
             p.storage.bind_platform_subscribe_api(p.subscribe, p.unsubscribe)
         try:
-            from ali2026v3_trading.data_service import DataService
+            from ali2026v3_trading.data.data_service import DataService
             DataService.bind_subscribe_api(p.subscribe, p.unsubscribe)
         except Exception as e:
             logging.debug("[StrategyLifecycleMixin] DataService.bind_subscribe_api failed: %s", e)

@@ -130,6 +130,11 @@ DEEP_VALIDATION_TIERS = {
     },
 }
 
+try:
+    from ali2026v3_trading.param_pool.backtest_param_grids import HFT_TICK_PARAMS
+except Exception:
+    HFT_TICK_PARAMS = {"hft_signal_confirm_ticks", "hft_cooldown_ms", "hft_min_imbalance", "hft_hard_time_stop_ms"}
+
 PARAM_TIERS = {
     "must_calibrate_every_run": [
         "close_take_profit_ratio", "close_stop_loss_ratio", "max_risk_ratio",

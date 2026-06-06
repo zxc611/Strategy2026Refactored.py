@@ -12,14 +12,14 @@ from typing import Any, Callable, Dict, List, Optional
 from collections import deque
 from dataclasses import dataclass
 
-from ali2026v3_trading.event_bus import RateLimiter
-from ali2026v3_trading.order_risk_guard import OrderRiskGuard
-from ali2026v3_trading.order_chase_service import OrderChaseService
-from ali2026v3_trading.order_state_manager import OrderStateManager
-from ali2026v3_trading.order_wal_state_service import OrderWALStateService
+from ali2026v3_trading.infra.event_bus import RateLimiter
+from ali2026v3_trading.order.order_risk_guard import OrderRiskGuard
+from ali2026v3_trading.order.order_chase_service import OrderChaseService
+from ali2026v3_trading.order.order_state_manager import OrderStateManager
+from ali2026v3_trading.order.order_wal_state_service import OrderWALStateService
 
 try:
-    from ali2026v3_trading.order_persistence import OrderPersistenceService
+    from ali2026v3_trading.order.order_persistence import OrderPersistenceService
     _HAS_PERSISTENCE_SERVICE = True
 except ImportError:
     _HAS_PERSISTENCE_SERVICE = False
@@ -89,7 +89,7 @@ def get_order_service() -> Any:
     if _order_service_instance is None:
         with _order_service_lock:
             if _order_service_instance is None:
-                from ali2026v3_trading.order_service import OrderService
+                from ali2026v3_trading.order.order_service import OrderService
                 _order_service_instance = OrderService()
     if _order_service_instance is None:
         raise RuntimeError("[R23-P1-06-FIX] get_order_service()返回None，单例初始化失败")
@@ -97,7 +97,7 @@ def get_order_service() -> Any:
 
 def init_order_service_attrs(svc, params=None):
     """OrderService.__init__属性初始化委托"""
-    from ali2026v3_trading.order_platform_auth import PlatformAuthenticator
+    from ali2026v3_trading.order.order_platform_auth import PlatformAuthenticator
     svc._platform_api_ready = False
     svc.authenticator = PlatformAuthenticator()
     svc._risk_guard = OrderRiskGuard(svc)

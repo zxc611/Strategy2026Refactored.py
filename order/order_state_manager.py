@@ -52,11 +52,11 @@ class OrderStateManager:
     def on_trade_update(self, svc, trade_data: Any) -> None:
         from datetime import datetime
         try:
-            from ali2026v3_trading.shared_utils import CHINA_TZ
+            from ali2026v3_trading.infra.shared_utils import CHINA_TZ
         except Exception:
             from datetime import timezone, timedelta
             CHINA_TZ = timezone(timedelta(hours=8))
-        from ali2026v3_trading.order_service import _validate_order_status_transition
+        from ali2026v3_trading.order.order_service import _validate_order_status_transition
         try:
             normalized = svc._normalize_platform_result(trade_data)
             oid = normalized.get('order_id', '')
@@ -98,7 +98,7 @@ class OrderStateManager:
                         _partial_ratio = filled / order.get('volume', 0)
                         logging.warning("[BIZ-P1-10] 订单部分成交: order_id=%s filled=%d/%d ratio=%.1f%%", oid, filled, order.get('volume', 0), _partial_ratio * 100)
                         try:
-                            from ali2026v3_trading.event_bus import get_global_event_bus
+                            from ali2026v3_trading.infra.event_bus import get_global_event_bus
                             _bus = get_global_event_bus()
                             if _bus is not None:
                                 _bus.publish('order.partial_filled', {'order_id': oid, 'filled_volume': filled, 'total_volume': order.get('volume', 0), 'partial_ratio': _partial_ratio}, async_mode=True)
@@ -134,7 +134,7 @@ class OrderStateManager:
     def check_pending_orders_full(self, svc) -> None:
         from datetime import datetime
         try:
-            from ali2026v3_trading.shared_utils import CHINA_TZ
+            from ali2026v3_trading.infra.shared_utils import CHINA_TZ
         except Exception:
             from datetime import timezone, timedelta
             CHINA_TZ = timezone(timedelta(hours=8))
@@ -187,7 +187,7 @@ class OrderStateManager:
     def _cleanup_orders(self, svc) -> None:
         from datetime import datetime
         try:
-            from ali2026v3_trading.shared_utils import CHINA_TZ
+            from ali2026v3_trading.infra.shared_utils import CHINA_TZ
         except Exception:
             from datetime import timezone, timedelta
             CHINA_TZ = timezone(timedelta(hours=8))

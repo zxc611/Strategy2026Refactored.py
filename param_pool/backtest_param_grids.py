@@ -634,7 +634,11 @@ from ali2026v3_trading.shared_trading_constants import REASON_MULTIPLIERS  # noq
 
 
 
-_sync_reason_multipliers_with_position_service()
+try:
+    from ali2026v3_trading.param_pool.backtest_runner_base import _sync_reason_multipliers_with_position_service
+    _sync_reason_multipliers_with_position_service()
+except Exception:
+    pass
 
 
 _REASON_TIME_STOP_SOURCE = {
@@ -697,7 +701,11 @@ _P0_IRON_RULE_LINK_MAP = {
 
 
 
-_sync_thresholds_from_runtime_config()
+try:
+    from ali2026v3_trading.param_pool.backtest_runner_base import _sync_thresholds_from_runtime_config
+    _sync_thresholds_from_runtime_config()
+except Exception:
+    pass
 
 SHADOW_PARAM_MAP = {
     "main": None,

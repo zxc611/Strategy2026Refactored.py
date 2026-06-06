@@ -16,8 +16,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.shared_utils import CHINA_TZ
-from ali2026v3_trading.shared_utils import TradeAction, TradeDirection, VALID_TRADE_DIRECTIONS
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from ali2026v3_trading.infra.shared_utils import TradeAction, TradeDirection, VALID_TRADE_DIRECTIONS
 
 try:
     from ali2026v3_trading.causal_chain_utils import CyclicDependencyGuard
@@ -178,7 +178,7 @@ class OrderExecutor:
                     svc._self_trade_bans[_opp_key] = _now + svc._self_trade_ban_minutes * 60.0
                     logging.warning("[OrderService] 自成交风险检测: key=%s %.1f分钟", _opp_key, svc._self_trade_ban_minutes)
                     try:
-                        from ali2026v3_trading.event_bus import EventBus
+                        from ali2026v3_trading.infra.event_bus import EventBus
                         EventBus.get_instance().publish("self_trade_detected", {
                             "instrument_id": ctx.instrument_id, "direction": ctx.direction,
                             "opposite_order_id": _oid, "ban_minutes": svc._self_trade_ban_minutes,
@@ -280,7 +280,7 @@ class OrderExecutor:
 
             if svc._platform_insert_order and callable(svc._platform_insert_order):
                 try:
-                    from ali2026v3_trading.config_service import resolve_product_exchange
+                    from ali2026v3_trading.config.config_service import resolve_product_exchange
                     if not ctx.exchange:
                         ctx.exchange = resolve_product_exchange(ctx.instrument_id)
                     filtered_params = svc._build_platform_insert_params(
@@ -361,7 +361,7 @@ class OrderExecutor:
         """阶段3: 后置持久化 — EventBus通知+延迟打点+返回结果"""
         svc = self._svc
         try:
-            from ali2026v3_trading.event_bus import get_global_event_bus
+            from ali2026v3_trading.infra.event_bus import get_global_event_bus
             _bus = get_global_event_bus()
             if _bus is not None:
                 _bus.publish('order.submitted', {
@@ -395,8 +395,8 @@ class OrderExecutor:
         open_reason: str = '',
         signal_id: str = '',
     ) -> List[str]:
-        from ali2026v3_trading.shared_utils import VALID_TRADE_DIRECTIONS
-        from ali2026v3_trading.order_compliance import check_self_trade_across_splits
+        from ali2026v3_trading.infra.shared_utils import VALID_TRADE_DIRECTIONS
+        from ali2026v3_trading.order.order_compliance import check_self_trade_across_splits
         svc = self._svc
         if direction not in VALID_TRADE_DIRECTIONS:
             logging.error("[OrderService] R24-P0-IV-05: send_order_split direction必须是BUY/SELL, 实际=%s, 订单被拒: %s", direction, instrument_id)
@@ -455,7 +455,7 @@ class OrderExecutor:
         asks: Optional[List],
         signal_strength: float = 1.0,
     ) -> List[Dict[str, Any]]:
-        from ali2026v3_trading.shared_utils import TradeDirection
+        from ali2026v3_trading.infra.shared_utils import TradeDirection
         try:
             lob = asks if direction == TradeDirection.BUY else bids
             if not lob or len(lob) == 0:
@@ -483,7 +483,7 @@ class OrderExecutor:
             return []
 
     def execute_by_ranking(self, targets: List[Dict[str, Any]], direction: str = 'BUY', action: str = 'OPEN') -> List[str]:
-        from ali2026v3_trading.shared_utils import TradeDirection
+        from ali2026v3_trading.infra.shared_utils import TradeDirection
         svc = self._svc
         if not targets:
             return []

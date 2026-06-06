@@ -5,10 +5,10 @@
 from __future__ import annotations
 import logging, time, uuid
 from typing import Any, Callable, Dict, List, Optional
-from ali2026v3_trading.order_base import (
+from ali2026v3_trading.order.order_base import (
     OrderResult, BaseService, OrderQueryMixin, _validate_order_status_transition, _mask_id,
     _VALID_ORDER_TRANSITIONS, _HAS_CAUSAL_CHAIN, get_order_service, reset_order_service, init_order_service_attrs)
-from ali2026v3_trading.shared_utils import CHINA_TZ, TradeAction, TradeDirection, VALID_TRADE_ACTIONS, VALID_TRADE_DIRECTIONS
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ, TradeAction, TradeDirection, VALID_TRADE_ACTIONS, VALID_TRADE_DIRECTIONS
 
 _WAL_DELEGATES = {'_ensure_wal_dir','_wal_path','_wal_write','_wal_read','_wal_delete',
     '_recover_orphaned_orders','_persist_idempotent_key','_recover_idempotent_state',
@@ -35,7 +35,7 @@ class OrderService(OrderQueryMixin, BaseService):
                    decision_score: float = 0.0, position_scale: float = 1.0, decision_action: str = '',
                    dimension_scores: Optional[Dict[str, float]] = None,
                    dimension_weights: Optional[Dict[str, float]] = None) -> OrderResult:
-        from ali2026v3_trading.order_executor import OrderExecutor, OrderContext
+        from ali2026v3_trading.order.order_executor import OrderExecutor, OrderContext
         return OrderExecutor(self).execute(OrderContext(
             instrument_id=instrument_id, volume=volume, price=price, direction=direction, action=action,
             exchange=exchange, priority=priority, is_chase=is_chase, signal_id=signal_id,
@@ -43,26 +43,26 @@ class OrderService(OrderQueryMixin, BaseService):
             position_scale=position_scale, decision_action=decision_action, dimension_scores=dimension_scores, dimension_weights=dimension_weights))
     def send_order_split(self, instrument_id, volume, price, direction='BUY', action='OPEN', exchange='',
                          signal_strength=1.0, bids=None, asks=None, open_reason='', signal_id=''):
-        from ali2026v3_trading.order_executor import OrderExecutor
+        from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self).send_order_split(instrument_id=instrument_id, volume=volume, price=price,
             direction=direction, action=action, exchange=exchange, signal_strength=signal_strength, bids=bids, asks=asks, open_reason=open_reason, signal_id=signal_id)
     def _plan_volume_split(self, volume, price, direction, bids, asks, signal_strength=1.0):
-        from ali2026v3_trading.order_executor import OrderExecutor
+        from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self)._plan_volume_split(volume=volume, price=price, direction=direction, bids=bids, asks=asks, signal_strength=signal_strength)
     def execute_by_ranking(self, targets, direction='BUY', action='OPEN'):
-        from ali2026v3_trading.order_executor import OrderExecutor
+        from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self).execute_by_ranking(targets, direction=direction, action=action)
     def bind_platform_apis(self, insert_order_func, cancel_order_func):
-        from ali2026v3_trading.order_executor import OrderExecutor
+        from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self).bind_platform_apis(insert_order_func, cancel_order_func)
     def _build_platform_insert_params(self, *, order_id, instrument_id, exchange, volume, price, direction, action):
-        from ali2026v3_trading.order_executor import OrderExecutor
+        from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self)._build_platform_insert_params(order_id=order_id, instrument_id=instrument_id, exchange=exchange, volume=volume, price=price, direction=direction, action=action)
     def _invoke_platform_insert_with_timeout(self, filtered_params):
-        from ali2026v3_trading.order_executor import OrderExecutor
+        from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self)._invoke_platform_insert_with_timeout(filtered_params)
     def _invoke_platform_cancel_with_timeout(self, platform_id):
-        from ali2026v3_trading.order_executor import OrderExecutor
+        from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self)._invoke_platform_cancel_with_timeout(platform_id)
     # ── 委托到 OrderStateManager ──
     def on_trade_update(self, trade_data): return self._state_manager.on_trade_update(self, trade_data)
@@ -81,12 +81,12 @@ class OrderService(OrderQueryMixin, BaseService):
     def emergency_close_all_positions(self, caller_id="unknown"): return self._chase_service.emergency_close_all_positions(caller_id)
     def _chase_reorder(self, original_order, retry_count): self._chase_service._chase_reorder(original_order, retry_count)
 
-from ali2026v3_trading.event_bus import RateLimiter
-from ali2026v3_trading.order_platform_auth import PlatformAuthenticator
-from ali2026v3_trading.order_sync import sync_order_status_with_exchange
-from ali2026v3_trading.order_split_models import OrderSplitStrategy, SplitOrderResult, SmartOrderSplitter
-from ali2026v3_trading.order_market_impact import almgren_chriss_impact, estimate_fill_probability
-from ali2026v3_trading.order_compliance import check_self_trade_across_splits, AlgoTradingCompliance, WashTradeDetector
+from ali2026v3_trading.infra.event_bus import RateLimiter
+from ali2026v3_trading.order.order_platform_auth import PlatformAuthenticator
+from ali2026v3_trading.order.order_sync import sync_order_status_with_exchange
+from ali2026v3_trading.order.order_split_models import OrderSplitStrategy, SplitOrderResult, SmartOrderSplitter
+from ali2026v3_trading.order.order_market_impact import almgren_chriss_impact, estimate_fill_probability
+from ali2026v3_trading.order.order_compliance import check_self_trade_across_splits, AlgoTradingCompliance, WashTradeDetector
 _OPEN_REASON_CODES = frozenset({'BOX_SPRING', 'CORRECT_RESONANCE', 'CORRECT_DIVERGENCE', 'SHADOW_A_REVERSAL', 'SHADOW_B_RANDOM', 'OTHER_SCALP', 'BOX_EXTREME', 'ARBITRAGE', 'HFT_TICK_CONFIRM'})
 __all__ = ['OrderService', 'OrderResult', 'RateLimiter', 'PlatformAuthenticator', 'get_order_service',
            'reset_order_service', '_validate_order_status_transition', '_VALID_ORDER_TRANSITIONS',

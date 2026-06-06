@@ -21,7 +21,7 @@ from ali2026v3_trading.serialization_utils import safe_jsonl_append_line
 from ali2026v3_trading.resilience_utils import is_disk_full_error
 
 try:
-    from ali2026v3_trading.config_params import CHINA_TZ
+    from ali2026v3_trading.config.config_params import CHINA_TZ
 except Exception:
     from datetime import timezone, timedelta
     CHINA_TZ = timezone(timedelta(hours=8))

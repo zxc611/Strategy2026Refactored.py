@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.order_flow_analyzer import (
+from ali2026v3_trading.order.order_flow_analyzer import (
     MicrostructureAnalyzer,
     MicrostructureConfig,
     VolumeWeightedOrderFlow,
@@ -284,7 +284,7 @@ class OrderFlowBridge:
             return self._product_cache[instrument_id]
 
         try:
-            from ali2026v3_trading.shared_utils import extract_product_code
+            from ali2026v3_trading.infra.shared_utils import extract_product_code
             product = extract_product_code(instrument_id)
         except Exception:
             product = ''

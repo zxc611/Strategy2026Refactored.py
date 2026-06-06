@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.shared_utils import CHINA_TZ, TradeAction, TradeDirection
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ, TradeAction, TradeDirection
 
 
 class OrderChaseService:

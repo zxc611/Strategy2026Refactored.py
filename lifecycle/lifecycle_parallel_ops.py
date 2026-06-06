@@ -9,7 +9,7 @@ import threading
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from ali2026v3_trading.lifecycle_state import StrategyState, _state_is
+from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState, _state_is
 
 
 class LifecycleParallelOps:

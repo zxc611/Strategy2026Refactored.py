@@ -5,7 +5,7 @@ from collections import deque, defaultdict
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.shared_utils import RingBuffer
+from ali2026v3_trading.infra.shared_utils import RingBuffer
 
 __all__ = ['MicrostructureAnalyzer', 'MicrostructureConfig', 'VolumeWeightedOrderFlow',
            'ProductMicroData', 'FootprintBar']
@@ -51,7 +51,7 @@ class MicrostructureConfig:
 def _get_data_service():
     """获取DataService单例（延迟加载）"""
     try:
-        from ali2026v3_trading.data_service import get_data_service
+        from ali2026v3_trading.data.data_service import get_data_service
         return get_data_service()
     except Exception as e:
         logger.warning(f"DataService not available: {e}")
@@ -631,7 +631,7 @@ class MicrostructureAnalyzer:
     @staticmethod
     def _extract_product(instrument_id: str) -> str:
         """提取品种代码"""
-        from ali2026v3_trading.shared_utils import extract_product_code
+        from ali2026v3_trading.infra.shared_utils import extract_product_code
         return extract_product_code(instrument_id)
 
     def _get_or_create(self, product: str) -> ProductMicroData:

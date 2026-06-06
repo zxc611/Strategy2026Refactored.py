@@ -10,9 +10,9 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.shared_utils import CHINA_TZ
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.params_service import get_param_value
-from ali2026v3_trading.lifecycle_state import StrategyState, _state_is
+from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState, _state_is
 
 
 class LifecycleCallbacks:
@@ -40,7 +40,7 @@ class LifecycleCallbacks:
             p._state_param_manager = spm
             logging.info("[StrategyCoreService.on_start] StateParamManager initialized, state=%s", spm.get_current_state())
             try:
-                from ali2026v3_trading.strategy_ecosystem import get_strategy_ecosystem
+                from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
                 eco = get_strategy_ecosystem()
                 spm.register_on_state_switch(eco.on_state_switched)
                 logging.info("[StrategyCoreService.on_start] SPM-Ecosystem联动已绑定")
@@ -49,7 +49,7 @@ class LifecycleCallbacks:
         except Exception as spm_e:
             logging.warning("[StrategyCoreService.on_start] StateParamManager init failed: %s", spm_e)
         try:
-            from ali2026v3_trading.risk_service import get_safety_meta_layer
+            from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
             from ali2026v3_trading.params_service import get_params_service
             ps = get_params_service()
             _sid = str(getattr(p, 'strategy_id', '') or 'global')
@@ -75,7 +75,7 @@ class LifecycleCallbacks:
         except Exception as mode_e:
             logging.debug("[P2-R8-06] debug/stress mode处理异常: %s", mode_e)
         try:
-            from ali2026v3_trading.data_service import get_data_service
+            from ali2026v3_trading.data.data_service import get_data_service
             ds = get_data_service()
             logging.info(f"[StrategyCoreService.on_start] DataService预热完成: {ds is not None}")
         except Exception as ds_e:
@@ -112,7 +112,7 @@ class LifecycleCallbacks:
             )
             if selected_futures_list or selected_options_dict:
                 try:
-                    from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
+                    from ali2026v3_trading.infra.diagnosis_service import DiagnosisProbeManager
                     DiagnosisProbeManager.start_contract_watch(p._subscribed_instruments)
                 except Exception as contract_watch_e:
                     logging.warning("[ContractWatch] 启动失败: %s", contract_watch_e)
@@ -243,7 +243,7 @@ class LifecycleCallbacks:
             )
             jobs_zero = False
         try:
-            from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager, reset_diagnosis_grace_period
+            from ali2026v3_trading.infra.diagnosis_service import DiagnosisProbeManager, reset_diagnosis_grace_period
             DiagnosisProbeManager.stop_contract_watch(reason='strategy_stop')
             reset_diagnosis_grace_period()
         except Exception as contract_watch_e:
@@ -312,7 +312,7 @@ class LifecycleCallbacks:
         except Exception as _lr_err:
             logging.debug("[LifecycleResource] cleanup_all 委托失败: %s", _lr_err)
         try:
-            from ali2026v3_trading.risk_service import generate_exchange_report
+            from ali2026v3_trading.risk.risk_service import generate_exchange_report
             generate_exchange_report([], output_path='logs/exchange_report.csv')
         except Exception:
             pass
@@ -472,7 +472,7 @@ class LifecycleCallbacks:
             except Exception as e:
                 logging.warning(f"[StrategyCoreService] Storage async writer stop error: {e}")
         try:
-            from ali2026v3_trading.risk_service import get_risk_service
+            from ali2026v3_trading.risk.risk_service import get_risk_service
             _rs = get_risk_service()
             if _rs is not None and hasattr(_rs, 'stop'):
                 _rs.stop()

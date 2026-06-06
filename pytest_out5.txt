@@ -1,0 +1,825 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.1, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading
+configfile: pytest.ini
+testpaths: tests
+plugins: hypothesis-6.155.1, cov-7.1.0
+collected 827 items
+
+tests\test_arrow_optimization.py ....                                    [  0%]
+tests\test_box_order.py ..FF......FFFFFFFF..                             [  2%]
+tests\test_callback_registry.py ...................                      [  5%]
+tests\test_config_service_p2.py sF                                       [  5%]
+tests\test_counterparty_risk.py .F..                                     [  5%]
+tests\test_crack_validation.py ......................................... [ 10%]
+................                                                         [ 12%]
+tests\test_diagnosis_service_p2.py s                                     [ 12%]
+tests\test_fuzz_tick_risk.py ....................                        [ 15%]
+tests\test_governance_greeks.py .........                                [ 16%]
+tests\test_hft_order.py ........FFFFF.FFFFF.....FFF                      [ 19%]
+tests\test_hypothesis_state_store.py ..........                          [ 20%]
+tests\test_infrastructure.py F.......F.FFFF                              [ 22%]
+tests\test_kline_fix.py .....                                            [ 23%]
+tests\test_l1_l2_pipeline.py ......F.....................                [ 26%]
+tests\test_manual_verification.py F.FF...FFFF..FFF.                      [ 28%]
+tests\test_market_risk.py ....                                           [ 29%]
+tests\test_operational_risk.py ......                                    [ 29%]
+tests\test_option_sort_alignment.py .................................... [ 34%]
+........................................................................ [ 42%]
+.......                                                                  [ 43%]
+tests\test_order_service_resilience.py FF                                [ 44%]
+tests\test_param_pool_alignment.py .sss........F........                 [ 46%]
+tests\test_performance_regression.py .......                             [ 47%]
+tests\test_r14_fixes.py .......F                                         [ 48%]
+tests\test_r15_p0_fixes.py .........s.....                               [ 50%]
+tests\test_regulatory_risk_reexport.py .......                           [ 51%]
+tests\test_resonance_order.py ...................FFFFFF................. [ 56%]
+.                                                                        [ 56%]
+tests\test_risk_contracts.py ........                                    [ 57%]
+tests\test_risk_service_core.py ..........F......                        [ 59%]
+tests\test_safety_meta_layer_patches.py FF..FFF.FFFF...F.                [ 61%]
+tests\test_service_container_p2.py .                                     [ 61%]
+tests\test_service_core.py ...FFF.........                               [ 63%]
+tests\test_shadow_strategy_engine.py ...........F......F.FF..F.......F.. [ 67%]
+.F.F..FF.FF...........                                                   [ 70%]
+tests\test_shard_acceptance.py ......F.FF..                              [ 71%]
+tests\test_shared_checks.py .........                                    [ 72%]
+tests\test_spring_order.py ....................FFF............FFF...     [ 77%]
+tests\test_state_store.py ................                               [ 79%]
+tests\test_storage_p2.py .                                               [ 79%]
+tests\test_strategy_2026.py FFFFFFFFFFFFFFFFFFF                          [ 81%]
+tests\test_strategy_core_service.py FFFFFFFFFFFFFFF                      [ 83%]
+tests\test_strategy_ecosystem.py .........................FFFFFFFFFFFFFF [ 88%]
+FFFFFFFFFFFFFFFFF...F.F                                                  [ 91%]
+tests\test_subscription_manager_integration.py ...........F              [ 92%]
+tests\test_t_type_service_p2.py s                                        [ 92%]
+tests\test_ui_service_p2.py s                                            [ 92%]
+tests\test_v7_meta_audit_v2.py ............................F...F.....FF. [ 97%]
+...........FFF                                                           [ 99%]
+python : C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\coverage\control.py:958: CoverageWarning
+: No data was collected. (no-data-collected); see https://coverage.readthedocs.io/en/7.14.1/messages.html#warning-no-da
+ta-collected
+所在位置 行:1 字符: 1
++ python -m pytest --tb=no -q --ignore=tests/test_e2e_pipeline.py --ign ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\xu\App...-data-collected:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  self._warn("No data was collected.", slug="no-data-collected")
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\pytest_cov\plugin.py:366: CovReportWarning: Faile
+d to generate report: No data to report.
+
+  warnings.warn(CovReportWarning(message), stacklevel=1)
+tests\test_version_vector_monotonic.py ...
+WARNING: Failed to generate report: No data to report.
+
+                                                                         [100%]
+
+============================== warnings summary ===============================
+config\config_service.py:1571
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\config\config_service.py:1571: DeprecationWarning: ConfigService() direct construction is deprecated; use get_config_service() instead
+    _config_service_instance = ConfigService()
+
+..\..\..\..\..\Local\Programs\Python\Python312\Lib\site-packages\_hypothesis_pytestplugin.py:481
+  C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\_hypothesis_pytestplugin.py:481: UserWarning: Skipping collection of '.hypothesis' directory - this usually means you've explicitly set the `norecursedirs` pytest config option, replacing rather than extending the default ignores.
+    warnings.warn(
+
+tests/test_v7_meta_audit_v2.py::TestAutoFieldLineageSyntaxError::test_invalid_syntax_no_crash
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\l1_quantification\v7_meta_audit_v2.py:727: UserWarning: Source code has syntax errors, lineage tracking skipped
+    warnings.warn("Source code has syntax errors, lineage tracking skipped")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_box_order.py::TestBoxExtremeStateAndOrder::test_bottom_extreme_long_order
+FAILED tests/test_box_order.py::TestBoxExtremeStateAndOrder::test_top_extreme_short_order
+FAILED tests/test_box_order.py::TestBoxEcosystemOrder::test_mutual_exclusion_blocks_master_in_other_state
+FAILED tests/test_box_order.py::TestBoxEcosystemOrder::test_other_strategy_allowed_in_other_state
+FAILED tests/test_box_order.py::TestBoxEcosystemOrder::test_other_strategy_signal_bottom_extreme
+FAILED tests/test_box_order.py::TestBoxEcosystemOrder::test_other_strategy_signal_top_extreme
+FAILED tests/test_box_order.py::TestBoxCapitalRoutingAndOrder::test_box_order_with_position_scale
+FAILED tests/test_box_order.py::TestBoxCapitalRoutingAndOrder::test_other_state_boosts_other_allocation
+FAILED tests/test_box_order.py::TestBoxClosePositionOrder::test_box_close_long_order
+FAILED tests/test_box_order.py::TestBoxClosePositionOrder::test_box_close_short_order
+FAILED tests/test_config_service_p2.py::TestConfigService::test_config_version_defined
+FAILED tests/test_counterparty_risk.py::TestCheckCounterpartyRisks::test_position_limit_blocks
+FAILED tests/test_hft_order.py::TestHFTSmartOrderSplit::test_adaptive_split_high_signal
+FAILED tests/test_hft_order.py::TestHFTSmartOrderSplit::test_aggressive_split_with_depth
+FAILED tests/test_hft_order.py::TestHFTSmartOrderSplit::test_passive_split - ...
+FAILED tests/test_hft_order.py::TestHFTOrderPlacement::test_hft_buy_order_via_send_order
+FAILED tests/test_hft_order.py::TestHFTOrderPlacement::test_hft_defensive_order_flow
+FAILED tests/test_hft_order.py::TestHFTOrderPlacement::test_hft_order_stats_tracking
+FAILED tests/test_hft_order.py::TestHFTOrderPlacement::test_hft_sell_order_via_send_order
+FAILED tests/test_hft_order.py::TestHFTOrderPlacement::test_hft_split_order_flow
+FAILED tests/test_hft_order.py::TestHFTPursuitRiskGate::test_pursuit_add_passes_risk_service_then_places_order
+FAILED tests/test_hft_order.py::TestHFTPursuitRiskGate::test_pursuit_entry_blocked_by_risk_service
+FAILED tests/test_hft_order.py::TestHFTSignalServiceIntegration::test_hft_close_long_signal
+FAILED tests/test_hft_order.py::TestHFTSignalServiceIntegration::test_hft_sell_signal_and_order
+FAILED tests/test_hft_order.py::TestHFTSignalServiceIntegration::test_hft_signal_generates_and_orders
+FAILED tests/test_infrastructure.py::TestProjectInfrastructure::test_requirements_freeze_exists
+FAILED tests/test_infrastructure.py::TestE2EPipelineEnhanced::test_sensitive_fields_no_hardcoded_secrets
+FAILED tests/test_infrastructure.py::TestModeEngineLockFix::test_mode_engine_uses_rlock
+FAILED tests/test_infrastructure.py::TestModeEngineLockFix::test_predictive_state_engine_uses_rlock
+FAILED tests/test_infrastructure.py::TestStrategyCoreServiceNetworkFix::test_heartbeat_interval_configurable
+FAILED tests/test_infrastructure.py::TestStrategyCoreServiceNetworkFix::test_heartbeat_max_failures_defined
+FAILED tests/test_l1_l2_pipeline.py::TestBayesianShrinkageLifeEstimator::test_level1_bayesian_shrinkage
+FAILED tests/test_manual_verification.py::test_round1_spring_integration - At...
+FAILED tests/test_manual_verification.py::test_round1_fail_safe - AttributeEr...
+FAILED tests/test_manual_verification.py::test_round1_mutual_exclusion - Attr...
+FAILED tests/test_manual_verification.py::test_r2_route_capital_static - Attr...
+FAILED tests/test_manual_verification.py::test_r2_switch_active_strategy_spring_state
+FAILED tests/test_manual_verification.py::test_r2_get_stats_spring - Attribut...
+FAILED tests/test_manual_verification.py::test_r2_stats_spring_trades - Attri...
+FAILED tests/test_manual_verification.py::test_r2_record_spring_trade_stats
+FAILED tests/test_manual_verification.py::test_r2_switch_return_spring_alloc
+FAILED tests/test_manual_verification.py::test_r2_is_same_delta_direction_spring
+FAILED tests/test_order_service_resilience.py::TestOrderServiceResilience::test_send_order_passes_stable_idempotency_key
+FAILED tests/test_order_service_resilience.py::TestOrderServiceResilience::test_send_order_platform_timeout_returns_quickly_and_marks_timeout
+FAILED tests/test_param_pool_alignment.py::TestDelayTimeSharpe3D::test_default_time_params_per_strategy
+FAILED tests/test_r14_fixes.py::TestMarginReleaseIntegration::test_release_margin_reservation_calls_risk_service
+FAILED tests/test_resonance_order.py::TestResonanceOrderPlacement::test_resonance_buy_order_release_phase
+FAILED tests/test_resonance_order.py::TestResonanceOrderPlacement::test_resonance_close_position_order
+FAILED tests/test_resonance_order.py::TestResonanceOrderPlacement::test_resonance_hft_floor_adjustment
+FAILED tests/test_resonance_order.py::TestResonanceOrderPlacement::test_resonance_reduced_size_in_chaos
+FAILED tests/test_resonance_order.py::TestResonanceOrderPlacement::test_resonance_sell_order_release_phase
+FAILED tests/test_resonance_order.py::TestResonanceOrderPlacement::test_resonance_spring_threshold_adjustment
+FAILED tests/test_risk_service_core.py::TestP0IronLawGate::test_sharpe_iron_rule_threshold_defined
+FAILED tests/test_safety_meta_layer_patches.py::TestDailyHardStopTrigger::test_hard_stop_not_triggered_initially
+FAILED tests/test_safety_meta_layer_patches.py::TestDailyHardStopTrigger::test_hard_stop_triggered_on_drawdown_exceed
+FAILED tests/test_safety_meta_layer_patches.py::TestConfirmDailyResume::test_resume_clears_hard_stop
+FAILED tests/test_safety_meta_layer_patches.py::TestConfirmDailyResume::test_resume_noop_when_not_triggered
+FAILED tests/test_safety_meta_layer_patches.py::TestConfirmDailyResume::test_resume_clears_drawdown
+FAILED tests/test_safety_meta_layer_patches.py::TestCheckSafetyMetaLayerIntegration::test_hard_stop_blocks_all_trades
+FAILED tests/test_safety_meta_layer_patches.py::TestCheckSafetyMetaLayerIntegration::test_hard_stop_blocks_close_too
+FAILED tests/test_safety_meta_layer_patches.py::TestCheckSafetyMetaLayerIntegration::test_new_open_blocked_still_allows_close
+FAILED tests/test_safety_meta_layer_patches.py::TestCheckSafetyMetaLayerIntegration::test_new_open_blocked_blocks_open
+FAILED tests/test_safety_meta_layer_patches.py::TestGetStats::test_stats_initial_values
+FAILED tests/test_service_core.py::TestSignalService::test_generate_signal_rejects_empty_instrument
+FAILED tests/test_service_core.py::TestSignalService::test_is_in_cooldown_returns_false_initially
+FAILED tests/test_service_core.py::TestSignalService::test_is_in_cooldown_returns_true_after_signal
+FAILED tests/test_shadow_strategy_engine.py::TestShadowASignal::test_reverses_long_to_short
+FAILED tests/test_shadow_strategy_engine.py::TestShadowBSignal::test_shadow_b_type
+FAILED tests/test_shadow_strategy_engine.py::TestMasterTradeRecording::test_pnl_accumulation
+FAILED tests/test_shadow_strategy_engine.py::TestMasterTradeRecording::test_record_master_trade
+FAILED tests/test_shadow_strategy_engine.py::TestAlphaMetricsComputation::test_absolute_ev_breach
+FAILED tests/test_shadow_strategy_engine.py::TestProcessSignal::test_process_signal_returns_both
+FAILED tests/test_shadow_strategy_engine.py::TestTradeLog::test_trade_log_is_valid_jsonl
+FAILED tests/test_shadow_strategy_engine.py::TestDailySummary::test_daily_summary_structure
+FAILED tests/test_shadow_strategy_engine.py::TestHealthStatus::test_health_status_structure
+FAILED tests/test_shadow_strategy_engine.py::TestStats::test_stats_increment
+FAILED tests/test_shadow_strategy_engine.py::TestRecentTrades::test_get_recent_trades_all
+FAILED tests/test_shadow_strategy_engine.py::TestRecentTrades::test_get_recent_trades_by_type
+FAILED tests/test_shard_acceptance.py::TestDegradedDispatch::test_degraded_does_not_drop_tick
+FAILED tests/test_shard_acceptance.py::TestHistoricalMaxWorkers::test_max_workers_wired
+FAILED tests/test_shard_acceptance.py::TestConfigShardParams::test_shard_config_exists
+FAILED tests/test_spring_order.py::TestSpringEntryOrder::test_buy_call_entry_order
+FAILED tests/test_spring_order.py::TestSpringEntryOrder::test_buy_put_entry_order
+FAILED tests/test_spring_order.py::TestSpringEntryOrder::test_buy_straddle_entry_order
+FAILED tests/test_spring_order.py::TestSpringFullPipelineOrder::test_full_pipeline_buy_call
+FAILED tests/test_spring_order.py::TestSpringFullPipelineOrder::test_full_pipeline_buy_put
+FAILED tests/test_spring_order.py::TestSpringFullPipelineOrder::test_full_pipeline_buy_straddle
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_auto_trading_disabled_initially
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_basic_instantiation
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_has_strategy_core
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_has_strategy_id
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_strategy_core_is_correct_type
+FAILED tests/test_strategy_2026.py::TestStrategy2026Inheritance::test_inherits_base_strategy
+FAILED tests/test_strategy_2026.py::TestStrategy2026Inheritance::test_inherits_ui_mixin
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_cancel_all_timers
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_ensure_runtime_config_loaded
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_log_error
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_log_info
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_log_warning
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_has_config
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_has_params
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_is_real_strategy_flag
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_stop_requested_initially_false
+FAILED tests/test_strategy_2026.py::TestStrategy2026LogMethods::test_log_error_does_not_raise
+FAILED tests/test_strategy_2026.py::TestStrategy2026LogMethods::test_log_info_does_not_raise
+FAILED tests/test_strategy_2026.py::TestStrategy2026LogMethods::test_log_warning_does_not_raise
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_custom_strategy_id
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_default_instantiation
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_initial_state_is_initializing
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_not_destroyed_initially
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_not_running_initially
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_check_position_risk
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_execute_option_trading_cycle
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_get_health_status
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_on_order
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_on_trade
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_recover_from_checkpoint
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_save_checkpoint
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHealthStatus::test_health_status_has_component_key
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHealthStatus::test_health_status_has_status_key
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHealthStatus::test_health_status_returns_dict
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRoute::test_default_allocations
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRoute::test_to_dict - Att...
+FAILED tests/test_strategy_ecosystem.py::TestStrategyEcosystemInit::test_init
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_allocations_sum_to_one
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_master_state_boosts_master
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_other_state_boosts_other
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_reverse_state_boosts_reverse
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_same_state_no_switch
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_close_old_first
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_to_other
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_to_reverse
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_updates_capital
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_master_allowed_when_no_reverse
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_other_state_blocks_master_new_open
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_other_state_blocks_reverse_new_open
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_other_strategy_allowed_in_other_state
+FAILED tests/test_strategy_ecosystem.py::TestOtherStrategySignal::test_no_box_returns_skip
+FAILED tests/test_strategy_ecosystem.py::TestOtherStrategySignal::test_tradeable_extreme_generates_signal
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_negative_ev_triggers_pause
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_no_breach_initially
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_resume_strategy
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_resume_strategy_blocked_when_frozen
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_resume_strategy_blocked_when_governance_degraded
+FAILED tests/test_strategy_ecosystem.py::TestHealthStatus::test_health_ok_initially
+FAILED tests/test_strategy_ecosystem.py::TestHealthStatus::test_health_structure
+FAILED tests/test_strategy_ecosystem.py::TestStats::test_stats_structure - At...
+FAILED tests/test_strategy_ecosystem.py::TestStrategySlots::test_slots_structure
+FAILED tests/test_strategy_ecosystem.py::TestRecordPnL::test_record_master_pnl
+FAILED tests/test_strategy_ecosystem.py::TestComputeExpectedValue::test_negative_ev
+FAILED tests/test_strategy_ecosystem.py::TestComputeExpectedValue::test_no_trades_ev_zero
+FAILED tests/test_strategy_ecosystem.py::TestComputeExpectedValue::test_positive_ev
+FAILED tests/test_strategy_ecosystem.py::TestThreadSafety::test_concurrent_ecosystem_access
+FAILED tests/test_strategy_ecosystem.py::TestSingletonFactories::test_ecosystem_singleton
+FAILED tests/test_subscription_manager_integration.py::TestInstrumentClassification::test_classify_registered_instruments
+FAILED tests/test_v7_meta_audit_v2.py::TestAuditPassportIntegration::test_clean_engine_passes
+FAILED tests/test_v7_meta_audit_v2.py::TestAuditPassportIntegration::test_save_and_load
+FAILED tests/test_v7_meta_audit_v2.py::TestResidue2AccessorInterception::test_getattr_patched_and_restored
+FAILED tests/test_v7_meta_audit_v2.py::TestResidue3RestrictedExec::test_allowed_module
+FAILED tests/test_v7_meta_audit_v2.py::TestResidue11CertificationTTL::test_ttl_not_expired
+FAILED tests/test_v7_meta_audit_v2.py::TestResidue11CertificationTTL::test_ttl_expired
+FAILED tests/test_v7_meta_audit_v2.py::TestResidue11CertificationTTL::test_code_hash_mismatch
+====== 162 failed, 657 passed, 8 skipped, 3 warnings in 90.38s (0:01:30) ======
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp84xe73m7\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpyx8p_1cw\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpyx8p_1cw\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp911tnc0o\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp911tnc0o\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp4axl9oml\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp4axl9oml\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpao10yfff\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpao10yfff\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp2zrb017t\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpqh67yw4g\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpwjtrkhip\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmph_m2wneo\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpe6n_ifw9\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmprfjnj2gi\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpq3t_wmnz\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpt_q4cbi8\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmphsbhp39d\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp6cf1ea0w\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)

@@ -1,0 +1,22 @@
+﻿python : WARNING:root:[config_option_loader] 鏈壘鍒癮uto_generated_option_params.json锛屼娇鐢ㄩ粯璁ゆ湡鏉冨弬鏁?
+所在位置 行:1 字符: 1
++ python -m pytest tests/ -q --tb=line 2>&1 | Out-File -FilePath "gate_ ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (WARNING:root:[c...n锛屼娇鐢ㄩ粯璁ゆ湡鏉冨弬鏁?:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+WARNING:root:[R24-P2-DF-09] 鏈熸潈鍙傛暟涓虹┖锛屾湡鏉冪瓥鐣ュ彲鑳戒娇鐢ㄦā鍧楀唴榛樿鍊?
+ImportError while loading conftest 'C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_tr
+ading\tests\conftest.py'.
+__init__.py:59: in <module>
+    from ali2026v3_trading.storage_core import _StorageCoreMixin, _get_default_db_path
+storage_core.py:13: in <module>
+    from ali2026v3_trading.data_service import get_data_service
+data_service.py:2: in <module>
+    from ali2026v3_trading.data.data_service import *
+data\data_service.py:48: in <module>
+    from ali2026v3_trading.ds_query_cache import QueryCacheMixin
+ds_query_cache.py:21: in <module>
+    from ali2026v3_trading.config_params import _DATA_SOURCE_TAG_FIELD
+E   ImportError: cannot import name '_DATA_SOURCE_TAG_FIELD' from 'ali2026v3_trading.config_params' (C:\Users\xu\AppDat
+a\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\config_params.py)

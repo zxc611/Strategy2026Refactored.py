@@ -15,10 +15,10 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List
 
-from ali2026v3_trading.shared_utils import TradeDirection
+from ali2026v3_trading.infra.shared_utils import TradeDirection
 
 try:
-    from ali2026v3_trading.config_params import CHINA_TZ
+    from ali2026v3_trading.config.config_params import CHINA_TZ
 except Exception:
     from datetime import timezone, timedelta
     CHINA_TZ = timezone(timedelta(hours=8))

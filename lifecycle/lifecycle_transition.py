@@ -13,7 +13,7 @@ import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from ali2026v3_trading.lifecycle_state import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
+from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
 
 
 class LifecycleTransition:
