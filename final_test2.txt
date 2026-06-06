@@ -1,0 +1,1268 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.1, pytest-9.0.2, pluggy-1.6.0
+rootdir: C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading
+configfile: pytest.ini
+plugins: hypothesis-6.155.1, cov-7.1.0
+collected 545 items
+
+tests\test_arrow_optimization.py ....                                    [  0%]
+tests\test_callback_registry.py ...................                      [  4%]
+tests\test_config_service_p2.py ..                                       [  4%]
+tests\test_counterparty_risk.py FFFF                                     [  5%]
+tests\test_crack_validation.py ......................................... [ 12%]
+................                                                         [ 15%]
+tests\test_diagnosis_service_p2.py s                                     [ 15%]
+tests\test_fuzz_tick_risk.py ..........FFFFFFFFFF                        [ 19%]
+tests\test_governance_greeks.py .........                                [ 21%]
+tests\test_hypothesis_state_store.py ..........                          [ 23%]
+tests\test_infrastructure.py F.FFFF..F.FFFF                              [ 25%]
+tests\test_kline_fix.py .....                                            [ 26%]
+tests\test_manual_verification.py F.FF..FFFFFF.FFF.                      [ 29%]
+tests\test_market_risk.py FFFF                                           [ 30%]
+tests\test_operational_risk.py FFFFFF                                    [ 31%]
+tests\test_option_sort_alignment.py .................................... [ 38%]
+........................................................................ [ 51%]
+.......                                                                  [ 52%]
+tests\test_performance_regression.py .......                             [ 53%]
+tests\test_phase1_managers.py ............                               [ 56%]
+tests\test_r15_p0_fixes.py ....FFF..sF...s                               [ 58%]
+tests\test_regulatory_risk_reexport.py FFFFFFF                           [ 60%]
+tests\test_risk_contracts.py FFFFFFFF                                    [ 61%]
+tests\test_service_container_p2.py .                                     [ 61%]
+tests\test_shadow_strategy_engine.py ...........F......F.FF..F.......F.. [ 68%]
+.F.F..FF.FF...........                                                   [ 72%]
+tests\test_shard_acceptance.py ......F.....                              [ 74%]
+tests\test_shared_checks.py FFFFFFFFF                                    [ 76%]
+tests\test_state_store.py ................                               [ 79%]
+tests\test_storage_p2.py .                                               [ 79%]
+tests\test_strategy_2026.py FFFFFFFFFFFFFFFFFFF                          [ 82%]
+tests\test_strategy_core_service.py FFFFFFFFFFFFFFF                      [ 85%]
+tests\test_strategy_ecosystem.py ........FFFFFFFFF........FFFFFFFFFFFFFF [ 92%]
+FFFFFFFFFFFFFFFFFFF.F.F                                                  [ 96%]
+tests\test_subscription_manager_integration.py ............              [ 99%]
+tests\test_t_type_service_p2.py .                                        [ 99%]
+tests\test_ui_service_p2.py s                                            [ 99%]
+python : C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\coverage\control.py:958: CoverageWarning
+: No data was collected. (no-data-collected); see https://coverage.readthedocs.io/en/7.14.1/messages.html#warning-no-da
+ta-collected
+所在位置 行:1 字符: 1
++ python -m pytest tests/ --ignore=tests/test_e2e_pipeline.py --ignore= ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\xu\App...-data-collected:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  self._warn("No data was collected.", slug="no-data-collected")
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\pytest_cov\plugin.py:366: CovReportWarning: Faile
+d to generate report: No data to report.
+
+  warnings.warn(CovReportWarning(message), stacklevel=1)
+tests\test_version_vector_monotonic.py ...
+WARNING: Failed to generate report: No data to report.
+
+                                                                         [100%]
+
+================================== FAILURES ===================================
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   AssertionError: requirements-freeze.txt搴斿瓨鍦?DEP-01淇)
+    assert False
+     +  where False = <built-in function _path_exists>('C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\tests\\..\\..\\requirements-freeze.txt')
+     +    where <built-in function _path_exists> = <module 'ntpath' (frozen)>.exists
+     +      where <module 'ntpath' (frozen)> = os.path
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_infrastructure.py:18: AssertionError: requirements-freeze.txt搴斿瓨鍦?DEP-01淇)
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ImportError: cannot import name 'LiquidityConsumptionTracker' from 'ali2026v3_trading.order_flow_analyzer' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\order_flow_analyzer.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\order\order_flow_bridge.py:11: ImportError: cannot import name 'LiquidityConsumptionTracker' from 'ali2026v3_trading.order_flow_analyzer' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\order_flow_analyzer.py)
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   AssertionError: 鏁忔劅瀛楁api_key涓嶅簲鏈夌‖缂栫爜闈炵┖鍊?
+    assert (***REDACTED*** == '' or not ***REDACTED***)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_infrastructure.py:84: AssertionError: 鏁忔劅瀛楁api_key涓嶅簲鏈夌‖缂栫爜闈炵┖鍊?
+E   TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_infrastructure.py:138: TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union
+E   TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_infrastructure.py:145: TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R1. Spring绛栫暐闆嗘垚瀹屾暣鎬?
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R1. Fail-safe涓€鑷存€?
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R1. 浜掓枼瑙勫垯瑕嗙洊Spring绛栫暐
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   ImportError: cannot import name 'LiquidityConsumptionTracker' from 'ali2026v3_trading.order_flow_analyzer' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\order_flow_analyzer.py)
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R1. OrderService璺ㄧ瓥鐣ラ鎺ч泦鎴?
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\order\order_flow_bridge.py:11: ImportError: cannot import name 'LiquidityConsumptionTracker' from 'ali2026v3_trading.order_flow_analyzer' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\order_flow_analyzer.py)
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. route_capital 鍔ㄦ€佺鐢ㄦ椂鍚玸pring
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. switch_active_strategy 鏇存柊spring state
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. get_stats 鍖呭惈spring pnl/ev
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. _stats 鍖呭惈spring_trades璁℃暟
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. PositionService._risk_service 灞炴€у瓨鍦ㄦ€?
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. record_spring_trade 缁熻瀹屾暣鎬?
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. switch_active_strategy 杩斿洖鍚玸pring鍒嗛厤
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+---------------------------- Captured stdout call -----------------------------
+
+======================================================================
+  R2. _is_same_delta_direction 鏀寔spring绛栫暐
+======================================================================
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.l1_quantification'; 'ali2026v3_trading.param_pool' is not a package
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_r15_p0_fixes.py:57: ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.l1_quantification'; 'ali2026v3_trading.param_pool' is not a package
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.l1_quantification'; 'ali2026v3_trading.param_pool' is not a package
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_r15_p0_fixes.py:62: ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.l1_quantification'; 'ali2026v3_trading.param_pool' is not a package
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.l1_quantification'; 'ali2026v3_trading.param_pool' is not a package
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_r15_p0_fixes.py:67: ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.l1_quantification'; 'ali2026v3_trading.param_pool' is not a package
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   AssertionError: 's2_resonance_shadow_a' != 'shadow_a'
+    - s2_resonance_shadow_a
+    + shadow_a
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\unittest\case.py:717: AssertionError: 's2_resonance_shadow_a' != 'shadow_a'
+E   AssertionError: 's2_resonance_shadow_b' != 'shadow_b'
+    - s2_resonance_shadow_b
+    + shadow_b
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\unittest\case.py:717: AssertionError: 's2_resonance_shadow_b' != 'shadow_b'
+E   UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine.py:731: UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+E   UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine.py:731: UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+E   UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine.py:731: UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+E   AssertionError: 's2_resonance_shadow_a' != 'shadow_a'
+    - s2_resonance_shadow_a
+    + shadow_a
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\unittest\case.py:717: AssertionError: 's2_resonance_shadow_a' != 'shadow_a'
+E   AssertionError: 0 not greater than 0
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\unittest\case.py:717: AssertionError: 0 not greater than 0
+E   UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine.py:731: UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+E   AssertionError: 'WARNING' != 'OK'
+    - WARNING
+    + OK
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\unittest\case.py:717: AssertionError: 'WARNING' != 'OK'
+E   UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine.py:731: UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+E   UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine.py:731: UnboundLocalError: cannot access local variable 'np' where it is not associated with a value
+E   AssertionError: 's2_resonance_shadow_a' != 'shadow_a'
+    - s2_resonance_shadow_a
+    + shadow_a
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.shadow_strategy_engine:[ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.shadow_strategy_engine:shadow_strategy_engine.py:529 [ShadowStrategyEngine] YAML鏂囦欢涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\state_param_sets.yaml
+C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\unittest\case.py:717: AssertionError: 's2_resonance_shadow_a' != 'shadow_a'
+E   NameError: name '_correlation_id' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_tick_handler.py:950: NameError: name '_correlation_id' is not defined
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\risk_check_service.py:7: ModuleNotFoundError: No module named 'ali2026v3_trading.audit_log_utils'
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle\lifecycle_callbacks.py:15: ImportError: cannot import name '_state_is' from 'ali2026v3_trading.lifecycle_state' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\lifecycle_state.py)
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   NameError: name '_CHINA_TZ' is not defined
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\box_detector.py:211: NameError: name '_CHINA_TZ' is not defined
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+E   AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_ecosystem.py:259: AttributeError: 'CapitalRoute' object has no attribute '_frozen'
+============================== warnings summary ===============================
+config_service.py:1571
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\config_service.py:1571: DeprecationWarning: ConfigService() direct construction is deprecated; use get_config_service() instead
+    _config_service_instance = ConfigService()
+
+..\..\..\..\..\Local\Programs\Python\Python312\Lib\site-packages\_hypothesis_pytestplugin.py:481
+  C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\_hypothesis_pytestplugin.py:481: UserWarning: Skipping collection of '.hypothesis' directory - this usually means you've explicitly set the `norecursedirs` pytest config option, replacing rather than extending the default ignores.
+    warnings.warn(
+
+tests/test_config_service_p2.py::TestConfigService::test_config_version_defined
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_config_service_p2.py:15: DeprecationWarning: ConfigService() direct construction is deprecated; use get_config_service() instead
+    svc = ConfigService.__new__(ConfigService)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_counterparty_risk.py::TestCheckCounterpartyRisks::test_returns_none_when_all_pass
+FAILED tests/test_counterparty_risk.py::TestCheckCounterpartyRisks::test_position_limit_blocks
+FAILED tests/test_counterparty_risk.py::TestCheckCounterpartyRisks::test_e13_on_close_returns_none
+FAILED tests/test_counterparty_risk.py::TestCheckCounterpartyRisks::test_strategy_health_degraded_not_block
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_market_risk_with_fuzz_price[nan]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_market_risk_with_fuzz_price[inf]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_market_risk_with_fuzz_price[-100.0]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_market_risk_with_fuzz_price[0.0]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_market_risk_with_fuzz_price[None]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_shared_checks_with_fuzz_amount[nan]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_shared_checks_with_fuzz_amount[inf]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_shared_checks_with_fuzz_amount[-100.0]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_shared_checks_with_fuzz_amount[0.0]
+FAILED tests/test_fuzz_tick_risk.py::TestRiskEngineFuzz::test_signal_validity_with_invalid_signal
+FAILED tests/test_infrastructure.py::TestProjectInfrastructure::test_requirements_freeze_exists
+FAILED tests/test_infrastructure.py::TestCrossServiceIntegration::test_signal_to_risk_chain
+FAILED tests/test_infrastructure.py::TestCrossServiceIntegration::test_risk_to_order_chain
+FAILED tests/test_infrastructure.py::TestCrossServiceIntegration::test_order_to_position_chain
+FAILED tests/test_infrastructure.py::TestCrossServiceIntegration::test_signal_risk_order_position_importable
+FAILED tests/test_infrastructure.py::TestE2EPipelineEnhanced::test_sensitive_fields_no_hardcoded_secrets
+FAILED tests/test_infrastructure.py::TestModeEngineLockFix::test_mode_engine_uses_rlock
+FAILED tests/test_infrastructure.py::TestModeEngineLockFix::test_predictive_state_engine_uses_rlock
+FAILED tests/test_infrastructure.py::TestStrategyCoreServiceNetworkFix::test_heartbeat_interval_configurable
+FAILED tests/test_infrastructure.py::TestStrategyCoreServiceNetworkFix::test_heartbeat_max_failures_defined
+FAILED tests/test_manual_verification.py::test_round1_spring_integration - At...
+FAILED tests/test_manual_verification.py::test_round1_fail_safe - ModuleNotFo...
+FAILED tests/test_manual_verification.py::test_round1_mutual_exclusion - Attr...
+FAILED tests/test_manual_verification.py::test_round1_order_service - ImportE...
+FAILED tests/test_manual_verification.py::test_r2_route_capital_static - Attr...
+FAILED tests/test_manual_verification.py::test_r2_switch_active_strategy_spring_state
+FAILED tests/test_manual_verification.py::test_r2_get_stats_spring - Attribut...
+FAILED tests/test_manual_verification.py::test_r2_stats_spring_trades - Attri...
+FAILED tests/test_manual_verification.py::test_r2_risk_service_attribute - Mo...
+FAILED tests/test_manual_verification.py::test_r2_record_spring_trade_stats
+FAILED tests/test_manual_verification.py::test_r2_switch_return_spring_alloc
+FAILED tests/test_manual_verification.py::test_r2_is_same_delta_direction_spring
+FAILED tests/test_market_risk.py::TestCheckMarketRisks::test_returns_none_when_all_pass
+FAILED tests/test_market_risk.py::TestCheckMarketRisks::test_risk_ratio_blocks
+FAILED tests/test_market_risk.py::TestCheckMarketRisks::test_greeks_limits_blocks
+FAILED tests/test_market_risk.py::TestCheckMarketRisks::test_exchange_not_tradeable_blocks
+FAILED tests/test_operational_risk.py::TestCheckOperationalRisks::test_returns_none_when_all_pass
+FAILED tests/test_operational_risk.py::TestCheckOperationalRisks::test_signal_validity_blocks_invalid
+FAILED tests/test_operational_risk.py::TestCheckOperationalRisks::test_consecutive_loss_can_block
+FAILED tests/test_operational_risk.py::TestCheckOperationalRisks::test_strategy_status_blocks
+FAILED tests/test_operational_risk.py::TestCheckOperationalRisks::test_rate_limit_blocks
+FAILED tests/test_operational_risk.py::TestCheckOperationalRisks::test_shadow_ev_critical_blocks
+FAILED tests/test_r15_p0_fixes.py::TestSecurityFixes::test_restricted_exec_blocks_import
+FAILED tests/test_r15_p0_fixes.py::TestSecurityFixes::test_restricted_exec_blocks_eval
+FAILED tests/test_r15_p0_fixes.py::TestSecurityFixes::test_restricted_exec_allows_safe_code
+FAILED tests/test_r15_p0_fixes.py::TestResilienceFixes::test_circuit_breaker_persistence_methods
+FAILED tests/test_regulatory_risk_reexport.py::TestRegulatoryRiskReExport::test_check_position_limit_reexported
+FAILED tests/test_regulatory_risk_reexport.py::TestRegulatoryRiskReExport::test_check_governance_violations_reexported
+FAILED tests/test_regulatory_risk_reexport.py::TestRegulatoryRiskReExport::test_check_margin_sufficiency_reexported
+FAILED tests/test_regulatory_risk_reexport.py::TestRegulatoryRiskReExport::test_check_cross_instrument_limit_reexported
+FAILED tests/test_regulatory_risk_reexport.py::TestRegulatoryRiskReExport::test_check_regulatory_risks_reexported
+FAILED tests/test_regulatory_risk_reexport.py::TestRegulatoryRiskReExport::test_update_margin_ratio_override_reexported
+FAILED tests/test_regulatory_risk_reexport.py::TestRegulatoryRiskReExport::test_reexported_functions_match_shared_checks
+FAILED tests/test_risk_contracts.py::TestCounterpartyRiskContract::test_check_counterparty_risks_returns_none_on_pass
+FAILED tests/test_risk_contracts.py::TestCounterpartyRiskContract::test_check_e13_returns_none_on_close_action
+FAILED tests/test_risk_contracts.py::TestRegulatoryRiskContract::test_check_regulatory_risks_returns_none_on_pass
+FAILED tests/test_risk_contracts.py::TestRegulatoryRiskContract::test_regulatory_risk_re_exports_shared_checks
+FAILED tests/test_risk_contracts.py::TestMarketRiskContract::test_check_market_risks_returns_none_on_pass
+FAILED tests/test_risk_contracts.py::TestMarketRiskContract::test_check_risk_ratio_delegates
+FAILED tests/test_risk_contracts.py::TestOperationalRiskContract::test_check_operational_risks_returns_none_on_pass
+FAILED tests/test_risk_contracts.py::TestOperationalRiskContract::test_check_signal_validity_blocks_invalid
+FAILED tests/test_shadow_strategy_engine.py::TestShadowASignal::test_reverses_long_to_short
+FAILED tests/test_shadow_strategy_engine.py::TestShadowBSignal::test_shadow_b_type
+FAILED tests/test_shadow_strategy_engine.py::TestMasterTradeRecording::test_pnl_accumulation
+FAILED tests/test_shadow_strategy_engine.py::TestMasterTradeRecording::test_record_master_trade
+FAILED tests/test_shadow_strategy_engine.py::TestAlphaMetricsComputation::test_absolute_ev_breach
+FAILED tests/test_shadow_strategy_engine.py::TestProcessSignal::test_process_signal_returns_both
+FAILED tests/test_shadow_strategy_engine.py::TestTradeLog::test_trade_log_is_valid_jsonl
+FAILED tests/test_shadow_strategy_engine.py::TestDailySummary::test_daily_summary_structure
+FAILED tests/test_shadow_strategy_engine.py::TestHealthStatus::test_health_status_structure
+FAILED tests/test_shadow_strategy_engine.py::TestStats::test_stats_increment
+FAILED tests/test_shadow_strategy_engine.py::TestRecentTrades::test_get_recent_trades_all
+FAILED tests/test_shadow_strategy_engine.py::TestRecentTrades::test_get_recent_trades_by_type
+FAILED tests/test_shard_acceptance.py::TestDegradedDispatch::test_degraded_does_not_drop_tick
+FAILED tests/test_shared_checks.py::TestCheckPositionLimit::test_delegates_to_risk_service
+FAILED tests/test_shared_checks.py::TestCheckPositionLimit::test_returns_none_when_pass
+FAILED tests/test_shared_checks.py::TestCheckGovernanceViolations::test_delegates_to_risk_service
+FAILED tests/test_shared_checks.py::TestCheckMarginSufficiency::test_returns_none_when_sufficient
+FAILED tests/test_shared_checks.py::TestCheckMarginSufficiency::test_returns_none_when_zero_equity
+FAILED tests/test_shared_checks.py::TestCheckMarginSufficiency::test_returns_none_when_zero_volume
+FAILED tests/test_shared_checks.py::TestCheckCrossInstrumentLimit::test_returns_none_when_pass
+FAILED tests/test_shared_checks.py::TestCheckRegulatoryRisks::test_returns_none_when_all_pass
+FAILED tests/test_shared_checks.py::TestCheckRegulatoryRisks::test_position_limit_blocks_first
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_auto_trading_disabled_initially
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_basic_instantiation
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_has_strategy_core
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_has_strategy_id
+FAILED tests/test_strategy_2026.py::TestStrategy2026Instantiation::test_strategy_core_is_correct_type
+FAILED tests/test_strategy_2026.py::TestStrategy2026Inheritance::test_inherits_base_strategy
+FAILED tests/test_strategy_2026.py::TestStrategy2026Inheritance::test_inherits_ui_mixin
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_cancel_all_timers
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_ensure_runtime_config_loaded
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_log_error
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_log_info
+FAILED tests/test_strategy_2026.py::TestStrategy2026RequiredMethods::test_has_log_warning
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_has_config
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_has_params
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_is_real_strategy_flag
+FAILED tests/test_strategy_2026.py::TestStrategy2026Attributes::test_stop_requested_initially_false
+FAILED tests/test_strategy_2026.py::TestStrategy2026LogMethods::test_log_error_does_not_raise
+FAILED tests/test_strategy_2026.py::TestStrategy2026LogMethods::test_log_info_does_not_raise
+FAILED tests/test_strategy_2026.py::TestStrategy2026LogMethods::test_log_warning_does_not_raise
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_custom_strategy_id
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_default_instantiation
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_initial_state_is_initializing
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_not_destroyed_initially
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceInstantiation::test_not_running_initially
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_check_position_risk
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_execute_option_trading_cycle
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_get_health_status
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_on_order
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_on_trade
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_recover_from_checkpoint
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHasRequiredMethods::test_has_save_checkpoint
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHealthStatus::test_health_status_has_component_key
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHealthStatus::test_health_status_has_status_key
+FAILED tests/test_strategy_core_service.py::TestStrategyCoreServiceHealthStatus::test_health_status_returns_dict
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorUpdateBar::test_update_bar
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorDetectBox::test_box_has_upper_lower
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorDetectBox::test_insufficient_data
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorDetectBox::test_ranging_market_detects_box
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorDetectBox::test_trending_market_no_box
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorExtremeState::test_bottom_extreme_with_resonance
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorExtremeState::test_mid_price_no_extreme
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorExtremeState::test_no_box_no_extreme
+FAILED tests/test_strategy_ecosystem.py::TestBoxDetectorExtremeState::test_top_extreme_with_resonance
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRoute::test_default_allocations
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRoute::test_to_dict - Att...
+FAILED tests/test_strategy_ecosystem.py::TestStrategyEcosystemInit::test_init
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_allocations_sum_to_one
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_master_state_boosts_master
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_other_state_boosts_other
+FAILED tests/test_strategy_ecosystem.py::TestCapitalRouting::test_reverse_state_boosts_reverse
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_same_state_no_switch
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_close_old_first
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_to_other
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_to_reverse
+FAILED tests/test_strategy_ecosystem.py::TestStrategySwitching::test_switch_updates_capital
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_master_allowed_when_no_reverse
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_other_state_blocks_master_new_open
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_other_state_blocks_reverse_new_open
+FAILED tests/test_strategy_ecosystem.py::TestMutualExclusion::test_other_strategy_allowed_in_other_state
+FAILED tests/test_strategy_ecosystem.py::TestOtherStrategySignal::test_no_box_returns_skip
+FAILED tests/test_strategy_ecosystem.py::TestOtherStrategySignal::test_tradeable_extreme_generates_signal
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_negative_ev_triggers_pause
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_no_breach_initially
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_resume_strategy
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_resume_strategy_blocked_when_frozen
+FAILED tests/test_strategy_ecosystem.py::TestAbsoluteEVBottomline::test_resume_strategy_blocked_when_governance_degraded
+FAILED tests/test_strategy_ecosystem.py::TestHealthStatus::test_health_ok_initially
+FAILED tests/test_strategy_ecosystem.py::TestHealthStatus::test_health_structure
+FAILED tests/test_strategy_ecosystem.py::TestStats::test_stats_structure - At...
+FAILED tests/test_strategy_ecosystem.py::TestStrategySlots::test_slots_structure
+FAILED tests/test_strategy_ecosystem.py::TestRecordPnL::test_record_master_pnl
+FAILED tests/test_strategy_ecosystem.py::TestComputeExpectedValue::test_negative_ev
+FAILED tests/test_strategy_ecosystem.py::TestComputeExpectedValue::test_no_trades_ev_zero
+FAILED tests/test_strategy_ecosystem.py::TestComputeExpectedValue::test_positive_ev
+FAILED tests/test_strategy_ecosystem.py::TestADXComputation::test_ranging_low_adx
+FAILED tests/test_strategy_ecosystem.py::TestADXComputation::test_trending_high_adx
+FAILED tests/test_strategy_ecosystem.py::TestThreadSafety::test_concurrent_ecosystem_access
+FAILED tests/test_strategy_ecosystem.py::TestSingletonFactories::test_ecosystem_singleton
+====== 165 failed, 376 passed, 4 skipped, 3 warnings in 77.69s (0:01:17) ======
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp_e811r9l\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpub_1nfhx\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpub_1nfhx\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpl1mf4p3v\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpl1mf4p3v\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpn0m6ffft\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpn0m6ffft\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpt_ixz8qd\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpt_ixz8qd\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpbw4r0p1e\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpogovr_zq\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmplsa9ztco\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp76nkd96t\\shadow_s2_re
+sonance_shadow_b_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpdyjz1l9j\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmps1_d5zwz\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp_1j9spe_\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp4zbv4cf4\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmp9h_71sl6\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)
+--- Logging error ---
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1200, in _do_write_logs
+    with open(log_file, 'a', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Local\\Temp\\tmpb2aoz5v4\\shadow_s2_re
+sonance_shadow_a_unknown_20260606.jsonl'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\logging\__init__.py", line 1163, in emit
+    stream.write(msg + self.terminator)
+ValueError: I/O operation on closed file.
+Call stack:
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 424, in _atexit_shutdown
+    self.shutdown(wait=False)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 411, in shutdown
+    self._async_flush_log_queue()
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1189, in _async_flush_log_queue
+    self._do_write_logs(items)
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\shadow_strategy_engine
+.py", line 1203, in _do_write_logs
+    logger.warning("[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s", e)
+Message: '[ShadowStrategyEngine] 鍐欏叆鏃ュ織鏂囦欢澶辫触: %s'
+Arguments: (FileNotFoundError(2, 'No such file or directory'),)

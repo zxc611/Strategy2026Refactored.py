@@ -1,0 +1,12 @@
+﻿python : WARNING:root:Using 20 hardcoded monitored contracts as fallback
+所在位置 行:1 字符: 1
++ python -m pytest tests/ --ignore=tests/test_e2e_pipeline.py --ignore= ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (WARNING:root:Us...cts as fallback:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ERROR: usage: __main__.py [options] [file_or_dir] [file_or_dir] [...]
+__main__.py: error: unrecognized arguments: -no-header
+  inifile: C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\pytest.ini
+  rootdir: C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading
+

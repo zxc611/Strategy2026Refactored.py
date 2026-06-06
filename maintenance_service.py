@@ -2355,10 +2355,11 @@ def ops_auto_repair(issue_type: str) -> Dict[str, Any]:
 
     elif issue_type == 'config_stale':
         try:
-            from ali2026v3_trading.config_service import get_config
-            config = get_config()
-            if config.need_reload():
-                config.reload()
+            from ali2026v3_trading.config_facade import get_config_query_facade, get_config_command_facade
+            query_facade = get_config_query_facade()
+            if query_facade.need_reload():
+                command_facade = get_config_command_facade()
+                command_facade.reload()
                 result['repaired'] = True
                 result['action'] = 'config_reloaded'
                 result['details'] = '配置已重新加载'
