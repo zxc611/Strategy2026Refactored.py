@@ -44,6 +44,12 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from ali2026v3_trading.shared_utils import CHINA_TZ as _CHINA_TZ
+except ImportError:
+    from datetime import timezone, timedelta
+    _CHINA_TZ = timezone(timedelta(hours=8))
+
 logger = logging.getLogger(__name__)
 
 

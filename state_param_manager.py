@@ -5,7 +5,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ali2026v3_trading.serialization_utils import yaml_safe_load
 from ali2026v3_trading.config_params import (

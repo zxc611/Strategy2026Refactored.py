@@ -33,19 +33,15 @@ _globals_lock = threading.Lock()
 try:
     _pkg_dir = _os.path.dirname(_os.path.abspath(__file__))
     _param_pool_dir = _os.path.join(_pkg_dir, 'param_pool')
-    _cn_pool_dir = _os.path.join(_pkg_dir, 'param_pool')
+    _cn_pool_dir = _os.path.join(_pkg_dir, '参数池')
     if _os.path.isdir(_param_pool_dir) and 'ali2026v3_trading.param_pool' not in sys.modules:
-        sys.modules['ali2026v3_trading.param_pool'] = None
-    if _os.path.isdir(_cn_pool_dir) and 'ali2026v3_trading.param_pool' not in sys.modules:
-        sys.modules.setdefault('ali2026v3_trading.param_pool', None)
-    if _os.path.isdir(_param_pool_dir) and not _os.path.isdir(_cn_pool_dir):
         import importlib as _il
         _pm = _il.import_module('ali2026v3_trading.param_pool')
         sys.modules['ali2026v3_trading.param_pool'] = _pm
-    elif _os.path.isdir(_cn_pool_dir) and not _os.path.isdir(_param_pool_dir):
+    if _os.path.isdir(_cn_pool_dir) and 'ali2026v3_trading.参数池' not in sys.modules:
         import importlib as _il
-        _pm = _il.import_module('ali2026v3_trading.param_pool')
-        sys.modules['ali2026v3_trading.param_pool'] = _pm
+        _cn = _il.import_module('ali2026v3_trading.参数池')
+        sys.modules['ali2026v3_trading.参数池'] = _cn
 except Exception:
     pass
 # storage: 持久化存储 (storage_core + storage_query)

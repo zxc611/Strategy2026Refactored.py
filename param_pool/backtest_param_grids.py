@@ -99,9 +99,16 @@ PULLBACK_GRID = {
 # P1-8修复: 从risk_service.RiskService动态导入并转换键名，保持单一数据源
 
 
-RISK_DIMENSION_DEFAULTS = _build_risk_dimension_defaults()
-RISK_DIMENSION_DEFAULTS["decision.score.threshold_high"] = 0.70
-RISK_DIMENSION_DEFAULTS["decision.score.threshold_low"] = 0.50  # R13-三对齐修复: 从0.40改为0.50，与signal_service._decision_score_threshold对齐
+def _get_risk_dimension_defaults():
+    from ali2026v3_trading.param_pool.backtest_runner_base import _build_risk_dimension_defaults
+    return _build_risk_dimension_defaults()
+
+try:
+    RISK_DIMENSION_DEFAULTS = _get_risk_dimension_defaults()
+except Exception:
+    RISK_DIMENSION_DEFAULTS = {}
+RISK_DIMENSION_DEFAULTS.setdefault("decision.score.threshold_high", 0.70)
+RISK_DIMENSION_DEFAULTS.setdefault("decision.score.threshold_low", 0.50)
 
 RISK_DIMENSION_GRID = {
     # 核心信号层权重扫描

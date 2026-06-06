@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from concurrent.futures import as_completed  # EC-P2-12: 删除未使用的ProcessPoolExecutor导入
 from dataclasses import dataclass, field
