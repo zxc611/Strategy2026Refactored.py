@@ -12,6 +12,7 @@ from ali2026v3_trading.order_flow_analyzer import (
     MicrostructureAnalyzer,
     MicrostructureConfig,
     VolumeWeightedOrderFlow,
+    LiquidityConsumptionTracker,
 )
 
 
@@ -59,12 +60,30 @@ class OrderFlowBridge:
             'cache_misses': 0,
         }
 
+        # MS-02: 深度质量统计（REAL vs INFERRED）
+        self._depth_quality = {'real': 0, 'inferred': 0}
+        self._last_inferred_warning = 0.0
+
+        # R33-P2-6修复: 集成三个微结构检测器到OrderFlowBridge
+        self._liquidity_tracker = LiquidityConsumptionTracker()
+        self._arbitrage_detector = CrossContractArbitrageDetector()
+        self._sweep_detector = SweepDetector()
+
     def on_tick_feed(self, instrument_id: str, price: float, volume: int,
                      exchange: str = '', bid_price: float = 0.0,
-                     ask_price: float = 0.0) -> None:
+                     ask_price: float = 0.0, mid_price: float = 0.0,
+                     l2_bids: List[tuple] = None, l2_asks: List[tuple] = None) -> None:
         product = self._extract_product(instrument_id)
         if not product:
             return
+
+        # MS-02: 保存mid_price用于后续分析
+        if mid_price > 0:
+            self._last_mid_price = mid_price
+
+        # MS-07: 真实L2多档深度优先
+        if l2_bids and l2_asks:
+            self.on_depth_feed(instrument_id, l2_bids, l2_asks, product=product)
 
         now = time.time()
         cache_key = instrument_id
@@ -106,6 +125,13 @@ class OrderFlowBridge:
             self._prev_volume[cache_key] = volume
             self._prev_timestamp[cache_key] = now
 
+        # R33-P2-6修复: 喂入流动性追踪器
+        if delta_vol > 0:
+            _depth_before = 0.0
+            if l2_bids and l2_asks:
+                _depth_before = float(sum(v for _, v in l2_bids[:1]) + sum(v for _, v in l2_asks[:1]))
+            self._liquidity_tracker.on_trade(volume=float(delta_vol), depth_before=_depth_before)
+
         if bid_price > 0 and ask_price > 0:
             self._feed_depth_from_tick(product, bid_price, ask_price, now,
                                        delta_vol=delta_vol, direction=direction)
@@ -123,6 +149,7 @@ class OrderFlowBridge:
             timestamp=time.time(), product=product
         )
         self._stats['depth_updates'] += 1
+        self._depth_quality['real'] += 1
 
     def get_flow_consistency(self, product: str = None) -> float:
         if product is None:
@@ -225,6 +252,7 @@ class OrderFlowBridge:
     def _feed_depth_from_tick(self, product: str, bid_price: float,
                                ask_price: float, timestamp: float,
                                delta_vol: int = 0, direction: str = '') -> None:
+        # MS-02: 标记INFERRED深度（从tick推断，非真实L2数据）
         depth_vol = max(delta_vol, self.DEFAULT_DEPTH_VOLUME) if delta_vol > 0 else self.DEFAULT_DEPTH_VOLUME
         if direction == 'buy':
             ask_vol = depth_vol
@@ -241,7 +269,15 @@ class OrderFlowBridge:
             product, bids, asks,
             timestamp=timestamp, product=product
         )
-        # ✅ P1-22修复：_feed_depth_from_tick中product作为instrument_id传入on_depth第一参数，语义正确（按品种聚合深度）
+        self._depth_quality['inferred'] += 1
+
+        # MS-02: 每60秒输出一次INFERRED深度使用告警
+        if timestamp - self._last_inferred_warning >= 60.0:
+            logging.warning(
+                "[MS-02] 使用伪造深度(INFERRED) - 非真实L2数据: real=%d inferred=%d",
+                self._depth_quality['real'], self._depth_quality['inferred'],
+            )
+            self._last_inferred_warning = timestamp
 
     def _extract_product(self, instrument_id: str) -> str:
         if instrument_id in self._product_cache:
@@ -262,6 +298,7 @@ class OrderFlowBridge:
         stats['products_tracked'] = len(self._analyzer.get_products())
         stats['product_cache_size'] = len(self._product_cache)
         stats['flow_cache_size'] = len(self._flow_cache)
+        stats['depth_quality'] = dict(self._depth_quality)
         return stats
 
     def get_volume_weighted_imbalance(self, product: str) -> float:
@@ -298,6 +335,26 @@ class OrderFlowBridge:
                 logging.debug("[OrderFlowBridge] detect_arbitrage error: %s", e)
         return None
 
+    def get_liquidity_consumption(self) -> Dict[str, Any]:
+        """R33-P2-6: 获取流动性消耗统计"""
+        return self._liquidity_tracker.get_stats()
+
+    def check_call_spread(self, calls: Dict[str, float]) -> List[Dict[str, Any]]:
+        """R33-P2-6: 检查看涨期权价差单调性"""
+        return self._arbitrage_detector.check_call_spread_monotonicity(calls)
+
+    def get_arbitrage_stats(self) -> Dict[str, Any]:
+        """R33-P2-6: 获取套利检测统计"""
+        return self._arbitrage_detector.get_stats()
+
+    def on_fill_event(self, direction: str, price_level: int, timestamp_ms: float = 0.0) -> Dict[str, Any]:
+        """R33-P2-6: 成交事件推送到扫单检测器"""
+        return self._sweep_detector.on_fill(direction, price_level, timestamp_ms)
+
+    def get_sweep_stats(self) -> Dict[str, Any]:
+        """R33-P2-6: 获取扫单检测统计"""
+        return self._sweep_detector.get_stats()
+
 
 _order_flow_bridge: Optional[OrderFlowBridge] = None
 _order_flow_bridge_lock = threading.Lock()
@@ -324,7 +381,7 @@ __all__ = [
 ]
 
 
-@dataclass
+@dataclass(slots=True)
 class ArbitrageOpportunity:
     opportunity_id: str
     instrument_id: str
@@ -489,6 +546,9 @@ class OrderDefenseType(Enum):
     POST_ONLY = auto()
 
 
+# R35-P2-6标注: SweepDetector已实例化(OrderFlowBridge.__init__),
+# on_fill()通过OrderFlowBridge.on_fill_event()间接调用。
+# 待集成到风控检查链路(目前无主动定时调用)。
 class SweepDetector:
     """扫单行为识别器：检测做市商短时间内多档扫单
 
@@ -540,7 +600,7 @@ class SweepDetector:
         return {'service_name': 'SweepDetector', **self._stats}
 
 
-@dataclass
+@dataclass(slots=True)
 class DefensiveOrder:
     order_id: str
     instrument_id: str

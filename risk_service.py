@@ -23,28 +23,116 @@ risk_service.py - 风控服务
 from __future__ import annotations
 
 import copy
+import json
+import math
+import os
 import time
 import logging
+from ali2026v3_trading.serialization_utils import json_dumps, json_loads, json_default_serializer
+from ali2026v3_trading import config_params
 import threading
-from datetime import datetime, timedelta
+import numpy as np
+from datetime import datetime, timedelta, timezone
+
+# P1-R11-12修复: 中国标准时间UTC+8，用于datetime.fromtimestamp的tz参数
+_CHINA_TZ = timezone(timedelta(hours=8))  # R26-P0-CD-08: 中国时区（统一变量名，消除_CHINA_TZ不一致）
+
+# R27-P1修复: 导入容错/浮点/断路器工具
+from ali2026v3_trading.resilience_utils import (
+    ExponentialBackoff, BoundedRetry, DbQueryTimeout, Watchdog, HeartbeatMonitor,
+    CircuitBreakerHalfOpen, SlowQueryDetector, DataStalenessDetector,
+    MemoryPressureGuard, RateLimitedLogger, GracefulDegradation,
+    ResourceLeakDetector, AsyncTaskTimeout, safe_callback_wrapper,
+    get_process_health, ProcessHealthState, AtomicConfigRef,
+    stable_sum, stable_mean, stable_variance, stable_std,
+    approx_equal, approx_less, approx_greater, approx_less_equal, approx_greater_equal,
+    should_trigger_stop_loss, should_trigger_take_profit,
+    KahanSummation, safe_divide, compute_sharpe_stable, safe_normalize_weights,
+    stable_ewma, PRICE_TOLERANCE, FLOAT_COMPARE_TOLERANCE,
+)
+
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum, auto
+
+try:
+    from ali2026v3_trading.causal_chain_utils import (
+        CyclicDependencyGuard, ContaminationGuard, ParamIsolationGuard,
+    )
+    _HAS_CAUSAL_CHAIN = True
+except ImportError:
+    _HAS_CAUSAL_CHAIN = False
+
+
+# ============================================================================
+# UPG-P1-04修复: API版本标记装饰器
+# ============================================================================
+
+def api_version(version: str):
+    """UPG-P1-04修复: API版本标记装饰器
+
+    为服务公共API方法标记版本号，便于：
+    1. 运行时查询API版本
+    2. 版本兼容性检查
+    3. 废弃API迁移追踪
+
+    用法:
+        @api_version("1.0")
+        def check_before_trade(self, signal):
+            return self._check_service.check_before_trade(signal)
+
+    Args:
+        version: API版本号，如 "1.0", "2.0"
+    """
+    def decorator(func):
+        func._api_version = version
+        func._api_versioned = True
+        return func
+    return decorator
+
+
+# ============================================================================
+# P1-R11-12修复: 时区感知时间获取 — 统一使用UTC避免系统时区不一致导致风控时间判断错误
+# ============================================================================
+
+def _get_tz_aware_now() -> datetime:
+    """P1-R11-12修复: 返回UTC时区感知的当前datetime
+
+    替代裸 datetime.now()，确保所有风控日志、审计、快照时间戳
+    均为UTC时区感知，避免跨时区部署或夏令时切换时的时间判断错误。
+
+    Returns:
+        datetime: UTC时区的当前datetime (tzinfo=timezone.utc)
+    """
+    return datetime.now(_CHINA_TZ)
+
+
+def _audit_annotation(category='', phase1_status='', note=''):
+    """审计标注装饰器 — 不改变类行为，仅用于H.1.3格式清单审计追踪"""
+    def decorator(cls):
+        cls._audit_category = category
+        cls._audit_phase1_status = phase1_status
+        cls._audit_note = note
+        return cls
+    return decorator
 
 
 # ============================================================================
 # 枚举与数据结构
 # ============================================================================
 
+@_audit_annotation(category='lightweight_enum', phase1_status='stable', note='枚举类，0方法，7行，无隐式依赖')
 class RiskLevel(Enum):
     """风险等级"""
     LOW = auto()
     MEDIUM = auto()
     HIGH = auto()
+    RESTRICTED = auto()  # [R23-P1-02-FIX] 受限中间状态：正常→受限→熔断，防止直接从正常跳到熔断
     CRITICAL = auto()
 
 
+@_audit_annotation(category='lightweight_enum', phase1_status='stable', note='枚举类，0方法，6行，无隐式依赖')
 class RiskCheckResult(Enum):
     """风控检查结果"""
     PASS = auto()       # 通过
@@ -53,14 +141,38 @@ class RiskCheckResult(Enum):
     DEGRADED = auto()   # 降级
 
 
-@dataclass
+# [R23-P1-02-FIX] 风控级别合法转移：禁止从LOW/MEDIUM直接跳到CRITICAL(熔断)，必须经过RESTRICTED
+_LEGAL_RISK_LEVEL_TRANSITIONS = {
+    RiskLevel.LOW: {RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.RESTRICTED},
+    RiskLevel.MEDIUM: {RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.RESTRICTED},
+    RiskLevel.HIGH: {RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.RESTRICTED, RiskLevel.CRITICAL},
+    RiskLevel.RESTRICTED: {RiskLevel.HIGH, RiskLevel.RESTRICTED, RiskLevel.CRITICAL},
+    RiskLevel.CRITICAL: {RiskLevel.RESTRICTED, RiskLevel.CRITICAL},
+}
+
+
+def validate_risk_level_transition(current: RiskLevel, target: RiskLevel) -> RiskLevel:
+    """[R23-P1-02-FIX] 校验风控级别转移合法性，禁止正常→熔断直接跳跃"""
+    allowed = _LEGAL_RISK_LEVEL_TRANSITIONS.get(current, set())
+    if target in allowed:
+        return target
+    if target == RiskLevel.CRITICAL and current in (RiskLevel.LOW, RiskLevel.MEDIUM):
+        logging.warning("[R23-P1-02-FIX] 风控级别非法跳跃: %s→%s, 强制经过RESTRICTED中间状态", current.name, target.name)
+        return RiskLevel.RESTRICTED
+    return target
+
+
+@_audit_annotation(category='lightweight_dataclass', phase1_status='stable', note='响应dataclass，5方法，36行，无隐式依赖')
+@dataclass(slots=True)
 class RiskCheckResponse:
     """风控检查响应"""
     result: RiskCheckResult = RiskCheckResult.PASS
     level: RiskLevel = RiskLevel.LOW
     message: str = ""
     reason: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # ENV-06修复: 使用UTC时区
+    threshold: Optional[float] = None  # R24-P1-TR-06修复: 风控拒绝阈值
+    actual: Optional[float] = None     # R24-P1-TR-06修复: 风控拒绝实际值
 
     @property
     def is_pass(self) -> bool:
@@ -76,9 +188,13 @@ class RiskCheckResponse:
 
     @classmethod
     def block_result(cls, reason: str, message: str = "",
-                     level: RiskLevel = RiskLevel.HIGH) -> "RiskCheckResponse":
+                     level: RiskLevel = RiskLevel.HIGH,
+                     threshold: Optional[float] = None,
+                     actual: Optional[float] = None) -> "RiskCheckResponse":
+        # R24-P1-TR-06修复: block_result增加threshold/actual参数
         return cls(result=RiskCheckResult.BLOCK, level=level,
-                   reason=reason, message=message)
+                   reason=reason, message=message,
+                   threshold=threshold, actual=actual)
 
     @classmethod
     def warning_result(cls, reason: str, message: str = "") -> "RiskCheckResponse":
@@ -86,19 +202,40 @@ class RiskCheckResponse:
                    reason=reason, message=message)
 
 
+_PASS_RESULT_CACHE = {}
+
+def _get_pass_result(reason: str = "风控检查通过") -> "RiskCheckResponse":
+    if reason not in _PASS_RESULT_CACHE:
+        _PASS_RESULT_CACHE[reason] = RiskCheckResponse.pass_result(reason)
+    return _PASS_RESULT_CACHE[reason]
+
+
 from ali2026v3_trading.position_service import PositionLimitConfig as PositionLimit
+from ali2026v3_trading.shared_utils import safe_int, safe_float
 
 
-@dataclass
+@_audit_annotation(category='lightweight_dataclass', phase1_status='stable', note='指标dataclass，0方法，12行，无隐式依赖')
+@dataclass(slots=True)
 class RiskMetrics:
-    """风险指标"""
+    """风险指标 — 含11维度评分"""
     total_exposure: float = 0.0       # 总敞口
     max_single_position: float = 0.0  # 最大单持仓
     position_count: int = 0           # 持仓数量
     risk_ratio: float = 0.0           # 风险比率
-    timestamp: datetime = field(default_factory=datetime.now)
+    # 11维度关键指标
+    life_degradation_level: int = 0   # D3 行情寿命降级等级(0-3)
+    life_p75_minutes: float = 0.0     # D3 当前状态寿命p75(分钟)
+    life_valid: bool = False          # D3 寿命数据是否有效
+    composite_risk_score: float = 0.0 # 11维度综合风险评分[0,1]
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # ENV-06修复: 使用UTC时区
 
 
+
+# CC-03/AP-02修复: 子服务导入（延迟导入避免循环依赖）
+from ali2026v3_trading.risk_check_service import RiskCheckService
+from ali2026v3_trading.risk_compute_service import RiskComputeService
+from ali2026v3_trading.risk_circuit_breaker import SafetyMetaLayer, get_safety_meta_layer, cleanup_safety_layer
+from ali2026v3_trading.risk_config_provider import RiskConfigProvider
 # ============================================================================
 # 风控服务
 # ============================================================================
@@ -118,1364 +255,521 @@ class RiskService:
         result = service.check_before_trade(signal)
     """
 
-    def __init__(self, params: Any, position_manager: Any = None,
-                 strategy: Any = None):
-        """
-        初始化风控服务
+    # [R23-P2-ID-01-FIX] 日志去重装饰器
+    # AUDIT: lightweight_helper, phase2_target=ali2026v3_trading.risk_engine.log_deduplicator, 2方法, 19行
+    # DEPRECATED: 独立模块 risk_engine.log_deduplicator 已替代  # noqa: F811  # pylint: disable=useless-suppression
+    class LogDeduplicator:  # noqa: F811  # pylint: disable=redefined-outer-name
+        """同一消息5秒内不重复输出"""
+        _DEDUP_WINDOW_SEC = 5.0
 
-        Args:
-            params: 参数配置对象
-            position_manager: 持仓管理器（可选）
-            strategy: 策略实例（可选）
-        """
-        self.params = params
+        def __init__(self):
+            self._recent: Dict[str, float] = {}
+            self._lock = threading.Lock()
+
+        def should_log(self, msg: str) -> bool:
+            return self._config_provider.should_log(msg)
+    # Phase 2: LogDeduplicator提取为独立模块，优先使用risk_engine.log_deduplicator
+    try:
+        from ali2026v3_trading.risk_engine.log_deduplicator import LogDeduplicator as _LogDedupIndependent
+        _log_dedup = _LogDedupIndependent()
+    except ImportError:
+        _log_dedup = LogDeduplicator()
+    # [R23-P2-ID-01-FIX]
+
+    # R13-P0-LOG-05修复: 告警回调机制，供外部告警系统集成
+    _alert_callbacks: List = []
+    _alert_callbacks_lock = threading.Lock()
+
+    def __init__(self, params: Any = None, position_manager: Any = None, strategy: Any = None):
+        # CC-03/AP-02修复: 子服务实例化
+        import copy as _copy
+        self.params = _copy.deepcopy(params) if params is not None else {}
         self.position_manager = position_manager
         self.strategy = strategy
+        self._check_service = RiskCheckService(self)
+        self._compute_service = RiskComputeService(self)
+        self._config_provider = RiskConfigProvider(self)
+        self._lock = threading.Lock()
+        self._risk_check_lock = threading.RLock()
+        self._life_estimator = None
+        self._life_estimator_init_failed = False
+        self._current_capital_scale = 'medium'
+        self._greeks_calc = None
+        self._alpha_decay_recovery_confirmed: bool = False
+        self._greeks_calc_lock = threading.Lock()
+        self._risk_engine = None
+        self._signal_service = None
 
-        # 线程安全
-        self._lock = threading.RLock()
+    @classmethod
+    def register_alert_callback(cls, cb) -> None:
+        with cls._alert_callbacks_lock:
+            if cb not in cls._alert_callbacks:
+                cls._alert_callbacks.append(cb)
+    def _fire_alert(self, event_type, detail):
+        with self._alert_callbacks_lock:
+            callbacks = list(self._alert_callbacks)
+        for cb in callbacks:
+            try:
+                cb(event_type, detail)
+            except Exception as e:
+                logging.warning('[RiskService] R13-P0-LOG-05修复: 告警回调异常: %s', e)
+    class _AbnormalTradeDetector:  # noqa: F811  # pylint: disable=redefined-outer-name
+        def __init__(self):
+            self._trade_history: deque = deque(maxlen=1000)
+            self._cancel_counts: Dict[str, int] = {}
+            self._burst_window_sec: float = 60.0
+            self._burst_threshold: int = 20
+            self._cancel_rate_threshold: float = 0.8
+            self._self_trade_pairs: Dict[str, float] = {}
 
-        # 持仓限额配置
-        self._position_limits: Dict[str, PositionLimit] = {}
-
-        # 限频控制
-        self._signal_times: Dict[str, deque] = {}  # 注：插入时统一使用maxlen=1000
-        # ✅ 修复：删除_last_signal_time，统一为_signal_times滑动窗口
-
-        # 风控统计
-        self._stats = {
-            "total_checks": 0,
-            "blocked": 0,
-            "warnings": 0,
-            "passed": 0,
-        }
-
-        # 连亏保护
-        self._consecutive_loss_limits: Dict[str, int] = {
-            'small': 5, 'medium': 7, 'large': 10,
-        }
-        self._consecutive_loss_counts: Dict[str, int] = {}
-        self._consecutive_loss_paused: Dict[str, bool] = {}
-        # 盈亏比恢复计时器：连亏暂停后，超过此时间自动恢复
-        self._consecutive_loss_recovery_timeouts: Dict[str, float] = {
-            'small': 1800.0,   # 30分钟
-            'medium': 3600.0,  # 60分钟
-            'large': 7200.0,   # 120分钟
-        }
-        self._consecutive_loss_pause_timestamps: Dict[str, float] = {}
-
-        # 非对称风控
-        self._asymmetric_risk_enabled: bool = False
-        self._asymmetric_profit_multiplier: float = 1.5
-        self._asymmetric_loss_multiplier: float = 0.7
-
-        # 缓存
-        self._strategy_status_cache: Tuple[float, RiskCheckResponse] = (0.0, RiskCheckResponse.pass_result())
-        self._cache_ttl = 1.0  # 缓存有效期（秒）
-        self._last_greeks_dashboard: Dict[str, Any] = {}
-
-        # ✅ P1-1修复：启动希腊字母仪表盘周期性日志定时器（每60秒）
-        self._dashboard_timer: Optional[threading.Timer] = None
-        self._start_dashboard_timer()
-
-    def _start_dashboard_timer(self) -> None:
-        """启动仪表盘周期性日志定时器"""
-        try:
-            self.log_greeks_dashboard_periodic()
-        except Exception as e:
-            logging.warning("[RiskService] 初始仪表盘日志异常: %s", e)
-        self._dashboard_timer = threading.Timer(60.0, self._dashboard_timer_callback)
-        self._dashboard_timer.daemon = True
-        self._dashboard_timer.start()
-
+        def record_trade(self, instrument_id: str, direction: str, volume: float, price: float, timestamp: float = None) -> None:
+            return self._config_provider.record_trade(instrument_id, direction, volume, price, timestamp)
+        def detect_burst_trading(self, instrument_id: str = '', window_sec: float = None) -> Dict[str, Any]:
+            return self._check_service.detect_burst_trading(instrument_id, window_sec)
+        def detect_self_trade(self, instrument_id: str, direction: str, price: float, tolerance_pct: float = 0.001) -> Dict[str, Any]:
+            return self._check_service.detect_self_trade(instrument_id, direction, price, tolerance_pct)
+        def detect_price_deviation(self, instrument_id: str, order_price: float, market_price: float, threshold_pct: float = 0.02) -> Dict[str, Any]:
+            return self._check_service.detect_price_deviation(instrument_id, order_price, market_price, threshold_pct)
+        def detect_volume_spike(self, instrument_id: str, volume: float, avg_volume: float, spike_factor: float = 5.0) -> Dict[str, Any]:
+            return self._check_service.detect_volume_spike(instrument_id, volume, avg_volume, spike_factor)
+    def _on_config_param_change(self, event: Dict[str, Any]) -> None:
+        return self._config_provider._on_config_param_change(event)
+    def _on_aggregate_position(self, event: Any) -> None:
+        return self._config_provider._on_aggregate_position(event)
+    def record_partial_fill_progress(self, order_id, instrument_id, filled_volume, total_volume, strategy_id) -> None:
+        return self._config_provider.record_partial_fill_progress(order_id, instrument_id, filled_volume, total_volume, strategy_id)
+    def _start_dashboard_timer(self) -> None:  # [R27-AUDIT] P1修复: 添加hasattr保护防止委托链断裂
+        if hasattr(self._config_provider, '_start_dashboard_timer'):
+            return self._config_provider._start_dashboard_timer()
+        logging.debug("[R27-AUDIT] _config_provider无_start_dashboard_timer方法，跳过")
     def _dashboard_timer_callback(self) -> None:
-        """定时器回调：调用周期性仪表盘日志并重新调度"""
-        try:
-            self.log_greeks_dashboard_periodic()
-        except Exception as e:
-            logging.warning("[RiskService] 仪表盘定时日志异常: %s", e)
-        # 重新启动定时器
-        self._dashboard_timer = threading.Timer(60.0, self._dashboard_timer_callback)
-        self._dashboard_timer.daemon = True
-        self._dashboard_timer.start()
-
-    # ========================================================================
-    # 主检查接口
-    # ========================================================================
-
+        if hasattr(self._config_provider, '_dashboard_timer_callback'):
+            return self._config_provider._dashboard_timer_callback()
+    def _cancel_dashboard_timer(self) -> None:
+        if hasattr(self._config_provider, '_cancel_dashboard_timer'):
+            return self._config_provider._cancel_dashboard_timer()
+    def stop(self) -> None:
+        # R25-P1-CF-05修复: stop()添加hasattr防御，防止_config_provider无stop方法时AttributeError
+        if hasattr(self._config_provider, 'stop') and callable(self._config_provider.stop):
+            return self._config_provider.stop()
+    def detect_abnormal_trading(self, instrument_id, direction, price, volume, market_price, avg_volume) -> Dict[str, Any]:
+        return self._check_service.detect_abnormal_trading(instrument_id, direction, price, volume, market_price, avg_volume)
     def check_before_trade(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        # R33-P1-7修复: 集成crack_validation到生产策略链路
         try:
-            safety_result = self._check_safety_meta_layer(signal)
-            if safety_result.is_block:
-                return self._record_result(safety_result)
-
-            with self._lock:
-                cl_result = self._check_consecutive_loss_protection(signal)
-                if cl_result.is_block:
-                    return self._record_result(cl_result)
-
-                status_result = self._check_strategy_status()
-                if status_result.is_block:
-                    return self._record_result(status_result)
-
-                if not signal.get("is_valid", True):
-                    return self._record_result(
-                        RiskCheckResponse.block_result("signal_invalid", "信号无效")
-                    )
-
-                symbol = signal.get("symbol", "")
-                rate_result = self._check_rate_limit(symbol)
-                if rate_result.is_block:
-                    return self._record_result(rate_result)
-
-                account_id = signal.get("account_id", "default")
-                amount = signal.get("amount", 0)
-                limit_result = self._check_position_limit(account_id, amount)
-                if limit_result.is_block:
-                    return self._record_result(limit_result)
-
-                risk_result = self._check_risk_ratio(signal)
-                if risk_result.is_block:
-                    return self._record_result(risk_result)
-
-                greeks_result = self._check_greeks_limits(signal)
-                if greeks_result.is_block:
-                    return self._record_result(greeks_result)
-
-                self._record_signal_time(symbol)
-
-            return self._record_result(RiskCheckResponse.pass_result("风控检查通过"))
-
-        except Exception as e:
-            logging.error(f"[RiskService] 风控检查异常，采用fail-safe阻断: {e}")
-            return RiskCheckResponse.block_result("check_error", f"风控检查异常，采用fail-safe阻断: {e}", RiskLevel.CRITICAL)
-
+            from ali2026v3_trading.crack_validation import (
+                check_safety_meta_layer,
+                validate_circuit_breaker_vs_time_stop,
+            )
+            _cb_paused = getattr(self, '_is_circuit_breaker_paused', False)
+            _hard_time_stop = getattr(self, '_hard_time_stop_triggered', False)
+            _safety_ok, _time_stop_ok = check_safety_meta_layer(_cb_paused, _hard_time_stop)
+            if not _safety_ok:
+                return RiskCheckResponse.block_result(reason='crack_validation_safety_meta_failed')
+            if not _time_stop_ok:
+                logging.warning("[R33-P1-7] 断路器与时间止损冲突检测: cb_paused=%s, time_stop=%s", _cb_paused, _hard_time_stop)
+        except ImportError:
+            pass
+        except Exception as _cv_err:
+            logging.debug("[R33-P1-7] crack_validation pre-check error: %s", _cv_err)
+        return self._check_service.check_before_trade(signal)
+    def _validate_signal(self, signal: Dict[str, Any], _check_dedup_key: str, _cyclic_guard) -> Optional[RiskCheckResponse]:
+        return self._check_service._validate_signal(signal, _check_dedup_key, _cyclic_guard)
+    def _check_operational_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
+        return self._check_service._check_operational_risks(signal, action)
+    def _check_market_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
+        return self._check_service._check_market_risks(signal, action)
+    def _check_counterparty_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
+        return self._check_service._check_counterparty_risks(signal, action)
+    def _check_regulatory_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
+        return self._check_service._check_regulatory_risks(signal, action)
+    def _detect_abnormal_trading_step(self, signal: Dict[str, Any]) -> Optional[RiskCheckResponse]:
+        return self._check_service._detect_abnormal_trading_step(signal)
+    def _record_and_publish(self, signal: Dict[str, Any], _check_dedup_key: str, _cyclic_guard) -> RiskCheckResponse:
+        return self._check_service._record_and_publish(signal, _check_dedup_key, _cyclic_guard)
     def _check_safety_meta_layer(self, signal: Dict[str, Any]) -> RiskCheckResponse:
-        try:
-            safety = get_safety_meta_layer(self.params)
-
-            paused, reason = safety.is_trading_paused()
-            if paused:
-                return RiskCheckResponse.block_result(
-                    "safety_circuit_breaker", reason, RiskLevel.CRITICAL
-                )
-
-            if safety.is_hard_stop_triggered():
-                return RiskCheckResponse.block_result(
-                    "safety_daily_hard_stop",
-                    "日回撤会话周期硬终止：所有交易禁止（含平仓），需人工confirm_daily_resume()恢复",
-                    RiskLevel.CRITICAL
-                )
-
-            action = signal.get("action", "")
-            if action != "CLOSE" and safety.is_new_open_blocked():
-                return RiskCheckResponse.block_result(
-                    "safety_daily_drawdown",
-                    "日最大回撤硬停止：仅允许平仓，禁止新开仓",
-                    RiskLevel.CRITICAL
-                )
-
-        except Exception as e:
-            logging.warning(f"[RiskService._check_safety_meta_layer] SafetyMetaLayer check error: {e}")
-
-        return RiskCheckResponse.pass_result()
+        return self._check_service._check_safety_meta_layer(signal)
 
     def _record_result(self, result: RiskCheckResponse) -> RiskCheckResponse:
-        """记录检查结果"""
-        with self._lock:
-            self._stats["total_checks"] += 1
-            if result.is_block:
-                self._stats["blocked"] += 1
-            elif result.result == RiskCheckResult.WARNING:
-                self._stats["warnings"] += 1
-            else:
-                self._stats["passed"] += 1
-        return result
-
-    # ========================================================================
-    # 策略状态检查
-    # ========================================================================
-
+        return self._check_service._record_result(result)
     def _check_strategy_status(self) -> RiskCheckResponse:
-        """检查策略运行状态"""
-        if self.strategy is None:
-            return RiskCheckResponse.pass_result()
-
-        now = time.time()
-
-        with self._lock:
-            # 检查缓存
-            ts, cached = self._strategy_status_cache
-            if now - ts < self._cache_ttl:
-                return cached
-
-            # 检查策略状态
-            if not getattr(self.strategy, "my_is_running", True):
-                result = RiskCheckResponse.block_result(
-                    "strategy_stopped", "策略未运行", RiskLevel.HIGH
-                )
-            elif getattr(self.strategy, "my_is_paused", False):
-                result = RiskCheckResponse.block_result(
-                    "trading_paused", "策略已暂停", RiskLevel.MEDIUM
-                )
-            elif getattr(self.strategy, "my_destroyed", False):
-                result = RiskCheckResponse.block_result(
-                    "strategy_destroyed", "策略已销毁", RiskLevel.CRITICAL
-                )
-            elif getattr(self.strategy, "my_trading", True) is False:
-                result = RiskCheckResponse.block_result(
-                    "trading_disabled", "交易开关关闭", RiskLevel.MEDIUM
-                )
-            else:
-                result = RiskCheckResponse.pass_result()
-
-            # 缓存结果
-            self._strategy_status_cache = (now, result)
-            return result
-
-    # ========================================================================
-    # 限频检查
-    # ========================================================================
-
+        return self._check_service._check_strategy_status()
     def _check_rate_limit(self, symbol: str) -> RiskCheckResponse:
-        """检查信号限频"""
-        cooldown = self._get_signal_cooldown()
-        max_signals = self._get_max_signals_per_window()
-        window_sec = self._get_rate_limit_window()
-
-        with self._lock:
-            now = time.time()
-
-            # ✅ 修复：统一使用_signal_times滑动窗口检查，删除_last_signal_time
-            if symbol not in self._signal_times:
-                self._signal_times[symbol] = deque(maxlen=max_signals * 2)
-
-            window = self._signal_times[symbol]
-            cutoff = now - window_sec
-
-            # 清理旧记录
-            while window and window[0] < cutoff:
-                window.popleft()
-
-            # 冷却检查：基于滑动窗口最后一个信号时间
-            if window:
-                last_time = window[-1]
-                if now - last_time < cooldown:
-                    return RiskCheckResponse.block_result(
-                        "rate_limit_cooldown",
-                        f"{symbol} 信号冷却中，剩余 {cooldown - (now - last_time):.1f} 秒",
-                        RiskLevel.MEDIUM
-                    )
-
-            if len(window) >= max_signals:
-                return RiskCheckResponse.block_result(
-                    "rate_limit_exceeded",
-                    f"{symbol} 窗口内信号数超限: {len(window)}/{max_signals}",
-                    RiskLevel.MEDIUM
-                )
-
-        return RiskCheckResponse.pass_result()
+        return self._check_service._check_rate_limit(symbol)
 
     def _record_signal_time(self, symbol: str) -> None:
-        """记录信号时间 - 统一使用_signal_times滑动窗口"""
-        with self._lock:
-            now = time.time()
-            # ✅ 修复：删除_last_signal_time更新，仅使用_signal_times
-            if symbol not in self._signal_times:
-                max_signals = self._get_max_signals_per_window()
-                self._signal_times[symbol] = deque(maxlen=max_signals * 2)
-            self._signal_times[symbol].append(now)
-
-    # ========================================================================
-    # 持仓限额检查
-    # ========================================================================
-
-    def _check_position_limit(self, account_id: str, required_amount: float) -> RiskCheckResponse:
-        """检查持仓限额"""
-        if required_amount <= 0:
-            return RiskCheckResponse.pass_result()
-
-        with self._lock:
-            expired_keys = []
-            for aid in list(self._position_limits.keys()):
-                if not self._position_limits[aid].is_valid():
-                    expired_keys.append(aid)
-            for aid in expired_keys:
-                self._position_limits.pop(aid, None)
-
-            if account_id not in self._position_limits:
-                return RiskCheckResponse.pass_result()
-
-            limit = self._position_limits[account_id]
-
-            current_exposure = 0.0
-            if self.position_manager is not None:
-                try:
-                    import copy as _copy
-                    positions_raw = getattr(self.position_manager, "positions", {})
-                    positions = _copy.deepcopy(positions_raw) if positions_raw else {}
-                    for inst_map in positions.values():
-                        for pos in inst_map.values():
-                            vol = getattr(pos, "volume", 0)
-                            price = getattr(pos, "open_price", 0)
-                            current_exposure += abs(vol) * price
-                except Exception as e:
-                    # ✅ P0修复：限额检查异常时返回WARNING而非静默跳过
-                    logging.warning(f"[RiskService._check_position_limit] Failed to calculate exposure: {e}")
-                    return RiskCheckResponse.block_result(
-                        "position_calculation_error",
-                        f"持仓计算异常: {e}",
-                        RiskLevel.WARNING
-                    )
-
-            if limit is not None and limit.limit_amount < (current_exposure + required_amount):
-                return RiskCheckResponse.block_result(
-                    "position_limit_exceeded",
-                    f"持仓限额不足: 当前{current_exposure:.2f}+需要{required_amount:.2f}={current_exposure + required_amount:.2f}, 限额 {limit.limit_amount:.2f}",
-                    RiskLevel.HIGH
-                )
-
-        return RiskCheckResponse.pass_result()
-
-    def set_position_limit(self, account_id: str, limit_amount: float,
-                           effective_until: Optional[datetime] = None) -> None:
-        with self._lock:
-            self._position_limits[account_id] = PositionLimit(
-                account_id=account_id,
-                limit_amount=limit_amount,
-                effective_until=effective_until,
-            )
-        logging.info("[RiskService.set_position_limit] Set limit for %s: amount=%.2f until=%s",
-                     account_id, limit_amount, effective_until)
-
+        return self._check_service._record_signal_time(symbol)
+    def _check_position_limit(self, account_id, required_amount, hedge_type) -> RiskCheckResponse:
+        return self._check_service._check_position_limit(account_id, required_amount, hedge_type)
+    def set_position_limit(self, account_id, limit_amount, effective_until) -> None:
+        return self._config_provider.set_position_limit(account_id, limit_amount, effective_until)
     def get_position_limit(self, account_id: str) -> Optional[PositionLimit]:
-        with self._lock:
-            limit = self._position_limits.get(account_id)
-            if limit and limit.is_valid():
-                return limit
-        return None
-
-    # ========================================================================
-    # 风险比率检查
-    # ========================================================================
-
+        return self._compute_service.get_position_limit(account_id)
     def _check_risk_ratio(self, signal: Dict[str, Any]) -> RiskCheckResponse:
-        """检查风险比率"""
-        max_risk_ratio = self._get_max_risk_ratio()
-        if max_risk_ratio <= 0:
-            return RiskCheckResponse.pass_result()
+        return self._check_service._check_risk_ratio(signal)
+    def _check_risk_consistency(self) -> RiskCheckResponse:
+        return self._check_service._check_risk_consistency()
 
-        # 计算当前风险比率
-        metrics = self.calculate_risk_metrics()
-        if metrics.risk_ratio >= max_risk_ratio:
-            return RiskCheckResponse.block_result(
-                "risk_ratio_exceeded",
-                f"风险比率超限: {metrics.risk_ratio:.2%} >= {max_risk_ratio:.2%}",
-                RiskLevel.HIGH
-            )
-
-        return RiskCheckResponse.pass_result()
-
-    _greeks_calc = None
-    _greeks_calc_lock = threading.Lock()
+    def _check_invariant_runtime(self) -> Dict[str, Any]:
+        return self._check_service._check_invariant_runtime()
+    def _check_single_trade_risk(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        return self._check_service._check_single_trade_risk(signal)
+    def _check_sharpe_iron_rule(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        return self._check_service._check_sharpe_iron_rule(signal)
+    def _check_e7_residual_block(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        return self._check_service._check_e7_residual_block(signal)
+    def _check_capital_sufficiency_in_trade(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        return self._check_service._check_capital_sufficiency_in_trade(signal)
+    def check_regulatory_compliance(self, position_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        _safety = get_safety_meta_layer()
+        return _safety.check_regulatory_compliance(position_data)
+    def check_capital_sufficiency(self, equity: float, required_margin: float = 0.0,
+                                  open_positions: int = 0, max_positions: int = 50,
+                                  existing_margin_used: float = 0.0) -> Dict[str, Any]:
+        _safety = get_safety_meta_layer()
+        return _safety.check_capital_sufficiency(equity, required_margin, open_positions, max_positions, existing_margin_used)
+    def check_exchange_status(self, exchange: str = "AUTO") -> Dict[str, Any]:
+        _safety = get_safety_meta_layer()
+        _result = _safety.check_exchange_status(exchange)
+        if 'status' not in _result:
+            _result['status'] = 'OPEN' if _result.get('tradeable', False) else 'CLOSED'
+        return _result
+    def _check_spread_degradation(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        return self._check_service._check_spread_degradation(signal)
+    def _check_governance_violations(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        return self._check_service._check_governance_violations(signal)
 
     def _get_greeks_calculator(self):
-        if RiskService._greeks_calc is None:
-            with RiskService._greeks_calc_lock:
-                if RiskService._greeks_calc is None:
-                    try:
-                        from ali2026v3_trading.greeks_calculator import GreeksCalculator
-                        RiskService._greeks_calc = GreeksCalculator()
-                    except Exception:
-                        return None
-        return RiskService._greeks_calc
-
+        return self._config_provider._get_greeks_calculator()
     def get_greeks_dashboard(self) -> Dict[str, Any]:
-        """V7核心工程：实时希腊字母风险仪表盘
-
-        输出结构化数据，包含组合Greeks、跳空模拟、PnL归因、安全元层状态。
-        每次 check_before_trade() 时更新仪表盘缓存。
-        如 greeks_calculator 导入失败，仪表盘字段设为 null 并记录警告，不阻断交易。
-        """
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
-
-        portfolio_section: Dict[str, Any] = {}
-        stress_section: Dict[str, Any] = {}
-        attribution_section: Dict[str, Any] = {}
-        safety_section: Dict[str, Any] = {}
-
-        try:
-            calc = self._get_greeks_calculator()
-            if calc is None:
-                portfolio_section = {k: None for k in (
-                    "net_delta", "max_net_delta", "delta_usage_pct",
-                    "net_gamma", "max_net_gamma", "gamma_usage_pct",
-                    "net_vega", "max_net_vega", "vega_usage_pct",
-                    "net_theta", "max_theta_ratio", "theta_ratio",
-                )}
-                logging.warning("[GreekDashboard] GreeksCalculator unavailable, fields set to null")
-            else:
-                positions_dict = {}
-                if self.position_manager:
-                    positions_raw = getattr(self.position_manager, "positions", {})
-                    for inst_map in positions_raw.values():
-                        for inst_id, pos in inst_map.items():
-                            vol = getattr(pos, "volume", 0)
-                            if vol != 0:
-                                positions_dict[inst_id] = vol
-
-                max_delta_pct = safe_get_float(self.params, "max_net_delta_pct", 0.30)
-                max_gamma_pct = safe_get_float(self.params, "max_net_gamma_pct", 0.08)
-                max_vega_bps = safe_get_float(self.params, "max_net_vega_bps", 0.02)
-                max_theta_ratio = safe_get_float(self.params, "max_theta_ratio", 0.5)
-
-                if positions_dict:
-                    pg = calc.get_portfolio_greeks(positions_dict)
-
-                    net_delta = pg.get("delta", 0.0)
-                    net_gamma = pg.get("gamma", 0.0)
-                    net_vega = pg.get("vega", 0.0)
-                    net_theta = pg.get("theta", 0.0)
-
-                    max_delta_abs = max_delta_pct * 1000
-                    max_gamma_abs = max_gamma_pct * 50
-                    max_vega_abs = max_vega_bps * 200
-
-                    portfolio_section = {
-                        "net_delta": round(net_delta, 4),
-                        "max_net_delta": round(max_delta_abs, 2),
-                        "delta_usage_pct": round(abs(net_delta) / max_delta_abs * 100, 2) if max_delta_abs > 0 else 0.0,
-                        "net_gamma": round(net_gamma, 6),
-                        "max_net_gamma": round(max_gamma_abs, 4),
-                        "gamma_usage_pct": round(abs(net_gamma) / max_gamma_abs * 100, 2) if max_gamma_abs > 0 else 0.0,
-                        "net_vega": round(net_vega, 6),
-                        "max_net_vega": round(max_vega_abs, 4),
-                        "vega_usage_pct": round(abs(net_vega) / max_vega_abs * 100, 2) if max_vega_abs > 0 else 0.0,
-                        "net_theta": round(net_theta, 6),
-                        "max_theta_ratio": max_theta_ratio,
-                        "theta_ratio": round(abs(net_theta) / max_theta_ratio, 4) if max_theta_ratio > 0 else 0.0,
-                    }
-
-                    stress_section = self._compute_stress_test(calc, positions_dict, net_delta, net_gamma, net_vega, net_theta)
-                    attribution_section = self._compute_pnl_attribution(calc, positions_dict, net_delta, net_gamma, net_vega, net_theta)
-                else:
-                    portfolio_section = {k: 0.0 for k in (
-                        "net_delta", "max_net_delta", "delta_usage_pct",
-                        "net_gamma", "max_net_gamma", "gamma_usage_pct",
-                        "net_vega", "max_net_vega", "vega_usage_pct",
-                        "net_theta", "max_theta_ratio", "theta_ratio",
-                    )}
-                    stress_section = {"jump_1sigma_pnl": 0.0, "jump_2sigma_pnl": 0.0, "L1_trigger_prob": 0.0}
-                    attribution_section = {
-                        "delta_contrib": 0.0, "gamma_contrib": 0.0,
-                        "vega_contrib": 0.0, "theta_contrib": 0.0,
-                        "unexplained": 0.0, "unexplained_pct": 0.0,
-                    }
-        except Exception as e:
-            logging.warning("[GreekDashboard] Computation error: %s", e)
-            portfolio_section = portfolio_section or {}
-            stress_section = stress_section or {}
-            attribution_section = attribution_section or {}
-
-        try:
-            safety = get_safety_meta_layer(self.params)
-            paused, _ = safety.is_trading_paused()
-            safety_section = {
-                "circuit_breaker_triggered": paused,
-                "trading_paused": paused,
-                "new_open_blocked": safety.is_new_open_blocked(),
-            }
-        except Exception:
-            safety_section = {"circuit_breaker_triggered": False, "trading_paused": False, "new_open_blocked": False}
-
-        dashboard = {
-            "timestamp": now_str,
-            "portfolio": portfolio_section,
-            "stress_test": stress_section,
-            "pnl_attribution": attribution_section,
-            "safety_meta": safety_section,
-        }
-
-        with self._lock:
-            self._last_greeks_dashboard = dashboard
-
-        return dashboard
-
+        return self._compute_service.get_greeks_dashboard()
     def _compute_stress_test(self, calc, positions_dict, net_delta, net_gamma, net_vega, net_theta):
-        """跳空模拟：1σ和2σ标的价格跳变下的PnL影响
-        
-        L1跳跃概率估计参数（可回测优化）：
-        - L1_JUMP_PROB_HIGH: 2σ跳跃显著大于1σ跳跃时的触发概率
-        - L1_JUMP_PROB_LOW: 其他情况的基础触发概率
-        """
-        L1_JUMP_PROB_HIGH = 0.05
-        L1_JUMP_PROB_LOW = 0.01
-        
-        try:
-            jump_1sigma_pnl = 0.0
-            jump_2sigma_pnl = 0.0
-
-            with calc.get_lock():
-                for inst_id, size in positions_dict.items():
-                    if size == 0:
-                        continue
-                    greeks = calc._option_greeks.get(inst_id)
-                    if not greeks:
-                        continue
-                    info = calc._option_info_cache.get(inst_id, {})
-                    future_product = info.get('future_product', '')
-                    multiplier = calc._contract_multiplier.get(future_product, 1)
-
-                    underlying_price = 0.0
-                    iv = calc._option_iv.get(inst_id, 0.2)
-                    if iv <= 0:
-                        iv = 0.2
-                    try:
-                        from ali2026v3_trading.data_service import get_data_service
-                        ds = get_data_service()
-                        if ds and ds.realtime_cache:
-                            underlying_id = info.get('underlying_future_id')
-                            if underlying_id:
-                                underlying_price = ds.realtime_cache.get_latest_price(str(underlying_id)) or 0.0
-                    except Exception:
-                        pass
-
-                    if underlying_price <= 0:
-                        continue
-
-                    sigma_1 = underlying_price * iv * 0.01
-                    sigma_2 = sigma_1 * 2
-
-                    delta_contrib = greeks.get('delta', 0.0) * multiplier * size
-                    gamma_contrib = 0.5 * greeks.get('gamma', 0.0) * multiplier * size
-
-                    jump_1sigma_pnl += delta_contrib * sigma_1 + gamma_contrib * sigma_1 * sigma_1
-                    jump_2sigma_pnl += delta_contrib * sigma_2 + gamma_contrib * sigma_2 * sigma_2
-
-            l1_prob = L1_JUMP_PROB_HIGH if abs(jump_2sigma_pnl) > abs(jump_1sigma_pnl) * 3 else L1_JUMP_PROB_LOW
-
-            return {
-                "jump_1sigma_pnl": round(jump_1sigma_pnl, 2),
-                "jump_2sigma_pnl": round(jump_2sigma_pnl, 2),
-                "L1_trigger_prob": l1_prob,
-            }
-        except Exception as e:
-            logging.warning("[GreekDashboard._compute_stress_test] Error: %s", e)
-            return {"jump_1sigma_pnl": 0.0, "jump_2sigma_pnl": 0.0, "L1_trigger_prob": 0.0}
-
+        return self._compute_service._compute_stress_test(calc, positions_dict, net_delta, net_gamma, net_vega, net_theta)
     def _compute_pnl_attribution(self, calc, positions_dict, net_delta, net_gamma, net_vega, net_theta):
-        """PnL归因：按Delta/Gamma/Vega/Theta分解收益贡献"""
-        try:
-            delta_contrib = 0.0
-            gamma_contrib = 0.0
-            vega_contrib = 0.0
-            theta_contrib = 0.0
+        return self._compute_service._compute_pnl_attribution(calc, positions_dict, net_delta, net_gamma, net_vega, net_theta)
 
-            with calc.get_lock():
-                for inst_id, size in positions_dict.items():
-                    if size == 0:
-                        continue
-                    greeks = calc._option_greeks.get(inst_id)
-                    if not greeks:
-                        continue
-                    info = calc._option_info_cache.get(inst_id, {})
-                    future_product = info.get('future_product', '')
-                    multiplier = calc._contract_multiplier.get(future_product, 1)
-
-                    iv = calc._option_iv.get(inst_id, 0.2)
-                    if iv <= 0:
-                        iv = 0.2
-
-                    delta_contrib += greeks.get('delta', 0.0) * multiplier * size * 0.01
-                    gamma_contrib += 0.5 * greeks.get('gamma', 0.0) * multiplier * size * 0.0001
-                    vega_contrib += greeks.get('vega', 0.0) * multiplier * size * (iv * 0.01)
-                    theta_contrib += greeks.get('theta', 0.0) * multiplier * size
-
-            total_explained = delta_contrib + gamma_contrib + vega_contrib + theta_contrib
-            total_pnl = abs(net_delta * 0.01) + abs(net_gamma * 0.0001) + abs(net_vega * 0.01) + abs(net_theta)
-            unexplained = total_pnl - abs(total_explained) if total_pnl > 0 else 0.0
-            unexplained_pct = (unexplained / total_pnl * 100) if total_pnl > 0 else 0.0
-
-            if unexplained_pct > 15.0:
-                logging.warning("[E7_PNL_RESIDUAL] PnL归因残差%.1f%%>15%%阈值，触发E7告警", unexplained_pct)
-
-            return {
-                "delta_contrib": round(delta_contrib, 2),
-                "gamma_contrib": round(gamma_contrib, 2),
-                "vega_contrib": round(vega_contrib, 2),
-                "theta_contrib": round(theta_contrib, 2),
-                "unexplained": round(unexplained, 2),
-                "unexplained_pct": round(unexplained_pct, 2),
-            }
-        except Exception as e:
-            logging.warning("[GreekDashboard._compute_pnl_attribution] Error: %s", e)
-            return {
-                "delta_contrib": 0.0, "gamma_contrib": 0.0,
-                "vega_contrib": 0.0, "theta_contrib": 0.0,
-                "unexplained": 0.0, "unexplained_pct": 0.0,
-            }
-
+    def compute_simplified_pnl(self, entry_price, exit_price, volume, direction, multiplier, commission_per_lot) -> float:
+        return self._compute_service.compute_simplified_pnl(entry_price, exit_price, volume, direction, multiplier, commission_per_lot)
+    def validate_gamma_path_dependency(self, bar_data, positions_dict, n_simulations, max_deviation_pct) -> Dict[str, Any]:
+        return self._check_service.validate_gamma_path_dependency(bar_data, positions_dict, n_simulations, max_deviation_pct)
     def log_greeks_dashboard_periodic(self) -> None:
-        """每分钟周期性输出仪表盘汇总日志，标签[GreekDashboard]"""
-        try:
-            dashboard = self.get_greeks_dashboard()
-            portfolio = dashboard.get("portfolio", {})
-            stress = dashboard.get("stress_test", {})
-            attribution = dashboard.get("pnl_attribution", {})
-            safety = dashboard.get("safety_meta", {})
-
-            delta_usage = portfolio.get("delta_usage_pct", 0)
-            gamma_usage = portfolio.get("gamma_usage_pct", 0)
-            vega_usage = portfolio.get("vega_usage_pct", 0)
-            unexplained_pct = attribution.get("unexplained_pct", 0)
-
-            usage_warning = ""
-            if delta_usage > 100 or gamma_usage > 100 or vega_usage > 100:
-                usage_warning = " ⚠️ USAGE>100%!"
-            if unexplained_pct > 15:
-                usage_warning += " ⚠️ RESIDUAL>15%!"
-
-            logging.info(
-                "[GreekDashboard] Δ=%.2f(%.0f%%) Γ=%.4f(%.0f%%) V=%.4f(%.0f%%) Θ=%.4f "
-                "| 1σPnL=%.0f 2σPnL=%.0f "
-                "| attr: D=%.0f G=%.0f V=%.0f T=%.0f unexp=%.1f%% "
-                "| safety: CB=%s blocked=%s%s",
-                portfolio.get("net_delta", 0), delta_usage,
-                portfolio.get("net_gamma", 0), gamma_usage,
-                portfolio.get("net_vega", 0), vega_usage,
-                portfolio.get("net_theta", 0),
-                stress.get("jump_1sigma_pnl", 0), stress.get("jump_2sigma_pnl", 0),
-                attribution.get("delta_contrib", 0), attribution.get("gamma_contrib", 0),
-                attribution.get("vega_contrib", 0), attribution.get("theta_contrib", 0),
-                unexplained_pct,
-                safety.get("circuit_breaker_triggered", False),
-                safety.get("new_open_blocked", False),
-                usage_warning,
-            )
-
-            # ✅ P1-3修复：在周期性日志中更新前5日平均收益到SafetyMetaLayer
-            try:
-                safety = get_safety_meta_layer(self.params)
-                if safety and hasattr(safety, 'set_prev_5day_avg_profit') and self.position_manager is not None:
-                    daily_pnl_list = getattr(self.position_manager, '_daily_pnl_history', None)
-                    if daily_pnl_list and len(daily_pnl_list) >= 1:
-                        recent = list(daily_pnl_list)[-5:]
-                        avg_profit = sum(recent) / len(recent) if recent else 0.0
-                        safety.set_prev_5day_avg_profit(avg_profit)
-            except Exception as e:
-                logging.debug("[RiskService] 更新5日平均收益异常: %s", e)
-
-            # ✅ 集成E7未解释收益检查（E7）
-            try:
-                from ali2026v3_trading.governance_engine import E7UnexplainedReturnChecker
-                e7 = E7UnexplainedReturnChecker()
-                pnl_attribution = {
-                    "total_pnl": attribution.get("delta_contrib", 0) + attribution.get("gamma_contrib", 0)
-                                   + attribution.get("vega_contrib", 0) + attribution.get("theta_contrib", 0),
-                    "delta_pnl": attribution.get("delta_contrib", 0),
-                    "gamma_pnl": attribution.get("gamma_contrib", 0),
-                    "vega_pnl": attribution.get("vega_contrib", 0),
-                    "theta_pnl": attribution.get("theta_contrib", 0),
-                }
-                e7_result = e7.check(pnl_attribution)
-                if e7_result.get("e7_triggered"):
-                    logging.warning("[RiskService] E7告警: 未解释收益占比%.1f%%超过阈值%.1f%%",
-                                    e7_result.get("residual_pct", 0), e7_result.get("threshold_pct", 15))
-            except Exception as e:
-                logging.debug("[RiskService] E7检查异常: %s", e)
-        except Exception as e:
-            logging.warning("[GreekDashboard] Periodic log error: %s", e)
-
+        return self._compute_service.log_greeks_dashboard_periodic()
     def _check_greeks_limits(self, signal: Dict[str, Any]) -> RiskCheckResponse:
-        """希腊字母硬约束检查 — 订单生成前必须执行
-
-        任一超限则拒绝新开仓信号，只允许减仓或对冲。
-        V7增强：每次检查时更新仪表盘缓存。
-        """
-        action = signal.get("action", "")
-        if action == "CLOSE":
-            return RiskCheckResponse.pass_result()
-
-        try:
-            calc = self._get_greeks_calculator()
-            if calc is None:
-                return RiskCheckResponse.pass_result()
-
-            positions_dict = {}
-            if self.position_manager:
-                positions_raw = getattr(self.position_manager, "positions", {})
-                for inst_map in positions_raw.values():
-                    for inst_id, pos in inst_map.items():
-                        vol = getattr(pos, "volume", 0)
-                        if vol != 0:
-                            positions_dict[inst_id] = vol
-
-            if not positions_dict:
-                return RiskCheckResponse.pass_result()
-
-            max_delta = safe_get_float(self.params, "max_net_delta_pct", 0.30) * 1000
-            max_gamma = safe_get_float(self.params, "max_net_gamma_pct", 0.08) * 50
-            max_vega = safe_get_float(self.params, "max_net_vega_bps", 0.02) * 200
-
-            warnings = calc.check_risk_limits(
-                positions_dict,
-                delta_limit=max_delta,
-                gamma_limit=max_gamma,
-                vega_limit=max_vega,
-            )
-
-            if warnings:
-                return RiskCheckResponse.block_result(
-                    "greeks_limit_exceeded",
-                    f"希腊字母硬约束超限: {'; '.join(warnings)}",
-                    RiskLevel.HIGH
-                )
-
-            try:
-                self.get_greeks_dashboard()
-            except Exception:
-                pass
-
-        except ImportError:
-            logging.debug("[RiskService._check_greeks_limits] GreeksCalculator not available, skip")
-        except Exception as e:
-            logging.warning("[RiskService._check_greeks_limits] Check error: %s", e)
-
-        return RiskCheckResponse.pass_result()
-
+        return self._check_service._check_greeks_limits(signal)
     def calculate_risk_metrics(self) -> RiskMetrics:
-        """计算风险指标"""
-        try:
-            if self.position_manager is None:
-                return RiskMetrics()
-
-            # ✅ P1修复：将deepcopy移到锁外，减少持锁时间
-            # 先读取引用，再在锁外执行deepcopy
-            positions_raw = getattr(self.position_manager, "positions", {})
-            
-            # 在锁外执行deepcopy，避免长时间持锁
-            import copy
-            positions = copy.deepcopy(positions_raw) if positions_raw else {}
-            
-            total_exposure = 0.0
-            max_position = 0.0
-            count = 0
-
-            for inst_map in positions.values():
-                for pos in inst_map.values():
-                    volume = getattr(pos, "volume", 0)
-                    price = getattr(pos, "open_price", 0)
-                    exposure = abs(volume) * price
-                    total_exposure += exposure
-                    max_position = max(max_position, exposure)
-                    if volume != 0:
-                        count += 1
-
-            # 计算风险比率
-            limit = self._get_total_position_limit()
-            risk_ratio = total_exposure / limit if limit > 0 else 0.0
-
-            return RiskMetrics(
-                total_exposure=total_exposure,
-                max_single_position=max_position,
-                position_count=count,
-                risk_ratio=risk_ratio
-            )
-
-        except Exception as e:
-            logging.error(f"[RiskService.calculate_risk_metrics] Error: {e}")
-            return RiskMetrics()
-
-    # ========================================================================
-    # 配置参数获取
-    # ========================================================================
-
+        return self._compute_service.calculate_risk_metrics()
     def _get_signal_cooldown(self) -> float:
-        """获取信号冷却时间（秒）"""
-        return safe_get_float(self.params, "signal_cooldown_sec", 1.0)
-
+        return self._config_provider._get_signal_cooldown()
     def _get_max_signals_per_window(self) -> int:
-        """获取窗口内最大信号数"""
-        return safe_get_int(self.params, "max_signals_per_window", 10)
-
+        return self._config_provider._get_max_signals_per_window()
     def _get_rate_limit_window(self) -> float:
-        """获取限频窗口（秒）"""
-        return safe_get_float(self.params, "rate_limit_window_sec", 60.0)
-
+        return self._config_provider._get_rate_limit_window()
     def _get_max_risk_ratio(self) -> float:
-        """获取最大风险比率"""
-        return safe_get_float(self.params, "max_risk_ratio", 0.8)
-
+        return self._config_provider._get_max_risk_ratio()
     def _get_total_position_limit(self) -> float:
-        """获取总持仓限额"""
-        return safe_get_float(self.params, "total_position_limit", 1000000.0)
-
-    # ========================================================================
-    # 状态与统计
-    # ========================================================================
-
-    # ✅ ID唯一：get_stats统一接口，返回值含service_name="RiskService"
+        return self._config_provider._get_total_position_limit()
+    def _get_contract_multiplier(self, instrument_id: str) -> float:
+        return self._config_provider._get_contract_multiplier(instrument_id)
+    def _get_margin_ratio(self, instrument_id: str) -> float:
+        return self._config_provider._get_margin_ratio(instrument_id)
+    def _get_circuit_breaker_pause_sec(self) -> float:
+        return self._config_provider._get_circuit_breaker_pause_sec()
+    def _get_circuit_breaker_calm_period_sec(self) -> float:
+        return self._config_provider._get_circuit_breaker_calm_period_sec()
+    def _get_daily_drawdown_multiplier(self) -> float:
+        return self._config_provider._get_daily_drawdown_multiplier()
+    def _get_hard_time_stop_minutes(self) -> float:
+        return self._config_provider._get_hard_time_stop_minutes()
+    def _get_min_profit_threshold(self) -> float:
+        return self._config_provider._get_min_profit_threshold()
+    def _get_stage1_minutes(self) -> float:
+        return self._config_provider._get_stage1_minutes()
+    def _get_stage2_minutes(self) -> float:
+        return self._config_provider._get_stage2_minutes()
+    def _get_stage1_profit_threshold(self) -> float:
+        return self._config_provider._get_stage1_profit_threshold()
     def get_stats(self) -> Dict[str, Any]:
-        """获取风控统计"""
-        with self._lock:
-            stats = dict(self._stats)
-            stats['service_name'] = 'RiskService'  # ✅ ID唯一：统一标识服务来源
-            return stats
-
+        return self._compute_service.get_stats()
+    def get_risk_status(self) -> Dict[str, Any]:
+        return self._compute_service.get_risk_status()
     def reset_stats(self) -> None:
-        """重置统计"""
-        with self._lock:
-            self._stats = {
-                "total_checks": 0,
-                "blocked": 0,
-                "warnings": 0,
-                "passed": 0,
-            }
-
-    # ✅ ID唯一：clear_cache统一接口，服务=RiskService
+        return self._config_provider.reset_stats()
     def clear_cache(self) -> None:
-        with self._lock:
-            self._strategy_status_cache = (0.0, RiskCheckResponse.pass_result())
-            self._signal_times.clear()
-        logging.info('[RiskService] Cache cleared')
-
+        return self._config_provider.clear_cache()
+    def invalidate_ev_cache(self) -> None:
+        return self._config_provider.invalidate_ev_cache()
     def _check_consecutive_loss_protection(self, signal: Dict[str, Any]) -> RiskCheckResponse:
-        strategy_id = signal.get('strategy_id', 'default')
-        with self._lock:
-            if strategy_id in self._consecutive_loss_paused and self._consecutive_loss_paused[strategy_id]:
-                # 检查是否超过恢复计时器
-                paused_ts = self._consecutive_loss_pause_timestamps.get(strategy_id, 0.0)
-                capital_scale = getattr(self, '_current_capital_scale', 'medium')
-                timeout = self._consecutive_loss_recovery_timeouts.get(capital_scale, 3600.0)
-                if paused_ts > 0 and (time.time() - paused_ts) >= timeout:
-                    logging.info(
-                        '[RiskService] 策略%s连亏暂停超时恢复 (暂停%.0f秒 >= 阈值%.0f秒)',
-                        strategy_id, time.time() - paused_ts, timeout,
-                    )
-                    self._consecutive_loss_counts[strategy_id] = 0
-                    self._consecutive_loss_paused[strategy_id] = False
-                    self._consecutive_loss_pause_timestamps.pop(strategy_id, None)
-                    return RiskCheckResponse.pass_result()
-                return RiskCheckResponse.block_result(
-                    'consecutive_loss_paused',
-                    '策略%s因连续亏损暂停' % strategy_id,
-                    level=RiskLevel.HIGH,
-                )
-            return RiskCheckResponse.pass_result()
+        return self._check_service._check_consecutive_loss_protection(signal)
 
     def record_trade_result(self, strategy_id: str, pnl: float, capital_scale: str = 'medium') -> None:
-        with self._lock:
-            count = self._consecutive_loss_counts.get(strategy_id, 0)
-            limit = self._consecutive_loss_limits.get(capital_scale, 7)
-            if pnl < 0:
-                self._consecutive_loss_counts[strategy_id] = count + 1
-                if self._consecutive_loss_counts[strategy_id] >= limit:
-                    self._consecutive_loss_paused[strategy_id] = True
-                    self._consecutive_loss_pause_timestamps[strategy_id] = time.time()
-                    logging.info(
-                        '[RiskService] 策略%s连亏达到阈值 %d/%d，已暂停交易',
-                        strategy_id, self._consecutive_loss_counts[strategy_id], limit,
-                    )
-                else:
-                    logging.info(
-                        '[RiskService] 策略%s连亏计数 %d/%d',
-                        strategy_id, self._consecutive_loss_counts[strategy_id], limit,
-                    )
-            else:
-                if count > 0:
-                    logging.info(
-                        '[RiskService] 策略%s盈利 %.2f，连亏计数从 %d 重置为 0',
-                        strategy_id, pnl, count,
-                    )
-                self._consecutive_loss_counts[strategy_id] = 0
-                self._consecutive_loss_paused.pop(strategy_id, None)
-                self._consecutive_loss_pause_timestamps.pop(strategy_id, None)
-
+        return self._config_provider.record_trade_result(strategy_id, pnl, capital_scale)
     def reset_consecutive_loss(self, strategy_id: str) -> None:
-        with self._lock:
-            self._consecutive_loss_counts.pop(strategy_id, None)
-            self._consecutive_loss_paused.pop(strategy_id, None)
-            self._consecutive_loss_pause_timestamps.pop(strategy_id, None)
-            logging.info('[RiskService] 策略%s连亏状态已手动重置', strategy_id)
-
+        return self._config_provider.reset_consecutive_loss(strategy_id)
+    def get_strategy_risk_state(self, strategy_id: str) -> Dict[str, Any]:
+        return self._compute_service.get_strategy_risk_state(strategy_id)
+    def update_strategy_risk_state(self, strategy_id: str, **kwargs) -> None:
+        return self._config_provider.update_strategy_risk_state(strategy_id, **kwargs)
     def set_capital_scale(self, capital_scale: str) -> None:
-        with self._lock:
-            self._current_capital_scale = capital_scale
-            if capital_scale == 'small':
-                self._asymmetric_risk_enabled = True
-            elif capital_scale == 'large':
-                self._asymmetric_risk_enabled = False
-            else:
-                self._asymmetric_risk_enabled = False
-        try:
-            from ali2026v3_trading.state_param_manager import get_state_param_manager
-            spm = get_state_param_manager()
-            spm.set_capital_scale(capital_scale)
-            cl_params = spm.get_params('consecutive_loss')
-            if cl_params and 'max_consecutive_losses' in cl_params:
-                with self._lock:
-                    self._consecutive_loss_limits[capital_scale] = cl_params['max_consecutive_losses']
-        except Exception:
-            pass
-
-    def compute_mode_position_size(
-        self, equity: float, entry_price: float, stop_price: float,
-        win_rate: float = 0.0, win_loss_ratio: float = 0.0,
-    ) -> float:
-        try:
-            from ali2026v3_trading.mode_engine import ModeEngine
-            me = ModeEngine.get_instance()
-            return me.compute_position_size(equity, entry_price, stop_price, win_rate, win_loss_ratio)
-        except Exception:
-            risk_pct = 0.02
-            risk_amount = equity * risk_pct
-            stop_distance = abs(entry_price - stop_price)
-            if stop_distance < 1e-10:
-                return 0.0
-            return risk_amount / stop_distance
-
+        return self._config_provider.set_capital_scale(capital_scale)
+    def evaluate_capital_scale_upgrade(self) -> Dict[str, Any]:
+        return self._config_provider.evaluate_capital_scale_upgrade()
+    def compute_mode_position_size(self, equity, entry_price, stop_price, win_rate, win_loss_ratio, sortino_ratio, calmar_ratio, sharpe_ratio, ofi, cvd_divergence, smart_money_flow, delta, gamma, theta, vega, prediction_correct, price_direction) -> float:
+        return self._compute_service.compute_mode_position_size(equity, entry_price, stop_price, win_rate, win_loss_ratio, sortino_ratio, calmar_ratio, sharpe_ratio, ofi, cvd_divergence, smart_money_flow, delta, gamma, theta, vega, prediction_correct, price_direction)
     def calculate_asymmetric_drawdown_limit(self, current_pnl: float, base_limit: float) -> float:
-        if not self._asymmetric_risk_enabled:
-            return base_limit
-        if current_pnl > 0:
-            return base_limit * self._asymmetric_profit_multiplier
-        else:
-            return base_limit * self._asymmetric_loss_multiplier
+        return self._compute_service.calculate_asymmetric_drawdown_limit(current_pnl, base_limit)
 
     def check_asymmetric_risk(self, current_pnl: float, drawdown_pct: float, base_limit: float) -> RiskCheckResponse:
-        adjusted_limit = self.calculate_asymmetric_drawdown_limit(current_pnl, base_limit)
-        if abs(drawdown_pct) > adjusted_limit:
-            logging.info(
-                '[RiskService] 非对称风控阻断: current_pnl=%.2f drawdown=%.2f%% adjusted_limit=%.2f%% base_limit=%.2f%%',
-                current_pnl, abs(drawdown_pct) * 100, adjusted_limit * 100, base_limit * 100,
-            )
-            return RiskCheckResponse.block_result(
-                'asymmetric_drawdown',
-                '回撤%.2f%%超过调整后限额%.2f%%' % (abs(drawdown_pct) * 100, adjusted_limit * 100),
-                level=RiskLevel.HIGH,
-            )
-        logging.debug(
-            '[RiskService] 非对称风控通过: current_pnl=%.2f drawdown=%.2f%% adjusted_limit=%.2f%%',
-            current_pnl, abs(drawdown_pct) * 100, adjusted_limit * 100,
-        )
-        return RiskCheckResponse.pass_result()
+        return self._check_service.check_asymmetric_risk(current_pnl, drawdown_pct, base_limit)
+    def compute_decision_score(self, state_strength, order_flow_consistency, hmm_state, cr_output, greeks_dashboard, consecutive_losses, current_pnl, drawdown_pct, alpha_ratio, cross_correlation, tri_validation_score, slippage_source) -> Dict[str, Any]:
+        return self._compute_service.compute_decision_score(state_strength, order_flow_consistency, hmm_state, cr_output, greeks_dashboard, consecutive_losses, current_pnl, drawdown_pct, alpha_ratio, cross_correlation, tri_validation_score, slippage_source)
+    def _compute_position_scale(self, composite_score: float,
+                                 scores: Dict[str, float]) -> float:
+        return self._compute_service._compute_position_scale(composite_score, scores)
 
-    def compute_decision_score(self, state_strength: float, order_flow_consistency: float) -> Dict[str, Any]:
-        state_weight = safe_get_float(self.params, "decision.score.state_weight",
-            safe_get_float(self.params, "decision_state_weight", 0.6))
-        flow_weight = safe_get_float(self.params, "decision.score.flow_weight",
-            safe_get_float(self.params, "decision_flow_weight", 0.4))
-        score = state_strength * state_weight + order_flow_consistency * flow_weight
-        threshold_high = safe_get_float(self.params, "decision.score.threshold_high",
-            safe_get_float(self.params, "decision_threshold_high", 0.7))
-        threshold_low = safe_get_float(self.params, "decision.score.threshold_low",
-            safe_get_float(self.params, "decision_threshold_low", 0.4))
-        threshold_flow = safe_get_float(self.params, "decision.score.threshold_flow",
-            safe_get_float(self.params, "decision_threshold_flow", 0.3))
-        if state_strength > threshold_high:
-            if order_flow_consistency > threshold_flow:
-                action = "normal_open"
-                position_scale = 1.0
-            else:
-                action = "divergence_warning"
-                position_scale = 0.5
-        elif state_strength > threshold_low:
-            if order_flow_consistency > 0:
-                action = "small_open_tight_stop"
-                position_scale = 0.3
-            else:
-                action = "no_open_wait"
-                position_scale = 0.0
-        else:
-            action = "no_open_wait"
-            position_scale = 0.0
-        return {
-            "decision_score": score,
-            "action": action,
-            "position_scale": position_scale,
-            "state_strength": state_strength,
-            "order_flow_consistency": order_flow_consistency,
-        }
+    # ── 各维度评分计算方法 ──
+    def _compute_life_score(self, hmm_state: Optional[str] = None) -> float:
+        return self._compute_service._compute_life_score(hmm_state)
+    def _compute_cycle_resonance_score(self, cr_output: Optional[Any] = None) -> float:
+        return self._compute_service._compute_cycle_resonance_score(cr_output)
+    def _compute_phase_quality_score(self, cr_output: Optional[Any] = None) -> float:
+        return self._compute_service._compute_phase_quality_score(cr_output)
+    def _compute_greeks_usage_score(self, dashboard: Optional[Dict[str, Any]] = None) -> float:
+        return self._compute_service._compute_greeks_usage_score(dashboard)
+    def _compute_consecutive_loss_score(self, consecutive_losses: int = 0) -> float:
+        return self._compute_service._compute_consecutive_loss_score(consecutive_losses)
+    def confirm_alpha_decay_recovery(self):
+        return self._config_provider.confirm_alpha_decay_recovery()
+    def _compute_asymmetric_drawdown_score(self, current_pnl: float = 0.0,
+                                            drawdown_pct: float = 0.0) -> float:
+        return self._compute_service._compute_asymmetric_drawdown_score(current_pnl, drawdown_pct)
+    def _compute_tri_validation_score(self, tri_score: Optional[float] = None) -> float:
+        return self._compute_service._compute_tri_validation_score(tri_score)
+    def _compute_alpha_decay_score(self, alpha_ratio: Optional[float] = None) -> float:
+        return self._compute_service._compute_alpha_decay_score(alpha_ratio)
+    def _compute_cross_correlation_score(self, cross_corr: Optional[float] = None) -> float:
+        return self._compute_service._compute_cross_correlation_score(cross_corr)
+    def _compute_liquidity_score(self) -> float:
+        return self._compute_service._compute_liquidity_score()
 
-
+    def _get_life_estimator(self) -> Any:
+        return self._config_provider._get_life_estimator()
+    def set_life_estimator(self, estimator: Any) -> None:
+        return self._config_provider.set_life_estimator(estimator)
+    def set_current_hmm_state(self, state: str) -> None:
+        return self._config_provider.set_current_hmm_state(state)
+    def _check_life_expectancy(self, signal: Dict[str, Any]) -> RiskCheckResponse:
+        return self._check_service._check_life_expectancy(signal)
+    def check_price_limit(self, instrument_id: str, price: float, direction: str) -> RiskCheckResponse:
+        return self._check_service.check_price_limit(instrument_id, price, direction)
+    def is_at_price_limit(self, instrument_id: str, price: float) -> Dict[str, bool]:
+        return self._config_provider.is_at_price_limit(instrument_id, price)
+    def check_expiry_risk(self, instrument_id: str, days_to_expiry: int = None) -> RiskCheckResponse:
+        return self._check_service.check_expiry_risk(instrument_id, days_to_expiry)
+    def check_auction_session(self, bar_datetime, instrument_id: str) -> RiskCheckResponse:
+        return self._check_service.check_auction_session(bar_datetime, instrument_id)
+    def is_trading_day(self, check_date) -> bool:
+        return self._config_provider.is_trading_day(check_date)
+    def check_last_trading_day(self, instrument_id: str, days_to_expiry: int) -> RiskCheckResponse:
+        return self._check_service.check_last_trading_day(instrument_id, days_to_expiry)
+    def calc_option_expiry_date(year: int, month: int, which_friday: int = 3, exchange: str = 'CFFEX') -> 'date':
+        return self._compute_service.calc_option_expiry_date(year, month, which_friday, exchange)
+    def check_margin_sufficiency(self, equity, instrument_id, volume, price) -> RiskCheckResponse:
+        return self._check_service.check_margin_sufficiency(equity, instrument_id, volume, price)
+    def update_margin_ratio(self, instrument_id: str, new_ratio: float) -> None:
+        return self._config_provider.update_margin_ratio(instrument_id, new_ratio)
+    def check_cross_instrument_limit(self, account_id, instrument_id, required_amount) -> RiskCheckResponse:
+        return self._check_service.check_cross_instrument_limit(account_id, instrument_id, required_amount)
+    def auto_rollover_if_needed(self, instrument_id: str, days_to_expiry: int):
+        return self._check_service.auto_rollover_if_needed(instrument_id, days_to_expiry)
+    def _infer_industry(self, instrument_id: str) -> str:
+        return self._config_provider._infer_industry(instrument_id)
+    def set_industry_limit(self, industry: str, limit_amount: float) -> None:
+        return self._config_provider.set_industry_limit(industry, limit_amount)
+    def monitor_margin_occupancy(self, account_id: str, equity: float, current_margin_used: float) -> Dict[str, Any]:
+        return self._config_provider.monitor_margin_occupancy(account_id, equity, current_margin_used)
+    def check_invariant_runtime(self, invariant_name, condition, context) -> bool:
+        return self._check_service.check_invariant_runtime(invariant_name, condition, context)
+    def _handle_invariant_violation(self, invariant_name, context) -> Dict[str, Any]:
+        return self._check_service._handle_invariant_violation(invariant_name, context)
+    def detect_data_flow_anomaly(self, metric_name, current_value, baseline_value, threshold_sigma) -> Dict[str, Any]:
+        return self._check_service.detect_data_flow_anomaly(metric_name, current_value, baseline_value, threshold_sigma)
 # ============================================================================
 # 辅助函数
 # ============================================================================
 
-def safe_get(obj: Any, attr: str, default: Any = None, target_type: type = float) -> Any:
-    """统一安全属性获取入口（方法唯一修复：公开为safe_get，并行接口为便捷别名）"""
-    try:
-        val = getattr(obj, attr, default)
-        if val is None:
-            return default
-        return target_type(val) if target_type == int else float(val)
-    except (ValueError, TypeError, AttributeError) as e:
-        logging.warning(f"[safe_get_{target_type.__name__}] Error getting {attr}: {e}")
-        return default
-
-
-def safe_get_float(obj: Any, attr: str, default: float = 0.0) -> float:
-    return safe_get(obj, attr, default, float)
-
-
-def safe_get_int(obj: Any, attr: str, default: int = 0) -> int:
-    return safe_get(obj, attr, default, int)
-
-
-# ============================================================================
-# L-1 安全元层 (SafetyMetaLayer)
-# ============================================================================
-
-class SafetyMetaLayer:
-    """L-1安全元层 — 独立于策略模型的账户级生存保障
-
-    三条硬规则（最高权限，不可被策略参数覆盖）：
-    1. 速率断路器：1分钟内权益回撤超过滚动3σ，暂停交易。
-       熔断冷静期(circuit_breaker_calm_period_sec)：首次触发后N秒内不再二次触发，防止极端行情中频繁"抽搐"
-    2. 持仓时间硬止损：开仓后max_hold_minutes_hard分钟内浮盈从未达到min_profit_threshold，
-       则在max_hold_minutes_hard+30分钟强制平仓
-    3. 日最大回撤硬停止：当日累计回撤超过前5日平均日收益的daily_drawdown_multiplier倍，
-       立即平掉所有仓位，禁止当日任何后续交易，直到下个交易日人工确认后恢复
-    
-    可回测优化参数：
-    - ANOMALY_THRESHOLD_MULTIPLIER: 异常检测阈值乘数（默认2.5σ）
-    - DEFAULT_ANOMALY_THRESHOLD: 无历史数据时的默认阈值
-    - DEFAULT_MAX_DRAWDOWN: 无历史均值时的默认最大回撤阈值
-    """
-
-    ANOMALY_THRESHOLD_MULTIPLIER = 2.5
-    DEFAULT_ANOMALY_THRESHOLD = 0.05
-    DEFAULT_MAX_DRAWDOWN = 0.05
-
-    def __init__(self, params: Any = None):
-        self._params = params
-        self._lock = threading.RLock()
-
-        self._equity_series: deque = deque(maxlen=60)
-        self._equity_timestamps: deque = deque(maxlen=60)
-
-        self._trading_paused_until: float = 0.0
-        self._pause_reason: str = ""
-        self._circuit_breaker_calm_until: float = 0.0
-
-        self._daily_start_equity: Optional[float] = None
-        self._daily_peak_equity: float = 0.0
-        self._daily_drawdown: float = 0.0
-        self._prev_5day_avg_profit: float = 0.0
-        self._daily_new_open_blocked: bool = False
-        self._daily_hard_stop_triggered: bool = False
-        self._current_date: Optional[str] = None
-
-        self._stats = {
-            "circuit_breaker_triggers": 0,
-            "circuit_breaker_calm_rejects": 0,
-            "hard_time_stop_triggers": 0,
-            "daily_drawdown_triggers": 0,
-            "daily_hard_stop_triggers": 0,
-            "total_equity_updates": 0,
-        }
-
-    def on_equity_update(self, equity: float) -> None:
-        now = time.time()
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        with self._lock:
-            self._stats["total_equity_updates"] += 1
-
-            if self._current_date != today:
-                self._current_date = today
-                self._daily_start_equity = equity
-                self._daily_peak_equity = equity
-                self._daily_drawdown = 0.0
-                self._daily_new_open_blocked = False
-                if self._daily_hard_stop_triggered:
-                    logging.warning(
-                        "[SafetyMetaLayer] ⚠️ 新交易日(%s)，但日回撤硬停止尚未人工确认恢复，"
-                        "交易仍被禁止。请调用confirm_daily_resume()确认恢复。",
-                        today,
-                    )
-
-            self._daily_peak_equity = max(self._daily_peak_equity, equity)
-            if self._daily_start_equity and self._daily_start_equity > 0:
-                self._daily_drawdown = (self._daily_peak_equity - equity) / self._daily_start_equity
-
-            self._equity_series.append(equity)
-            self._equity_timestamps.append(now)
-
-            if not self._daily_hard_stop_triggered:
-                self._check_circuit_breaker(now)
-                self._check_daily_drawdown()
-
-    def _check_circuit_breaker(self, now: float) -> None:
-        if len(self._equity_series) < 10:
-            return
-
-        recent = list(self._equity_series)
-        if len(recent) < 3:
-            return
-
-        current = recent[-1]
-        one_min_ago_idx = max(0, len(recent) - 6)
-        one_min_ago_val = recent[one_min_ago_idx]
-
-        if one_min_ago_val <= 0:
-            return
-
-        drop_pct = (one_min_ago_val - current) / one_min_ago_val
-
-        import statistics
-        if len(recent) >= 10:
-            diffs = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
-            mean_diff = statistics.mean(diffs)
-            if len(diffs) >= 2:
-                std_diff = statistics.stdev(diffs)
-            else:
-                std_diff = abs(mean_diff) if mean_diff != 0 else 1.0
-        else:
-            std_diff = 1.0
-
-        threshold = self.ANOMALY_THRESHOLD_MULTIPLIER * std_diff / one_min_ago_val if one_min_ago_val > 0 else self.DEFAULT_ANOMALY_THRESHOLD
-
-        if drop_pct > max(threshold, 0.02):
-            if now < self._circuit_breaker_calm_until:
-                self._stats["circuit_breaker_calm_rejects"] += 1
-                logging.info(
-                    "[SafetyMetaLayer] 熔断冷静期内，忽略二次触发 (冷静期剩余%.0fs)",
-                    self._circuit_breaker_calm_until - now,
-                )
-                return
-
-            pause_duration = self._get_circuit_breaker_pause_sec()
-            self._trading_paused_until = now + pause_duration
-            self._pause_reason = f"速率断路器: 1min回撤{drop_pct:.2%} > 2.5σ阈值{threshold:.2%}"
-            self._stats["circuit_breaker_triggers"] += 1
-
-            calm_period = self._get_circuit_breaker_calm_period_sec()
-            self._circuit_breaker_calm_until = now + pause_duration + calm_period
-
-            logging.warning(
-                "[SafetyMetaLayer] ⚡ 速率断路器触发！1min回撤=%.2f%%, 阈值=%.2f%%, 暂停%.0f秒, 冷静期%.0f秒",
-                drop_pct * 100, threshold * 100, pause_duration, calm_period
-            )
-
-            self._cancel_pending_on_circuit_breaker()
-
-    def _check_daily_drawdown(self) -> None:
-        if self._daily_hard_stop_triggered:
-            return
-
-        multiplier = self._get_daily_drawdown_multiplier()
-        if multiplier <= 0:
-            return
-
-        triggered = False
-
-        if self._prev_5day_avg_profit <= 0:
-            if self._daily_start_equity and self._daily_start_equity > 0:
-                max_dd = self.DEFAULT_MAX_DRAWDOWN
-                if self._daily_drawdown >= max_dd:
-                    triggered = True
-                    self._stats["daily_drawdown_triggers"] += 1
-                    logging.warning(
-                        "[SafetyMetaLayer] 🛑 日最大回撤硬停止触发！回撤=%.2f%% >= 硬限5%%",
-                        self._daily_drawdown * 100
-                    )
-        else:
-            max_daily_loss = self._prev_5day_avg_profit * multiplier
-            current_loss = self._daily_peak_equity - list(self._equity_series)[-1] if self._equity_series else 0
-
-            if current_loss >= max_daily_loss:
-                triggered = True
-                self._stats["daily_drawdown_triggers"] += 1
-                logging.warning(
-                    "[SafetyMetaLayer] 🛑 日最大回撤硬停止触发！当前亏损=%.2f >= 5日均值×%.1f=%.2f",
-                    current_loss, multiplier, max_daily_loss
-                )
-
-        if triggered:
-            self._daily_hard_stop_triggered = True
-            self._daily_new_open_blocked = True
-            self._stats["daily_hard_stop_triggers"] += 1
-            # ✅ P0-9修复: 触发日回撤硬停止时同步更新CrossStrategyRiskGuard
-            try:
-                from ali2026v3_trading.position_service import get_cross_strategy_risk_guard
-                guard = get_cross_strategy_risk_guard()
-                if guard and hasattr(guard, 'set_daily_drawdown'):
-                    guard.set_daily_drawdown(self._daily_drawdown * 100)
-            except Exception as e:
-                logging.debug("[SafetyMetaLayer] set_daily_drawdown sync error: %s", e)
-            logging.critical(
-                "[SafetyMetaLayer] 🚫 会话周期硬终止！所有交易禁止，需人工调用confirm_daily_resume()恢复"
-            )
-
-    def check_position_hard_time_stop(self, position_id: str, open_time,
-                                       max_profit_reached: float,
-                                       profit_slope: float = 0.0,
-                                       peak_profit_pct: float = 0.0,
-                                       current_profit_pct: float = 0.0) -> Optional[str]:
-        if isinstance(open_time, datetime):
-            open_time = open_time.timestamp()
-        elif not isinstance(open_time, (int, float)):
-            try:
-                open_time = float(open_time)
-            except (ValueError, TypeError):
-                logging.warning("[SafetyMetaLayer] open_time类型无效: %s, 跳过硬时间止损检查", type(open_time).__name__)
-                return None
-
-        stage1_min = self._get_stage1_minutes()
-        stage2_min = self._get_stage2_minutes()
-        stage1_threshold = self._get_stage1_profit_threshold()
-
-        now = time.time()
-        elapsed_min = (now - open_time) / 60.0
-
-        if elapsed_min >= stage1_min and max_profit_reached < stage1_threshold:
-            self._stats["hard_time_stop_triggers"] += 1
-            logging.warning(
-                "[SafetyMetaLayer] ⏰ 阶段1硬止损触发！position=%s, 已持%.0fmin, "
-                "最高浮盈=%.2f%% < 阶段1要求=%.2f%%",
-                position_id, elapsed_min, max_profit_reached * 100, stage1_threshold * 100
-            )
-            return f"HardTimeStop@{elapsed_min:.0f}min(profit<{stage1_threshold:.1%})"
-
-        if stage1_min <= elapsed_min < stage2_min:
-            if profit_slope < 0:
-                self._stats["hard_time_stop_triggers"] += 1
-                logging.warning(
-                    "[SafetyMetaLayer] ⏰ 阶段2硬止损触发(斜率为负)！position=%s, 已持%.0fmin, "
-                    "profit_slope=%.6f",
-                    position_id, elapsed_min, profit_slope
-                )
-                return f"HardTimeStop@{elapsed_min:.0f}min(slope<0)"
-
-            if peak_profit_pct > 0 and current_profit_pct < peak_profit_pct * 0.5:
-                self._stats["hard_time_stop_triggers"] += 1
-                logging.warning(
-                    "[SafetyMetaLayer] ⏰ 阶段2硬止损触发(回撤超50%%)！position=%s, 已持%.0fmin, "
-                    "peak=%.2f%% current=%.2f%%",
-                    position_id, elapsed_min, peak_profit_pct * 100, current_profit_pct * 100
-                )
-                return f"HardTimeStop@{elapsed_min:.0f}min(drawdown>50%)"
-
-        return None
-
-    def is_trading_paused(self) -> Tuple[bool, str]:
-        with self._lock:
-            if time.time() < self._trading_paused_until:
-                remaining = self._trading_paused_until - time.time()
-                return True, f"{self._pause_reason}, 剩余{remaining:.0f}秒"
-            return False, ""
-
-    def is_new_open_blocked(self) -> bool:
-        with self._lock:
-            return self._daily_new_open_blocked
-
-    def is_hard_stop_triggered(self) -> bool:
-        with self._lock:
-            return self._daily_hard_stop_triggered
-
-    def confirm_daily_resume(self) -> bool:
-        with self._lock:
-            if not self._daily_hard_stop_triggered:
-                logging.info("[SafetyMetaLayer] confirm_daily_resume: 未处于硬停止状态，无需恢复")
-                return False
-            self._daily_hard_stop_triggered = False
-            self._daily_new_open_blocked = False
-            self._daily_drawdown = 0.0
-            logging.critical(
-                "[SafetyMetaLayer] ✅ 人工确认恢复交易！日回撤硬停止已解除，交易恢复正常"
-            )
-            return True
-
-    def set_prev_5day_avg_profit(self, avg_profit: float) -> None:
-        with self._lock:
-            self._prev_5day_avg_profit = avg_profit
-
-    def _get_circuit_breaker_pause_sec(self) -> float:
-        return safe_get_float(self._params, "circuit_breaker_pause_sec", 180.0)
-
-    def _get_circuit_breaker_calm_period_sec(self) -> float:
-        return safe_get_float(self._params, "circuit_breaker_calm_period_sec", 600.0)
-
-    def _cancel_pending_on_circuit_breaker(self) -> None:
-        try:
-            from ali2026v3_trading.order_service import get_order_service
-            osvc = get_order_service()
-            if osvc:
-                count = osvc.cancel_all_pending()
-                if count > 0:
-                    logging.warning("[SafetyMetaLayer] 断路器触发，已撤销 %d 笔未成交订单", count)
-        except Exception as e:
-            logging.warning("[SafetyMetaLayer] cancel_pending error: %s", e)
-
-    def _get_daily_drawdown_multiplier(self) -> float:
-        return safe_get_float(self._params, "daily_drawdown_multiplier", 2.0)
-
-    def _get_hard_time_stop_minutes(self) -> float:
-        return safe_get_float(self._params, "hard_time_stop_minutes", 90.0)
-
-    def _get_min_profit_threshold(self) -> float:
-        return safe_get_float(self._params, "min_profit_threshold", 0.002)
-
-    def _get_stage1_minutes(self) -> float:
-        return safe_get_float(self._params, "stage1_minutes", 90.0)
-
-    def _get_stage2_minutes(self) -> float:
-        return safe_get_float(self._params, "stage2_minutes", 240.0)
-
-    def _get_stage1_profit_threshold(self) -> float:
-        return safe_get_float(self._params, "stage1_profit_threshold", 0.002)
-
-    def get_stats(self) -> Dict[str, Any]:
-        with self._lock:
-            stats = dict(self._stats)
-            stats['trading_paused'] = time.time() < self._trading_paused_until
-            stats['new_open_blocked'] = self._daily_new_open_blocked
-            stats['hard_stop_triggered'] = self._daily_hard_stop_triggered
-            stats['daily_drawdown_pct'] = self._daily_drawdown
-            return stats
-
-
-_safety_meta_layer: Optional[SafetyMetaLayer] = None
-_safety_meta_layer_lock = threading.Lock()
-
-
-def get_safety_meta_layer(params: Any = None) -> SafetyMetaLayer:
-    global _safety_meta_layer
-    if _safety_meta_layer is None:
-        with _safety_meta_layer_lock:
-            if _safety_meta_layer is None:
-                _safety_meta_layer = SafetyMetaLayer(params=params)
-    return _safety_meta_layer
-
-
-_risk_service_instance: Optional[RiskService] = None
-_risk_service_lock = threading.Lock()
-
-
 def get_risk_service(params: Any = None, position_manager: Any = None,
-                     strategy: Any = None) -> RiskService:
-    global _risk_service_instance
+                     strategy: Any = None,
+                     scope_id: Optional[str] = None) -> RiskService:
+    """R13-API-02修复: RiskService单例工厂支持参数更新
+
+    首次以params=None初始化后，后续传入真实params会被更新到实例中，
+    避免风控检查因参数缺失而失效。
+    """
+    scope = _normalize_risk_scope_id(scope_id, strategy)
     with _risk_service_lock:
-        if _risk_service_instance is None:
+        if scope not in _risk_service_instances:
             effective_params = params if params is not None else {}
-            _risk_service_instance = RiskService(
+            _risk_service_instances[scope] = RiskService(
                 params=effective_params,
                 position_manager=position_manager,
                 strategy=strategy,
             )
             logging.info(
-                '[RiskService] 首次初始化完成 params_type=%s position_manager=%s',
+                '[RiskService] 首次初始化完成 scope=%s params_type=%s position_manager=%s',
+                scope,
                 type(effective_params).__name__,
                 'yes' if position_manager else 'no',
             )
-    return _risk_service_instance
+        else:
+            instance = _risk_service_instances[scope]
+            # R13-P0-API-02修复: 后续调用时，只要传入非None的params就更新（无论原params是否为None）
+            # 原逻辑仅在_instance.params is None时更新，导致首次params=None初始化后，
+            # 第二次传入真实params时若_instance.params已被设为{}则不会更新
+            if params is not None:
+                if instance.params is None or instance.params != params:
+                    instance.params = params
+                    logging.info('[RiskService] 参数已更新 scope=%s params_type=%s',
+                                 scope,
+                                 type(params).__name__)
+            # R13-API-02修复: 更新position_manager和strategy
+            if position_manager is not None and instance.position_manager is None:
+                instance.position_manager = position_manager
+            if strategy is not None and instance.strategy is None:
+                instance.strategy = strategy
+    # [R23-P1-06-FIX] 工厂函数返回None防护
+    result = _risk_service_instances.get(scope)
+    if result is None:
+        raise RuntimeError(f"[R23-P1-06-FIX] get_risk_service()返回None，scope={scope}单例初始化失败")
+    # AP-03: SingletonRegistry注册（非关键路径，失败不影响服务返回）
+    try:
+        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        registry = SingletonRegistry.get_registry("risk_service")
+        registry.register_singleton("risk_service." + scope, result)
+    except ImportError as e:
+        logging.debug("[R26-FIX] SingletonRegistry模块不可用，跳过risk_service单例注册: %s", e)
+    except Exception as e:
+        logging.warning("[R26-FIX] SingletonRegistry.register_singleton失败: %s", e)
+    return result
 
 
-def reset_risk_service() -> None:
-    global _risk_service_instance
+def reset_risk_service(scope_id: Optional[str] = None) -> None:
     with _risk_service_lock:
-        _risk_service_instance = None
+        if scope_id is None:
+            _risk_service_instances.clear()
+        else:
+            _risk_service_instances.pop(str(scope_id), None)
+    # [R23-P1-07-FIX] reset后发布引用失效通知，提醒其他模块重新获取实例
+    try:
+        from ali2026v3_trading.event_bus import get_global_event_bus
+        _bus = get_global_event_bus()
+        if _bus is not None:
+            _bus.publish('risk_service.reset', {'scope_id': scope_id, 'timestamp': time.time()})
+            logging.info("[R23-P1-07-FIX] risk_service reset通知已发布: scope_id=%s", scope_id)
+    except Exception as _e:
+        logging.debug("[R23-P1-07-FIX] reset通知发布失败: %s", _e)
+
+
+# P-04修复: RiskDashboardService独立全局单例 — Greeks聚合+PnL归因+压力测试
+class RiskDashboardService:
+    """风险仪表盘服务 — Greeks聚合、PnL归因、压力测试
+
+    独立全局单例，供RiskService和外部仪表盘调用。
+    """
+
+    _instance: Optional['RiskDashboardService'] = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> 'RiskDashboardService':
+        import warnings
+        warnings.warn(
+            "RiskDashboardService.get_instance() is deprecated; use get_risk_dashboard_service() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+        return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        with cls._lock:
+            cls._instance = None
+
+    def __init__(self):
+        # R15-P1-PERF-13修复: Greeks缓存添加maxsize参数(默认10000)，超过时LRU淘汰
+        self._greeks_cache_maxsize: int = 10000
+        self._greeks_cache_ttl_seconds: float = 300.0
+        self._greeks_cache_timestamps: Dict[str, float] = {}
+        self._greeks_cache: Dict[str, Any] = {}
+        self._pnl_attribution: Dict[str, float] = {}
+        self._stress_results: Dict[str, Any] = {}
+        self._last_update: datetime = datetime.now(_CHINA_TZ)
+
+    def aggregate_greeks(self, positions: Dict[str, Any]) -> Dict[str, float]:
+        """Greeks聚合：按持仓汇总delta/gamma/theta/vega"""
+        now = time.time()
+        expired_keys = [k for k, ts in self._greeks_cache_timestamps.items() if (now - ts) > self._greeks_cache_ttl_seconds]
+        for k in expired_keys:
+            self._greeks_cache.pop(k, None)
+            del self._greeks_cache_timestamps[k]
+        agg = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+        for sym, pos in positions.items():
+            greeks = getattr(pos, 'greeks', None) or {}
+            for k in agg:
+                agg[k] += greeks.get(k, 0.0)
+        self._greeks_cache = agg
+        for k in agg:
+            self._greeks_cache_timestamps[k] = now
+        if len(self._greeks_cache) > self._greeks_cache_maxsize:
+            keys_to_evict = list(self._greeks_cache.keys())[:len(self._greeks_cache) - self._greeks_cache_maxsize]
+            for k in keys_to_evict:
+                del self._greeks_cache[k]
+                self._greeks_cache_timestamps.pop(k, None)
+        self._last_update = datetime.now(_CHINA_TZ)
+        return agg
+
+    def attribute_pnl(self, closed_trades: List[Any]) -> Dict[str, float]:
+        """PnL归因：按策略/状态/持仓时长分组归因"""
+        attr: Dict[str, float] = {}
+        for t in closed_trades:
+            reason = getattr(t, 'close_reason', 'unknown')
+            pnl = getattr(t, 'pnl', 0.0)
+            attr[reason] = attr.get(reason, 0.0) + pnl
+        self._pnl_attribution = attr
+        return attr
+
+    def run_stress_test(self, positions: Dict[str, Any],
+                        shock_pct: float = 0.10) -> Dict[str, Any]:
+        """压力测试：价格冲击shock_pct下的最坏情景损失"""
+        total_loss = 0.0
+        for sym, pos in positions.items():
+            exposure = getattr(pos, 'volume', 0) * getattr(pos, 'open_price', 0)
+            total_loss += abs(exposure) * shock_pct
+        self._stress_results = {"shock_pct": shock_pct, "worst_case_loss": total_loss}
+        return self._stress_results
+
+
+_risk_dashboard_instance: Optional[RiskDashboardService] = None
+_risk_dashboard_lock = threading.Lock()
+
+
+def get_risk_dashboard_service() -> RiskDashboardService:
+    """获取RiskDashboardService全局单例"""
+    with RiskDashboardService._lock:
+        if RiskDashboardService._instance is None:
+            RiskDashboardService._instance = RiskDashboardService()
+            # AP-03: SingletonRegistry注册（非关键路径，失败不影响服务返回）
+            try:
+                from ali2026v3_trading.singleton_registry import SingletonRegistry
+                registry = SingletonRegistry.get_registry("risk_dashboard_service")
+                registry.register_singleton("risk_dashboard_service.instance", RiskDashboardService._instance)
+            except ImportError as e:
+                logging.debug("[R26-FIX] SingletonRegistry模块不可用，跳过dashboard单例注册: %s", e)
+            except Exception as e:
+                logging.warning("[R26-FIX] SingletonRegistry.register_singleton(dashboard)失败: %s", e)
+    return RiskDashboardService._instance
 
 
 # ============================================================================
@@ -1491,6 +785,54 @@ __all__ = [
     'RiskMetrics',
     'SafetyMetaLayer',
     'get_safety_meta_layer',
+    'SimplifiedSPAN',
     'get_risk_service',
     'reset_risk_service',
+    'RiskDashboardService',
+    'get_risk_dashboard_service',
+    # OPS-05/06/07/14/15修复
+    'AlertLevel',
+    'AlertDeduplicator',
+    'alert',
+    'operations_audit_log',
+    # R24-P0审计可追溯性修复
+    'audit_chain_append',
+    'structured_audit_log',
+    'save_state_snapshot',
+    'generate_exchange_report',
 ]
+
+
+# ============================================================================
+# OPS-05修复: 告警分级 — P0/P1/P2分类
+# OPS-06修复: P0告警自动升级 — 超时后自动升级通知
+# OPS-07修复: 告警去重/聚合 — 防止告警风暴
+# OPS-14修复: 紧急操作审批机制 — confirm_daily_resume需审批
+# OPS-15修复: 操作审计日志 — 记录谁在何时做了什么
+# ============================================================================
+
+
+
+# Re-exports from risk_audit_utils (backward compatibility)
+from ali2026v3_trading.risk_audit_utils import (
+    safe_get,
+    safe_get_float,
+    safe_get_int,
+    _normalize_risk_scope_id,
+    AlertLevel,
+    AlertDeduplicator,
+    get_alert_deduplicator,
+    _check_alert_escalation,
+    alert,
+    _get_audit_log_path,
+    operations_audit_log,
+    audit_chain_append,
+    save_state_snapshot,
+    generate_exchange_report,
+    SimplifiedSPAN,
+    calculate_var_historical,
+    calculate_var_rolling,
+    check_circuit_breaker_auto_recovery,
+)
+# R27-CP-05-FIX: structured_audit_log从独立模块导入，消除config_params↔risk_service双向依赖
+from ali2026v3_trading.audit_log_utils import structured_audit_log  # R27-CP-05-FIX

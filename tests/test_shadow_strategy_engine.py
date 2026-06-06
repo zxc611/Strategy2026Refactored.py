@@ -409,7 +409,7 @@ class TestParamIndependence(unittest.TestCase):
     def test_params_do_not_change_after_relock(self):
         original_a = self.engine.get_shadow_a_params()
         original_hash = self.engine.get_params_snapshot()['shadow_a']['param_hash']
-        self.engine.relock_params()
+        self.engine.relock_params(caller_id='shadow_strategy_engine')
         new_hash = self.engine.get_params_snapshot()['shadow_a']['param_hash']
         self.assertEqual(original_hash, new_hash)
 

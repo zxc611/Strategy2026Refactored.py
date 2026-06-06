@@ -17,16 +17,21 @@ import sqlite3
 import threading
 import time
 import weakref
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
+
+from ali2026v3_trading.serialization_utils import json_dumps, json_loads, json_default_serializer
+
+_CHINA_TZ = timezone(timedelta(hours=8))
 
 try:
     from .quant_infra import rate_limit_log
 except ImportError:
     from quant_infra import rate_limit_log
 
+# OPTIONAL-DEPENDENCY: numba用于JIT编译加速，缺失时降级为纯Python实现
 try:
     import numba as _numba
     HAS_NUMBA = True
@@ -82,7 +87,7 @@ class LightweightPersistence:
         with self._lock:
             try:
                 conn = self._ensure_conn()
-                json_val = json.dumps(value, default=str, ensure_ascii=False)
+                json_val = json_dumps(value)
                 now_ms = int(time.time() * 1000)
                 self._batch_buffer.append((key, json_val, now_ms))
                 if len(self._batch_buffer) >= self._batch_size:
@@ -126,10 +131,10 @@ class LightweightPersistence:
         self._last_snapshot_ms = now_ms
         with self._lock:
             try:
-                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                ts = datetime.now(_CHINA_TZ).strftime('%Y%m%d_%H%M%S')
                 filepath = os.path.join(self._json_dir, f"{name}_{ts}.json")
                 with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, default=self._json_serializer, ensure_ascii=False, indent=2)
+                    f.write(json_dumps(data, indent=2))
                 self._cleanup_old_snapshots(name, max_files=10)
             except Exception as e:
                 rate_limit_log(logging.getLogger(), logging.ERROR,
@@ -294,7 +299,7 @@ class HotConfigManager:
         if self._config_path:
             try:
                 with open(self._config_path, 'w', encoding='utf-8') as f:
-                    json.dump(self._config, f, ensure_ascii=False, indent=2)
+                    f.write(json_dumps(self._config, indent=2))
             except Exception as e:
                 rate_limit_log(logging.getLogger(), logging.ERROR,
                                f"[HotConfig] write error: {e}", "hotconfig_write", 60.0)

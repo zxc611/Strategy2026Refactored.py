@@ -405,6 +405,62 @@ class TestHFTOrderPlacement(unittest.TestCase):
         self.assertGreaterEqual(stats['total_orders'], 1)
 
 
+class TestHFTPursuitRiskGate(unittest.TestCase):
+    def setUp(self):
+        from ali2026v3_trading.strategy_tick_handler import TickHandlerMixin
+
+        self.mixin = TickHandlerMixin.__new__(TickHandlerMixin)
+        self.mixin._order_service = MagicMock()
+        self.mixin._ensure_order_service = MagicMock()
+
+    def test_pursuit_entry_blocked_by_risk_service(self):
+        hft = MagicMock()
+        hft.pursuit_engine.confirm_position_on_platform.return_value = True
+        tick = MagicMock()
+        blocked = MagicMock()
+        blocked.is_block = True
+        blocked.reason = 'circuit_breaker_open'
+
+        with patch('ali2026v3_trading.risk_service.get_risk_service') as get_rs:
+            get_rs.return_value.check_before_trade.return_value = blocked
+            self.mixin._execute_pursuit_entry(
+                hft,
+                {'direction': 'BUY', 'volume': 2, 'price': 4000.0},
+                tick,
+                'IF2606',
+                4000.0,
+                2,
+                'CFFEX',
+            )
+
+        self.mixin._order_service.send_order_split.assert_not_called()
+
+    def test_pursuit_add_passes_risk_service_then_places_order(self):
+        hft = MagicMock()
+        hft.pursuit_engine.add_platform_order_id.return_value = True
+        tick = MagicMock()
+        tick.bid_price1 = 3999.8
+        tick.ask_price1 = 4000.2
+        allowed = MagicMock()
+        allowed.is_block = False
+        allowed.reason = ''
+        self.mixin._order_service.send_order_split.return_value = ['OID-1']
+
+        with patch('ali2026v3_trading.risk_service.get_risk_service') as get_rs:
+            get_rs.return_value.check_before_trade.return_value = allowed
+            self.mixin._execute_pursuit_add(
+                hft,
+                {'direction': 'BUY', 'volume': 1, 'price': 4000.0},
+                tick,
+                'IF2606',
+                4000.0,
+                1,
+                'CFFEX',
+            )
+
+        self.mixin._order_service.send_order_split.assert_called_once()
+
+
 class TestHFTMarketMakerDefense(unittest.TestCase):
     """高频策略：做市商防御"""
 

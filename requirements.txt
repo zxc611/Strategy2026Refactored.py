@@ -1,0 +1,25 @@
+# EC-P2-04: 依赖库版本锁定
+# 由项目实际import扫描生成（排除标准库和项目内部模块ali2026v3_trading）
+# 注意: requirements-freeze.txt 是本文件的精确版本锁定快照，部署时优先使用freeze文件
+
+# === 核心依赖 ===
+numpy>=1.21,<3.0
+pandas>=1.5,<3.0
+duckdb>=0.8,<2.0
+pyarrow>=12.0,<25.0  # R16-P1-DEP-01修复: 上界从<20.0改为<25.0，容纳freeze中的24.0.0
+psutil>=5.0,<7.0  # R17-P2-DEP-02: psutil更新日志信息泄漏风险，见health_check_api.py
+pyyaml>=5.0,<7.0
+apscheduler>=3.10,<4.0
+tqdm>=4.0,<5.0
+pydantic>=1.10,<3.0
+pymongo>=4.0,<5.0
+motor>=3.0,<4.0
+scipy>=1.7,<2.0
+optuna>=3.0,<5.0
+pythongo>=0.0.1  # R16-P0-DEP-01修复: 补充pythongo平台依赖声明(与freeze对齐)
+
+# === 可选依赖 ===
+# R17-P2-DEP-01: 以下小众库为可选依赖，缺失时降级为纯Python实现
+# numba: JIT编译加速(quant_services.py)，缺失时回退到纯Python
+# statsmodels: 统计模型(部分param_pool模块)，缺失时跳过高级统计功能
+# concurrent_log_handler: 高并发日志写入(config_service.py)，缺失时使用标准RotatingFileHandler

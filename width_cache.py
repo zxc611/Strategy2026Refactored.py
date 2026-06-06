@@ -28,14 +28,20 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from dataclasses import dataclass, field
-from ali2026v3_trading.shared_utils import to_float32
+from ali2026v3_trading.shared_utils import to_float32, CHINA_TZ
+
+__all__ = [
+    'SortEntry', 'WidthStrengthCache',
+    'MAX_OPTION_CACHE_SIZE', 'MAX_INSTRUMENT_ID_MAP_SIZE', 'MAX_FUTURE_CACHE_SIZE',
+    'MAX_STATUS_COUNTS_SIZE', 'MAX_SORT_BUCKETS_FUTURES',
+]
 
 
 # ============================================================================
 # SortEntry - 排序桶条目（by_sort_bucket 索引结构）
 # ============================================================================
 
-@dataclass(order=True)
+@dataclass(order=True, slots=True)
 class SortEntry:
     """
     ✅ 分组D准备：排序桶条目，用于 by_sort_bucket 索引
@@ -129,6 +135,13 @@ try:
 except ImportError:
     EventBusKLineEvent = None
 
+MAX_OPTION_CACHE_SIZE = 5000
+MAX_INSTRUMENT_ID_MAP_SIZE = 10000
+MAX_FUTURE_CACHE_SIZE = 500
+MAX_STATUS_COUNTS_SIZE = 5000
+MAX_SORT_BUCKETS_FUTURES = 100
+_CACHE_TTL_SECONDS = 86400
+
 class WidthStrengthCache:
     """内存字典：实时计算宽度强度（同步虚值期权计数）
     
@@ -137,8 +150,8 @@ class WidthStrengthCache:
     2. 期货下跌 + 看跌期权价格上涨 → 同步 ✅
 
      五态状态机规则：
-     1. 五态缓存表示"当前状态"，不是历史事件累计。
-     2. 期权方向只由最近两笔"不同且大于 0"的价格确定。
+     1. 五态缓存表示“当前状态”，不是历史事件累计。
+     2. 期权方向只由最近两笔“不同且大于 0”的价格确定。
      3. 平价 Tick 不提供新的方向信息，因此不改变最近一次有效方向。
      4. 如果期货方向未变，则平价 Tick 保持当前五态；例如已是 correct_rise 时，
          平价 Tick 不会把状态打回 other。
@@ -152,10 +165,9 @@ class WidthStrengthCache:
     - 期货 tick: O(N) 重算（但 N 可优化）
     """
 
-    DEFAULT_SORT_BUCKET_MAX_SIZE = 50
-
-    def __init__(self, tracked_option_tick_ids: Optional[set] = None, params_service=None):
-        self._sharded_locks = [threading.RLock() for _ in range(16)]
+    def __init__(self, tracked_option_tick_ids: Optional[set] = None, params_service=None, strategy_id: Optional[str] = None):
+        self._lock = threading.RLock()
+        self._strategy_id = strategy_id or 'global'
         self._tracked_option_tick_ids = set(tracked_option_tick_ids) if tracked_option_tick_ids else set()
         self._params_service = params_service
         
@@ -221,10 +233,63 @@ class WidthStrengthCache:
             lambda: defaultdict(lambda: defaultdict(list))
         )
         # 每个桶的最大容量（只保留前N个）
-        self._sort_bucket_max_size: int = self.DEFAULT_SORT_BUCKET_MAX_SIZE
+        self._sort_bucket_max_size: int = 50
 
-    def _get_lock(self, key):
-        return self._sharded_locks[hash(key) % 16]
+        self._buckets_dirty: set = set()
+
+        self._option_info_timestamps: Dict[int, float] = {}
+        self._instrument_id_timestamps: Dict[str, float] = {}
+        self._last_cache_cleanup: float = time.time()
+
+    def _enforce_cache_size_limit(self) -> None:
+        _now = time.time()
+        if _now - self._last_cache_cleanup < 60:
+            return
+        self._last_cache_cleanup = _now
+        _expired_cutoff = _now - _CACHE_TTL_SECONDS
+        _expired_ids = [k for k, ts in self._option_info_timestamps.items() if ts < _expired_cutoff]
+        for _eid in _expired_ids:
+            self._option_info.pop(_eid, None)
+            self._option_prev_price.pop(_eid, None)
+            self._option_last_distinct_price.pop(_eid, None)
+            self._option_last_direction.pop(_eid, None)
+            self._option_volume.pop(_eid, None)
+            self._option_daily_volume.pop(_eid, None)
+            self._sync_flag.pop(_eid, None)
+            self._current_status.pop(_eid, None)
+            del self._option_info_timestamps[_eid]
+        if len(self._option_info) > MAX_OPTION_CACHE_SIZE:
+            _sorted_keys = sorted(self._option_info_timestamps, key=self._option_info_timestamps.get)
+            _to_remove = _sorted_keys[:len(self._option_info) - MAX_OPTION_CACHE_SIZE]
+            for _eid in _to_remove:
+                self._option_info.pop(_eid, None)
+                self._option_info_timestamps.pop(_eid, None)
+        _expired_iids = [k for k, ts in self._instrument_id_timestamps.items() if ts < _expired_cutoff]
+        for _iid in _expired_iids:
+            self._instrument_id_to_internal_id.pop(_iid, None)
+            del self._instrument_id_timestamps[_iid]
+        if len(self._instrument_id_to_internal_id) > MAX_INSTRUMENT_ID_MAP_SIZE:
+            _sorted_keys = sorted(self._instrument_id_timestamps, key=self._instrument_id_timestamps.get)
+            _to_remove = _sorted_keys[:len(self._instrument_id_to_internal_id) - MAX_INSTRUMENT_ID_MAP_SIZE]
+            for _iid in _to_remove:
+                self._instrument_id_to_internal_id.pop(_iid, None)
+                self._instrument_id_timestamps.pop(_iid, None)
+        # RES-P1-08修复: 期货缓存上限控制
+        if len(self._future_prev_price) > MAX_FUTURE_CACHE_SIZE:
+            _oldest_fids = list(self._future_prev_price.keys())[:len(self._future_prev_price) - MAX_FUTURE_CACHE_SIZE]
+            for _fid in _oldest_fids:
+                self._future_prev_price.pop(_fid, None)
+                self._future_rising.pop(_fid, None)
+                self._future_initialized.pop(_fid, None)
+                self._status_counts.pop(_fid, None)
+                self._sync_otm_count.pop(_fid, None)
+                self._sort_buckets.pop(_fid, None)
+                self._months.pop(_fid, None)
+                self._options_by_future_type.pop(_fid, None)
+        if len(self._sort_buckets) > MAX_SORT_BUCKETS_FUTURES:
+            _excess = list(self._sort_buckets.keys())[MAX_SORT_BUCKETS_FUTURES:]
+            for _fid in _excess:
+                self._sort_buckets.pop(_fid, None)
 
     def _get_params(self):
         if self._params_service is not None:
@@ -232,6 +297,11 @@ class WidthStrengthCache:
         from ali2026v3_trading.params_service import get_params_service as _get_ps
         self._params_service = _get_ps()
         return self._params_service
+
+
+    def _mk(self, key):
+        """P1-R11-21: strategy_id namespace composite key for cache isolation"""
+        return (self._strategy_id, key)
 
     @staticmethod
     def _new_status_bucket() -> Dict[str, int]:
@@ -277,8 +347,9 @@ class WidthStrengthCache:
             ps = self._get_params()
             iid = ps.get_internal_id(normalized)
             if iid is not None:
-                logging.debug("[_resolve_internal_id] ParamsService回退命中: %s -> %d (配置文件外合约?)", normalized, iid)
+                logging.info("[_resolve_internal_id] ParamsService回退命中: %s -> %d (配置文件外合约?)", normalized, iid)  # R26-P2-DF-05修复: debug→info
                 self._instrument_id_to_internal_id[normalized] = iid
+                self._instrument_id_timestamps[normalized] = time.time()
                 self._internal_id_to_instrument_id[iid] = normalized
                 return iid
         except Exception as e:
@@ -587,80 +658,6 @@ class WidthStrengthCache:
         )
         return is_target and is_otm
 
-    def _check_is_main_month(self, instrument_id: str, month: str) -> bool:
-        try:
-            params = self._get_params()
-            month_mapping = getattr(params, 'month_mapping', {}) or {}
-            product_from_id = instrument_id[:2].upper() if len(instrument_id) >= 2 else ''
-            if product_from_id not in month_mapping:
-                return False
-            contracts = month_mapping[product_from_id]
-            if not isinstance(contracts, (list, tuple)) or len(contracts) < 3:
-                return False
-            main_months_yymm = []
-            for c in contracts[2:]:
-                if len(c) >= 4:
-                    main_months_yymm.append(c[-4:])
-            return month in main_months_yymm
-        except Exception:
-            return False
-
-    def _backfill_is_main_month(self):
-        backfilled = 0
-        for iid, info in self._option_info.items():
-            if 'is_main_month' not in info:
-                info['is_main_month'] = self._check_is_main_month(
-                    info.get('instrument_id', ''), info.get('month', '')
-                )
-                backfilled += 1
-        if backfilled > 0:
-            logging.info(f"[WidthStrengthCache] _backfill_is_main_month: {backfilled} entries updated")
-
-    def _get_scoring_months(self, fid: int) -> List[str]:
-        result = []
-        try:
-            params = self._get_params()
-            info = params.get_instrument_meta(fid)
-            if not info:
-                return sorted(self._months.get(fid, []))[:self.MAX_MONTHS_FOR_SCORING]
-            product = str(info.get('product', '')).upper()
-            month_mapping = getattr(params, 'month_mapping', {}) or {}
-            if product in month_mapping:
-                contracts = month_mapping[product]
-                if isinstance(contracts, (list, tuple)):
-                    for c in contracts[:self.MAX_MONTHS_FOR_SCORING]:
-                        if len(c) >= 4:
-                            ym = c[-4:]
-                            if ym not in result:
-                                result.append(ym)
-            if len(result) < self.MAX_MONTHS_FOR_SCORING:
-                main_months = set()
-                other_months = []
-                for iid in self._options_by_future_type.get(fid, {}).get('CALL', []) + self._options_by_future_type.get(fid, {}).get('PUT', []):
-                    opt_info = self._option_info.get(iid)
-                    if not opt_info:
-                        continue
-                    m = opt_info.get('month', '')
-                    if not m or m in result:
-                        continue
-                    if opt_info.get('is_main_month', False) and m not in main_months:
-                        main_months.add(m)
-                    elif m not in other_months:
-                        other_months.append(m)
-                for m in sorted(main_months):
-                    if len(result) >= self.MAX_MONTHS_FOR_SCORING:
-                        break
-                    if m not in result:
-                        result.append(m)
-                for m in sorted(other_months):
-                    if len(result) >= self.MAX_MONTHS_FOR_SCORING:
-                        break
-                    if m not in result:
-                        result.append(m)
-        except Exception:
-            result = sorted(self._months.get(fid, []))[:self.MAX_MONTHS_FOR_SCORING]
-        return result[:self.MAX_MONTHS_FOR_SCORING]
-
     def register_future(self, future_internal_id: int, initial_price: float, month: str = None):
         """注册期货品种，初始化价格和方向
         
@@ -669,7 +666,7 @@ class WidthStrengthCache:
             initial_price: 初始价格
             month: 可选，指定月份。如果不传，则更新该期货所有已知月份的价格。
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             # ✅ 从 id_cache 获取 product 和 month
             info = self._get_params().get_instrument_meta(future_internal_id)
             if not info:
@@ -709,7 +706,7 @@ class WidthStrengthCache:
             underlying_future_id: 标的期货 internal_id
             internal_id: 系统内部代理键（优先使用）
         """
-        with self._get_lock(underlying_future_id if underlying_future_id is not None else instrument_id):
+        with self._lock:
             _reg_count = getattr(self.__class__, '_reg_option_count', 0)
             if _reg_count < 5:
                 logging.info(f"[WidthStrengthCache] register_option called: {instrument_id}, underlying_future_id={underlying_future_id}, internal_id={internal_id}")
@@ -736,6 +733,7 @@ class WidthStrengthCache:
             
             # 维护双向映射
             self._instrument_id_to_internal_id[instrument_id] = internal_id
+            self._instrument_id_timestamps[instrument_id] = time.time()
             self._internal_id_to_instrument_id[internal_id] = instrument_id
 
             existing_info = self._option_info.get(internal_id)
@@ -756,8 +754,9 @@ class WidthStrengthCache:
                 'month': month,
                 'strike_price': float(strike_price),
                 'option_type': opt_type_upper,
-                'is_main_month': self._check_is_main_month(instrument_id, month),
             }
+            self._option_info_timestamps[internal_id] = time.time()
+            self._enforce_cache_size_limit()
             _info_count = getattr(self.__class__, '_option_info_count', 0) + 1
             self.__class__._option_info_count = _info_count
             if _info_count <= 5 or _info_count % 500 == 0:
@@ -796,7 +795,7 @@ class WidthStrengthCache:
             month: 可选，该 Tick 所属的具体月份（如 '2605'）。
                    如果不提供，则从 id_cache 获取。
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             # ✅ 从 id_cache 获取 product 和 month
             info = self._get_params().get_instrument_meta(future_internal_id)
             if not info:
@@ -841,14 +840,14 @@ class WidthStrengthCache:
 
     def _get_current_trading_date(self) -> str:
         """获取当前交易日（P1-4.3修复：提取为独立方法，便于测试时mock）"""
-        return datetime.now().strftime('%Y%m%d')
+        return datetime.now(CHINA_TZ).strftime('%Y%m%d')
 
     def on_option_tick(self, instrument_id: str, price: float, volume: float = 0):
         """更新期权价格，增量更新同步虚值计数
         
         入口先做 instrument_id -> internal_id 标准化。
         """
-        with self._get_lock(instrument_id):
+        with self._lock:
             instrument_id = self._normalize_instrument_id(instrument_id)
             # 入口标准化：instrument_id -> internal_id
             internal_id = self._resolve_internal_id(instrument_id)
@@ -932,6 +931,7 @@ class WidthStrengthCache:
                     prev_price=prev_price,
                     current_price=price,
                 )
+            self._enforce_cache_size_limit()
 
     def _get_future_price_for_month(self, product: str, month: str) -> float:
         """✅ 获取指定产品在指定月份的期货价格（ID语义版本）"""
@@ -960,7 +960,7 @@ class WidthStrengthCache:
             return
         
         # 阶段1：锁内快照 - 快速读取所有需要的数据
-        with self._get_lock(future_internal_id):
+        with self._lock:
             target_internal_ids = []
             for internal_ids in self._options_by_future_type.get(future_internal_id, {}).values():
                 target_internal_ids.extend(internal_ids)
@@ -1028,7 +1028,7 @@ class WidthStrengthCache:
             })
         
         # 阶段3：锁内替换 - 用计算结果原子替换共享状态
-        with self._get_lock(future_internal_id):
+        with self._lock:
             if future_internal_id in self._sort_buckets:
                 self._sort_buckets[future_internal_id].clear()
             
@@ -1043,17 +1043,6 @@ class WidthStrengthCache:
             self._status_counts[future_internal_id] = defaultdict(lambda: defaultdict(self._new_status_bucket), {k: defaultdict(self._new_status_bucket, v) for k, v in temp_status_counts.items()})
             self._sync_otm_count[future_internal_id] = defaultdict(lambda: defaultdict(int), {k: defaultdict(int, v) for k, v in temp_sync_otm_count.items()})
 
-    def get_status_counts_snapshot(self) -> Dict[int, Dict[str, Dict[str, Dict[str, int]]]]:
-        """性能优化：返回 _status_counts 的深拷贝快照
-
-        解决卡点6.1/7.1：StateParamManager 无锁读取 _status_counts 可能导致
-        RuntimeError: dictionary changed size during iteration。
-        调用方在快照上遍历，无需持锁，不阻塞写路径。
-        """
-        import copy
-        with self._get_lock(0):
-            return copy.deepcopy(dict(self._status_counts))
-
     def get_width_strength_summary(self, future_internal_id: int, months: List[str], option_type: str = None) -> Dict[str, int]:
         """P2 优化：获取指定月份组合的五类状态汇总
         
@@ -1065,7 +1054,7 @@ class WidthStrengthCache:
         Returns:
             Dict: 五类状态计数
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             # ✅ 从 id_cache 获取 product
             info = self._get_params().get_instrument_meta(future_internal_id)
             if not info:
@@ -1094,7 +1083,7 @@ class WidthStrengthCache:
         Returns:
             bool: 期货是否上涨
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             # ✅ 直接查询，使用 future_internal_id 作为键
             return self._future_rising.get(future_internal_id, False)
     
@@ -1128,7 +1117,7 @@ class WidthStrengthCache:
         Returns:
             int: 同步虚值期权计数
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             # ✅ 从 id_cache 获取 product
             info = self._get_params().get_instrument_meta(future_internal_id)
             if not info:
@@ -1154,7 +1143,7 @@ class WidthStrengthCache:
         """获取缓存统计信息（含内存占用估算）"""
         import sys
         
-        with self._get_lock(0):
+        with self._lock:
             total_queries = self._query_count
             hit_rate = (self._cache_hits / total_queries * 100) if total_queries > 0 else 0.0
             
@@ -1191,7 +1180,7 @@ class WidthStrengthCache:
             future_internal_id: 期货合约 internal_id（主键），None 表示所有期货
             top_n: 每个状态下显示前 N 个合约
         """
-        with self._get_lock(future_internal_id or 0):
+        with self._lock:
             # ✅ 如果指定了 future_internal_id，获取其 product；否则遍历所有 future_internal_id
             if future_internal_id:
                 info = self._get_params().get_instrument_meta(future_internal_id)
@@ -1231,7 +1220,7 @@ class WidthStrengthCache:
                 }
                 
                 # 锁内快照数据，锁外遍历（避免长时间持锁阻塞其他线程）
-                with self._get_lock(fid):
+                with self._lock:
                     option_info_keys = [iid for iid, info in self._option_info.items()
                                        if info.get('underlying_future_id') == fid]
                     option_price_snapshot = dict(self._option_price)
@@ -1309,7 +1298,7 @@ class WidthStrengthCache:
             month: 月份
             opt_type: CALL/PUT
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             self._do_update_sort_bucket(internal_id, info, future_internal_id, month, opt_type)
 
     def _do_update_sort_bucket(self, internal_id: int, info: Dict, future_internal_id: int, month: str, opt_type: str):
@@ -1369,20 +1358,18 @@ class WidthStrengthCache:
                     break
             
             if existing_idx is not None:
-                # 使用heapq公共API：先移除旧条目再重新堆化
                 bucket[existing_idx] = bucket[-1]
                 bucket.pop()
-                heapq.heapify(bucket)  # O(n) 重新堆化，使用公共API避免内部函数
+                self._buckets_dirty.add((future_internal_id, month, opt_type))
             
-            # 插入新的
             if len(bucket) < self._sort_bucket_max_size:
                 heapq.heappush(bucket, entry)
+                self._buckets_dirty.add((future_internal_id, month, opt_type))
             else:
-                # 桶满时：找最差元素（sort_key最大），如果新条目更优则替换最差
                 worst_idx = max(range(len(bucket)), key=lambda i: bucket[i])
                 if entry < bucket[worst_idx]:
                     bucket[worst_idx] = entry
-                    heapq.heapify(bucket)
+                    self._buckets_dirty.add((future_internal_id, month, opt_type))
                 
         except Exception as e:
             logging.warning(f"[_update_sort_bucket] Error updating sort bucket for {internal_id}: {e}")
@@ -1397,19 +1384,17 @@ class WidthStrengthCache:
             month: 月份
             opt_type: CALL/PUT
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             self._do_remove_from_sort_bucket(internal_id, future_internal_id, month, opt_type)
 
     def _do_remove_from_sort_bucket(self, internal_id: int, future_internal_id: int, month: str, opt_type: str):
-        """_remove_from_sort_bucket实际逻辑（在锁内调用）"""
         try:
-            # ✅ 使用 future_internal_id 作为键
             bucket = self._sort_buckets.get(future_internal_id, {}).get(month, {}).get(opt_type, [])
             for i, entry in enumerate(bucket):
                 if entry.internal_id == internal_id:
                     bucket[i] = bucket[-1]
                     bucket.pop()
-                    heapq.heapify(bucket)
+                    self._buckets_dirty.add((future_internal_id, month, opt_type))
                     break
         except Exception as e:
             logging.warning(f"[_remove_from_sort_bucket] Error removing {internal_id}: {e}")
@@ -1430,9 +1415,15 @@ class WidthStrengthCache:
         Returns:
             最优期权列表
         """
-        with self._get_lock(future_internal_id):
+        with self._lock:
             try:
-                # ✅ 使用 future_internal_id 作为键
+                bucket_key = (future_internal_id, month, opt_type)
+                if bucket_key in self._buckets_dirty:
+                    bucket = self._sort_buckets.get(future_internal_id, {}).get(month, {}).get(opt_type, [])
+                    if bucket:
+                        heapq.heapify(bucket)
+                    self._buckets_dirty.discard(bucket_key)
+
                 bucket = self._sort_buckets.get(future_internal_id, {}).get(month, {}).get(opt_type, [])
                 if not bucket:
                     return []
@@ -1462,7 +1453,7 @@ class WidthStrengthCache:
 
     def get_all_options(self) -> List[Dict[str, Any]]:
         """获取所有已注册的期权合约列表"""
-        with self._get_lock(0):
+        with self._lock:
             results = []
             for internal_id, info in self._option_info.items():
                 display_meta = self._get_option_display_products(info)
@@ -1479,180 +1470,46 @@ class WidthStrengthCache:
                 })
             return results
 
-    MONTH_WEIGHT_DECAY = 0.55
-    MONTH_WEIGHT_DECAY_GRID = (0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95)
-    TIER1_WILSON_THRESHOLD = 0.6
-    TIER2_COVERAGE_THRESHOLD = 0.5
-    TIER2_CORRECT_UP_THRESHOLD = 0.5
-    TIER3_CORRECT_UP_THRESHOLD = 0.4
-    MAX_MONTHS_FOR_SCORING = 5
-
-    @staticmethod
-    def _wilson_lower_bound(pos: float, total: float, z: float = 1.96) -> float:
-        if total <= 0:
-            return 0.0
-        p = pos / total
-        n = total
-        denom = 1.0 + z * z / n
-        center = p + z * z / (2 * n)
-        spread = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
-        return max(0.0, (center - spread) / denom)
-
-    def _resolve_month_weights(self, sorted_months: List[str], fid: int) -> Dict[str, float]:
-        n = len(sorted_months)
-        if n == 0:
-            return {}
-        weights = {}
-        decay = getattr(self, '_month_weight_decay', self.MONTH_WEIGHT_DECAY)
-        if n <= self.MAX_MONTHS_FOR_SCORING:
-            w_current = 1.0
-            if n == 1:
-                weights[sorted_months[0]] = 1.0
-            else:
-                raw_decays = [decay ** i for i in range(1, n)]
-                sum_decays = sum(raw_decays)
-                if sum_decays > 0:
-                    norm_decays = [d / sum_decays for d in raw_decays]
-                else:
-                    norm_decays = [1.0 / (n - 1)] * (n - 1)
-                weights[sorted_months[0]] = w_current
-                for i, m in enumerate(sorted_months[1:]):
-                    weights[m] = norm_decays[i]
-        else:
-            per = 1.0 / n
-            for m in sorted_months:
-                weights[m] = per
-        return weights
-
     def select_otm_targets_by_volume(self, future_internal_id: int = None) -> List[Dict[str, Any]]:
-        if not getattr(self, '_is_main_month_backfilled', False):
-            self._backfill_is_main_month()
-            self._is_main_month_backfilled = True
-        with self._get_lock(future_internal_id or 0):
+        """
+        ✅ 分组D优化：使用 by_sort_bucket 索引，避免全量扫描
+        
+        优化前：遍历 _options_by_future_type 全量筛选 O(N)
+        优化后：直接从排序桶读取 O(1)
+        
+        Args:
+            future_internal_id: 可选，指定期货合约 internal_id。如果为 None，则自动选择最优期货。
+        """
+        # ✅ WidthStrengthCache自身就是缓存，直接使用self
+        with self._lock:
+            # 第一步：选择最优期货（使用 future_internal_id 作为键）
             future_scores = []
             for fid, month_data in self._status_counts.items():
+                # 如果指定了 future_internal_id，只处理该期货
                 if future_internal_id is not None and fid != future_internal_id:
                     continue
+                    
                 if not self._future_initialized.get(fid, False):
                     continue
+                    
+                # ✅ 从 id_cache 获取 product
                 fp_info = self._get_params().get_instrument_meta(fid)
                 if not fp_info:
                     continue
-
-                future_rising = self._future_rising.get(fid, False)
-                opt_type = 'CALL' if future_rising else 'PUT'
-
-                option_ids = self._options_by_future_type.get(fid, {}).get(opt_type, [])
-                month_cr_vol = defaultdict(float)
-                month_wr_vol = defaultdict(float)
-                month_cf_vol = defaultdict(float)
-                month_wf_vol = defaultdict(float)
-                month_other_vol = defaultdict(float)
-                month_rise_vol = defaultdict(float)
-                month_total_vol = defaultdict(float)
-
-                for iid in option_ids:
-                    opt_info = self._option_info.get(iid)
-                    if not opt_info:
-                        continue
-                    month = opt_info.get('month', '')
-                    if not month:
-                        continue
-                    vol = self._option_daily_volume.get(iid, self._option_volume.get(iid, 0))
-                    status = self._current_status.get(iid, 'other')
-                    month_total_vol[month] += vol
-                    if status == 'correct_rise':
-                        month_cr_vol[month] += vol
-                        month_rise_vol[month] += vol
-                    elif status == 'wrong_rise':
-                        month_wr_vol[month] += vol
-                        month_rise_vol[month] += vol
-                    elif status == 'correct_fall':
-                        month_cf_vol[month] += vol
-                    elif status == 'wrong_fall':
-                        month_wf_vol[month] += vol
-                    else:
-                        month_other_vol[month] += vol
-
-                scoring_months = self._get_scoring_months(fid)
-                if not scoring_months:
-                    continue
-
-                month_weights = self._resolve_month_weights(scoring_months, fid)
-
-                correct_up_pct = 0.0
-                correct_down_pct = 0.0
-                noise_ratio = 0.0
-                coverage = 0.0
-                tc = 0.0
-                th = 0.0
-                ra = 0.0
-
-                for m in scoring_months:
-                    w = month_weights.get(m, 0.0)
-                    total = month_total_vol[m]
-                    if total <= 0:
-                        continue
-                    cr = month_cr_vol[m]
-                    wr = month_wr_vol[m]
-                    cf = month_cf_vol[m]
-                    wf = month_wf_vol[m]
-                    rise = month_rise_vol[m]
-
-                    if cr > 0:
-                        coverage += w
-
-                    if rise > 0:
-                        correct_up_pct += w * (cr / rise)
-                    directional_down = cf + wf
-                    if directional_down > 0:
-                        correct_down_pct += w * (cf / directional_down)
-
-                    noise_ratio += w * ((wr + wf) / total)
-
-                    if rise > 0:
-                        tc += w * (cr / rise)
-                    sync_total = cr + cf
-                    if sync_total > 0:
-                        th += w * (cr / sync_total)
-                    ra += w * (1.0 - wr / rise if rise > 0 else 1.0)
-
-                total_cr = sum(month_cr_vol[m] for m in scoring_months)
-                total_rise = sum(month_rise_vol[m] for m in scoring_months)
-                wilson = self._wilson_lower_bound(total_cr, total_rise) if total_rise > 0 else 0.0
-
-                if correct_up_pct > 0 and correct_up_pct >= noise_ratio:
-                    if coverage >= 1.0 and wilson > self.TIER1_WILSON_THRESHOLD:
-                        tier = 1
-                    elif coverage >= self.TIER2_COVERAGE_THRESHOLD and correct_up_pct > self.TIER2_CORRECT_UP_THRESHOLD:
-                        tier = 2
-                    elif correct_up_pct > self.TIER3_CORRECT_UP_THRESHOLD:
-                        tier = 3
-                    else:
-                        tier = 4
-                else:
-                    tier = 4
-
-                future_scores.append({
-                    'future_internal_id': fid,
-                    'correct_up_pct': correct_up_pct,
-                    'correct_down_pct': correct_down_pct,
-                    'noise_ratio': noise_ratio,
-                    'coverage': coverage,
-                    'wilson': wilson,
-                    'tier': tier,
-                    'tc': tc,
-                    'th': th,
-                    'ra': ra,
-                    'future_rising': future_rising,
-                    'scoring_months': scoring_months,
-                })
-
-            future_scores.sort(key=lambda x: (x['tier'], -x['correct_up_pct'], -x['wilson']))
+                
+                opt_type = 'CALL' if self._future_rising.get(fid, False) else 'PUT'
+                target_status = 'correct_rise'
+                cr = sum(m_data.get(opt_type, {}).get(target_status, 0) for m_data in month_data.values())
+                wr = sum(m_data.get(opt_type, {}).get('wrong_rise', 0) for m_data in month_data.values())
+                if cr > 0 and cr >= wr:
+                    future_scores.append({'future_internal_id': fid, 'correct_rise': cr, 'wrong_rise': wr})
+            
+            future_scores.sort(key=lambda x: -x['correct_rise'])
             top_futures = future_scores[:2]
             if not top_futures:
                 return []
-
+            
+            # 第二步：✅ 从排序桶直接读取最优期权（避免全量扫描）
             targets = []
             for pidx, fs in enumerate(top_futures):
                 fid = fs['future_internal_id']
@@ -1662,44 +1519,32 @@ class WidthStrengthCache:
                 except Exception as e:
                     logging.warning(f"[select_otm_targets_by_volume] PositionService导入失败: {e}")
                     pos_svc = None
-
+                
                 if not self._get_params().get_instrument_meta(fid):
                     continue
-
-                fr = fs['future_rising']
-                ot = 'CALL' if fr else 'PUT'
-
+                
+                future_rising = self._future_rising.get(fid, False)
+                opt_type = 'CALL' if future_rising else 'PUT'
+                
                 all_buckets = self._sort_buckets.get(fid, {})
                 best_candidates = []
                 for mth in all_buckets:
-                    mth_candidates = self.select_from_sort_bucket(fid, mth, ot, top_n=1)
+                    mth_candidates = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
                     if mth_candidates and mth_candidates[0]:
                         best_candidates.append(mth_candidates[0])
                 if not best_candidates:
                     logging.debug(f"[select_otm_targets] Sort bucket empty for future_internal_id={fid}, skipping")
                     continue
-
+                
                 best_candidates.sort(key=lambda x: x['volume'], reverse=True)
+                
                 best = best_candidates[0]
-
+                
                 if best:
                     if pos_svc and hasattr(pos_svc, 'has_position') and pos_svc.has_position(best['instrument_id']):
                         continue
-                    targets.append({
-                        **best,
-                        'lots': 2 if pidx == 0 else 1,
-                        'product_rank': pidx + 1,
-                        'tier': fs['tier'],
-                        'coverage': round(fs['coverage'], 3),
-                        'correct_up_pct': round(fs['correct_up_pct'], 4),
-                        'wilson': round(fs['wilson'], 4),
-                        'noise_ratio': round(fs['noise_ratio'], 4),
-                        'tc': round(fs['tc'], 4),
-                        'th': round(fs['th'], 4),
-                        'ra': round(fs['ra'], 4),
-                        'scoring_months': fs['scoring_months'],
-                    })
-
+                    targets.append({**best, 'lots': 2 if pidx == 0 else 1, 'product_rank': pidx + 1})
+            
             return targets
 
 
@@ -1793,7 +1638,7 @@ class WidthStrengthCache:
                 'moneyness_percent': to_float32(moneyness),
                 'is_otm': is_otm,
                 'is_itm': not is_otm,
-                'calculated_at': datetime.now(),
+                'calculated_at': datetime.now(CHINA_TZ),
                 'source': source,
             }
 
@@ -1868,7 +1713,7 @@ class WidthStrengthCache:
                     'month_details': month_details,
                     'all_sync': width_strength > 0,
                     'total_months': len(specified_months),
-                    'calculated_at': datetime.now()
+                    'calculated_at': datetime.now(CHINA_TZ)
                 }
             except Exception as e:
                 logging.error(f"[WidthStrengthCache] WidthStrengthCache calculation failed: {e}")
@@ -1887,7 +1732,7 @@ class WidthStrengthCache:
             'month_details': month_details,
             'all_sync': False,
             'total_months': len(months),
-            'calculated_at': datetime.now(),
+            'calculated_at': datetime.now(CHINA_TZ),
             'source': 'empty_fallback'
         }
 

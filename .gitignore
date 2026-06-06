@@ -64,3 +64,6 @@ Thumbs.db
 # Build artifacts
 *.pyc
 *.pyo
+
+# P2-R8-01修复: 运行时参数状态文件(含环境特定数据，不应提交)
+**/state_param_sets.yaml

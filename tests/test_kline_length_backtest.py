@@ -18,9 +18,9 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'ali2026v3_trading', '参数池'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'ali2026v3_trading', 'param_pool'))
 
-from ali2026v3_trading.参数池.task_scheduler import (
+from ali2026v3_trading.param_pool.task_scheduler import (
     _interpolate_ticks_in_bar,
     _resample_bars_runtime,
     BAR_INTERVAL_GRID,

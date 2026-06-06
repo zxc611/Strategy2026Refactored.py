@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone  # ENV-P2修复: 导入timezone
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
@@ -530,7 +530,7 @@ class TestSpringClosePosition(unittest.TestCase):
             direction='BUY_CALL',
             entry_premium=50.0,
             current_premium=300.0,
-            entry_time=datetime.now() - timedelta(minutes=10),
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=10),
             stop_profit_ratio=5.0,
             max_loss_pct=0.95,
             box_id='BOX_TEST',
@@ -546,7 +546,7 @@ class TestSpringClosePosition(unittest.TestCase):
             direction='BUY_CALL',
             entry_premium=50.0,
             current_premium=1.0,
-            entry_time=datetime.now() - timedelta(minutes=10),
+            entry_time=datetime.now(timezone.utc) - timedelta(minutes=10),
             stop_profit_ratio=5.0,
             max_loss_pct=0.95,
             box_id='BOX_TEST',
@@ -562,7 +562,7 @@ class TestSpringClosePosition(unittest.TestCase):
             direction='BUY_CALL',
             entry_premium=50.0,
             current_premium=100.0,
-            entry_time=datetime.now(),
+            entry_time=datetime.now(timezone.utc),
             stop_profit_ratio=5.0,
             max_loss_pct=0.95,
             box_id='BOX_TEST',
@@ -585,7 +585,7 @@ class TestSpringIronRule(unittest.TestCase):
             direction='BUY_CALL',
             entry_premium=50.0,
             current_premium=100.0,
-            entry_time=datetime.now(),
+            entry_time=datetime.now(timezone.utc),
             stop_profit_ratio=5.0,
             max_loss_pct=0.95,
             box_id='BOX_TEST',
@@ -611,7 +611,7 @@ class TestSpringIronRule(unittest.TestCase):
             direction='BUY_CALL',
             entry_premium=50.0,
             current_premium=100.0,
-            entry_time=datetime.now(),
+            entry_time=datetime.now(timezone.utc),
             stop_profit_ratio=5.0,
             max_loss_pct=0.95,
             box_id='BOX_TEST',
@@ -642,7 +642,7 @@ class TestSpringExpectedValue(unittest.TestCase):
                 direction='BUY_CALL',
                 entry_premium=50.0,
                 current_premium=50.0 * pnl_ratio,
-                entry_time=datetime.now(),
+                entry_time=datetime.now(timezone.utc),
                 stop_profit_ratio=5.0,
                 max_loss_pct=0.95,
                 box_id='BOX_TEST',
@@ -664,7 +664,7 @@ class TestSpringDirectionInference(unittest.TestCase):
         box = BoxRange(
             box_id='B1', instrument_id='IF2606',
             box_top=BOX_TOP, box_bottom=BOX_BOTTOM,
-            box_width_pct=0.025, confirmed_at=datetime.now(),
+            box_width_pct=0.025, confirmed_at=datetime.now(timezone.utc),
             touch_count=5,
         )
         direction = self.strategy._infer_direction(box, 3985.0, 0.35)
@@ -674,7 +674,7 @@ class TestSpringDirectionInference(unittest.TestCase):
         box = BoxRange(
             box_id='B2', instrument_id='IF2606',
             box_top=BOX_TOP, box_bottom=BOX_BOTTOM,
-            box_width_pct=0.025, confirmed_at=datetime.now(),
+            box_width_pct=0.025, confirmed_at=datetime.now(timezone.utc),
             touch_count=5,
         )
         direction = self.strategy._infer_direction(box, 4015.0, 0.65)
@@ -684,7 +684,7 @@ class TestSpringDirectionInference(unittest.TestCase):
         box = BoxRange(
             box_id='B3', instrument_id='IF2606',
             box_top=BOX_TOP, box_bottom=BOX_BOTTOM,
-            box_width_pct=0.025, confirmed_at=datetime.now(),
+            box_width_pct=0.025, confirmed_at=datetime.now(timezone.utc),
             touch_count=5,
         )
         direction = self.strategy._infer_direction(box, 4000.0, 0.5)

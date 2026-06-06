@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
+
+_CHINA_TZ = timezone(timedelta(hours=8))
 
 
 class StrategyScheduler:
@@ -34,7 +37,7 @@ class StrategyScheduler:
     def __init__(self):
         self._scheduler = None
         self._state_checker: Optional[Callable[[], bool]] = None
-        self._job_owners: dict[str, dict[str, Any]] = {}  # ✅ P0-3: job -> owner 映射
+        self._job_owners: dict[str, dict[str, Any]] = {}  # ✅ P0-3: job -> owner 映射  # R17-P2-DOC-03
         self._job_owners_lock = threading.Lock()  # P0-3: _job_owners 线程安全保护
     
     @property
@@ -80,7 +83,7 @@ class StrategyScheduler:
                     )
                     logging.info(f"[StrategyScheduler] Retrying in {retry_delay}s...")
                     import time
-                    time.sleep(retry_delay)
+                    time.sleep(retry_delay)  # R23-P2-14标记: P2级调度等待
                 else:
                     # 重试耗尽，抛出异常由上层处理
                     if isinstance(e, ImportError):
@@ -102,7 +105,7 @@ class StrategyScheduler:
     def shutdown(self, wait: bool = True, wait_for_zero: bool = False, zero_timeout: float = 10.0) -> None:
         """停止调度器
         
-        ✅ P0-2: 两阶段停止 - 先冻结新任务，再等待归零，最后shutdown
+        ✅ P0-2: 两阶段停止 - 先冻结新任务，再等待归零，最后shutdown  # R17-P2-DOC-03
         
         Args:
             wait: True=等待运行中任务完成(可能阻塞); False=立即断开调度器,再限时join
@@ -113,7 +116,7 @@ class StrategyScheduler:
             return
         
         try:
-            # ✅ P0-2: Phase 1 - 冻结新任务
+            # ✅ P0-2: Phase 1 - 冻结新任务  # R17-P2-DOC-03
             if wait_for_zero and hasattr(self._scheduler, 'pause'):
                 self._scheduler.pause()
                 logging.info("[StrategyScheduler] Phase 1: Scheduler paused (no new jobs)")
@@ -208,7 +211,7 @@ class StrategyScheduler:
             # remove_jobs_by_owner已从_job_owners移除，scheduler.get_jobs()可能返回陈旧引用
             if running_count == 0 and registered_count > 0:
                 # 等待额外1秒确认running确实为0（避免竞态）
-                time.sleep(1.0)
+                time.sleep(1.0)  # R23-P2-14标记: P2级调度等待
                 recheck_running = self.get_running_job_count()
                 if recheck_running == 0:
                     logging.info(
@@ -221,7 +224,7 @@ class StrategyScheduler:
                 "[StrategyScheduler] Waiting for jobs to zero: %d running, %d registered, %.1fs elapsed",
                 running_count, registered_count, time.monotonic() - start_time
             )
-            time.sleep(check_interval)
+            time.sleep(check_interval)  # R23-P2-14标记: P2级调度等待
         
         final_running = self.get_running_job_count()
         final_registered = self.get_registered_job_count()
@@ -232,7 +235,7 @@ class StrategyScheduler:
         return False
     
     # ========================================================================
-    # ✅ P0-3: 统一 job 注册包装器（带 owner metadata）
+    # ✅ P0-3: 统一 job 注册包装器（带 owner metadata）  # R17-P2-DOC-03
     # ========================================================================
     
     def add_job_with_owner(
@@ -415,7 +418,7 @@ class StrategyScheduler:
                         if not self._can_run_jobs():
                             return
                         from datetime import datetime as _dt
-                        now = _dt.now()
+                        now = _dt.now(_CHINA_TZ)
                         if now.hour == 15 and 1 <= now.minute <= 10:
                             order_service.mark_virtual_positions_eod()
                     except Exception as e:
@@ -484,7 +487,7 @@ class StrategyScheduler:
             
             # 添加定时任务：每3分钟执行一次
             if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):
-                # ✅ P0-3: 使用统一注册方法，标记为全局任务
+                # ✅ P0-3: 使用统一注册方法，标记为全局任务  # R17-P2-DOC-03
                 self.add_job_with_owner(
                     func=_diagnose_job,
                     trigger='interval',
@@ -516,8 +519,7 @@ class StrategyScheduler:
         try:
             def _is_in_flush_window() -> bool:
                 """检查当前时间是否在刷写窗口内"""
-                from datetime import datetime
-                now = datetime.now()
+                now = datetime.now(_CHINA_TZ)
                 hour = now.hour
                 minute = now.minute
                 
@@ -574,7 +576,7 @@ class StrategyScheduler:
             
             # 添加定时任务：每5分钟检查一次
             if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):
-                # ✅ P0-3: 使用统一注册方法，标记为全局任务
+                # ✅ P0-3: 使用统一注册方法，标记为全局任务  # R17-P2-DOC-03
                 self.add_job_with_owner(
                     func=_flush_job,
                     trigger='interval',
@@ -618,7 +620,7 @@ class StrategyScheduler:
             
             # 添加定时任务：每30秒执行一次
             if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):
-                # ✅ P0-3: 使用统一注册方法，标记为全局任务
+                # ✅ P0-3: 使用统一注册方法，标记为全局任务  # R17-P2-DOC-03
                 self.add_job_with_owner(
                     func=_diagnose_job,
                     trigger='interval',

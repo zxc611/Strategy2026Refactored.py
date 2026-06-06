@@ -6,7 +6,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.参数池.task_scheduler import (
+from ali2026v3_trading.param_pool.task_scheduler import (
     optimize_l2_params_step1,
     run_step2_smoke_test,
     run_deep_validation_tiered,
@@ -119,3 +119,69 @@ def test_full_pipeline():
 
 if __name__ == '__main__':
     test_full_pipeline()
+
+
+class TestTradingCoreChainE2E:
+    """R17-P0-TEST-E2E: 交易核心链路E2E测试 — 信号→风控→下单→持仓"""
+
+    def test_signal_service_generates_and_rejects_empty(self):
+        from ali2026v3_trading.signal_service import SignalService
+        svc = SignalService.__new__(SignalService)
+        svc._cooldown_times = {}
+        svc._cooldown_durations = {}
+        svc._signal_dedup_cache = {}
+        svc._signal_history = []
+        svc._min_estimated_plr = 0.0
+        svc._mode_engine = None
+        svc._hft_filter = None
+        svc._adaptive_threshold = None
+        result = svc.generate_signal('', 'BUY', 100.0, 1)
+        assert result is None
+
+    def test_risk_check_response_block_and_pass(self):
+        from ali2026v3_trading.risk_service import RiskCheckResponse, RiskLevel
+        block_resp = RiskCheckResponse.block_result('TEST', 'test block', RiskLevel.HIGH)
+        assert block_resp.is_block is True
+        assert block_resp.is_pass is False
+        pass_resp = RiskCheckResponse.pass_result('test pass')
+        assert pass_resp.is_pass is True
+        assert pass_resp.is_block is False
+
+    def test_order_result_ok_and_fail(self):
+        from ali2026v3_trading.order_service import OrderResult
+        ok = OrderResult.ok('ORD_001')
+        assert ok.success is True
+        assert bool(ok) is True
+        fail = OrderResult.fail('ERR_TIMEOUT', 'order timed out')
+        assert fail.success is False
+        assert bool(fail) is False
+
+    def test_position_tp_sl_ratios_consistent_chain(self):
+        from ali2026v3_trading.position_service import PositionService
+        from ali2026v3_trading.config_params import DEFAULT_PARAM_TABLE
+        svc = PositionService.__new__(PositionService)
+        svc._state_param_manager = None
+        tp, sl = svc._get_tp_sl_ratios_by_reason('CORRECT_RESONANCE')
+        assert tp > 0 and sl > 0
+        assert tp > sl
+        assert DEFAULT_PARAM_TABLE['close_take_profit_ratio'] > 0
+        assert DEFAULT_PARAM_TABLE['close_stop_loss_ratio'] > 0
+
+    def test_e7_checker_integrated_with_greeks_config(self):
+        from ali2026v3_trading.governance_engine import E7UnexplainedReturnChecker
+        from ali2026v3_trading.config_params import DEFAULT_PARAM_TABLE
+        assert 'max_net_delta_pct' in DEFAULT_PARAM_TABLE
+        assert 'max_net_gamma_pct' in DEFAULT_PARAM_TABLE
+        assert 'max_net_vega_bps' in DEFAULT_PARAM_TABLE
+        checker = E7UnexplainedReturnChecker.__new__(E7UnexplainedReturnChecker)
+        checker._residual_threshold_pct = 15.0
+        pnl_attribution = {
+            'unexplained': 50.0,
+            'delta_contrib': 30.0,
+            'gamma_contrib': 10.0,
+            'vega_contrib': 5.0,
+            'theta_contrib': 5.0,
+        }
+        result = checker.check(pnl_attribution)
+        assert 'e7_triggered' in result
+        assert 'residual_pct' in result

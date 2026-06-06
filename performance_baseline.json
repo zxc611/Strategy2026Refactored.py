@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-05-31T23:49:10.718453",
+  "hostname": "XSL",
+  "state_store_snapshot": {
+    "snapshot_count": 500,
+    "p50_us": 6.9,
+    "p99_us": 8.5,
+    "max_us": 11.1,
+    "mean_us": 6.97
+  },
+  "callback_registry_invoke": {
+    "invoke_count": 1000,
+    "callbacks_per_invoke": 10,
+    "p50_us": 1.7,
+    "p99_us": 1.8,
+    "max_us": 9.3,
+    "mean_us": 1.7
+  },
+  "memory": {
+    "rss_current_mb": 0.11,
+    "rss_peak_mb": 0.11,
+    "state_keys": 100
+  },
+  "tick_processing": {
+    "tick_count": 1000,
+    "p50_us": 1.1,
+    "p99_us": 1.4,
+    "max_us": 42.4,
+    "mean_us": 1.16
+  }
+}

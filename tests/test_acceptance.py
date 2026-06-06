@@ -25,8 +25,8 @@ def verify_code_syntax():
     
     try:
         import py_compile
-        py_compile.compile('c:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\storage.py', doraise=True)
-        py_compile.compile('c:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\data_service.py', doraise=True)
+        py_compile.compile(os.path.join(project_root, 'ali2026v3_trading', 'storage.py'), doraise=True)
+        py_compile.compile(os.path.join(project_root, 'ali2026v3_trading', 'data_service.py'), doraise=True)
         print("[PASS] storage.py 和 data_service.py 编译通过")
         print()
         return True
@@ -41,7 +41,7 @@ def verify_no_pa_import():
     print("验收2: storage.py 无 pyarrow 直接导入")
     print("=" * 60)
     
-    with open('c:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\storage.py', 'r', encoding='utf-8') as f:
+    with open(os.path.join(project_root, 'ali2026v3_trading', 'storage.py'), 'r', encoding='utf-8') as f:
         content = f.read()
     
     # 检查是否有 "import pyarrow as pa" 或 "from pyarrow import"
@@ -60,7 +60,7 @@ def verify_arrow_in_data_service():
     print("验收3: Arrow代码集中在 data_service.py")
     print("=" * 60)
     
-    with open('c:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\data_service.py', 'r', encoding='utf-8') as f:
+    with open(os.path.join(project_root, 'ali2026v3_trading', 'data_service.py'), 'r', encoding='utf-8') as f:
         ds_content = f.read()
     
     required_methods = [
@@ -88,7 +88,7 @@ def verify_single_interface():
     print("验收4: 接口唯一性（四唯一原则）")
     print("=" * 60)
     
-    with open('c:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\data_service.py', 'r', encoding='utf-8') as f:
+    with open(os.path.join(project_root, 'ali2026v3_trading', 'data_service.py'), 'r', encoding='utf-8') as f:
         ds_content = f.read()
     
     # 检查是否有 insert_tick_data 方法（不应该有）
@@ -347,10 +347,10 @@ def verify_line_count():
     print("验收10: 行数变化监控（原则3）")
     print("=" * 60)
     
-    with open('c:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\storage.py', 'r', encoding='utf-8') as f:
+    with open(os.path.join(project_root, 'ali2026v3_trading', 'storage.py'), 'r', encoding='utf-8') as f:
         storage_lines = len(f.readlines())
     
-    with open('c:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\data_service.py', 'r', encoding='utf-8') as f:
+    with open(os.path.join(project_root, 'ali2026v3_trading', 'data_service.py'), 'r', encoding='utf-8') as f:
         ds_lines = len(f.readlines())
     
     original_storage = 2454

@@ -13,7 +13,7 @@ from ali2026v3_trading.subscription_manager import SubscriptionManager
 import re
 
 
-@dataclass
+@dataclass(slots=True)
 class ExchangeConfig:
     """交易所配置"""
     exchanges: List[str] = field(default_factory=lambda: ["CFFEX", "SHFE", "DCE", "CZCE"])

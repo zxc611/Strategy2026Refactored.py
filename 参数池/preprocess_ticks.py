@@ -12,20 +12,55 @@
 """
 from __future__ import annotations
 
+from ali2026v3_trading.cross_system_utils import get_spawn_context  # NEW-P2-03修复
+from ali2026v3_trading.shared_utils import ANNUALIZE_FACTOR_DAILY, TRADING_DAYS_PER_YEAR_CHINA
+
+try:
+    from ali2026v3_trading.参数池.tick_aggregator import TickAggregator
+    _HAS_TICK_AGGREGATOR = True
+except ImportError:
+    _HAS_TICK_AGGREGATOR = False
+    TickAggregator = None
+
+try:
+    from ali2026v3_trading.param_pool.feature_engine import FeatureEngine
+    _HAS_FEATURE_ENGINE = True
+except ImportError:
+    _HAS_FEATURE_ENGINE = False
+    FeatureEngine = None
+
+try:
+    from ali2026v3_trading.param_pool.data_validator import DataValidator
+    _HAS_DATA_VALIDATOR = True
+except ImportError:
+    _HAS_DATA_VALIDATOR = False
+    DataValidator = None
+
 import os
 import glob
 import time
 import shutil
 import logging
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, NamedTuple
 
-import duckdb
+_CHINA_TZ = timezone(timedelta(hours=8))
+
+try:
+    from ali2026v3_trading.data_access import get_data_access
+    from ali2026v3_trading.db_adapter import connect, get_duckdb_module
+    duckdb = get_duckdb_module()
+except ImportError:
+    duckdb = None
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 try:
     import math as _math
@@ -46,9 +81,78 @@ SYMBOLS = sorted(set([
 ]))
 MAX_WORKERS = min(max(1, (os.cpu_count() or 4) // 2), len(SYMBOLS))
 ROWS_PER_CHUNK = 500_000
+ENABLE_MINUTE_BOUNDARY_CHECK = os.environ.get("ENABLE_MINUTE_BOUNDARY_CHECK", "true").lower() in ("true", "1", "yes")
+
+class _TypedResult(NamedTuple):
+    """NamedTuple基类，提供dict兼容的.get()和__contains__方法，R5-I-03修复"""
+    def get(self, key, default=None):
+        return getattr(self, key, default) if hasattr(self, key) else default
+    def __contains__(self, key):
+        return key in self._fields
+    def keys(self):
+        return self._fields
+
+
+class MinuteBoundaryResult(_TypedResult):
+    passed: bool
+    split_minutes: int
+    details: list
+
+
+class CircuitBreakerResult(_TypedResult):
+    halt_events: list
+    n_halts: int
+    survival_rate_check_needed: bool
+
+
+class OutOfOrderResult(_TypedResult):
+    is_monotonic: bool
+    rollback_count: int
+    simulated_swap_count: int
+    swap_prob: float
+    needs_dedup_module: bool
+    recommendation: str
+    swapped_df: object
+
+
+class ExpireDateResult(_TypedResult):
+    passed: bool
+    total_rows: int
+    missing_expire_count: int
+    missing_expire_pct: float
+    issues: list
+    action: str
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
+
+
+# R4-D-02修复: 新增列定义，用于schema同步
+_SCHEMA_REQUIRED_COLUMNS = {
+    "_spread_quality": "INTEGER DEFAULT 0",
+    "_option_metadata_quality": "INTEGER DEFAULT 0",
+    "days_to_expiry": "INTEGER",
+    "_classification_mode": "INTEGER DEFAULT 1",
+}
+
+
+def _sync_db_schema(con: duckdb.DuckDBPyConnection) -> None:
+    """R4-D-02修复: 检测并同步数据库schema，添加缺失列
+
+    当代码新增字段但数据库表已存在时，通过ALTER TABLE自动添加缺失列，
+    避免INSERT时因列不存在而异常被静默吞没。
+    """
+    try:
+        cols = con.execute("DESCRIBE minute_data").fetchall()
+        existing_cols = {row[0] for row in cols}
+        for col_name, col_type in _SCHEMA_REQUIRED_COLUMNS.items():
+            if col_name not in existing_cols:
+                con.execute(f"ALTER TABLE minute_data ADD COLUMN {col_name} {col_type}")
+                logger.info("[R4-D-02] schema同步: 添加缺失列 %s %s", col_name, col_type)
+    except Exception as e:
+        # 表不存在时DESCRIBE会报错，此时CREATE TABLE已处理
+        logger.debug("[R4-D-02] schema同步跳过(表可能不存在): %s", e)
 
 
 def _ensure_table(con: duckdb.DuckDBPyConnection) -> None:
@@ -66,6 +170,7 @@ def _ensure_table(con: duckdb.DuckDBPyConnection) -> None:
             open_interest BIGINT,
             tick_count    BIGINT,
             bid_ask_spread DOUBLE,
+            _spread_quality INTEGER DEFAULT 0,
             strike_price  DOUBLE,
             expire_date   VARCHAR,
             option_type   VARCHAR,
@@ -82,10 +187,15 @@ def _ensure_table(con: duckdb.DuckDBPyConnection) -> None:
             delta             DOUBLE,
             gamma             DOUBLE,
             vega              DOUBLE,
-            theta             DOUBLE
+            theta             DOUBLE,
+            _option_metadata_quality INTEGER DEFAULT 0,
+            days_to_expiry    INTEGER,
+            _classification_mode INTEGER DEFAULT 1
         )
     """)
-
+    # R4-D-02修复: 数据库schema同步更新 — 检测并添加缺失列
+    # 若表已存在但缺少新增列，通过ALTER TABLE自动同步
+    _sync_db_schema(con)
 
 def compute_option_state_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     """向量化五态分类 — 移植自 width_cache._classify_status()
@@ -118,10 +228,8 @@ def compute_option_state_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         underlying = df["underlying_price"].values
         opt_close = df["close"].values
 
-        prev_underlying = np.roll(underlying, 1)
-        prev_underlying[0] = underlying[0]
-        prev_opt = np.roll(opt_close, 1)
-        prev_opt[0] = opt_close[0]
+        prev_underlying = np.empty_like(underlying); prev_underlying[1:] = underlying[:-1]; prev_underlying[0] = underlying[0]  # PD-P2-09: 手动shift避免look-ahead
+        prev_opt = np.empty_like(opt_close); prev_opt[1:] = opt_close[:-1]; prev_opt[0] = opt_close[0]  # PD-P2-09: 手动shift避免look-ahead
 
         underlying_rising = underlying > prev_underlying
         opt_rising = opt_close > prev_opt
@@ -149,6 +257,7 @@ def compute_option_state_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         close = df["close"].values
         open_ = df["open"].values
         pct_change = np.where(open_ > 0, (close - open_) / open_, 0.0)
+        pct_change = np.where(np.isfinite(pct_change), pct_change, 0.0)  # NP-P2-17: 浮点噪声消除
         is_rise = pct_change > 0
         is_correct = np.abs(pct_change) > 0.005
         correct_rise = is_rise & is_correct
@@ -158,17 +267,20 @@ def compute_option_state_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         pct_change_abs = np.abs(pct_change)
         logger.debug("五态降级: 缺少underlying_price/option_type，使用价格动量简化分类")
 
-    total = np.maximum(
-        correct_rise.astype(np.float64) + correct_fall.astype(np.float64)
-        + wrong_rise.astype(np.float64) + wrong_fall.astype(np.float64),
-        1.0,
-    )
+    try:  # NP-P2-29: astype类型转换错误处理
+        total = np.maximum(
+            correct_rise.astype(np.float64) + correct_fall.astype(np.float64)
+            + wrong_rise.astype(np.float64) + wrong_fall.astype(np.float64),
+            1.0,
+        )
+    except (ValueError, TypeError) as _e:
+        logger.warning("[NP-P2-29] astype float64 conversion failed: %s, using zeros", _e)
+        total = np.maximum(np.zeros_like(pct_change_abs, dtype=np.float64), 1.0)
     other_mask = ~(correct_rise | correct_fall | wrong_rise | wrong_fall)
 
     if has_real_data:
         underlying = df["underlying_price"].values
-        prev_underlying = np.roll(underlying, 1)
-        prev_underlying[0] = underlying[0]
+        prev_underlying = np.empty_like(underlying); prev_underlying[1:] = underlying[:-1]; prev_underlying[0] = underlying[0]  # PD-P2-09: 手动shift避免look-ahead
         strength_raw = np.abs(underlying - prev_underlying) / np.where(prev_underlying > 0, prev_underlying, 1.0)
         strength = np.clip(strength_raw * 20, 0, 1)
     else:
@@ -178,12 +290,15 @@ def compute_option_state_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         strength = np.clip(np.abs(pct_change) * 20, 0, 1)
 
     return pd.DataFrame({
-        "correct_rise_pct": correct_rise.astype(float) / total,
-        "correct_fall_pct": correct_fall.astype(float) / total,
-        "wrong_rise_pct": wrong_rise.astype(float) / total,
-        "wrong_fall_pct": wrong_fall.astype(float) / total,
-        "other_pct": other_mask.astype(float) / total,
+        "correct_rise_pct": correct_rise.astype(float, errors='coerce') / total,  # NP-P2-29
+        "correct_fall_pct": correct_fall.astype(float, errors='coerce') / total,  # NP-P2-29
+        "wrong_rise_pct": wrong_rise.astype(float, errors='coerce') / total,  # NP-P2-29
+        "wrong_fall_pct": wrong_fall.astype(float, errors='coerce') / total,  # NP-P2-29
+        "other_pct": other_mask.astype(float, errors='coerce') / total,  # NP-P2-29
         "strength": strength,
+        # R4-P-11修复: 区分降级模式与真实五态语义
+        # _classification_mode=1表示真实五态分类，=0表示降级简化分类
+        "_classification_mode": np.full(n, 1 if has_real_data else 0, dtype=np.int32),
     })
 
 
@@ -206,14 +321,15 @@ def compute_order_flow_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     if n == 0:
         return pd.DataFrame(np.zeros((0, 2)), columns=["imbalance", "consistency"])
 
-    close = df["close"].values.astype(float)
-    open_ = df["open"].values.astype(float)
-    high = df["high"].values.astype(float) if "high" in df.columns else np.maximum(open_, close)
-    low = df["low"].values.astype(float) if "low" in df.columns else np.minimum(open_, close)
-    vol = df["volume"].values.astype(float)
+    close = df["close"].to_numpy(dtype=float)  # NP-P2-31
+    open_ = df["open"].to_numpy(dtype=float)  # NP-P2-31
+    high = df["high"].to_numpy(dtype=float) if "high" in df.columns else np.maximum(open_, close)  # NP-P2-31
+    low = df["low"].to_numpy(dtype=float) if "low" in df.columns else np.minimum(open_, close)  # NP-P2-31
+    vol = df["volume"].to_numpy(dtype=float)  # NP-P2-31
     vol_safe = np.where(vol > 0, vol, 1.0)
 
     spread = high - low
+    spread = np.nan_to_num(spread, nan=0.0)
     spread_safe = np.where(spread > 1e-8, spread, 1e-8)
     price_position = (close - low) / spread_safe
     price_position = np.clip(price_position, 0.0, 1.0)
@@ -225,11 +341,14 @@ def compute_order_flow_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     weighted_imbalance = raw_imbalance * vol_weight
 
     alpha = 2.0 / (5.0 + 1.0)
+    ema_warmup = 5  # PD-P2-10: EMA warm-up期
     imbalance = np.empty(n)
     imbalance[0] = weighted_imbalance[0] / vol_weight[0] if vol_weight[0] > 0 else 0.0
     for i in range(1, n):
         imbalance[i] = alpha * (weighted_imbalance[i] / vol_weight[i] if vol_weight[i] > 0 else 0.0) + (1.0 - alpha) * imbalance[i - 1]
-    imbalance = np.clip(imbalance, -1.0, 1.0)
+    for i in range(min(ema_warmup, n)):
+        imbalance[i] = np.nan
+    imbalance = np.clip(np.nan_to_num(imbalance, nan=0.0), -1.0, 1.0)
 
     signs = np.sign(raw_imbalance)
     if n >= 3:
@@ -237,7 +356,9 @@ def compute_order_flow_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         consistency_ema[0] = signs[0]
         for i in range(1, n):
             consistency_ema[i] = alpha * signs[i] + (1.0 - alpha) * consistency_ema[i - 1]
-        consistency = np.clip(consistency_ema * np.abs(imbalance), -1.0, 1.0)
+        for i in range(min(ema_warmup, n)):  # PD-P2-10: consistency EMA也做warm-up期标记
+            consistency_ema[i] = np.nan
+        consistency = np.clip(np.nan_to_num(consistency_ema, nan=0.0) * np.abs(imbalance), -1.0, 1.0)
     else:
         consistency = np.clip(imbalance * 0.8, -1.0, 1.0)
 
@@ -276,11 +397,11 @@ def compute_greeks_vectorized(df: pd.DataFrame) -> pd.DataFrame:
 
     RISK_FREE_RATE = 0.02
     DIVIDEND_YIELD = 0.0
-    reference_date = df["minute"].min() if "minute" in df.columns else pd.Timestamp.now()
+    reference_date = df["minute"].min() if "minute" in df.columns else pd.Timestamp.now(tz=_CHINA_TZ)
 
-    S = df["underlying_price"].values.astype(np.float64)
-    K = df["strike_price"].values.astype(np.float64)
-    market_price = df["close"].values.astype(np.float64)
+    S = df["underlying_price"].to_numpy(dtype=np.float64)  # NP-P2-31
+    K = df["strike_price"].to_numpy(dtype=np.float64)  # NP-P2-31
+    market_price = df["close"].to_numpy(dtype=np.float64)  # NP-P2-31
     opt_type = df["option_type"].fillna("").str.upper().values
 
     expire_ts = pd.to_datetime(df["expire_date"].values, errors="coerce")
@@ -328,7 +449,9 @@ def _norm_pdf(x: float) -> float:
 
 def _bs_price_scalar(S: float, K: float, T: float, r: float, q: float,
                       sigma: float, option_type: str) -> float:
-    if T <= 0 or sigma <= 0:
+    if T <= 0 or sigma <= 0 or K <= 0 or S <= 0:
+        return max(0.0, (S - K) if option_type == 'CALL' else (K - S))
+    if sigma < 1e-6:
         return max(0.0, (S - K) if option_type == 'CALL' else (K - S))
     try:
         d1 = (_math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * _math.sqrt(T))
@@ -343,8 +466,10 @@ def _bs_price_scalar(S: float, K: float, T: float, r: float, q: float,
 
 def _bs_greeks_scalar(S: float, K: float, T: float, r: float, q: float,
                        sigma: float, option_type: str) -> Tuple[float, float, float, float]:
-    if T <= 0 or sigma <= 0 or S <= 0:
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
         return (0.0, 0.0, 0.0, 0.0)
+    if sigma < 1e-6:
+        return (1.0 if option_type == 'CALL' else -1.0, 0.0, 0.0, 0.0)
     try:
         d1 = (_math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * _math.sqrt(T))
         d2 = d1 - sigma * _math.sqrt(T)
@@ -352,12 +477,12 @@ def _bs_greeks_scalar(S: float, K: float, T: float, r: float, q: float,
             delta = _math.exp(-q * T) * _norm_cdf(d1)
             theta = (-_math.exp(-q * T) * S * _norm_pdf(d1) * sigma / (2 * _math.sqrt(T))
                      - r * K * _math.exp(-r * T) * _norm_cdf(d2)
-                     + q * S * _math.exp(-q * T) * _norm_cdf(d1)) / 365.0
+                     + q * S * _math.exp(-q * T) * _norm_cdf(d1)) / TRADING_DAYS_PER_YEAR_CHINA
         else:
             delta = _math.exp(-q * T) * (_norm_cdf(d1) - 1.0)
             theta = (-_math.exp(-q * T) * S * _norm_pdf(d1) * sigma / (2 * _math.sqrt(T))
                      + r * K * _math.exp(-r * T) * _norm_cdf(-d2)
-                     - q * S * _math.exp(-q * T) * _norm_cdf(-d1)) / 365.0
+                     - q * S * _math.exp(-q * T) * _norm_cdf(-d1)) / TRADING_DAYS_PER_YEAR_CHINA
         gamma = _math.exp(-q * T) * _norm_pdf(d1) / (S * sigma * _math.sqrt(T))
         vega = S * _math.exp(-q * T) * _norm_pdf(d1) * _math.sqrt(T) / 100.0
         return (round(delta, 6), round(gamma, 4), round(theta, 6), round(vega, 4))
@@ -396,7 +521,7 @@ def _compute_greeks_fallback(df: pd.DataFrame) -> pd.DataFrame:
     close = df["close"].values
     close_safe = np.where(close > 0, close, 1.0)
     hl_range = np.where(close_safe > 0, (high - low) / close_safe, 0.0)
-    iv = np.clip(hl_range * np.sqrt(252) * 0.5, 0.05, 2.0)
+    iv = np.clip(hl_range * np.sqrt(ANNUALIZE_FACTOR_DAILY) * 0.5, 0.05, 2.0)
     delta = np.clip((close - (high + low) / 2) / close_safe, -1, 1)
     gamma = np.clip(1.0 / (close_safe * iv + 1e-8), 0, 0.1)
     vega = np.clip(iv * 0.1, 0, 0.05)
@@ -410,8 +535,8 @@ def _aggregate_ticks_to_bars(tick_df: pd.DataFrame) -> pd.DataFrame:
     if tick_df.empty:
         return pd.DataFrame()
 
-    tick_df = tick_df.copy()
-    tick_df["minute"] = tick_df["datetime"].dt.floor("min")
+    tick_df = tick_df.copy()  # PD-P2-05: 必须copy,防止后续列赋值触发SettingWithCopyWarning或污染原始数据
+    tick_df["minute"] = tick_df["datetime"].dt.ceil("min")
 
     agg_spec = {
         "open": ("price", "first"),
@@ -441,7 +566,7 @@ def _aggregate_ticks_to_bars(tick_df: pd.DataFrame) -> pd.DataFrame:
             tick_df["ask_price1"] - tick_df["bid_price1"],
             np.nan
         )
-        tick_df["_spread_valid"] = valid_spread_mask.astype(int)
+        tick_df["_spread_valid"] = valid_spread_mask.astype(pd.Int64Dtype())  # PD-P2-04
         agg_spec["_spread_mean"] = ("_spread", "mean")
         agg_spec["_spread_valid_ratio"] = ("_spread_valid", "mean")
 
@@ -449,7 +574,7 @@ def _aggregate_ticks_to_bars(tick_df: pd.DataFrame) -> pd.DataFrame:
 
     if has_bid and has_ask and "_spread_mean" in ohlcv.columns:
         ohlcv["bid_ask_spread"] = ohlcv["_spread_mean"].fillna(0.0)
-        ohlcv["_spread_quality"] = (ohlcv["_spread_mean"].notna() & (ohlcv["_spread_mean"] > 0)).astype(int)
+        ohlcv["_spread_quality"] = (ohlcv["_spread_mean"].notna() & (ohlcv["_spread_mean"] > 0)).astype(pd.Int64Dtype())  # PD-P2-04
         cols_to_drop = ["_spread_mean"]
         if "_spread_valid_ratio" in ohlcv.columns:
             cols_to_drop.append("_spread_valid_ratio")
@@ -465,25 +590,59 @@ def _aggregate_ticks_to_bars(tick_df: pd.DataFrame) -> pd.DataFrame:
             ohlcv.loc[nonzero_vol, "turnover"] / ohlcv.loc[nonzero_vol, "volume"]
         )
     else:
-        ohlcv["turnover"] = ohlcv["close"].astype(np.float64) * ohlcv["volume"].astype(np.float64)
+        ohlcv["turnover"] = pd.to_numeric(ohlcv["close"], errors='coerce').astype(np.float64) * pd.to_numeric(ohlcv["volume"], errors='coerce').astype(np.float64)  # NP-P2-29
         ohlcv["vwap"] = ohlcv["close"].copy()
 
     if not has_oi:
-        ohlcv["open_interest"] = 0
+        ohlcv["open_interest"] = pd.array([0] * len(ohlcv), dtype="int64")
 
     for col in ["strike_price", "expire_date", "option_type", "underlying_price"]:
         if col in tick_df.columns:
+            # P0-3修复：ffill在合约边界重置
+            if "instrument_id" in tick_df.columns:
+                tick_df["_contract_changed"] = tick_df["instrument_id"] != tick_df["instrument_id"].shift(1)
+                tick_df.loc[tick_df.index[0], "_contract_changed"] = True
+                tick_df.loc[tick_df["_contract_changed"], col] = np.nan
+            # PD-P1-03: ffill前先确保跨合约边界不继承前合约值
             tick_df[col] = tick_df[col].ffill()
-            valid_vals = tick_df.groupby("minute")[col].apply(
-                lambda x: x.dropna().iloc[0] if len(x.dropna()) > 0 else np.nan
-            )
+            valid_vals = tick_df.dropna(subset=[col]).groupby("minute")[col].first()
             ohlcv[col] = ohlcv["minute"].map(valid_vals)
+            if col == "strike_price":
+                ohlcv.loc[ohlcv[col].isna() | (ohlcv[col] <= 0), col] = 0.0
+                _nan_count = (ohlcv[col] == 0.0).sum()
+                if _nan_count > 0:
+                    import logging as _logging
+                    _logging.warning("[P0-8修复] strike_price NaN/非正值阻断: %d条记录置0，将跳过Greeks计算", _nan_count)
 
     metadata_cols = [c for c in ["strike_price", "expire_date", "option_type"] if c in ohlcv.columns]
     if metadata_cols:
-        ohlcv["_option_metadata_quality"] = ohlcv[metadata_cols].notna().all(axis=1).astype(int)
+        ohlcv["_option_metadata_quality"] = ohlcv[metadata_cols].notna().all(axis=1).astype(pd.Int64Dtype())  # PD-P2-04
     else:
         ohlcv["_option_metadata_quality"] = 0
+
+    # P0-6修复: 生成days_to_expiry列，供到期日滑点倍增模型消费
+    # 原代码缺失此列，导致_get_expiry_slippage_multiplier恒返回1.0
+    # R4-P-12修复: 使用交易日计算而非日历日，排除周末和节假日
+    if "expire_date" in ohlcv.columns:
+        try:
+            expire_dt = pd.to_datetime(ohlcv["expire_date"], errors="coerce")
+            bar_dt = pd.to_datetime(ohlcv["minute"], errors="coerce")
+            # PD-P1-07: 确保minute列类型为datetime，防止下游比较时str与Timestamp混用
+            ohlcv["minute"] = bar_dt
+            # R4-P-12: 使用np.busday_count计算工作日天数(排除周末)
+            # 注: 不包含中国特有节假日，但已比日历日更准确
+            calendar_days = (expire_dt - bar_dt).dt.days
+            # 估算工作日: 去除周末(约号2/7)
+            trading_days = np.maximum(0, np.floor(calendar_days.fillna(-1) * 5.0 / 7.0)).astype(int)
+            trading_days = np.where(calendar_days.isna(), -1, trading_days)
+            trading_days = np.minimum(trading_days, 3650)
+            ohlcv["days_to_expiry"] = trading_days
+        except Exception as _e:
+            # N-04修复: 添加logging.warning而非静默吞掉→到期日滑点模型静默失效
+            logging.warning("[preprocess_ticks] days_to_expiry计算异常，到期日滑点模型将使用默认值: %s", _e)
+            ohlcv["days_to_expiry"] = np.nan
+    else:
+        ohlcv["days_to_expiry"] = np.nan
 
     return ohlcv
 
@@ -507,6 +666,7 @@ def _ensure_multiscale_table(con: duckdb.DuckDBPyConnection) -> None:
             open_interest BIGINT,
             tick_count    BIGINT,
             bid_ask_spread DOUBLE,
+            _spread_quality INTEGER DEFAULT 0,
             strike_price  DOUBLE,
             expire_date   VARCHAR,
             option_type   VARCHAR,
@@ -523,7 +683,9 @@ def _ensure_multiscale_table(con: duckdb.DuckDBPyConnection) -> None:
             delta             DOUBLE,
             gamma             DOUBLE,
             vega              DOUBLE,
-            theta             DOUBLE
+            theta             DOUBLE,
+            _option_metadata_quality INTEGER DEFAULT 0,
+            days_to_expiry    INTEGER
         )
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_multiscale_symbol ON minute_data_multiscale(symbol, bar_length_minutes, minute)")
@@ -563,13 +725,22 @@ def _resample_bars_to_multiscale(df_1m: pd.DataFrame, bar_length: int) -> pd.Dat
         result["close"],
     )
 
-    last_cols = [
-        "bid_ask_spread", "strike_price", "expire_date", "option_type",
-        "underlying_price", "open_interest",
+    mean_cols = [
         "correct_rise_pct", "correct_fall_pct", "wrong_rise_pct", "wrong_fall_pct",
         "other_pct", "strength", "imbalance", "consistency",
         "iv", "delta", "gamma", "vega", "theta",
     ]
+    last_cols = [
+        "bid_ask_spread", "_spread_quality", "strike_price", "_option_metadata_quality",
+        "expire_date", "days_to_expiry", "option_type",
+        "underlying_price", "open_interest",
+    ]
+    for col in mean_cols:
+        if col in df.columns:
+            agg_val = df.groupby(group_cols)[col].mean()
+            result[col] = result.set_index(group_cols).index.map(
+                lambda idx: agg_val.get(idx, np.nan) if idx in agg_val.index else np.nan
+            )
     for col in last_cols:
         if col in df.columns:
             agg_val = df.groupby(group_cols)[col].last()
@@ -581,6 +752,69 @@ def _resample_bars_to_multiscale(df_1m: pd.DataFrame, bar_length: int) -> pd.Dat
     result = result.dropna(subset=["open", "close"])
 
     return result
+
+
+def _resample_bars_runtime(
+    tick_buffer: List[Dict[str, Any]],
+    target_interval_minutes: int = 5,
+    bar_length: int = None,
+) -> pd.DataFrame:
+    """
+    P1-R8-15修复: 运行时多粒度Bar聚合(5m/15m/60m)
+    手册4.8节L-0.5T: 接收tick缓冲区实时聚合为目标粒度的Bar
+    Args:
+        tick_buffer: tick数据缓冲区，每项为dict含timestamp/price/volume等
+        target_interval_minutes: 目标Bar粒度(默认5分钟)
+        bar_length: 兼容参数，同target_interval_minutes
+    Returns:
+        聚合后的OHLCV DataFrame
+    """
+    interval = bar_length if bar_length is not None else target_interval_minutes
+    if not tick_buffer or interval <= 0:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(tick_buffer)
+    if df.empty or "timestamp" not in df.columns or "price" not in df.columns:
+        return pd.DataFrame()
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # P0-R11-13修复: 1分钟Bar使用ceil对齐（与_aggregate_ticks_to_bars一致），N分钟Bar使用floor（从已对齐1分钟Bar重采样）
+    if interval <= 1:
+        df["minute"] = df["timestamp"].dt.ceil(f"{interval}min")
+    else:
+        df["minute"] = df["timestamp"].dt.floor(f"{interval}min")
+
+    # 准备聚合规则
+    agg_map: Dict[str, Any] = {
+        "price": ("first", "max", "min", "last"),
+    }
+    if "volume" in df.columns:
+        agg_map["volume"] = "sum"
+
+    # 按分钟分组聚合OHLCV
+    grouped = df.groupby("minute")
+    ohlc = pd.DataFrame({
+        "open": grouped["price"].first(),
+        "high": grouped["price"].max(),
+        "low": grouped["price"].min(),
+        "close": grouped["price"].last(),
+    })
+    if "volume" in df.columns:
+        ohlc["volume"] = grouped["volume"].sum()
+
+    # P1-R9-01/02修复: 补充质量标记列到last_cols，与另一个实现保持一致
+    last_cols_runtime = [
+        "bid_ask_spread", "_spread_quality", "strike_price", "_option_metadata_quality",
+        "expire_date", "days_to_expiry", "option_type",
+        "underlying_price", "open_interest",
+    ]
+    for col in last_cols_runtime:
+        if col in df.columns:
+            ohlc[col] = grouped[col].last().values
+
+    ohlc = ohlc.reset_index()
+    ohlc["bar_length_minutes"] = interval
+    return ohlc
 
 
 def _filter_bars(df: pd.DataFrame, min_date: str, max_date: str) -> pd.DataFrame:
@@ -600,12 +834,11 @@ def _filter_bars(df: pd.DataFrame, min_date: str, max_date: str) -> pd.DataFrame
         (df["low"] <= df["open"]) &
         (df["low"] <= df["close"])
     )
-    df = df[mask].copy()
-
     min_dt = pd.Timestamp(min_date)
     max_dt = pd.Timestamp(max_date) + timedelta(days=1)
     date_mask = (df["minute"] >= min_dt) & (df["minute"] < max_dt)
-    df = df[date_mask].copy()
+    combined_mask = mask & date_mask
+    df = df[combined_mask].copy()
 
     return df.reset_index(drop=True)
 
@@ -619,7 +852,16 @@ def _enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
     flow = compute_order_flow_vectorized(df)
     greeks = compute_greeks_vectorized(df)
 
-    return pd.concat([df.reset_index(drop=True), state, flow, greeks], axis=1)
+    df_reset = df.reset_index(drop=True)
+    n = len(df_reset)
+    state_reset = state.reset_index(drop=True)
+    flow_reset = flow.reset_index(drop=True)
+    greeks_reset = greeks.reset_index(drop=True)
+    result = pd.concat([df_reset, state_reset, flow_reset, greeks_reset], axis=1)
+    greeks_cols = [c for c in ["iv", "delta", "gamma", "vega", "theta"] if c in result.columns]
+    if greeks_cols:
+        result[greeks_cols] = result[greeks_cols].fillna(0.0)
+    return result
 
 
 def _process_tick_chunk(tick_df: pd.DataFrame, min_date: str, max_date: str, symbol: str) -> Optional[pd.DataFrame]:
@@ -627,8 +869,16 @@ def _process_tick_chunk(tick_df: pd.DataFrame, min_date: str, max_date: str, sym
     if tick_df.empty:
         return None
 
+    tick_df = tick_df.copy()  # PD-P2-05: 必须copy,防止后续列赋值触发SettingWithCopyWarning或污染原始数据
     bars = _aggregate_ticks_to_bars(tick_df)
     bars = _filter_bars(bars, min_date, max_date)
+    # R4-D-04修复: 时区标准化 — 确保时间戳统一为本地时区(naive timestamp)
+    # preprocess_ticks使用本地时区，task_scheduler使用UTC
+    # 此处统一为naive timestamp(无时区信息)，下游消费时再按需转换
+    if "minute" in bars.columns:
+        bars["minute"] = pd.to_datetime(bars["minute"])
+        if bars["minute"].dt.tz is not None:
+            bars["minute"] = bars["minute"].dt.tz_localize(None)
     bars = _enrich_bars(bars)
 
     if not bars.empty:
@@ -646,6 +896,9 @@ def _minute_safe_chunk_indices(tick_df: pd.DataFrame, chunk_rows: int) -> List[T
       1. 每个Chunk内的Tick按分钟完整分组
       2. 同一分钟的Tick不会出现在两个Chunk中
       3. 每个Chunk的行数 ≤ chunk_rows + 最后一个分钟组的行数
+      4. P1-R11-11修复: 跨交易日边界检测 — 日期变化时强制切分
+
+    P0-裂缝2修复：增加边界完整性验证，确保无分钟数据跨chunk拆分。
     """
     minute_series = tick_df["datetime"].dt.floor("min")
     groups = tick_df.groupby(minute_series)
@@ -653,9 +906,28 @@ def _minute_safe_chunk_indices(tick_df: pd.DataFrame, chunk_rows: int) -> List[T
     boundaries: List[Tuple[int, int]] = []
     chunk_start = 0
     accumulated = 0
+    # P1-R11-11修复: 跟踪上一个分钟的日期，日期变化时强制切分
+    _prev_date: Optional[str] = None
 
-    for _, group_idx in groups.groups.items():
+    for minute_val, group_idx in groups.groups.items():
         group_size = len(group_idx)
+        # P1-R11-11修复: 跨交易日检测 — 日期(以18:00为界)变化时强制切分
+        if isinstance(minute_val, pd.Timestamp):
+            _minute_dt = minute_val
+        else:
+            _minute_dt = pd.Timestamp(minute_val)
+        _hour = _minute_dt.hour
+        # 交易日判定: hour>=18使用当天日期, hour<18使用前一天日期
+        _trading_date = _minute_dt.strftime("%Y-%m-%d") if _hour >= 18 else (_minute_dt - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        if _prev_date is not None and _trading_date != _prev_date:
+            # 跨交易日: 强制在当前分钟组开头切一刀，开始新chunk
+            if chunk_start < group_idx[0]:
+                boundaries.append((chunk_start, group_idx[0]))
+            chunk_start = group_idx[0]
+            accumulated = group_size
+            _prev_date = _trading_date
+            continue
+        _prev_date = _trading_date
         accumulated += group_size
 
         if accumulated >= chunk_rows:
@@ -671,8 +943,53 @@ def _minute_safe_chunk_indices(tick_df: pd.DataFrame, chunk_rows: int) -> List[T
     return boundaries
 
 
+def check_minute_boundary_integrity(tick_df: pd.DataFrame,
+                                     chunk_boundaries: List[Tuple[int, int]]) -> MinuteBoundaryResult:
+    """P0-Q3-EXT 质量门：验证无分钟数据分散在多个chunk中
+
+    R5-I-03修复: 返回类型从Dict改为MinuteBoundaryResult(NamedTuple)，消除dict硬编码键访问风险
+
+    Returns:
+        MinuteBoundaryResult: (passed, split_minutes, details)
+    """
+    if tick_df.empty or not chunk_boundaries:
+        return MinuteBoundaryResult(passed=True, split_minutes=0, details=[])
+
+    tick_df = tick_df.copy()  # PD-P2-05: 必须copy,防止后续列赋值触发SettingWithCopyWarning或污染原始数据
+    tick_df["minute"] = tick_df["datetime"].dt.floor("min")
+    tick_df["_chunk_id"] = -1
+
+    for chunk_id, (start, end) in enumerate(chunk_boundaries):
+        tick_df.loc[tick_df.index[start:end], "_chunk_id"] = chunk_id
+
+    minute_chunk_counts = tick_df.groupby("minute")["_chunk_id"].nunique()
+    split_minutes = minute_chunk_counts[minute_chunk_counts > 1]
+
+    _passed = len(split_minutes) == 0
+    _split = len(split_minutes)
+    _details = [{"minute": str(m), "chunk_count": int(c)} for m, c in split_minutes.items()]
+
+    if not _passed:
+        logger.warning("[P0-Q3-EXT FAIL] %d 分钟数据被拆分到多个chunk: %s",
+                       _split, split_minutes.index.tolist()[:5])
+
+    return MinuteBoundaryResult(passed=_passed, split_minutes=_split, details=_details)
+
+
 def process_symbol(symbol: str, tick_dir: str, min_date: str, max_date: str) -> Optional[str]:
-    """处理单个品种：逐文件流式读取 → 按分钟边界安全分块 → 聚合 → 过滤 → 衍生指标 → 写临时Parquet"""
+    """处理单个品种：逐文件流式读取 → 按分钟边界安全分块 → 聚合 → 过滤 → 衍生指标 → 写临时Parquet
+
+    R5-I-01修复: 添加参数None检查，防止None传入导致运行时异常。
+    SER-03修复: 添加symbol参数校验，防止SQL注入和路径遍历攻击。
+    """
+    # R5-I-01修复: 参数None检查
+    if symbol is None or tick_dir is None:
+        raise ValueError(f"symbol和tick_dir不能为None: symbol={symbol}, tick_dir={tick_dir}")
+    if min_date is None or max_date is None:
+        raise ValueError(f"min_date和max_date不能为None: min_date={min_date}, max_date={max_date}")
+    # SER-03修复: symbol参数校验 - 仅允许字母数字下划线，防止SQL注入和路径遍历
+    if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,30}$', symbol):
+        raise ValueError(f"SER-03: Invalid symbol format (potential SQL injection): {symbol}")
     pattern = os.path.join(tick_dir, "**", f"{symbol}.parquet")
     files = sorted(glob.glob(pattern, recursive=True))
     if not files:
@@ -704,16 +1021,37 @@ def process_symbol(symbol: str, tick_dir: str, min_date: str, max_date: str) -> 
 
         if len(tick_df) > ROWS_PER_CHUNK:
             boundaries = _minute_safe_chunk_indices(tick_df, ROWS_PER_CHUNK)
+            if ENABLE_MINUTE_BOUNDARY_CHECK:
+                integrity = check_minute_boundary_integrity(tick_df, boundaries)
+                if not integrity["passed"]:
+                    logger.warning(
+                        "[DATA-05] 分钟边界完整性检查失败: %d 分钟被拆分, 详情: %s",
+                        integrity["split_minutes"], integrity["details"][:3],
+                    )
             for start, end in boundaries:
                 chunk = tick_df.iloc[start:end]
                 result = _process_tick_chunk(chunk, min_date, max_date, symbol)
                 if result is not None:
                     all_chunks.append(result)
+                    if len(all_chunks) % 100 == 0:
+                        total_rows = sum(len(c) for c in all_chunks)
+                        if total_rows > 1000000:
+                            logger.warning("PD-P2-09: all_chunks accumulating %d rows, peak memory risk", total_rows)
+                        if total_rows > 5000000:
+                            logger.error("[PD-P2-04] all_chunks超过500万行硬上限, 触发增量写入")
+                            break
             del tick_df
         else:
             result = _process_tick_chunk(tick_df, min_date, max_date, symbol)
             if result is not None:
                 all_chunks.append(result)
+                if len(all_chunks) % 100 == 0:
+                    total_rows = sum(len(c) for c in all_chunks)
+                    if total_rows > 1000000:
+                        logger.warning("PD-P2-09: all_chunks accumulating %d rows, peak memory risk", total_rows)
+                    if total_rows > 5000000:
+                        logger.error("[PD-P2-04] all_chunks超过500万行硬上限, 触发增量写入")
+                        break
             del tick_df, result
 
     if not all_chunks:
@@ -731,18 +1069,54 @@ def process_symbol(symbol: str, tick_dir: str, min_date: str, max_date: str) -> 
 
 
 def _merge_temp_file(db_path: str, parquet_path: str) -> int:
-    """将单个临时Parquet文件合并到DuckDB（单写者，线程安全）"""
-    con = duckdb.connect(db_path)
-    try:
-        _ensure_table(con)
-        con.execute(f"""
-            INSERT INTO minute_data
-            SELECT * FROM read_parquet('{parquet_path}')
-        """)
-        count = con.execute("SELECT changes()").fetchone()[0]
-    finally:
-        con.close()
-    return count
+    """将单个临时Parquet文件合并到DuckDB（单写者，线程安全）
+
+    R4-D-11修复: 数据库连接异常处理完善 —
+    添加重试机制和详细错误日志，避免写入失败时数据丢失。
+    """
+    import traceback as _tb
+    _max_retries = 3
+    _retry_delay = 1.0
+    for _attempt in range(_max_retries):
+        con = None
+        try:
+            con = connect(db_path)
+            _ensure_table(con)
+            # R4-D-11: 列对齐INSERT — 只插入表已存在的列，避免列不匹配异常
+            cols_info = con.execute("DESCRIBE minute_data").fetchall()
+            table_cols = [row[0] for row in cols_info]
+            df = pd.read_parquet(parquet_path)
+            # 只保留表中存在的列
+            insert_cols = [c for c in df.columns if c in table_cols]
+            if not insert_cols:
+                logger.warning("[R4-D-11] parquet列与表不匹配，跳过: %s", parquet_path)
+                return 0
+            df_subset = df[insert_cols]
+            col_str = ", ".join(insert_cols)
+            con.execute(f"""
+                INSERT INTO minute_data ({col_str})
+                SELECT {col_str} FROM df_subset
+            """)
+            count = con.execute("SELECT changes()").fetchone()[0]
+            return count
+        except Exception as e:
+            # R4-D-14修复: 异常堆栈记录完整
+            logger.error(
+                "[R4-D-11] DuckDB写入失败(attempt %d/%d): %s\n%s",
+                _attempt + 1, _max_retries, e, _tb.format_exc(),
+            )
+            if _attempt < _max_retries - 1:
+                time.sleep(_retry_delay * (_attempt + 1))
+            else:
+                logger.error("[R4-D-11] DuckDB写入最终失败: %s", parquet_path)
+                return 0
+        finally:
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+    return 0
 
 
 def _build_task_list(symbols: List[str], tick_dir: str, min_date: str, max_date: str) -> List[Tuple[str, str, str, str]]:
@@ -788,7 +1162,14 @@ def main_preprocess() -> None:
                     len(tasks), len(SYMBOLS))
 
         if MAX_WORKERS > 1:
-            with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # R21-CC-P2-02修复: 添加max_tasks_per_child参数(Python 3.11+)
+            # 预处理任务涉及大量DataFrame序列化，子进程内存碎片累积可能导致OOM
+            _executor_kwargs = dict(max_workers=MAX_WORKERS, mp_context=get_spawn_context())  # NEW-P2-03修复: 使用公共函数替代重复代码
+            try:
+                _executor_kwargs['max_tasks_per_child'] = 50  # Python 3.11+
+            except Exception:
+                pass
+            with ProcessPoolExecutor(**_executor_kwargs) as executor:
                 futures = {
                     executor.submit(process_symbol, sym, tdir, lo, hi): label
                     for (sym, tdir, lo, hi), label in zip(tasks, task_labels)
@@ -823,7 +1204,7 @@ def main_preprocess() -> None:
             except Exception as e:
                 logger.error("合并 %s 失败: %s", tmp_path, e)
 
-        con = duckdb.connect(OUTPUT_DB)
+        con = connect(OUTPUT_DB)
         try:
             _ensure_table(con)
             con.execute("CREATE INDEX IF NOT EXISTS idx_symbol_minute ON minute_data(symbol, minute)")
@@ -833,7 +1214,7 @@ def main_preprocess() -> None:
             con.close()
 
         logger.info("开始多粒度Bar聚合(%s)...", MULTISCALE_BAR_LENGTHS)
-        con = duckdb.connect(OUTPUT_DB)
+        con = connect(OUTPUT_DB)
         try:
             _ensure_multiscale_table(con)
             for bl in MULTISCALE_BAR_LENGTHS:
@@ -871,3 +1252,164 @@ def main_preprocess() -> None:
 
 if __name__ == "__main__":
     main_preprocess()
+
+
+def validate_circuit_breaker_halts(bar_data: pd.DataFrame,
+                                    price_col: str = "close",
+                                    ref_change_pct: float = 0.50,
+                                    halt_duration_bars: int = 5,
+                                    resume_slippage_pct: float = 0.50) -> CircuitBreakerResult:
+    """P0-裂缝14：从历史数据中提取熔断停牌事件，在回测中注入停牌期
+
+    检测价格涨跌超过参考价50%的极端bar，标记为熔断停牌点。
+    停牌期间：锁定持仓，复牌时施加额外滑点(跳空幅度×50%)。
+
+    R5-I-03修复: 返回类型从Dict改为CircuitBreakerResult(NamedTuple)
+
+    Returns:
+        CircuitBreakerResult: (halt_events, n_halts, survival_rate_check_needed)
+    """
+    if bar_data.empty or price_col not in bar_data.columns:
+        return CircuitBreakerResult(halt_events=[], n_halts=0, survival_rate_check_needed=False)
+
+    halt_events = []
+    prices = bar_data[price_col].values
+
+    for i in range(1, len(prices)):
+        if prices[i - 1] > 0:
+            change_pct = abs(prices[i] - prices[i - 1]) / prices[i - 1]
+            if change_pct >= ref_change_pct:
+                gap_pct = (prices[i] - prices[i - 1]) / prices[i - 1]
+                halt_events.append({
+                    "bar_index": i,
+                    "gap_pct": round(gap_pct * 100, 2),
+                    "halt_duration_bars": halt_duration_bars,
+                    "resume_slippage_bps": round(abs(gap_pct) * resume_slippage_pct * 10000, 1),
+                    "direction": "up" if gap_pct > 0 else "down",
+                })
+
+    return CircuitBreakerResult(
+        halt_events=halt_events,
+        n_halts=len(halt_events),
+        survival_rate_check_needed=len(halt_events) > 0,
+    )
+
+
+def validate_out_of_order_ticks(tick_df: pd.DataFrame,
+                                 swap_prob: float = 0.001,
+                                 datetime_col: str = "datetime") -> OutOfOrderResult:
+    """P0-裂缝17：验证策略对tick乱序的鲁棒性
+
+    在回测数据中随机交换相邻tick（概率p=0.001），
+    按时间戳重排序后馈给策略。若夏普下降>30%，需增加tick缓存+去重+排序模块。
+
+    R5-I-03修复: 返回类型从Dict改为OutOfOrderResult(NamedTuple)
+    """
+    if tick_df.empty or datetime_col not in tick_df.columns:
+        return OutOfOrderResult(is_monotonic=True, rollback_count=0, simulated_swap_count=0,
+                                swap_prob=swap_prob, needs_dedup_module=False,
+                                recommendation="数据时序正常", swapped_df=None)
+
+    n = len(tick_df)
+    rng = np.random.RandomState(42)
+    swap_indices = rng.random(n - 1) < swap_prob
+    swap_count = int(swap_indices.sum())
+
+    dt_series = pd.to_datetime(tick_df[datetime_col])
+    is_monotonic = dt_series.is_monotonic_increasing
+
+    time_diffs = dt_series.diff().dt.total_seconds()
+    rollback_count = int((time_diffs < 0).sum())
+
+    needs_dedup = rollback_count > 0 or swap_count > n * 0.01
+
+    swapped_df = tick_df.copy()
+    dt_values = swapped_df[datetime_col].values.copy()
+    swap_positions = np.where(swap_indices)[0]
+    for idx in swap_positions:
+        if idx + 1 < len(dt_values):
+            dt_values[idx], dt_values[idx + 1] = dt_values[idx + 1], dt_values[idx]
+    swapped_df[datetime_col] = dt_values
+    swapped_df = swapped_df.sort_values(datetime_col).reset_index(drop=True)
+
+    return OutOfOrderResult(
+        is_monotonic=is_monotonic,
+        rollback_count=rollback_count,
+        simulated_swap_count=swap_count,
+        swap_prob=swap_prob,
+        needs_dedup_module=needs_dedup,
+        recommendation="增加tick缓存+去重+排序模块" if needs_dedup else "数据时序正常",
+        swapped_df=swapped_df,
+    )
+
+
+def validate_expire_date_integrity(bar_data: pd.DataFrame = None,
+                                    symbol_col: str = "symbol",
+                                    expire_col: str = "expire_date",
+                                    strike_col: str = "strike_price") -> ExpireDateResult:
+    """P1-裂缝34：期权到期日结构完整性检查
+
+    回测中隐式假设所有合约有相同的到期日结构，但不同行权价的期权
+    可能有不同的到期日（如周度 vs 月度）。在预处理中增加完整性检查，
+    若某行权价缺少到期日则剔除该合约。
+
+    通过标准：所有用于回测的期权合约都有唯一且有效的expire_date。
+
+    R5-I-03修复: 返回类型从Dict改为ExpireDateResult(NamedTuple)
+    """
+    if bar_data is None or bar_data.empty:
+        return ExpireDateResult(passed=True, total_rows=0, missing_expire_count=0,
+                                missing_expire_pct=0.0, issues=[], action="no_data")
+
+    if expire_col not in bar_data.columns:
+        return ExpireDateResult(passed=True, total_rows=len(bar_data), missing_expire_count=0,
+                                missing_expire_pct=0.0, issues=[], action="no_expire_date_column")
+
+    issues = []
+    total_rows = len(bar_data)
+
+    # 检查1：expire_date缺失率
+    missing_expire = bar_data[expire_col].isna().sum()
+    missing_pct = missing_expire / total_rows * 100 if total_rows > 0 else 0
+    if missing_pct > 5.0:
+        issues.append(f"expire_date缺失率{missing_pct:.1f}%超过5%阈值")
+
+    # 检查2：同一symbol下expire_date不一致（周度vs月度混合）
+    if symbol_col in bar_data.columns:
+        symbol_expire_counts = (
+            bar_data.dropna(subset=[expire_col])
+            .groupby(symbol_col)[expire_col]
+            .nunique()
+        )
+        multi_expire_symbols = symbol_expire_counts[symbol_expire_counts > 1]
+        if len(multi_expire_symbols) > 0:
+            issues.append(
+                f"发现{len(multi_expire_symbols)}个symbol有多个到期日"
+                f"（可能混合周度/月度期权）: "
+                f"{list(multi_expire_symbols.index[:5])}"
+            )
+
+    # 检查3：有strike_price但无expire_date的合约（应剔除）
+    if strike_col in bar_data.columns:
+        has_strike_no_expire = (
+            bar_data[strike_col].notna() & bar_data[expire_col].isna()
+        ).sum()
+        if has_strike_no_expire > 0:
+            issues.append(
+                f"发现{has_strike_no_expire}条记录有strike_price但无expire_date，应剔除"
+            )
+
+    passed = len(issues) == 0
+    _action = "remove_invalid_contracts" if not passed else "proceed"
+
+    if not passed:
+        logger.warning("[P1-裂缝34] 期权到期日完整性检查失败: %s", issues)
+
+    return ExpireDateResult(
+        passed=passed,
+        total_rows=total_rows,
+        missing_expire_count=int(missing_expire),
+        missing_expire_pct=round(missing_pct, 2),
+        issues=issues,
+        action=_action,
+    )

@@ -13,7 +13,11 @@ from datetime import datetime
 from ali2026v3_trading.width_cache import WidthStrengthCache, _NoOpDiagnosisProbeManager
 from ali2026v3_trading.params_service import get_params_service
 from ali2026v3_trading.shared_utils import to_float32
-# ✅ 新增：导入 DataService（顶级性能数据服务）- P1 修复：增强健壮性
+
+__all__ = [
+    'TTypeService', 'get_t_type_service',
+]
+# ✅ 新增：导入 DataService（顶级性能数据服务）- P1 修复：增强健壮性  # R17-P2-DOC-04
 try:
     from ali2026v3_trading.data_service import DataService
     _HAS_DATA_SERVICE = True
@@ -27,8 +31,6 @@ except ImportError as e:
 # ============================================================================
 
 def _to_float32(value: Any) -> float:
-    """✅ ID唯一：委托shared_utils.to_float32，不再独立实现"""
-    from ali2026v3_trading.shared_utils import to_float32
     return to_float32(value)
 
 
@@ -76,7 +78,7 @@ class TTypeService:
         # 线程锁
         self._data_lock = threading.RLock()
 
-        # ✅ 新增：DataService 集成
+        # ✅ 新增：DataService 集成  # R17-P2-DOC-05
         self._data_service: Optional[Any] = None
         if use_data_service and _HAS_DATA_SERVICE:
             try:
@@ -90,14 +92,24 @@ class TTypeService:
                 self._data_service = None
         
         # ✅ 新增：WidthStrengthCache 内存缓存（已内嵌）
+        # P1-R11-21: per-strategy WidthStrengthCache isolation
+        self._width_caches: Dict[str, WidthStrengthCache] = {}
         try:
             with DiagnosisProbeManager.startup_step("TTypeService.__init__.WidthStrengthCache"):
-                self._width_cache = WidthStrengthCache()
+                self._width_caches['global'] = WidthStrengthCache(strategy_id='global')
             logging.info("[TTypeService] WidthStrengthCache integration enabled (O(1) query)")
             self._preload_complete = False
         except Exception as e:
             logging.warning(f"[TTypeService] Failed to initialize WidthStrengthCache: {e}")
-            self._width_cache = None
+            self._width_caches = {}
+
+    def _get_width_cache(self, strategy_id: Optional[str] = None) -> Optional[WidthStrengthCache]:
+        """P1-R11-21: get or create per-strategy WidthStrengthCache instance"""
+        sid = strategy_id or 'global'
+        if sid not in self._width_caches:
+            self._width_caches[sid] = WidthStrengthCache(strategy_id=sid)
+            logging.info("[TTypeService] Created WidthStrengthCache for strategy_id=%s", sid)
+        return self._width_caches.get(sid)
     
     def initialize(self):
         """显式初始化（预加载已由strategy_lifecycle_mixin统一执行）"""
@@ -157,86 +169,112 @@ class TTypeService:
 
     @property
     def width_cache(self):
-        return self._width_cache
+        return self._get_width_cache()
+
+    @property
+    def _width_cache(self):
+        return self._get_width_cache()
     
     def calculate_option_width(
         self,
         instrument_id: str,
         underlying_price: Optional[float] = None,
         strike_price: float = 0.0,
-        option_type: str = 'CALL'
+        option_type: str = 'CALL',
+        strategy_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """✅ P2说明：提供空值检查和降级处理，非简单薄代理"""
-        if self._width_cache:
-            return self._width_cache.calculate_option_width(instrument_id, underlying_price, strike_price, option_type)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc.calculate_option_width(instrument_id, underlying_price, strike_price, option_type)
         return {}
     def calculate_option_width_strength(
         self,
         specified_months: Optional[List[str]] = None,
         underlying_future_id: int = None,
         option_type_filter: Optional[str] = None,
-        min_width_threshold: float = 4.0
+        min_width_threshold: float = 4.0,
+        strategy_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        if self._width_cache:
-            return self._width_cache.calculate_option_width_strength(specified_months, underlying_future_id, option_type_filter, min_width_threshold)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc.calculate_option_width_strength(specified_months, underlying_future_id, option_type_filter, min_width_threshold)
         return {}
-    def _empty_width_result(self, product: str, months: List[str]) -> Dict[str, Any]:
-        if self._width_cache:
-            return self._width_cache._empty_width_result(product, months)
+    def _empty_width_result(self, product: str, months: List[str], strategy_id: Optional[str] = None) -> Dict[str, Any]:
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc._empty_width_result(product, months)
         return {}
     def select_trading_targets(
         self,
         width_strength_results: Dict[str, Dict[str, Any]],
         top_n: int = 5,
-        min_width_threshold: float = 4.0
+        min_width_threshold: float = 4.0,
+        strategy_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        if self._width_cache:
-            return self._width_cache.select_trading_targets(width_strength_results, top_n, min_width_threshold)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc.select_trading_targets(width_strength_results, top_n, min_width_threshold)
         return []
-    def clear_cache(self) -> None:
-        """清空所有缓存（已移除独立缓存，保留接口兼容性）"""
-        logging.info('[TTypeService] Cache cleared')
+    def clear_cache(self, strategy_id: Optional[str] = None) -> None:
+        """清空指定策略或所有缓存（P1-R11-21: 支持按strategy_id清空）"""
+        if strategy_id:
+            wc = self._get_width_cache(strategy_id)
+            if wc:
+                logging.info('[TTypeService] Cache cleared for strategy_id=%s', strategy_id)
+        else:
+            for sid in list(self._width_caches.keys()):
+                self._width_caches.pop(sid, None)
+            self._width_caches['global'] = WidthStrengthCache(strategy_id='global')
+            logging.info('[TTypeService] All caches cleared')
     
 
     # ======================== WidthStrengthCache 公共 API ========================
     
-    def on_future_tick(self, future_internal_id: int, price: float, month: str = None):
+    def on_future_tick(self, future_internal_id: int, price: float, month: str = None, strategy_id: Optional[str] = None):
         """外部行情推送时调用，更新期货价格并自动重算宽度强度
         
         Args:
             future_internal_id: 期货合约 internal_id（主键）
             price: 期货最新价
             month: 可选，合约月份 (如 '2605')
+            strategy_id: P1-R11-21 策略隔离维度，None使用全局缓存
         """
-        if self._width_cache:
-            self._width_cache.on_future_tick(future_internal_id, price, month)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            wc.on_future_tick(future_internal_id, price, month)
 
-    def on_future_instrument_tick(self, future_internal_id: int, price: float):
+    def on_future_instrument_tick(self, future_internal_id: int, price: float, strategy_id: Optional[str] = None):
         """外部行情推送时按期货 internal_id 更新 TType（ID语义）。"""
-        if self._width_cache:
-            self._width_cache.on_future_instrument_tick(future_internal_id, price)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            wc.on_future_instrument_tick(future_internal_id, price)
     
-    def on_option_tick(self, instrument_id: str, price: float, volume: float = 0):
-        if self._width_cache:
-            self._width_cache.on_option_tick(instrument_id, price, volume)
+    def on_option_tick(self, instrument_id: str, price: float, volume: float = 0, strategy_id: Optional[str] = None):
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            wc.on_option_tick(instrument_id, price, volume)
     
     # ✅ 接口唯一：register_future_contract委托给WidthStrengthCache.register_future
-    def register_future_contract(self, future_internal_id: int, initial_price: float):
+    def register_future_contract(self, future_internal_id: int, initial_price: float, strategy_id: Optional[str] = None):
         """注册期货合约到缓存
         
         Args:
             future_internal_id: 期货合约 internal_id（主键）
             initial_price: 初始价格
+            strategy_id: P1-R11-21 策略隔离维度，None使用全局缓存
         """
-        if self._width_cache:
-            self._width_cache.register_future(future_internal_id, initial_price)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            wc.register_future(future_internal_id, initial_price)
     
     # ✅ 接口唯一：register_option_contract委托给WidthStrengthCache.register_option
     def register_option_contract(self, instrument_id: str, underlying_product: str,
                                  month: str, strike_price: float, option_type: str,
                                  initial_price: float,
                                  underlying_future_id: Optional[int] = None,
-                                 internal_id: Optional[int] = None):
+                                 internal_id: Optional[int] = None,
+                                 strategy_id: Optional[str] = None):
         """注册期权合约到缓存
         
         Args:
@@ -248,15 +286,21 @@ class TTypeService:
             initial_price: 初始价格
             underlying_future_id: 标的期货 internal_id，主链来源（必须为int，禁止传入合约代码字符串）
             internal_id: 系统内部代理键（优先使用）
+            strategy_id: P1-R11-21 策略隔离维度，None使用全局缓存
         """
-        if underlying_future_id is not None and not isinstance(underlying_future_id, int):
-            raise TypeError(
-                f"register_option_contract: underlying_future_id must be int (internal_id), "
-                f"got {type(underlying_future_id).__name__} '{underlying_future_id}' for {instrument_id}. "
-                f"Use params_service.get_internal_id(future_instrument_id) to resolve."
-            )
-        if self._width_cache:
-            self._width_cache.register_option(
+        # R23-P2-16修复: 增强numpy.int64类型处理
+        if underlying_future_id is not None:
+            try:
+                underlying_future_id = int(underlying_future_id)
+            except (TypeError, ValueError):
+                raise TypeError(
+                    f"register_option_contract: underlying_future_id must be int (internal_id), "
+                    f"got {type(underlying_future_id).__name__} '{underlying_future_id}' for {instrument_id}. "
+                    f"Use params_service.get_internal_id(future_instrument_id) to resolve."
+                )
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            wc.register_option(
                 instrument_id, underlying_product, month, 
                 strike_price, option_type, initial_price,
                 underlying_future_id=underlying_future_id,
@@ -267,7 +311,8 @@ class TTypeService:
                         month: str, strike_price: float, option_type: str,
                         initial_price: float,
                         underlying_future_id: Optional[int] = None,
-                        internal_id: Optional[int] = None):
+                        internal_id: Optional[int] = None,
+                        strategy_id: Optional[str] = None):
         """兼容旧调用路径，转发到 register_option_contract。"""
         self.register_option_contract(
             instrument_id=instrument_id,
@@ -278,28 +323,32 @@ class TTypeService:
             initial_price=initial_price,
             underlying_future_id=underlying_future_id,
             internal_id=internal_id,
+            strategy_id=strategy_id,
         )
     
     def get_width_strength_from_cache(self, future_internal_id: int, months: List[str], 
-                                      option_type: str = None) -> int:
+                                      option_type: str = None, strategy_id: Optional[str] = None) -> int:
         """从内存缓存获取宽度强度 - O(1) 查询
         
         Args:
             future_internal_id: 期货合约 internal_id（主键）
             months: 月份列表
             option_type: 可选，'CALL' 或 'PUT'
+            strategy_id: P1-R11-21 策略隔离维度，None使用全局缓存
             
         Returns:
             int: 宽度强度（同步虚值期权计数）
         """
-        if self._width_cache:
-            return self._width_cache.get_width_strength(future_internal_id, months, option_type)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc.get_width_strength(future_internal_id, months, option_type)
         return 0
     
-    def get_width_cache_stats(self) -> Dict[str, Any]:
+    def get_width_cache_stats(self, strategy_id: Optional[str] = None) -> Dict[str, Any]:
         """获取宽度缓存统计信息（含内存占用估算）"""
-        if self._width_cache:
-            return self._width_cache.get_cache_stats()
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc.get_cache_stats()
         return {
             'enabled': False,
             'total_futures': 0,
@@ -307,31 +356,36 @@ class TTypeService:
             'query_count': 0
         }
     
-    def print_option_status_diagnosis(self, future_internal_id: int = None, top_n: int = 10):
+    def print_option_status_diagnosis(self, future_internal_id: int = None, top_n: int = 10, strategy_id: Optional[str] = None):
         """打印期权状态诊断报告
         
         Args:
             future_internal_id: 期货合约 internal_id（主键），None 表示所有期货
             top_n: 每个状态下显示前 N 个合约
+            strategy_id: P1-R11-21 策略隔离维度，None使用全局缓存
         """
-        if self._width_cache:
-            self._width_cache.print_status_diagnosis(future_internal_id, top_n)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            wc.print_status_diagnosis(future_internal_id, top_n)
     
-    def get_all_options(self) -> List[Dict[str, Any]]:
+    def get_all_options(self, strategy_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取所有已注册的期权合约列表"""
-        if self._width_cache:
-            return self._width_cache.get_all_options()
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc.get_all_options()
         return []
     
-    def select_otm_targets_by_volume(self, product: str = None) -> List[Dict[str, Any]]:
+    def select_otm_targets_by_volume(self, product: str = None, strategy_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """代理方法：委托给 WidthStrengthCache.select_otm_targets_by_volume"""
-        if self._width_cache:
-            return self._width_cache.select_otm_targets_by_volume(product)
+        wc = self._get_width_cache(strategy_id)
+        if wc:
+            return wc.select_otm_targets_by_volume(product)
         return []
 
     def compute_decision_score(self, future_internal_id: int = None,
                                 order_flow_imbalance: float = None,
-                                product: str = None) -> Dict[str, Any]:
+                                product: str = None,
+                                strategy_id: Optional[str] = None) -> Dict[str, Any]:
         """决策得分协同计算：期权状态强度 × 订单流方向一致性
 
         Args:
@@ -350,7 +404,7 @@ class TTypeService:
                 'flow_source': str,       # 'auto'或'manual'
             }
         """
-        state_strength = self._calc_option_state_strength(future_internal_id)
+        state_strength = self._calc_option_state_strength(future_internal_id, strategy_id)
 
         if order_flow_imbalance is not None:
             flow_consistency = max(-1.0, min(1.0, order_flow_imbalance))
@@ -366,15 +420,23 @@ class TTypeService:
         if state_strength > self.STATE_STRENGTH_HIGH and flow_consistency > self.FLOW_CONSISTENCY_THRESHOLD:
             action = "normal_open"
             position_scale = 1.0
+            stop_loss_scale = 1.0
+            take_profit_scale = 1.0
         elif state_strength > self.STATE_STRENGTH_HIGH and flow_consistency < -self.FLOW_CONSISTENCY_THRESHOLD:
             action = "divergence_warning"
             position_scale = 0.5
+            stop_loss_scale = 0.8
+            take_profit_scale = 0.7
         elif self.STATE_STRENGTH_MID <= state_strength <= self.STATE_STRENGTH_HIGH and flow_consistency > 0:
             action = "small_open_tight_stop"
             position_scale = 0.3
+            stop_loss_scale = 0.6
+            take_profit_scale = 0.5
         else:
             action = "no_open_wait"
             position_scale = 0.0
+            stop_loss_scale = 0.0
+            take_profit_scale = 0.0
 
         return {
             'score': round(score, 4),
@@ -382,6 +444,8 @@ class TTypeService:
             'flow_consistency': round(flow_consistency, 4),
             'action': action,
             'position_scale': position_scale,
+            'stop_loss_scale': stop_loss_scale,  # P1-R9-18修复: 不同模式返回不同止损缩放
+            'take_profit_scale': take_profit_scale,  # P1-R9-18修复: 不同模式返回不同止盈缩放
             'flow_source': flow_source,
         }
 
@@ -395,16 +459,17 @@ class TTypeService:
             logging.debug(f"[TTypeService._auto_get_flow_consistency] Error: {e}")
             return 0.0
 
-    def _calc_option_state_strength(self, future_internal_id: int = None) -> float:
+    def _calc_option_state_strength(self, future_internal_id: int = None, strategy_id: Optional[str] = None) -> float:
         """计算期权状态强度 [0, 1]
 
         基于 width_cache 的 _status_counts 统计各状态占比，
         correct_trending 占比越高 → 强度越高
         """
-        if not self._width_cache:
+        wc = self._get_width_cache(strategy_id)
+        if not wc:
             return 0.0
 
-        status_counts = getattr(self._width_cache, '_status_counts', {})
+        status_counts = getattr(wc, '_status_counts', {})
         if not status_counts:
             return 0.0
 

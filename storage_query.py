@@ -5,18 +5,22 @@ READ + HELPER + INSTRUMENT + SCHEMA 方法组
 
 from ali2026v3_trading.subscription_manager import SubscriptionManager, inst_get
 from ali2026v3_trading.diagnosis_service import DiagnosisProbeManager
+from ali2026v3_trading.config_params import DATA_CLEANING_RULES
 import logging
+import os
+import re
 import time
 import json
 import math
+import sqlite3
 from contextlib import contextmanager
 from typing import List, Dict, Optional, Any, Tuple, Callable
-from datetime import datetime
+from datetime import datetime, time as dt_time
 
-from ali2026v3_trading.shared_utils import InitPhase, requires_phase
+from ali2026v3_trading.shared_utils import InitPhase, requires_phase, CHINA_TZ
 
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class _StorageQueryMixin:
@@ -160,6 +164,7 @@ class _StorageQueryMixin:
         return result
 
     def _validate_tick(self, tick: Dict[str, Any]) -> bool:
+        _rules = DATA_CLEANING_RULES
         if not isinstance(tick, dict):
             logging.error("save_tick 参数不是字典：%s", type(tick))
             return False
@@ -177,11 +182,24 @@ class _StorageQueryMixin:
         if ts_value is None:
             logging.error("save_tick 缺少时间戳字段 (ts、timestamp 或 UpdateTime)")
             return False
-        if not isinstance(last_price, (int, float)) or last_price < 0:
-            logging.warning("save_tick 价格无效（结算tick可能为0）：%s", last_price)
-            return True
+        if _rules.get('remove_zero_price', True) and (not isinstance(last_price, (int, float)) or last_price <= 0):
+            logging.warning("save_tick 价格无效(<=0)：%s", last_price)
+            return False
+        bid_price1 = tick.get('bid_price1') or tick.get('BidPrice1')
+        ask_price1 = tick.get('ask_price1') or tick.get('AskPrice1')
+        if bid_price1 is not None and ask_price1 is not None:
+            if isinstance(bid_price1, (int, float)) and isinstance(ask_price1, (int, float)):
+                if bid_price1 > 0 and ask_price1 > 0 and bid_price1 >= ask_price1:
+                    _max_spread_pct = _rules.get('max_spread_pct', 5.0)
+                    _spread_pct = abs(bid_price1 - ask_price1) / ask_price1 * 100.0
+                    if _spread_pct > _max_spread_pct:
+                        logging.warning("save_tick 盘口价差异常: spread_pct=%.2f%% > max=%.2f%%, bid=%.4f, ask=%.4f, instrument=%s",
+                                        _spread_pct, _max_spread_pct, bid_price1, ask_price1, instrument_id)
+                    logging.warning("save_tick 盘口交叉异常: bid=%.4f >= ask=%.4f instrument=%s",
+                                    bid_price1, ask_price1, instrument_id)
+                    return False
         volume = tick.get('volume', tick.get('Volume', 0))
-        if volume is not None and (not isinstance(volume, (int, float)) or volume < 0):
+        if _rules.get('remove_negative_volume', True) and volume is not None and (not isinstance(volume, (int, float)) or volume < 0):
             logging.error("save_tick 成交量无效：%s", volume)
             return False
         return True
@@ -260,7 +278,7 @@ class _StorageQueryMixin:
         else:
             period_minutes = 1
 
-        return max(1, int(history_minutes / period_minutes))
+        return -max(1, int(history_minutes / period_minutes))
 
     @staticmethod
     def _normalize_kline_period(kline_style: str) -> str:
@@ -353,46 +371,69 @@ class _StorageQueryMixin:
             return list(result)
         return []
 
-    def _query_instrument_by_field(self, lookup_field: str, lookup_value,
-                                    cache_lookup_key: str = None) -> Optional[dict]:
+    def _get_instrument_info(self, instrument_id: str) -> Optional[dict]:
         with self._lock:
-            cache_key = cache_lookup_key or str(lookup_value)
-            info = self._params_service.get_instrument_meta_by_id(cache_key)
+            info = self._params_service.get_instrument_meta_by_id(instrument_id)
             if info:
                 return info
 
-            rows = self._q(
-                f"SELECT internal_id, instrument_id, product_code, shard_key FROM futures_instruments WHERE {lookup_field}=?",
-                [lookup_value],
-            )
+            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM futures_instruments WHERE instrument_id=?", [instrument_id])
             if rows:
                 r = rows[0]
                 info = self._make_instrument_info(r['internal_id'], r['instrument_id'], 'future')
                 if r.get('shard_key') is not None:
                     info['shard_key'] = r['shard_key']
                     info['product_code'] = r.get('product_code') or info.get('product_code', '')
-                self._cache_to_params_service(r['instrument_id'], info)
+                self._cache_to_params_service(instrument_id, info)
                 return info
 
-            rows = self._q(
-                f"SELECT internal_id, instrument_id, product_code, shard_key FROM option_instruments WHERE {lookup_field}=?",
-                [lookup_value],
-            )
+            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM option_instruments WHERE instrument_id=?", [instrument_id])
             if rows:
                 r = rows[0]
                 info = self._make_instrument_info(r['internal_id'], r['instrument_id'], 'option')
                 if r.get('shard_key') is not None:
                     info['shard_key'] = r['shard_key']
                     info['product_code'] = r.get('product_code') or info.get('product_code', '')
-                self._cache_to_params_service(r['instrument_id'], info)
+                self._cache_to_params_service(instrument_id, info)
                 return info
             return None
 
-    def _get_instrument_info(self, instrument_id: str) -> Optional[dict]:
-        return self._query_instrument_by_field('instrument_id', instrument_id)
-
     def _get_info_by_id(self, internal_id: int) -> Optional[dict]:
-        return self._query_instrument_by_field('internal_id', internal_id, cache_lookup_key=str(internal_id))
+        with self._lock:
+            info = self._params_service.get_instrument_meta_by_id(str(internal_id))
+            if info:
+                return info
+
+            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM futures_instruments WHERE internal_id=?", [internal_id])
+            row = rows[0] if rows else None
+            if row:
+                info = self._make_instrument_info(
+                    row['internal_id'],
+                    row['instrument_id'],
+                    'future',
+                )
+                if row.get('shard_key') is not None:
+                    info['shard_key'] = row['shard_key']
+                    info['product_code'] = row.get('product_code') or info.get('product_code', '')
+                instrument_id = row['instrument_id']
+                self._cache_to_params_service(instrument_id, info)
+                return info
+
+            rows = self._q("SELECT internal_id, instrument_id, product_code, shard_key FROM option_instruments WHERE internal_id=?", [internal_id])
+            row = rows[0] if rows else None
+            if row:
+                info = self._make_instrument_info(
+                    row['internal_id'],
+                    row['instrument_id'],
+                    'option',
+                )
+                if row.get('shard_key') is not None:
+                    info['shard_key'] = row['shard_key']
+                    info['product_code'] = row.get('product_code') or info.get('product_code', '')
+                instrument_id = row['instrument_id']
+                self._cache_to_params_service(instrument_id, info)
+                return info
+            return None
 
     @requires_phase(InitPhase.EXTERNAL_SERVICES)
     def get_registered_instrument_ids(self, instrument_ids: Optional[List[str]] = None) -> List[str]:
@@ -612,7 +653,7 @@ class _StorageQueryMixin:
         from datetime import timedelta
         import time as time_module
 
-        end_time = datetime.now()
+        end_time = datetime.now(CHINA_TZ)
         start_time = end_time - timedelta(minutes=history_minutes)
 
         logging.info(
@@ -817,23 +858,13 @@ class _StorageQueryMixin:
     def query_kline(self, instrument_id: str, start_time: str, end_time: str,
                     limit: Optional[int] = None) -> List[Dict]:
         internal_id = self.register_instrument(instrument_id)
-        sql = "SELECT * FROM klines_raw WHERE internal_id=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp ASC"
-        params: list = [internal_id, start_time, end_time]
-        if limit:
-            sql += " LIMIT ?"
-            params.append(limit)
-        return self._query_rows(sql, params)
+        return self.query_kline_by_id(internal_id, start_time, end_time, limit)
 
     @requires_phase(InitPhase.DB_SCHEMA)
     def query_tick(self, instrument_id: str, start_time: str, end_time: str,
                    limit: Optional[int] = None) -> List[Dict]:
         internal_id = self.register_instrument(instrument_id)
-        sql = "SELECT * FROM ticks_raw WHERE internal_id=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp ASC"
-        params: list = [internal_id, start_time, end_time]
-        if limit:
-            sql += " LIMIT ?"
-            params.append(limit)
-        return self._query_rows(sql, params)
+        return self.query_tick_by_id(internal_id, start_time, end_time, limit)
 
     @requires_phase(InitPhase.DB_SCHEMA)
     def get_option_chain(self, ts: float, underlying: str, expiration: str) -> List[Dict[str, Any]]:
@@ -851,40 +882,11 @@ class _StorageQueryMixin:
             chain = self.get_option_chain_for_future(future_instrument_id)
             return chain.get('options', [])
         except Exception as e:
-            logging.error("get_option_chain failed: %s", e)
+            logging.error("[R22-EP-P1] get_option_chain failed(数据库异常→空列表，调用方无法区分无数据/故障): %s", e, exc_info=True)
             return []
 
     def get_latest_underlying(self, underlying: str, expiration: str) -> Optional[Dict[str, Any]]:
-        """获取标的期货最新数据
-        
-        Args:
-            underlying: 标的产品代码 (如 'IF')
-            expiration: 到期月份 (如 '2605')
-            
-        Returns:
-            标的期货数据字典，包含最新价格等信息；如果未找到返回None
-            
-        Note:
-            此方法需要根据实际数据源实现。当前为占位符实现。
-        """
         logging.debug("get_latest_underlying called: %s %s", underlying, expiration)
-        try:
-            future_id = f"{underlying}{expiration}"
-            klines = self._query_rows(
-                "SELECT close, high, low, volume FROM klines_raw WHERE internal_id=(SELECT internal_id FROM futures_instruments WHERE instrument_id=? LIMIT 1) ORDER BY timestamp DESC LIMIT 1",
-                [future_id],
-            )
-            if klines:
-                latest = klines[0]
-                return {
-                    'instrument_id': future_id,
-                    'close': latest.get('close', 0),
-                    'high': latest.get('high', 0),
-                    'low': latest.get('low', 0),
-                    'volume': latest.get('volume', 0),
-                }
-        except Exception as e:
-            logging.warning("get_latest_underlying error: %s", e)
         return None
 
     @staticmethod
@@ -993,7 +995,7 @@ class _StorageQueryMixin:
             return futures_list, options_dict
 
         except Exception as e:
-            logger.error("load_all_instruments 异常：%s", e)
+            logger.error("[R22-EP-P1] load_all_instruments 异常(数据库异常→空结果，调用方无法区分无数据/故障): %s", e, exc_info=True)
             return [], {}
 
     def load(self, key: str) -> Optional[Any]:
@@ -1006,7 +1008,11 @@ class _StorageQueryMixin:
             row = rows[0] if rows else None
             if not row:
                 return None
-            return json.loads(row['value'])
+            loaded = json.loads(row['value'])
+            # SER-04修复: 兼容带版本号和不带版本号的payload
+            if isinstance(loaded, dict) and '__kv_version__' in loaded:
+                return loaded.get('data')
+            return loaded
         except Exception as e:
             logging.error("load 失败 key=%s: %s", key, e, exc_info=True)
             return None
@@ -1032,10 +1038,10 @@ class _StorageQueryMixin:
         raise RuntimeError("[Storage] _maintenance_service is None, cannot reserve global ID")
 
     def _create_future_tables_by_id(self, instrument_id: int):
-        logging.debug("_create_future_tables_by_id is deprecated, using unified klines_raw")
+        logging.warning("[DEPRECATED] _create_future_tables_by_id is deprecated, using unified klines_raw")  # R16-P1-DOC-P1-10修复: debug→warning确保废弃标记可见
 
     def _create_option_tables_by_id(self, instrument_id: int):
-        logging.debug("_create_option_tables_by_id is deprecated, using unified klines_raw")
+        logging.warning("[DEPRECATED] _create_option_tables_by_id is deprecated, using unified klines_raw")  # R16-P1-DOC-P1-10修复: debug→warning确保废弃标记可见
 
     @requires_phase(InitPhase.EXTERNAL_SERVICES)
     def register_instrument(self, instrument_id: str, exchange: str = "AUTO",
@@ -1080,11 +1086,11 @@ class _StorageQueryMixin:
                         self._data_service.query("""
                             INSERT INTO futures_instruments
                             (internal_id, exchange, instrument_id, product, year_month, format,
-                             expire_date, listing_date, kline_table, tick_table, product_code, shard_key)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             expire_date, listing_date, kline_table, tick_table, product_code, shard_key, is_active)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, [new_id, exchange, normalized_instrument_id, parsed['product'], parsed['year_month'],
                               prod['format_template'], expire_date, listing_date, kline_table, tick_table,
-                              parsed['product'].lower(), ShardRouter._deterministic_hash(parsed['product'].lower())], raise_on_error=True)
+                              parsed['product'].lower(), ShardRouter._deterministic_hash(parsed['product'].lower()), 1], raise_on_error=True)
                         self._create_future_tables_by_id(new_id)
                         # 更新缓存
                         info = self._make_instrument_info(
@@ -1142,12 +1148,12 @@ class _StorageQueryMixin:
                             INSERT INTO option_instruments
                             (internal_id, exchange, instrument_id, product, underlying_future_id, underlying_product,
                             year_month, option_type, strike_price, format,
-                            expire_date, listing_date, kline_table, tick_table, product_code, shard_key)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            expire_date, listing_date, kline_table, tick_table, product_code, shard_key, is_active)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, [new_id, exchange, normalized_instrument_id, parsed['product'], new_future_id, prod['product'], parsed['year_month'],
                               parsed['option_type'], parsed['strike_price'], prod['format_template'],
                               expire_date, listing_date, kline_table, tick_table,
-                              opt_product_code, opt_shard_key], raise_on_error=True)
+                              opt_product_code, opt_shard_key, 1], raise_on_error=True)
                         self._create_option_tables_by_id(new_id)
                         # 更新缓存
                         info = self._make_instrument_info(
@@ -1193,7 +1199,7 @@ class _StorageQueryMixin:
                                             DiagnosisProbeManager.on_register(normalized_instrument_id, 'storage_register', canonical_internal_id, 'future')
                                             return canonical_internal_id
                         except Exception as _e:
-                            logging.debug("[Storage] 期权标的期货回退注册失败: %s", _e)
+                            logging.info("[Storage] 期权标的期货回退注册失败: %s", _e)  # R26-P2-DF-05修复: debug→info
                         continue
 
             raise ValueError(f"无法识别合约品种：{normalized_instrument_id}")
@@ -1232,9 +1238,9 @@ class _StorageQueryMixin:
             self._data_service.query("DELETE FROM option_instruments WHERE instrument_id=?", [instrument_id], raise_on_error=True)
         logging.info(f"已删除合约 {instrument_id} (ID={internal_id})")
 
-    def _batch_import_contracts(self, contracts_data: List[Dict], contract_type: str) -> None:
+    def batch_add_future_instruments(self, instruments: List[Dict]) -> None:
         try:
-            for inst in contracts_data:
+            for inst in instruments:
                 exchange = inst.get('exchange', 'AUTO')
                 instrument_id = inst.get('instrument_id')
                 if not instrument_id:
@@ -1244,17 +1250,29 @@ class _StorageQueryMixin:
                                            expire_date=inst.get('expire_date'),
                                            listing_date=inst.get('listing_date'))
                 except Exception as e:
-                    logging.warning("批量导入%s失败 %s: %s", contract_type, instrument_id, e)
-            logging.info("批量导入 %d 个%s合约", len(contracts_data), contract_type)
+                    logging.warning("批量导入期货失败 %s: %s", instrument_id, e)
+            logging.info("批量导入 %d 个期货合约", len(instruments))
         except Exception as e:
-            logging.error("批量导入%s失败：%s", contract_type, e)
+            logging.error("批量导入期货失败：%s", e)
             raise
 
-    def batch_add_future_instruments(self, instruments: List[Dict]) -> None:
-        self._batch_import_contracts(instruments, '期货')
-
     def batch_add_option_instruments(self, instruments: List[Dict]) -> None:
-        self._batch_import_contracts(instruments, '期权')
+        try:
+            for inst in instruments:
+                exchange = inst.get('exchange', 'AUTO')
+                instrument_id = inst.get('instrument_id')
+                if not instrument_id:
+                    continue
+                try:
+                    self.register_instrument(instrument_id, exchange,
+                                           expire_date=inst.get('expire_date'),
+                                           listing_date=inst.get('listing_date'))
+                except Exception as e:
+                    logging.warning("批量导入期权失败 %s: %s", instrument_id, e)
+            logging.info("批量导入 %d 个期权合约", len(instruments))
+        except Exception as e:
+            logging.error("批量导入期权失败：%s", e)
+            raise
 
     def _migrate_legacy_schema(self):
         migrated = False

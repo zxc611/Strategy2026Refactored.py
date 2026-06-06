@@ -1,14 +1,21 @@
+"""
+订单持久化模块 — WAL写前日志 + JSONL状态持久化 + 自成交检测 + 网络重试 + 部分成交
+从order_service.py拆分，委托到order_wal_state_service.py
+"""
+from __future__ import annotations
+
 import logging
 import json
+import os
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 from dataclasses import dataclass, field
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class OrderRecord:
     order_id: str
     instrument_id: str
@@ -30,7 +37,6 @@ class SelfTradeDetector:
     def check_self_trade(self, new_order: OrderRecord) -> Tuple[bool, Optional[str]]:
         instrument = new_order.instrument_id
         opposite_dir = "sell" if new_order.direction == "buy" else "buy"
-        
         for existing in self._pending_orders[instrument]:
             if existing.direction == opposite_dir:
                 price_match = (
@@ -133,7 +139,6 @@ class PartialFillHandler:
         record = self._partial_fills.get(order_id)
         if record is None:
             return {"cancelled": False, "reason": "order_not_found"}
-        
         elapsed = time.time() - record["timestamp"]
         if elapsed > self._timeout_sec and record["remaining_volume"] > 0:
             if cancel_func is not None:
@@ -159,3 +164,182 @@ class PartialFillHandler:
             oid: rec for oid, rec in self._partial_fills.items()
             if rec["status"] == "partial"
         }
+
+
+class OrderPersistenceService:
+    _ORDER_STATE_MAX_BYTES = 50 * 1024 * 1024
+    _ORDER_STATE_BACKUP_COUNT = 3
+
+    def __init__(self, wal_dir: str = "", idempotent_file: str = "", state_file: str = ""):
+        self._wal_dir = wal_dir
+        self._idempotent_state_file = idempotent_file
+        self._order_state_file = state_file
+        self._order_idempotent_set: Set[str] = set()
+        self._self_trade_detector = SelfTradeDetector()
+        self._network_retry = NetworkRetryManager()
+        self._partial_fill_handler = PartialFillHandler()
+
+    def ensure_wal_dir(self) -> None:
+        if self._wal_dir:
+            os.makedirs(self._wal_dir, exist_ok=True)
+
+    def wal_path(self, order_id: str) -> str:
+        safe_id = order_id.replace('/', '_').replace('\\', '_')
+        return os.path.join(self._wal_dir, f"{safe_id}.wal")
+
+    def wal_write(self, order_id: str, state: str, order: Dict) -> None:
+        try:
+            entry = {
+                'order_id': order_id, 'state': state,
+                'instrument_id': order.get('instrument_id', ''),
+                'direction': order.get('direction', ''),
+                'volume': order.get('volume', 0),
+                'price': order.get('price', 0),
+                'timestamp': time.time(),
+            }
+            _wal_path = self.wal_path(order_id)
+            _tmp_path = _wal_path + '.tmp'
+            with open(_tmp_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(entry))
+            os.replace(_tmp_path, _wal_path)
+        except Exception as e:
+            logger.error("[OrderPersistence] WAL写入失败: order=%s state=%s err=%s", order_id, state, e)
+
+    def wal_read(self, order_id: str) -> Optional[Dict]:
+        try:
+            path = self.wal_path(order_id)
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.warning("[OrderPersistence] WAL读取失败: order=%s err=%s", order_id, e)
+        return None
+
+    def wal_delete(self, order_id: str) -> None:
+        try:
+            path = self.wal_path(order_id)
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:
+            logger.warning("[OrderPersistence] WAL删除失败: order=%s err=%s", order_id, e)
+
+    def persist_idempotent_key(self, key: str) -> None:
+        self._order_idempotent_set.add(key)
+        try:
+            if self._idempotent_state_file:
+                with open(self._idempotent_state_file, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({'key': key, 'ts': time.time()}) + '\n')
+        except Exception as e:
+            logger.warning("[OrderPersistence] 幂等键持久化失败: %s", e)
+
+    def rotate_jsonl_if_needed(self, filepath: str) -> None:
+        try:
+            if not os.path.exists(filepath):
+                return
+            if os.path.getsize(filepath) > self._ORDER_STATE_MAX_BYTES:
+                for i in range(self._ORDER_STATE_BACKUP_COUNT, 0, -1):
+                    src = f"{filepath}.{i}"
+                    dst = f"{filepath}.{i + 1}"
+                    if os.path.exists(src):
+                        if i == self._ORDER_STATE_BACKUP_COUNT:
+                            os.remove(src)
+                        else:
+                            os.rename(src, dst)
+                os.rename(filepath, f"{filepath}.1")
+        except Exception:
+            pass
+
+    def append_order_state(self, order_id: str, state: str, order: Dict) -> None:
+        try:
+            record = {
+                'order_id': order_id, 'state': state,
+                'instrument_id': order.get('instrument_id', ''),
+                'direction': order.get('direction', ''),
+                'volume': order.get('volume', 0),
+                'price': order.get('price', 0),
+                'ts': time.time(),
+            }
+            if self._order_state_file:
+                self.rotate_jsonl_if_needed(self._order_state_file)
+                with open(self._order_state_file, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(record) + '\n')
+        except Exception as e:
+            logger.error("[OrderPersistence] 订单状态追加写失败: order=%s state=%s err=%s", order_id, state, e)
+
+    def recover_order_state(self) -> Dict[str, Dict]:
+        recovered = {}
+        try:
+            if not self._order_state_file or not os.path.exists(self._order_state_file):
+                return recovered
+            with open(self._order_state_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        order_id = record.get('order_id', '')
+                        if order_id:
+                            recovered[order_id] = record
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        except Exception as e:
+            logger.warning("[OrderPersistence] 订单状态恢复失败: %s", e)
+        return recovered
+
+    def recover_idempotent_state(self) -> Set[str]:
+        try:
+            if not self._idempotent_state_file or not os.path.exists(self._idempotent_state_file):
+                return self._order_idempotent_set
+            with open(self._idempotent_state_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        key = record.get('key', '')
+                        if key:
+                            self._order_idempotent_set.add(key)
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        except Exception as e:
+            logger.warning("[OrderPersistence] 幂等状态恢复失败: %s", e)
+        return self._order_idempotent_set
+
+    def recover_orphaned_orders(self, orders_by_id: Dict[str, Dict]) -> int:
+        orphaned_count = 0
+        try:
+            if not self._wal_dir or not os.path.isdir(self._wal_dir):
+                return 0
+            for fname in os.listdir(self._wal_dir):
+                if not fname.endswith('.wal'):
+                    continue
+                fpath = os.path.join(self._wal_dir, fname)
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        entry = json.load(f)
+                    if entry.get('state') == 'PENDING':
+                        order_id = entry.get('order_id', '')
+                        order = orders_by_id.get(order_id)
+                        if order and order.get('status') in ('SUBMITTED', 'PENDING'):
+                            order['status'] = 'ORPHANED'
+                            orphaned_count += 1
+                            self.wal_write(order_id, 'ORPHANED', {'order_id': order_id})
+                except Exception as e:
+                    logger.warning("[OrderPersistence] WAL文件恢复异常: %s err=%s", fname, e)
+        except Exception as e:
+            logger.warning("[OrderPersistence] 孤儿订单恢复过程异常: %s", e)
+        return orphaned_count
+
+    @property
+    def self_trade_detector(self) -> SelfTradeDetector:
+        return self._self_trade_detector
+
+    @property
+    def network_retry(self) -> NetworkRetryManager:
+        return self._network_retry
+
+    @property
+    def partial_fill_handler(self) -> PartialFillHandler:
+        return self._partial_fill_handler

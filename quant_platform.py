@@ -24,15 +24,19 @@ except ImportError:
 class ExchangeTime:
     """交易所时间标准化，处理CST时区和夜盘跨天trade_date。"""
 
-    _CST = timezone(timedelta(hours=8))
+    _CST = None  # [R22-TIME-P1-01] 延迟初始化为CHINA_TZ
     _NIGHT_START = 21
     _DAY_START = 9
 
     __slots__ = ('_exchange', '_night_end_hour')
 
-    def __init__(self, exchange: str = 'DCE', night_end_hour: int = 23):
+    # [R16-P2-1.3修复] 夜盘结束时间默认0点(凌晨)，23点仍属夜盘交易时段
+    def __init__(self, exchange: str = 'DCE', night_end_hour: int = 0):
         self._exchange = exchange
         self._night_end_hour = night_end_hour
+        if ExchangeTime._CST is None:  # [R22-TIME-P1-01] 延迟初始化
+            from ali2026v3_trading.shared_utils import CHINA_TZ
+            ExchangeTime._CST = CHINA_TZ
 
     def now_cst(self) -> datetime:
         return datetime.now(self._CST)
@@ -62,6 +66,9 @@ class ExchangeTime:
         return int(dt.timestamp() * 1000)
 
     def from_epoch_ms(self, epoch_ms: int) -> datetime:
+        # R23-P2-05修复: 参数校验，自动检测毫秒/秒格式
+        if epoch_ms > 1e12:
+            epoch_ms = epoch_ms / 1000.0
         return datetime.fromtimestamp(epoch_ms / 1000.0, tz=self._CST)
 
 
@@ -94,7 +101,9 @@ class TickAggregator:
 
     def update_tick(self, price: float, volume: int,
                     timestamp_ms: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        if price <= 0:
+        # R24-P1-IV-01修复 + R25-P1-IV-01/10修复: 使用math.isfinite统一NaN/Inf检查，覆盖numpy.float64等类型
+        import math
+        if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
             return None
 
         with self._lock:
@@ -105,6 +114,9 @@ class TickAggregator:
                 else:
                     tick_vol = 0
                 self._last_cum_volume = volume
+            # R16-P1-1.1修复: delta模式首tick volume=0保护
+            if tick_vol == 0 and self._current_bar is None:
+                tick_vol = max(1, getattr(volume, 'last_volume', 1) if not isinstance(volume, int) else 1)
 
             now_ms = timestamp_ms or int(time.time() * 1000)
             dt = self._exchange_time.from_epoch_ms(now_ms)
@@ -148,8 +160,10 @@ class TickAggregator:
     def _should_close_bar(self, bar_start: datetime, new_vol: int) -> bool:
         if self._current_bar is None:
             return False
-        cur_start_str = self._current_bar.get('bar_start', '')
-        if bar_start.strftime('%Y-%m-%d %H:%M:%S') != cur_start_str:
+        # [R16-P2-1.2修复] 使用时间戳数值比较替代strftime字符串比对，避免格式差异导致误判
+        cur_start_ms = self._current_bar.get('bar_start_ms', 0)
+        _bar_ts = int(bar_start.timestamp() * 1000) if bar_start is not None else 0
+        if cur_start_ms != _bar_ts:
             return True
         if self._vol_threshold > 0 and self._current_bar['volume'] >= self._vol_threshold:
             return True
@@ -218,13 +232,17 @@ class AtomicSystemState:
 
     @property
     def version(self) -> int:
-        return self._version
+        # P2-4修复: property读取加锁，与capture()锁契约一致
+        with self._lock:
+            return self._version
 
     @property
     def age_ms(self) -> float:
-        if self._last_update_ms == 0:
-            return float('inf')
-        return (time.time() * 1000) - self._last_update_ms
+        # P2-4修复: property读取加锁，与capture()锁契约一致
+        with self._lock:
+            if self._last_update_ms == 0:
+                return float('inf')
+            return (time.time() * 1000) - self._last_update_ms
 
 
 class SystemHealthMonitor:

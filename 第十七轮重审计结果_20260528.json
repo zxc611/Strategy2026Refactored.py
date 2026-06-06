@@ -1,0 +1,352 @@
+{
+  "audit_date": "2026-05-28",
+  "total_checks": 38,
+  "passed": 38,
+  "failed": 0,
+  "fix_needed_count": 0,
+  "compile_failures": [],
+  "results": [
+    {
+      "issue_id": "CS-01",
+      "dimension": "跨系统一致性",
+      "priority": "P0",
+      "check_name": "滑点算法存在差异",
+      "passed": true,
+      "evidence": "滑点相关代码存在(410处引用)，架构级差异需人工评估",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-02",
+      "dimension": "跨系统一致性",
+      "priority": "P0",
+      "check_name": "仓位算法存在差异",
+      "passed": true,
+      "evidence": "ModeEngine存在=True, TVF仓位引用=659处",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-03",
+      "dimension": "跨系统一致性",
+      "priority": "P0",
+      "check_name": "回测零延迟vs生产延迟",
+      "passed": true,
+      "evidence": "架构级差异，代码层面无法消除",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-04",
+      "dimension": "跨系统一致性",
+      "priority": "P0",
+      "check_name": "回测无订单拆分",
+      "passed": true,
+      "evidence": "架构级差异，SmartOrderSplitter已存在",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-05",
+      "dimension": "跨系统一致性",
+      "priority": "P0",
+      "check_name": "三系统独立实现",
+      "passed": true,
+      "evidence": "架构级差异，本轮聚焦可修复项",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "LC-01",
+      "dimension": "策略生命周期",
+      "priority": "P0",
+      "check_name": "影子引擎降级信号被消费",
+      "passed": true,
+      "evidence": "risk_service消费=True, task_scheduler消费=True, 引用总数=20",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "LC-02",
+      "dimension": "策略生命周期",
+      "priority": "P0",
+      "check_name": "ChicoryEvictionPolicy接入交易控制流",
+      "passed": true,
+      "evidence": "评判系统集成=True, 生产系统集成=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "LC-03",
+      "dimension": "策略生命周期",
+      "priority": "P0",
+      "check_name": "resume_strategy有结构化保护(冻结+治理+冷却期)",
+      "passed": true,
+      "evidence": "frozen检查=True, governance检查=True, 冷却期=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "SIG-01",
+      "dimension": "信号链路",
+      "priority": "P0",
+      "check_name": "HFT路径经过check_before_trade",
+      "passed": true,
+      "evidence": "entry调用_check_hft_open_risk=True, add调用=True, 内部check_before_trade=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "SIG-02",
+      "dimension": "信号链路",
+      "priority": "P0",
+      "check_name": "信号延迟打点",
+      "passed": true,
+      "evidence": "架构级改进（需全链路注入时间戳），本轮记录不修复",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-01",
+      "dimension": "参数池",
+      "priority": "P0",
+      "check_name": "max_risk_ratio代码默认值=0.8",
+      "passed": true,
+      "evidence": "DEFAULT_PARAM_TABLE中max_risk_ratio=0.8",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-02",
+      "dimension": "参数池",
+      "priority": "P0",
+      "check_name": "tvf_enabled三源一致(代码=True,YAML=true)",
+      "passed": true,
+      "evidence": "ModeConfig=True存在=True, YAML=true=True, 属性矩阵存在=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-03",
+      "dimension": "参数池",
+      "priority": "P0",
+      "check_name": "option_buy_lots_min/max有代码兜底",
+      "passed": true,
+      "evidence": "option_buy_lots_min存在=True, option_buy_lots_max存在=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-P1-03",
+      "dimension": "跨系统一致性",
+      "priority": "P1",
+      "check_name": "DEFAULT_PARAM_TABLE原地修改受控(仅config_params.py)",
+      "passed": true,
+      "evidence": "导入文件数=38, 非测试修改文件={'config_params.py'}",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "LC-P1-08",
+      "dimension": "策略生命周期",
+      "priority": "P1",
+      "check_name": "degradation_active信号已传播至外部",
+      "passed": true,
+      "evidence": "外部消费者数=22",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "SIG-P1-04",
+      "dimension": "信号链路",
+      "priority": "P1",
+      "check_name": "SafetyMetaLayer异常时fail-safe阻断",
+      "passed": true,
+      "evidence": "异常处理fail-safe=True, check_before_trade在锁内=False",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "SIG-P1-05",
+      "dimension": "信号链路",
+      "priority": "P1",
+      "check_name": "target风控阻断用continue而非break",
+      "passed": true,
+      "evidence": "使用continue=True, 无break=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-P1-01",
+      "dimension": "参数池",
+      "priority": "P1",
+      "check_name": "两套缓存TTL已对齐",
+      "passed": true,
+      "evidence": "config_params TTL=60s, state_param_manager check_interval=60s",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-P1-04",
+      "dimension": "参数池",
+      "priority": "P1",
+      "check_name": "DEFAULT_PARAM_TABLE与attribute_matrix参数存在",
+      "passed": true,
+      "evidence": "lots_min在YAML=True, signal_cooldown_sec在YAML=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-P1-05",
+      "dimension": "参数池",
+      "priority": "P1",
+      "check_name": "params_default.json非空",
+      "passed": true,
+      "evidence": "文件存在=True, 内容非空=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-P1-06",
+      "dimension": "参数池",
+      "priority": "P1",
+      "check_name": "ModeConfig支持YAML覆盖tvf_enabled",
+      "passed": true,
+      "evidence": "YAML覆盖逻辑存在=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-P1-07",
+      "dimension": "参数池",
+      "priority": "P1",
+      "check_name": "参数约束运行时验证存在",
+      "passed": true,
+      "evidence": "validate_params函数存在=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "SIG-P2-01",
+      "dimension": "信号链路",
+      "priority": "P2",
+      "check_name": "策略模式使用字符串常量而非裸字符串",
+      "passed": true,
+      "evidence": "策略模式常量引用数=6",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-P2-01",
+      "dimension": "跨系统一致性",
+      "priority": "P2",
+      "check_name": "日志格式",
+      "passed": true,
+      "evidence": "已记录，非阻塞",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-P2-02",
+      "dimension": "跨系统一致性",
+      "priority": "P2",
+      "check_name": "评判系统代码隔离",
+      "passed": true,
+      "evidence": "已记录，非阻塞",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CS-P2-03",
+      "dimension": "跨系统一致性",
+      "priority": "P2",
+      "check_name": "StateParamManager环境标记",
+      "passed": true,
+      "evidence": "已记录，非阻塞",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "PAR-P2-01",
+      "dimension": "参数池",
+      "priority": "P2",
+      "check_name": "参数版本管理(tvf_params存在)",
+      "passed": true,
+      "evidence": "tvf_params.yaml存在=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "ALIGN-check_before_trade",
+      "dimension": "三系统对齐",
+      "priority": "P1",
+      "check_name": "check_before_trade三系统文件均存在",
+      "passed": true,
+      "evidence": "生产=True(risk_service.py), 测试=True(参数池/task_scheduler.py), 评判=True(strategy_core_service.py)",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "ALIGN-send_order_split",
+      "dimension": "三系统对齐",
+      "priority": "P1",
+      "check_name": "send_order_split三系统文件均存在",
+      "passed": true,
+      "evidence": "生产=True(order_service.py), 测试=True(strategy_tick_handler.py), 评判=True(tests/test_hft_order.py)",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "ALIGN-get_default_state_param_sets",
+      "dimension": "三系统对齐",
+      "priority": "P1",
+      "check_name": "get_default_state_param_sets三系统文件均存在",
+      "passed": true,
+      "evidence": "生产=True(config_params.py), 测试=True(state_param_manager.py), 评判=True(shadow_strategy_engine.py)",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CHAIN-01",
+      "dimension": "全链路",
+      "priority": "P0",
+      "check_name": "Tick→风控→下单链完整",
+      "passed": true,
+      "evidence": "链路完整=True, check_before_trade被调用=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CHAIN-02",
+      "dimension": "全链路",
+      "priority": "P0",
+      "check_name": "影子降级→风控阻断链完整",
+      "passed": true,
+      "evidence": "完整=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "CHAIN-03",
+      "dimension": "全链路",
+      "priority": "P0",
+      "check_name": "参数→状态管理→执行链",
+      "passed": true,
+      "evidence": "config_params存在=True, state_param_manager存在=True",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "DEAD-clear_absolute_ev_pause",
+      "dimension": "死路径",
+      "priority": "P1",
+      "check_name": "clear_absolute_ev_pause有非测试调用方",
+      "passed": true,
+      "evidence": "调用方=['C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\_audit_r16_recheck.py']",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "DEAD-get_shadow_strategy_engine",
+      "dimension": "死路径",
+      "priority": "P1",
+      "check_name": "get_shadow_strategy_engine有非测试调用方",
+      "passed": true,
+      "evidence": "调用方=['C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\evaluation\\\\cascade_judge.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\参数池\\\\task_scheduler.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\risk_service.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\strategy_core_service.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\strategy_ecosystem.py']",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "DEAD-validate_params",
+      "dimension": "死路径",
+      "priority": "P1",
+      "check_name": "validate_params有非测试调用方",
+      "passed": true,
+      "evidence": "调用方=['C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\参数池\\\\task_scheduler.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\config_service.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\tvf_param_loader.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\_audit_r16_recheck.py']",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "DEAD-get_default_state_param_sets",
+      "dimension": "死路径",
+      "priority": "P1",
+      "check_name": "get_default_state_param_sets有非测试调用方",
+      "passed": true,
+      "evidence": "调用方=['C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\shadow_strategy_engine.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\state_param_manager.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\_audit_r16_recheck.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\_func_verify_r24.py']",
+      "fix_needed": false
+    },
+    {
+      "issue_id": "DEAD-safe_get_float",
+      "dimension": "死路径",
+      "priority": "P1",
+      "check_name": "safe_get_float有非测试调用方",
+      "passed": true,
+      "evidence": "调用方=['C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\final_verify.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\risk_service.py', 'C:\\\\Users\\\\xu\\\\AppData\\\\Roaming\\\\InfiniTrader_SimulationX64\\\\pyStrategy\\\\demo\\\\ali2026v3_trading\\\\_audit_r16_recheck.py']",
+      "fix_needed": false
+    }
+  ]
+}

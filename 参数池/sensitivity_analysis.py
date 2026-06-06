@@ -28,10 +28,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import duckdb
+try:
+    from ali2026v3_trading.data_access import get_data_access
+    from ali2026v3_trading.db_adapter import connect, get_duckdb_module
+    duckdb = get_duckdb_module()
+except ImportError:
+    duckdb = None
 import numpy as np
 import pandas as pd
 
@@ -40,25 +47,39 @@ try:
     _run_backtest = _ts.run_backtest
     _load_data_for_period = _ts._load_data_for_period
 except ImportError:
-    from ali2026v3_trading.参数池 import task_scheduler as _ts
+    from ali2026v3_trading.param_pool import task_scheduler as _ts
     _run_backtest = _ts.run_backtest
     _load_data_for_period = _ts._load_data_for_period
 
 logger = logging.getLogger(__name__)
 
+_yaml_cache: Optional[Dict[str, Any]] = None
+_yaml_mtime: float = 0.0
+_yaml_path: str = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    'parameter_attribute_matrix.yaml',
+)
+
 
 def _load_attribute_matrix() -> Dict[str, Any]:
-    yaml_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        'parameter_attribute_matrix.yaml',
-    )
+    global _yaml_cache, _yaml_mtime
+    try:
+        _current_mtime = os.path.getmtime(_yaml_path)
+    except OSError:
+        if _yaml_cache is not None:
+            return _yaml_cache
+        return {}
+    if _yaml_cache is not None and abs(_current_mtime - _yaml_mtime) < 1.0:
+        return _yaml_cache
     try:
         import yaml
-        with open(yaml_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f) or {}
+        with open(_yaml_path, 'r', encoding='utf-8') as f:
+            _yaml_cache = yaml.safe_load(f) or {}
+        _yaml_mtime = _current_mtime
+        return _yaml_cache
     except Exception as e:
         logger.warning("Failed to load attribute matrix: %s", e)
-        return {}
+        return _yaml_cache or {}
 
 
 def _clamp_value(value: float, attr: Optional[Dict[str, Any]]) -> float:
@@ -194,7 +215,7 @@ class SensitivityAnalyzer:
         base_return = base_result.get('total_return', 0.0)
         base_max_dd = base_result.get('max_drawdown', 0.0)
         base_profit_factor = base_result.get('profit_factor', 0.0)
-        base_win_loss_ratio = base_result.get('avg_win_loss_ratio', 0.0)
+        base_win_loss_ratio = base_result.get('win_loss_ratio', 0.0)
         logger.info("Base: sharpe=%.4f, return=%.4f, max_dd=%.4f, pf=%.4f, wlr=%.4f",
                      base_sharpe, base_return, base_max_dd, base_profit_factor, base_win_loss_ratio)
 
@@ -237,8 +258,8 @@ class SensitivityAnalyzer:
             sr.high_max_dd = res_high.get('max_drawdown', 0.0)
             sr.low_profit_factor = res_low.get('profit_factor', 0.0)
             sr.high_profit_factor = res_high.get('profit_factor', 0.0)
-            sr.low_win_loss_ratio = res_low.get('avg_win_loss_ratio', 0.0)
-            sr.high_win_loss_ratio = res_high.get('avg_win_loss_ratio', 0.0)
+            sr.low_win_loss_ratio = res_low.get('win_loss_ratio', 0.0)
+            sr.high_win_loss_ratio = res_high.get('win_loss_ratio', 0.0)
             sr.compute_sensitivity()
 
             logger.info(
@@ -258,7 +279,7 @@ class SensitivityAnalyzer:
     ) -> None:
         if db_path is None:
             db_path = self.db_path
-        con = duckdb.connect(db_path)
+        con = connect(db_path)
         try:
             safe_table_name = table_name.replace("'", "''").replace(";", "")
             con.execute(f"""
@@ -285,7 +306,7 @@ class SensitivityAnalyzer:
             for sr in results:
                 d = sr.to_dict()
                 con.execute(
-                    f"INSERT INTO {safe_table_name} VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    f"INSERT INTO {safe_table_name} VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",  # 预留灵敏度分析查询表(P2-10)
                     [
                         d['param_key'], d['base_value'], d['perturb_pct'],
                         d['base_sharpe'], d['low_sharpe'], d['high_sharpe'],
@@ -298,6 +319,24 @@ class SensitivityAnalyzer:
             logger.info("Saved %d sensitivity results to %s.%s", len(results), db_path, table_name)
         finally:
             con.close()
+
+    def query_sensitivity_results(self, table_name: str, param_name: Optional[str] = None) -> List[Dict[str, Any]]:  # P2-10修复: 提供sensitivity查询消费方法
+        """查询灵敏度分析结果"""
+        try:
+            safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+            conn = connect(self.db_path)
+            try:
+                if param_name:
+                    rows = conn.execute(f"SELECT * FROM {safe_table_name} WHERE param_key = ?", [param_name]).fetchall()
+                else:
+                    rows = conn.execute(f"SELECT * FROM {safe_table_name} LIMIT 1000").fetchall()
+                columns = [desc[0] for desc in conn.execute(f"SELECT * FROM {safe_table_name} LIMIT 0").description]
+                return [dict(zip(columns, row)) for row in rows]
+            finally:
+                conn.close()
+        except Exception as e:
+            logging.debug("[SensitivityAnalyzer] P2-10: query_sensitivity_results查询失败: %s", e)
+            return []
 
     @staticmethod
     def print_report(results: List[SensitivityResult]) -> None:
@@ -329,3 +368,118 @@ class SensitivityAnalyzer:
                 logger.warning(f"  - {sr.param_key}: 敏感度={sr.sharpe_sensitivity:.4f}")
 
         logger.info("=" * 100)
+
+
+def validate_hmm_perturbation_sensitivity(iv_series: pd.Series,
+                                            strategy_func=None,
+                                            n_perturb: int = 10,
+                                            noise_pct: float = 0.02,
+                                            cv_threshold: float = 0.3,
+                                            random_seed: int = 42) -> Dict[str, Any]:
+    """P1-裂缝12：HMM扰动敏感性测试
+
+    对IV序列添加1-2%噪声，重算HMM状态和策略绩效。
+    若夏普变异系数 > 0.3，需增加状态平滑或降低HMM依赖。
+    """
+    if len(iv_series) < 100:
+        return {"cv": 0.0, "passed": True, "action": "insufficient_data"}
+
+    try:
+        from ali2026v3_trading.quant_core import AdaptiveHMM
+    except ImportError:
+        return {"cv": 0.0, "passed": True, "action": "hmm_unavailable"}
+
+    iv_values = iv_series.dropna().values
+    rng = np.random.RandomState(random_seed)
+
+    def _get_hmm_states(iv_arr):
+        hmm = AdaptiveHMM(n_states=3, update_interval=len(iv_arr) + 1)
+        states = []
+        for val in iv_arr:
+            result = hmm.update(val)
+            states.append(result.get('state', 1))
+        return states
+
+    # 基准状态
+    base_states = _get_hmm_states(iv_values)
+
+    # 扰动测试
+    state_match_rates = []
+    for _ in range(n_perturb):
+        noise = rng.uniform(1.0 - noise_pct, 1.0 + noise_pct, len(iv_values))
+        perturbed_iv = iv_values * noise
+        perturbed_states = _get_hmm_states(perturbed_iv)
+        match_rate = sum(1 for a, b in zip(base_states, perturbed_states) if a == b) / len(base_states)
+        state_match_rates.append(match_rate)
+
+    avg_match_rate = np.mean(state_match_rates)
+    std_match_rate = np.std(state_match_rates)
+
+    # P1-裂缝12修复v2：同时计算状态匹配率CV和策略绩效CV
+    state_cv = float(std_match_rate / avg_match_rate) if avg_match_rate > 0 else 0.0
+
+    # 如果提供了strategy_func，计算策略绩效（夏普）的变异系数
+    sharpe_cv = None
+    if strategy_func is not None:
+        try:
+            sharpes = []
+            for noise_level in [noise_pct * (i + 1) / n_perturb for i in range(n_perturb)]:
+                noisy_iv = iv_values * (1 + rng.uniform(-noise_level, noise_level, size=len(iv_values)))
+                # 运行策略获取绩效
+                perf = strategy_func(pd.Series(noisy_iv))
+                sharpe_val = perf.get("sharpe", 0.0) if isinstance(perf, dict) else 0.0
+                sharpes.append(sharpe_val)
+            if len(sharpes) > 1 and np.mean(sharpes) != 0:
+                sharpe_cv = float(np.std(sharpes) / abs(np.mean(sharpes)))
+        except Exception as e:
+            logger.debug("[P1-裂缝12v2] strategy_func执行失败: %s", e)
+
+    # 使用夏普CV（如果有）或状态CV作为判断依据
+    effective_cv = sharpe_cv if sharpe_cv is not None else state_cv
+    passed = effective_cv <= cv_threshold
+
+    return {
+        "state_match_cv": round(state_cv, 4),
+        "sharpe_cv": round(sharpe_cv, 4) if sharpe_cv is not None else None,
+        "effective_cv": round(effective_cv, 4),
+        "threshold": cv_threshold,
+        "passed": passed,
+        "action": "increase_state_smoothing" if not passed else "proceed",
+        "n_perturbations": n_perturb,
+        "avg_state_match_rate": round(float(avg_match_rate), 4),
+        "noise_pct": noise_pct,
+    }
+
+
+_sensitivity_analyzer_lock = threading.Lock()
+
+
+def get_sensitivity_analyzer(
+    db_path: str = ":memory:",
+    base_params: Optional[Dict[str, float]] = None,
+    train_period: Tuple[str, str] = ("2024-01-01", "2025-06-30"),
+    test_period: Tuple[str, str] = ("2025-07-01", "2026-04-30"),
+) -> SensitivityAnalyzer:
+    from ali2026v3_trading.singleton_registry import SingletonRegistry
+    with _sensitivity_analyzer_lock:
+        _registry = SingletonRegistry.get_registry('sensitivity_analyzer')
+        _inst = _registry.get('instance')
+        if _inst is None:
+            import threading as _thr_sa
+            _inst = SensitivityAnalyzer(
+                db_path=db_path,
+                base_params=base_params or {},
+                train_period=train_period,
+                test_period=test_period,
+            )
+            _registry.set('instance', _inst)
+            logger.info("[P2-R8-08] SensitivityAnalyzer单例已创建 db_path=%s", db_path)
+        return _inst
+
+
+def reset_sensitivity_analyzer() -> None:
+    from ali2026v3_trading.singleton_registry import SingletonRegistry
+    with _sensitivity_analyzer_lock:
+        _registry = SingletonRegistry.get_registry('sensitivity_analyzer')
+        _registry.remove('instance')
+        logger.info("[P2-R8-08] SensitivityAnalyzer单例已重置")

@@ -1,0 +1,14 @@
+# R17-P2-DEP-05: 开发依赖
+# 基于requirements.txt，额外添加开发/测试/安全审计工具
+-r requirements.txt
+
+# 测试框架
+pytest>=7.0,<9.0
+pytest-cov>=4.0,<7.0
+
+# 安全审计
+bandit>=1.7,<2.0
+pip-audit>=2.0,<3.0
+
+# 代码质量
+ruff>=0.1,<1.0

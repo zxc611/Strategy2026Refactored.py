@@ -339,7 +339,7 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
             logging.info(f"  期权: {', '.join(options)}")
     
     if failed_contracts:
-        logging.info(f"\n❌ 异常合约 ({len(failed_contracts)}/{len(MONITORED_CONTRACTS)}):")
+        logging.warning(f"\n❌ 异常合约 ({len(failed_contracts)}/{len(MONITORED_CONTRACTS)}):")  # [R22-P2-EP04]
         reason_stats = {}
         for fail_info in failed_contracts:
             reasons = fail_info['reasons']
@@ -410,7 +410,13 @@ class ResourceOwnershipScanner:
     @staticmethod
     def log_resource_ownership_table(strategy_core, phase: str = 'unknown') -> None:
         import threading as _threading
-        strategy_id = getattr(strategy_core, 'strategy_id', 'unknown')
+        # P1-R11-17修复: strategy_id缺失时发出警告，防止审计溯源歧义
+        _sid = getattr(strategy_core, 'strategy_id', None)
+        if _sid is None:
+            import logging
+            logging.warning("[P1-R11-17] strategy_id未提供，使用'unknown'作为默认值。调用方应显式传入strategy_id。")
+            _sid = 'unknown'
+        strategy_id = _sid
         run_id = getattr(strategy_core, '_lifecycle_run_id', 'N/A')
         ALLOWED_PREFIXES = (
             'Main', 'Thread-', 'APScheduler', 'ThreadPoolExecutor',
@@ -579,4 +585,5 @@ class ControlActionLogger:
         )
         if source is not None:
             base_msg += f" [source={source}]"
-        ControlActionLogger._logger.info(base_msg)
+        # R27-P2-FC-01修复: BLOCKED事件日志从info提升到warning
+        ControlActionLogger._logger.warning(base_msg)

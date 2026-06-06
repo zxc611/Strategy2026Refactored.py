@@ -26,7 +26,8 @@ from dataclasses import dataclass, field
 
 from ali2026v3_trading.scheduler_service import is_market_open
 from ali2026v3_trading import InstrumentDataManager
-from ali2026v3_trading.config_service import UIConfig
+from ali2026v3_trading.shared_utils import CHINA_TZ
+from ali2026v3_trading.serialization_utils import json_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def safe_getattr_int(obj: Any, attr: str, default: int = 0, min_val: int = 0) ->
 # 数据类
 # =============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class UIEvent:
     """UI事件记录"""
     timestamp: datetime
@@ -64,15 +65,20 @@ class UIEvent:
 # =============================================================================
 
 class UIMixin:
-    """策略UI混入类 - 提供Tkinter界面控制功能"""
+    """策略UI混入类 - 提供Tkinter界面控制功能
+
+    [P1-2归属] 被Strategy2026(BaseStrategy, UIMixin)继承 | ServiceContainer可选注册为'ui'服务
+    | 与StrategyCoreService无直接关系(StrategyCoreService仅继承4核心Mixin)
+    | 重构阶段: UI重构阶段处理(Phase 3+)，不纳入Phase 1 Mixin解耦范围
+    """
     
     def __init__(self, *args, **kwargs):
         """初始化"""
         super().__init__(*args, **kwargs)
         # ✅ M21 Bug #3修复：初始化锁
         import threading
-        if UIMixin._ui_lock is None:
-            UIMixin._ui_lock = threading.Lock()
+        if UIService._ui_lock is None:
+            UIService._ui_lock = threading.Lock()
     
     @classmethod
     def _get_ui_lock(cls):
@@ -118,8 +124,8 @@ class UIMixin:
             except Exception as e:
                 self._log_error(f"设置窗口置顶失败: {e}")
             try:
-                w = UIConfig.WINDOW_WIDTH
-                h = UIConfig.WINDOW_HEIGHT
+                w = safe_getattr_int(self.params, "ui_window_width", 320, 320)
+                h = safe_getattr_int(self.params, "ui_window_height", 310, 310)
             except Exception as e:
                 self._log_error(f"读取UI窗口尺寸失败: {e}")
                 w, h = 320, 310
@@ -205,7 +211,8 @@ class UIMixin:
                     setattr(self.params, "run_profile", "full")
                     setattr(self.params, "backtest_tick_mode", False)
                     setattr(self.params, "diagnostic_output", True)
-                    setattr(self.params, "test_mode", False)
+                    # R17-P1-CFG-P1-01修复: test_mode从配置读取而非硬编码
+                    self.params.test_mode = self.params.test_mode if hasattr(self.params, 'test_mode') else False
                     resumed = self._call_method_by_priority(['internal_resume_strategy', 'resume_strategy'])
                     if resumed:
                         self.my_trading = True
@@ -239,7 +246,8 @@ class UIMixin:
                     
                     setattr(self.params, "debug_output", True)
                     setattr(self.params, "diagnostic_output", True)
-                    setattr(self.params, "test_mode", True)
+                    # R17-P1-CFG-P1-01修复: test_mode从配置读取而非硬编码
+                    self.params.test_mode = self.params.test_mode if hasattr(self.params, 'test_mode') else True
                     resumed = False
                     if hasattr(self, "internal_resume_strategy"):
                         resumed = self.internal_resume_strategy()
@@ -276,7 +284,8 @@ class UIMixin:
                     
                     setattr(self.params, "debug_output", False)
                     setattr(self.params, "diagnostic_output", False)
-                    setattr(self.params, "test_mode", False)
+                    # R17-P1-CFG-P1-01修复: test_mode从配置读取而非硬编码
+                    self.params.test_mode = self.params.test_mode if hasattr(self.params, 'test_mode') else False
                     setattr(self.params, "run_profile", "full")
                     setattr(self.params, "backtest_tick_mode", False)
                     self.my_trading = True
@@ -418,18 +427,112 @@ class UIMixin:
         current_thread = _threading.current_thread()
         
         if current_thread != main_thread:
-            self._log_warning("检测到非主线程调用UI，Tkinter要求主线程创建，切换为headless(无头)模式")
-            with cls._get_ui_lock():
-                self._ui_running = False
-                setattr(cls, "_ui_global_running", False)
+            # 不在主线程，通过queue请求主线程创建UI
+            self._log_warning("检测到非主线程调用UI，将通过queue调度到主线程")
+            if not hasattr(self, "_ui_queue"):
+                self._ui_queue = queue.Queue()
+            # 标记需要创建UI
+            self._ui_queue.put({"action": "create_ui", "params": None})
+            # 如果还没有UI线程，启动一个专门的UI主循环线程
+            if not getattr(cls, "_ui_mainloop_started", False):
+                setattr(cls, "_ui_mainloop_started", True)
+                def _ui_mainloop_thread():
+                    try:
+                        import tkinter as tk
+                        # ✅ 修复：非主线程直接创建Tk并运行mainloop
+                        # 在某些平台上，Tkinter可以在非主线程运行
+                        root = None
+                        with cls._get_ui_lock():
+                            setattr(cls, "_ui_global_root", None)
+                        
+                        def _process_ui_queue():
+                            nonlocal root
+                            should_continue = True
+                            try:
+                                msg_count = 0
+                                while not self._ui_queue.empty() and msg_count < 20:
+                                    msg = self._ui_queue.get_nowait()
+                                    msg_count += 1
+                                    action = msg.get("action")
+                                    
+                                    if action == "create_ui":
+                                        # 尝试在当前线程创建Tk root（仅首次）
+                                        if root is None:
+                                            try:
+                                                root = tk.Tk()
+                                                root.withdraw()  # 隐藏主窗口
+                                                with cls._get_ui_lock():
+                                                    setattr(cls, "_ui_global_root", root)
+                                                self._log_info("UI线程中Tk root创建成功")
+                                            except Exception as e:
+                                                self._log_error(f"UI线程中Tk root创建失败: {e}")
+                                                root = None
+                                        if root:
+                                            self._create_ui_in_main_thread(root)
+                                    elif action == "destroy":
+                                        if root:
+                                            try:
+                                                root.destroy()
+                                            except Exception as e:
+                                                self._log_error(f"UI窗口销毁失败: {e}")
+                                        should_continue = False
+                                        with cls._get_ui_lock():
+                                            self._ui_running = False
+                                            setattr(cls, "_ui_global_running", False)
+                            except queue.Empty:
+                                pass
+                            except Exception as e:
+                                self._log_error(f"处理UI队列失败: {e}")
+                            finally:
+                                if should_continue and root:
+                                    try:
+                                        root.after(100, _process_ui_queue)
+                                    except Exception as e:
+                                        self._log_error(f"UI队列调度失败: {e}")
+                        
+                        # 立即处理一次队列，检查是否有create_ui消息
+                        _process_ui_queue()
+                        
+                        if root:
+                            root.after(100, _process_ui_queue)
+                            self._log_info("UI线程进入mainloop")
+                            root.mainloop()
+                            self._log_info("UI线程mainloop已退出")
+                        else:
+                            # root创建失败，使用简单轮询模式
+                            self._log_warning("Tk root创建失败，使用轮询模式")
+                            import time as _time
+                            poll_count = 0
+                            while poll_count < 300:  # 最多轮询30秒
+                                if not self._ui_queue.empty():
+                                    _process_ui_queue()
+                                _time.sleep(0.1)
+                                poll_count += 1
+                    except Exception as e:
+                        self._log_error(f"UI主循环线程异常: {e}")
+                        import traceback
+                        self._log_error(traceback.format_exc())
+                    finally:
+                        # 显式销毁窗口
+                        try:
+                            if 'root' in locals() and root:
+                                root.destroy()
+                        except Exception as e:
+                            self._log_error(f"UI窗口最终清理失败: {e}")
+                        setattr(cls, "_ui_mainloop_started", False)
+                        with cls._get_ui_lock():
+                            self._ui_running = False
+                            setattr(cls, "_ui_global_running", False)
+                
+                # daemon=False，确保UI资源正确释放
+                t = _threading.Thread(target=_ui_mainloop_thread, daemon=False, name="UIMainLoop")
+                t.start()
+                self._log_info("UI主循环线程已启动")
             return
         
         # 在主线程中，直接创建UI（非阻塞方式）
         try:
             import tkinter as tk
-            if threading.current_thread() is not threading.main_thread():
-                self._log_warning("非主线程，跳过Tk root创建")
-                return
             root = tk.Tk()
             setattr(cls, "_ui_global_root", root)
             
@@ -639,7 +742,7 @@ class UIMixin:
                         except Exception as e:
                             self._log_error(f"读取参数{attr}失败: {e}")
             
-            text_area.insert("1.0", json.dumps(params_dict, indent=2, ensure_ascii=False, default=str))
+            text_area.insert("1.0", json_dumps(params_dict, indent=2))
             
             def _save():
                 try:
@@ -702,7 +805,7 @@ class UIMixin:
             vbar.pack(side="right", fill="y")
             hbar.pack(side="bottom", fill="x")
             txt.pack(fill="both", expand=True, padx=5, pady=5)
-            txt.insert("1.0", json.dumps(backtest_params, indent=2, ensure_ascii=False, default=str))
+            txt.insert("1.0", json_dumps(backtest_params, indent=2))
             
             def _save():
                 try:
@@ -802,10 +905,20 @@ class UIMixin:
 # StrategyUI - 独立UI类
 # =============================================================================
 
+# DEPRECATED: StrategyUI无实例化调用方。UIMixin有消费者但StrategyUI没有。待删除或激活。
+# R33-P2-7标记: 此类为死代码 — 全仓零生产消费者
+# 仅被tests引用
+# 待决策: 集成到生产链路 或 删除
 class StrategyUI:
     """策略UI界面 - 独立运行的控制面板"""
     
     def __init__(self, strategy_core=None, title="策略控制面板", width=900, height=700):
+        import warnings
+        warnings.warn(
+            "StrategyUI is dead code (P2-7): zero production consumers. Pending integration or removal.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.strategy = strategy_core
         self.title = title
         self.width = width
@@ -858,9 +971,6 @@ class StrategyUI:
             import tkinter as tk
             from tkinter import ttk, scrolledtext
             
-            if threading.current_thread() is not threading.main_thread():
-                self._log_warning("非主线程，跳过Tk root创建")
-                return
             self.root = tk.Tk()
             self.root.title(self.title)
             self.root.geometry(f"{self.width}x{self.height}")
@@ -984,7 +1094,7 @@ class StrategyUI:
         try:
             text = self._widgets.get("log_text")
             if text:
-                timestamp = datetime.now().strftime("%H:%M:%S")
+                timestamp = datetime.now(CHINA_TZ).strftime("%H:%M:%S")
                 text.insert("end", f"[{timestamp}] {msg}\n")
                 text.see("end")
         except Exception as e:
@@ -994,7 +1104,7 @@ class StrategyUI:
         """记录事件"""
         with self._lock:
             self.event_log.append(UIEvent(
-                timestamp=datetime.now(),
+                timestamp=datetime.now(CHINA_TZ),
                 event_type=event_type,
                 data=data or {}
             ))
@@ -1005,7 +1115,7 @@ class StrategyUI:
     
     def update_status(self, status: Dict[str, Any]) -> None:
         """更新状态"""
-        self.message_queue.put(f"STATUS: {json.dumps(status, default=str)}")
+        self.message_queue.put(f"STATUS: {json_dumps(status)}")
     
     def _on_pause(self) -> None:
         """暂停回调"""
@@ -1041,9 +1151,10 @@ class StrategyUI:
 # UIDiagnosisTool - UI诊断工具
 # =============================================================================
 
+# R33-P2-7标记: 已集成到health_check_api.py生产链路
 class UIDiagnosisTool:
     """UI诊断工具"""
-    
+
     @staticmethod
     def check_tkinter() -> Dict[str, Any]:
         """检查Tkinter可用性"""
@@ -1078,7 +1189,7 @@ class UIDiagnosisTool:
         return {
             "tkinter": UIDiagnosisTool.check_tkinter(),
             "thread_safety": UIDiagnosisTool.check_thread_safety(),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(CHINA_TZ).isoformat()
         }
 
 

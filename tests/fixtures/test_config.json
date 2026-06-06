@@ -1,0 +1,6 @@
+{
+    "signal_cooldown_sec": 60.0,
+    "close_take_profit_ratio": 1.8,
+    "close_stop_loss_ratio": 0.3,
+    "max_risk_ratio": 0.8
+}

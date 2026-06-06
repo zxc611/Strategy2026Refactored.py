@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import threading
 import time
 import weakref
 import argparse
 import sys
 from typing import Any, Dict, List, Optional
+
+from .serialization_utils import json_dumps, json_loads, json_default_serializer
 
 try:
     from .quant_infra import NumpyRingBuffer
@@ -50,6 +53,9 @@ class ProductionQuantSystem:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         cfg = config or {}
 
+        # R13-P2-DEAD-04修复: 添加shutdown标志
+        self._shutdown_requested: bool = False
+
         # ✅ 集成健康检查API（L-P1-2）
         try:
             from ali2026v3_trading.health_check_api import HealthCheckAPI, StructuredJsonlLogger
@@ -61,10 +67,16 @@ class ProductionQuantSystem:
             self.health_check_api = None
             self.structured_logger = None
 
+        # R24-P2-IV-08修复: 验证config中关键数值参数的合理性
+        _adx_period = cfg.get('adx_period', 14)
+        if not isinstance(_adx_period, (int, float)) or _adx_period <= 0:
+            logging.warning("[R24-P2-IV-08] adx_period=%s 无效，回退到默认值14", _adx_period)
+            _adx_period = 14
+
         self.trend_scorer = MultiPeriodTrendScorer(
             periods=tuple(cfg.get('trend_periods', (5, 20, 60))),
             weights=tuple(cfg.get('trend_weights', (0.2, 0.5, 0.3))),
-            adx_period=cfg.get('adx_period', 14),
+            adx_period=_adx_period,
         )
 
         self.iv_pca = IVSurfacePCA(
@@ -160,13 +172,40 @@ class ProductionQuantSystem:
         if not self._initialized:
             return {}
         t0 = time.perf_counter()
-        trend_result = self.trend_scorer.update(high, low, close)
-        vol_result = self.vol_filter.update(return_value)
-        hmm_result = self.hmm.update(return_value)
-        iv_result = self.iv_pca.update(iv_surface) if iv_surface else {}
-        self.coint_scanner.update_price(symbol, close)
-        completed_bar = self.tick_aggregator.update_tick(close, cum_volume, timestamp_ms)
-        self.hmm.run_em_if_needed()
+        # R27-P0-DR-04修复: 每个策略模块调用加异常隔离，防止单策略崩溃影响全局
+        trend_result = {}
+        try:
+            trend_result = self.trend_scorer.update(high, low, close)
+        except Exception as e:
+            logging.warning("[R27-P0-DR-04] trend_scorer异常隔离: %s", e)
+        vol_result = {}
+        try:
+            vol_result = self.vol_filter.update(return_value)
+        except Exception as e:
+            logging.warning("[R27-P0-DR-04] vol_filter异常隔离: %s", e)
+        hmm_result = {}
+        try:
+            hmm_result = self.hmm.update(return_value)
+        except Exception as e:
+            logging.warning("[R27-P0-DR-04] hmm异常隔离: %s", e)
+        iv_result = {}
+        try:
+            iv_result = self.iv_pca.update(iv_surface) if iv_surface else {}
+        except Exception as e:
+            logging.warning("[R27-P0-DR-04] iv_pca异常隔离: %s", e)
+        try:
+            self.coint_scanner.update_price(symbol, close)
+        except Exception as e:
+            logging.warning("[R27-P0-DR-04] coint_scanner异常隔离: %s", e)
+        try:
+            completed_bar = self.tick_aggregator.update_tick(close, cum_volume, timestamp_ms)
+        except Exception as e:
+            completed_bar = None
+            logging.warning("[R27-P0-DR-04] tick_aggregator异常隔离: %s", e)
+        try:
+            self.hmm.run_em_if_needed()
+        except Exception as e:
+            logging.warning("[R27-P0-DR-04] hmm EM异常隔离: %s", e)
 
         if self._last_close is not None and cum_volume > 0:
             tick_vol = max(cum_volume - getattr(self, '_last_cum_volume', 0), 1)
@@ -182,32 +221,41 @@ class ProductionQuantSystem:
             imbalance = net_vol / total_vol if total_vol > 0 else 0.0
             imbalance = max(-1.0, min(1.0, imbalance))
 
-        try:
-            if self._crm is None:
-                import importlib
-                crm_module = importlib.import_module('ali2026v3_trading.参数池.cycle_resonance_module')
-                self._crm = crm_module.get_cycle_resonance_module()
-            hmm_label = hmm_result.get('state_label', 'NORMAL') if isinstance(hmm_result, dict) else 'NORMAL'
-            hmm_posterior = tuple(hmm_result.get('posterior', [0.33, 0.34, 0.33])) if isinstance(hmm_result, dict) else (0.33, 0.34, 0.33)
-            trend_scores = tuple(trend_result.get('period_scores', [0.0, 0.0, 0.0])) if isinstance(trend_result, dict) else (0.0, 0.0, 0.0)
-            trend_dirs = tuple(1.0 if s > 0 else (-1.0 if s < 0 else 0.0) for s in trend_scores)
-            strength = trend_result.get('strength', 0.0) if isinstance(trend_result, dict) else 0.0
-            self._crm.update(
-                hmm_state=hmm_label,
-                hmm_posterior=hmm_posterior,
-                trend_scores=trend_scores,
-                trend_directions=trend_dirs,
-                strength=strength,
-                imbalance=imbalance,
-            )
-        except Exception as e:
-            logging.debug("[ProductionQuantSystem] CRM update skipped: %s", e)
+        # R10-P1-10修复: CRM.update()失败时升级为warning日志并加重试机制
+        _crm_max_retries = 3
+        for _crm_attempt in range(_crm_max_retries):
+            try:
+                if self._crm is None:
+                    import importlib  # R21-CC-P2-03修复: 动态导入 — 每次tick都可能触发，应缓存模块引用
+                    crm_module = importlib.import_module('ali2026v3_trading.param_pool.cycle_resonance_module')
+                    self._crm = crm_module.get_cycle_resonance_module()
+                hmm_label = hmm_result.get('state_label', 'NORMAL') if isinstance(hmm_result, dict) else 'NORMAL'
+                hmm_posterior = tuple(hmm_result.get('posterior', [0.33, 0.34, 0.33])) if isinstance(hmm_result, dict) else (0.33, 0.34, 0.33)
+                trend_scores = tuple(trend_result.get('period_scores', [0.0, 0.0, 0.0])) if isinstance(trend_result, dict) else (0.0, 0.0, 0.0)
+                trend_dirs = tuple(1.0 if s > 0 else (-1.0 if s < 0 else 0.0) for s in trend_scores)
+                strength = trend_result.get('strength', 0.0) if isinstance(trend_result, dict) else 0.0
+                self._crm.update(
+                    hmm_state=hmm_label,
+                    hmm_posterior=hmm_posterior,
+                    trend_scores=trend_scores,
+                    trend_directions=trend_dirs,
+                    strength=strength,
+                    imbalance=imbalance,
+                )
+                break  # 成功则跳出重试循环
+            except Exception as e:
+                if _crm_attempt < _crm_max_retries - 1:
+                    logging.warning("[R10-P1-10] CRM update失败(第%d次), 将重试: %s", _crm_attempt + 1, e)
+                else:
+                    logging.warning("[R10-P1-10] CRM update失败(已重试%d次), 后续状态诊断可能基于过期CRM状态: %s",
+                                    _crm_max_retries, e)
 
         self.atomic_state.capture(
             trend=trend_result, vol_regime=vol_result,
             hmm_state=hmm_result, iv_pca=iv_result,
             current_bar=self.tick_aggregator.get_current_bar(),
         )
+        # P2-R11-15: 性能计数器为全局变量，多策略共享。建议：使用per-strategy计数器或标签化metrics。
         elapsed_us = (time.perf_counter() - t0) * 1e6
         self.health_monitor.record_latency('system_update_tick', elapsed_us)
 
@@ -243,6 +291,41 @@ class ProductionQuantSystem:
             'completed_bar': completed_bar,
         }
 
+    # R30-ARCH-02修复: PQS分析结果桥接到策略决策链路
+    def publish_analysis_to_strategy(self, analysis_result: Dict[str, Any]) -> None:
+        """R30-ARCH-02: 将量化分析结果通过EventBus发布，供策略主链路消费
+
+        发布事件:
+        - 'pqs.trend_updated': 趋势评分变化
+        - 'pqs.hmm_state_changed': HMM状态转移
+        - 'pqs.vol_regime_changed': 波动率区间切换
+        - 'pqs.analysis_snapshot': 完整分析快照
+
+        Args:
+            analysis_result: update_tick()返回的分析结果字典
+        """
+        try:
+            from ali2026v3_trading.event_bus import get_global_event_bus
+            _bus = get_global_event_bus()
+            if _bus is None or getattr(_bus, '_shutdown', False):
+                return
+            _bus.publish('pqs.analysis_snapshot', analysis_result)
+            trend = analysis_result.get('trend', {})
+            if isinstance(trend, dict) and trend.get('strength', 0) != 0:
+                _bus.publish('pqs.trend_updated', trend)
+            hmm = analysis_result.get('hmm_state', {})
+            if isinstance(hmm, dict) and hmm.get('state_label'):
+                _bus.publish('pqs.hmm_state_changed', hmm)
+            vol = analysis_result.get('volatility_regime', {})
+            if isinstance(vol, dict) and vol.get('regime'):
+                _bus.publish('pqs.vol_regime_changed', vol)
+        except Exception as e:
+            logging.debug("[R30-ARCH-02] PQS EventBus发布失败: %s", e)
+
+    def get_latest_analysis(self) -> Dict[str, Any]:
+        """R30-ARCH-02: 获取最新分析结果快照（供策略直接查询）"""
+        return self.atomic_state.get_snapshot() if self._initialized else {}
+
     def periodic_scan(self) -> Dict[str, Any]:
         return {'cointegration': self.coint_scanner.scan()}
 
@@ -267,6 +350,13 @@ class ProductionQuantSystem:
         hmm_state = self.persistence.load('hmm_state')
         if hmm_state:
             restored['hmm_state'] = hmm_state
+        # P1-17修复: 补充读取last_atomic_version和vol_regime（与persist_state对齐）
+        last_atomic_version = self.persistence.load('last_atomic_version')
+        if last_atomic_version is not None:
+            restored['last_atomic_version'] = last_atomic_version
+        vol_regime = self.persistence.load('vol_regime')
+        if vol_regime is not None:
+            restored['vol_regime'] = vol_regime
         return restored
 
     def get_system_status(self) -> Dict[str, Any]:
@@ -314,6 +404,43 @@ class ProductionQuantSystem:
         self.hmm._em_running = False
         if self.hmm._em_thread is not None and self.hmm._em_thread.is_alive():
             self.hmm._em_thread.join(timeout=2.0)
+        # R22-RES-04修复: 扩展shutdown覆盖更多子服务
+        for _attr in ('tick_aggregator', 'health_monitor', 'atomic_state'):
+            _svc = getattr(self, _attr, None)
+            if _svc is not None and hasattr(_svc, 'stop'):
+                try:
+                    _svc.stop()
+                except Exception as _stop_err:
+                    logging.warning("[R22-RES-04] %s.stop()失败: %s", _attr, _stop_err)
+            elif _svc is not None and hasattr(_svc, 'close'):
+                try:
+                    _svc.close()
+                except Exception as _close_err:
+                    logging.warning("[R22-RES-04] %s.close()失败: %s", _attr, _close_err)
+        # R22-RES-04-残留修复: 清理health_check_api和structured_logger
+        if hasattr(self, 'health_check_api') and self.health_check_api is not None:
+            try:
+                if hasattr(self.health_check_api, 'stop_push'):
+                    self.health_check_api.stop_push()
+                    logging.debug("[R22-RES-04-修复] health_check_api.stop_push()已调用")
+            except Exception as _hca_err:
+                logging.warning("[R22-RES-04] health_check_api.stop_push()失败: %s", _hca_err)
+        if hasattr(self, 'structured_logger') and self.structured_logger is not None:
+            try:
+                if hasattr(self.structured_logger, 'close'):
+                    self.structured_logger.close()
+                    logging.debug("[R22-RES-04-修复] structured_logger.close()已调用")
+            except Exception as _sl_err:
+                logging.warning("[R22-RES-04] structured_logger.close()失败: %s", _sl_err)
+        # R33-P0-03修复: EventBus线程池生命周期管理 — 在系统shutdown时主动关闭
+        try:
+            from ali2026v3_trading.event_bus import get_global_event_bus
+            _eb = get_global_event_bus()
+            if hasattr(_eb, 'shutdown'):
+                _eb.shutdown(wait=False)
+                logging.debug("[R33-P0-03] event_bus.shutdown()已调用")
+        except Exception as _eb_err:
+            logging.warning("[R33-P0-03] event_bus.shutdown()失败: %s", _eb_err)
         logging.info("[ProductionQuantSystem] Shutdown complete")
 
 
@@ -424,13 +551,19 @@ def main() -> int:
                         help='运行模式: run=正常运行, status=查看状态, scan=一次性扫描')
     parser.add_argument('--duration', '-d', type=int, default=0,
                         help='运行时长（秒），0表示一直运行直到Ctrl+C')
+    parser.add_argument('--param-version', type=str, default='',
+                        help='参数版本号（如v1.2），对应环境变量PARAM_VERSION，手册15节要求')
 
     args = parser.parse_args()
+
+    if args.param_version:
+        os.environ.setdefault('PARAM_VERSION', args.param_version)
+        logging.info("[ProductionQuantSystem] --param-version=%s 已设置到PARAM_VERSION环境变量", args.param_version)
 
     # 初始化日志
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s - %(message)s',
+        format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s - %(message)s',  # [R22-P2-TIME04]
         handlers=[logging.StreamHandler(sys.stdout)]
     )
 
@@ -453,12 +586,12 @@ def main() -> int:
     try:
         if args.mode == 'status':
             status = pqs.get_system_status()
-            print(json.dumps(status, indent=2, ensure_ascii=False, default=str))
+            print(json_dumps(status, indent=2))
             return 0
 
         elif args.mode == 'scan':
             result = pqs.periodic_scan()
-            print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+            print(json_dumps(result, indent=2))
             return 0
 
         elif args.mode == 'run':
@@ -472,6 +605,10 @@ def main() -> int:
 
             while True:
                 now = time.time()
+                # R13-P2-DEAD-04修复: 检查shutdown标志
+                if hasattr(pqs, '_shutdown_requested') and pqs._shutdown_requested:
+                    logging.info("[ProductionQuantSystem] 收到shutdown请求，退出主循环")
+                    break
 
                 # 周期性扫描
                 if now - last_scan >= scan_interval:

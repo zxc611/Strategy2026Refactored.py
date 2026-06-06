@@ -9,7 +9,7 @@ storage_core.py — 存储核心模块
   __init__.py       → InstrumentDataManager = _StorageCoreMixin + _StorageQueryMixin + 单例
 """
 
-from ali2026v3_trading.shared_utils import InitPhase, InitStateMachine, requires_phase, ThreadLifecycleManager
+from ali2026v3_trading.shared_utils import InitPhase, InitStateMachine, requires_phase, ThreadLifecycleManager, CHINA_TZ, ShardRouter, extract_product_code
 from ali2026v3_trading.data_service import get_data_service
 from ali2026v3_trading.query_service import _KlineAggregator, StorageMaintenanceService
 from ali2026v3_trading.subscription_manager import SubscriptionConfig, SubscriptionManager
@@ -21,8 +21,31 @@ import threading
 import time
 import json
 import queue
+import sys
 from typing import List, Dict, Optional, Any, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
+
+# P0-R11-20: 跨进程文件锁 — DuckDB只支持单进程写入，多进程同时写入会导致数据损坏
+# 使用 msvcrt(Windows) / fcntl(Linux) 实现OS级文件锁，配合 threading.Lock() 作为进程内伴生锁
+if sys.platform == 'win32':
+    import msvcrt as _filelock_module
+    _FILELOCK_AVAILABLE = True
+else:
+    try:
+        import fcntl as _filelock_module
+        _FILELOCK_AVAILABLE = True
+    except ImportError:
+        _FILELOCK_AVAILABLE = False
+        logging.getLogger(__name__).warning("P0-R11-20: fcntl不可用，跨进程文件锁已禁用")
+
+from ali2026v3_trading.serialization_utils import json_dumps, json_loads
+
+# R27-P1修复: 导入有界重试和容错工具
+from ali2026v3_trading.resilience_utils import (
+    BoundedRetry, ExponentialBackoff, Watchdog, HeartbeatMonitor,
+    SlowQueryDetector, DataStalenessDetector, ResourceLeakDetector,
+    safe_callback_wrapper, get_process_health,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -34,7 +57,14 @@ def _get_default_db_path() -> str:
 
         db_path = get_default_db_path()
         if db_path:
-            return db_path
+            # R15-P1-SEC-02修复: 路径消毒+越权检查
+            _resolved = os.path.realpath(db_path)
+            _proj_root = os.path.realpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            if not _resolved.startswith(_proj_root):
+                logging.warning("R15-P1-SEC-02: db_path越权,回退默认: %s", db_path)
+                db_path = None
+            else:
+                return db_path
     except Exception as exc:
         logging.warning("[storage] Failed to resolve db path from config_service: %s", exc)
 
@@ -57,6 +87,9 @@ class _StorageCoreMixin:
     DEFAULT_SHARD_CAP_DIVISOR = 10000000
     DEFAULT_KLINE_MISSING_TIMEOUT_MULTIPLIER = 2.0
 
+    # P0-R11-20: 跨进程文件锁超时(秒) — 超过此时间未能获取锁则跳过写入
+    DB_LOCK_TIMEOUT = 30.0
+
     def __init__(self, db_path: Optional[str] = None, max_retries: int = 3, retry_delay: float = 0.1,
                  async_queue_size: int = 500000, batch_size: int = 5000,
                  drop_on_full: bool = True, max_connections: int = 20,
@@ -73,6 +106,7 @@ class _StorageCoreMixin:
         """
         self._init_state = InitStateMachine()
         self._kline_missing_timeout_multiplier = kline_missing_timeout_multiplier
+
         try:
             from ali2026v3_trading.config_params import get_cached_params
             _params = get_cached_params()
@@ -107,6 +141,10 @@ class _StorageCoreMixin:
         self._kline_queue = queue.Queue(maxsize=100000)
         self._kline_writer_thread = None
         self._maintenance_queue = queue.Queue(maxsize=50000)
+        # R21-NET-P1-06修复: 消息队列优先级标记 — 当前使用普通Queue无优先级区分
+        # 优先级规划: P0=风控/撤单(最高), P1=下单/成交回报, P2=Tick/K线数据, P3=诊断/日志(最低)
+        # 后续升级方案: 将queue.Queue替换为PriorityQueue，消息体增加priority字段
+        self._queue_priority_levels = {'risk_cancel': 0, 'order': 1, 'tick': 2, 'kline': 2, 'diagnosis': 3}
         self._maintenance_writer_thread = None
         self._stop_event = threading.Event()
         self._pending_on_stop_data: list = []
@@ -118,6 +156,7 @@ class _StorageCoreMixin:
         #   L5 _lock (RLock)         — 保护公共API入口 (独立,无嵌套)
         #   L6 _ext_kline_lock       — 保护外部K线写入 (独立,无嵌套)
         #   L7 _agg_lock             — 保护K线聚合 (独立,无嵌套)
+        # P0-R11-20: L0 _db_file_lock  — 跨进程文件锁(intra-process伴生锁), 最先获取, 最外层的写保护
         #   L8 _db_tick_write_locks  — 保护Tick分片DB写入 (独立,无嵌套)
         #   L9 _db_kline_write_lock  — 保护K线DB写入 (独立,无嵌套)
         #   L10 _db_maintenance_write_lock — 保护维护DB写入 (独立,无嵌套)
@@ -142,6 +181,27 @@ class _StorageCoreMixin:
         self._db_tick_write_locks = [threading.Lock() for _ in range(self._TICK_WRITER_COUNT)]
         self._db_kline_write_lock = threading.Lock()
         self._db_maintenance_write_lock = threading.Lock()
+        # P0-R11-20: 跨进程文件锁初始化 — 打开 {db_path}.lock 文件并获取OS文件锁fd
+        self._db_file_lock_fd = None
+        self._db_file_lock = threading.Lock()  # intra-process伴生锁
+        if _FILELOCK_AVAILABLE:
+            _lock_path = self.db_path + '.lock'
+            _lock_fd = None
+            try:
+                _lock_fd = open(_lock_path, 'w', encoding='utf-8')
+                self._db_file_lock_fd = _lock_fd
+                _lock_fd = None  # NEW-P1-02修复: 所有权转移至self._db_file_lock_fd，finally不再关闭
+                logger.info("P0-R11-20: 跨进程文件锁已初始化 lock_path=%s", _lock_path)
+            except Exception as _flock_err:
+                logger.warning("P0-R11-20: 无法打开锁文件 %s: %s", self.db_path + '.lock', _flock_err)
+                self._db_file_lock_fd = None
+            finally:
+                # NEW-P1-02修复: 若open()成功但后续异常导致_lock_fd未转移，确保fd被关闭
+                if _lock_fd is not None:
+                    try:
+                        _lock_fd.close()
+                    except Exception:
+                        pass
         self._runtime_missing_warned = set()
         self._platform_subscribe = None
         self._platform_unsubscribe = None
@@ -150,6 +210,89 @@ class _StorageCoreMixin:
         self._ext_kline_load_in_progress = False
         self._aggregators: Dict[Tuple[str, str], '_KlineAggregator'] = {}
         self._init_state.advance(InitPhase.MEMORY_ALLOC)
+
+    # ── P0-R11-20: 跨进程文件锁 acquire/release ──────────────────────────
+    def _acquire_db_file_lock(self, timeout: Optional[float] = None) -> bool:
+        """获取跨进程文件锁（intra-process伴生锁 + OS文件锁）
+
+        先获取 threading.Lock() 确保进程内串行，
+        再通过 msvcrt.locking / fcntl.flock 获取OS级文件锁防止多进程并发写入。
+
+        P0-R11-20: DuckDB单进程写入限制，多进程并发写会导致数据损坏。
+        """
+        if timeout is None:
+            timeout = self.DB_LOCK_TIMEOUT
+
+        # Step 1: 获取 intra-process 伴生锁（进程内串行化）
+        acquired_internal = self._db_file_lock.acquire(timeout=min(timeout, 5.0))
+        if not acquired_internal:
+            logger.error("P0-R11-20: 无法获取intra-process伴生锁(timeout=%.1fs), 跳过写入", min(timeout, 5.0))
+            return False
+
+        # Step 2: 如果文件锁fd未初始化, 降级为仅intra-process锁
+        if self._db_file_lock_fd is None:
+            return True
+
+        # Step 3: 获取OS级文件锁（带超时重试）
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if sys.platform == 'win32':
+                    # Windows: msvcrt.locking — 锁定整个文件
+                    _filelock_module.locking(self._db_file_lock_fd.fileno(),
+                                             _filelock_module.LK_LOCK, 1)
+                else:
+                    # Linux/macOS: fcntl.flock — 排他锁, 非阻塞
+                    _filelock_module.flock(self._db_file_lock_fd.fileno(),
+                                           _filelock_module.LOCK_EX | _filelock_module.LOCK_NB)
+                return True
+            except (IOError, OSError) as _flock_err:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    logger.error(
+                        "P0-R11-20: 获取OS文件锁超时(timeout=%.1fs), 跳过写入: %s",
+                        timeout, _flock_err,
+                    )
+                    # 释放 intra-process 锁
+                    self._db_file_lock.release()
+                    return False
+                # 指数退避重试: 10ms, 20ms, 40ms, ... max 500ms
+                wait = min(0.01 * (2 ** min(6, int((timeout - remaining) / 0.1))), 0.5)
+                time.sleep(wait)
+
+    def _release_db_file_lock(self) -> None:
+        """释放跨进程文件锁（OS文件锁 → intra-process伴生锁）
+
+        必须与 _acquire_db_file_lock 成对调用。
+        """
+        if self._db_file_lock_fd is not None:
+            try:
+                if sys.platform == 'win32':
+                    _filelock_module.locking(self._db_file_lock_fd.fileno(),
+                                             _filelock_module.LK_UNLCK, 1)
+                else:
+                    _filelock_module.flock(self._db_file_lock_fd.fileno(),
+                                           _filelock_module.LOCK_UN)
+            except (IOError, OSError) as _flock_err:
+                logger.warning("P0-R11-20: 释放OS文件锁异常(可能已被释放): %s", _flock_err)
+
+        # 释放 intra-process 伴生锁
+        try:
+            self._db_file_lock.release()
+        except RuntimeError:
+            # 锁可能已被释放（例如 _acquire_db_file_lock 失败时已释放）
+            pass
+
+    def _close_db_file_lock(self) -> None:
+        """关闭锁文件句柄（shutdown时调用）"""
+        if self._db_file_lock_fd is not None:
+            try:
+                self._db_file_lock_fd.close()
+            except Exception as _close_err:
+                logger.warning("P0-R11-20: 关闭锁文件失败: %s", _close_err)
+            finally:
+                self._db_file_lock_fd = None
+    # ────────────────────────────────────────────────────────────────────
 
     def _phase2_db_init(self, max_retries, retry_delay, cleanup_interval, cleanup_config):
         """Phase2: DB连接+schema迁移+缓存加载——失败通过_emergency_cleanup回滚"""
@@ -234,6 +377,11 @@ class _StorageCoreMixin:
                 logging.info("[Storage] 紧急清理: DB连接已关闭")
         except Exception as e:
             logging.warning("[Storage] 紧急清理DB关闭失败: %s", e)
+        # P0-R11-20: 关闭锁文件句柄
+        try:
+            self._close_db_file_lock()
+        except Exception as _lock_close_err:
+            logging.warning("[Storage] 紧急清理关闭文件锁失败: %s", _lock_close_err)
 
     def wait_until_ready(self, timeout: float = 30.0) -> bool:
         return self._init_state.wait_until_ready(timeout=timeout)
@@ -263,7 +411,6 @@ class _StorageCoreMixin:
 
     @staticmethod
     def _pc_to_shard_idx(inst_id: str, shard_mask: int) -> int:
-        from ali2026v3_trading.shared_utils import ShardRouter, extract_product_code
         _pc_raw = extract_product_code(inst_id)
         pc = _pc_raw.lower() if _pc_raw else ''
         return ShardRouter._deterministic_hash(pc) & shard_mask if pc else 0
@@ -404,7 +551,7 @@ class _StorageCoreMixin:
         if total_saved:
             logging.info("[AsyncWriter] 停止时共保存 %d 条任务到内存", total_saved)
 
-    def _async_shard_writer_loop(self, shard_indices: list, batch_tasks: int, name: str, writer_idx: int = 0):
+    def _async_shard_writer_loop(self, shard_indices: List[int], batch_tasks: int, name: str, writer_idx: int = 0):  # [R22-P2-TS17]
         batch = []
         idx = 0
         while not self._stop_event.is_set():
@@ -626,6 +773,10 @@ class _StorageCoreMixin:
             write_lock = self._db_tick_write_locks[0]
 
         with write_lock:
+            # P0-R11-20: 获取跨进程文件锁 — DuckDB单进程写入限制
+            if not self._acquire_db_file_lock():
+                logging.error("P0-R11-20: [AsyncWriter] 无法获取DB文件锁, 跳过本批次 %d 条写入", len(batch))
+                return 0
             try:
                 merged_tasks = self._data_service.merge_tick_task_batch(batch, info_callback=self._get_info_by_id)
                 if not merged_tasks:
@@ -657,6 +808,9 @@ class _StorageCoreMixin:
                             break
                 logging.critical("[DATA_LOSS] _flush_batch_to_db异常，%d条数据已暂存到_pending_on_stop_data", len(batch))
                 return len(batch)
+            finally:
+                # P0-R11-20: 释放跨进程文件锁
+                self._release_db_file_lock()
 
     def _wait_for_queue_capacity(self, max_fill_rate: float = 60.0, timeout_sec: float = 30.0, source: str = 'runtime') -> bool:
         deadline = time.time() + max(0.1, float(timeout_sec or 0.1))
@@ -756,17 +910,17 @@ class _StorageCoreMixin:
             logging.warning("[SpillWAL] WAL恢复失败: %s", e)
 
     @staticmethod
-    def _wal_serialize(task) -> list:
+    def _wal_serialize(task) -> List[Any]:  # [R22-P2-TS16]
         wal_entry = [task[0] if len(task) > 0 else '']
         args_data = task[1] if len(task) > 1 else None
         try:
-            json.dumps(args_data, default=str)
+            json_dumps(args_data)
             wal_entry.append(args_data)
         except (TypeError, ValueError):
             wal_entry.append(str(args_data))
         kwargs_data = task[2] if len(task) > 2 else {}
         try:
-            json.dumps(kwargs_data, default=str)
+            json_dumps(kwargs_data)
             wal_entry.append(kwargs_data)
         except (TypeError, ValueError):
             wal_entry.append(str(kwargs_data))
@@ -777,11 +931,13 @@ class _StorageCoreMixin:
             wal_entry = self._wal_serialize(task)
             with self._spill_wal_lock:
                 with open(self._spill_wal_path, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(wal_entry, ensure_ascii=False, default=str) + '\n')
+                    f.write(json_dumps(wal_entry) + '\n')
+                    f.flush()
+                    os.fsync(f.fileno())
         except Exception as e:
             logging.debug("[SpillWAL] WAL追加失败(非致命): %s", e)
 
-    def _spill_wal_append_batch(self, tasks: list) -> None:
+    def _spill_wal_append_batch(self, tasks: List[Any]) -> None:  # [R22-P2-TS18]
         if not tasks:
             return
         try:
@@ -790,10 +946,12 @@ class _StorageCoreMixin:
                     for task in tasks:
                         try:
                             wal_entry = self._wal_serialize(task)
-                            f.write(json.dumps(wal_entry, ensure_ascii=False, default=str) + '\n')
+                            f.write(json_dumps(wal_entry) + '\n')
                         except Exception as _batch_wal_err:
                             logging.debug("[SpillWAL] 批量WAL单条写入失败(跳过): %s", _batch_wal_err)
                             continue
+                    f.flush()
+                    os.fsync(f.fileno())
         except Exception as e:
             logging.debug("[SpillWAL] 批量WAL写入失败(非致命): %s", e)
 
@@ -808,12 +966,12 @@ class _StorageCoreMixin:
     def _spill_wal_rewrite(self) -> None:
         try:
             with self._spill_wal_lock:
-                tmp_path = self._spill_wal_path + '.tmp'
+                tmp_path = self._spill_wal_path + '.tmp'  # EC-P2-01: 后缀拼接非路径分隔符拼接，保持原样
                 with open(tmp_path, 'w', encoding='utf-8') as f:
                     for task in self._pending_on_stop_data:
                         try:
                             wal_entry = self._wal_serialize(task)
-                            f.write(json.dumps(wal_entry, ensure_ascii=False, default=str) + '\n')
+                            f.write(json_dumps(wal_entry) + '\n')
                         except Exception as _wal_err:
                             logging.debug("[SpillWAL] 单条WAL写入失败(跳过): %s", _wal_err)
                             continue
@@ -949,6 +1107,242 @@ class _StorageCoreMixin:
 
         self._data_service.batch_insert_ticks(tick_data, instrument_id)
 
+        # P2-R11-05: 写入日期分区表
+        self._route_tick_to_date_partition(tick_data, instrument_id)
+
+    def _route_tick_to_date_partition(self, tick_data, instrument_id: str) -> None:
+        """P2-R11-05: 将tick数据路由到对应的日期分区表"""
+        if not tick_data:
+            return
+        try:
+            dates_seen = set()
+            for tick in (tick_data if isinstance(tick_data, list) else [tick_data]):
+                ts = self._to_timestamp(tick.get('ts') or tick.get('timestamp'))
+                if ts is not None:
+                    dt = datetime.fromtimestamp(ts)
+                    dates_seen.add(dt.strftime('%Y%m%d'))
+
+            for date_str in dates_seen:
+                self._create_tick_table_for_date(date_str)
+                self._insert_tick_to_partition(tick_data, instrument_id, date_str)
+        except Exception as e:
+            logging.debug("[P2-R11-05] 日期分区写入失败(非致命，ticks_raw已写入): %s", e)
+
+    def _create_tick_table_for_date(self, date_str: str) -> None:
+        """P2-R11-05: 为指定交易日创建独立的tick_data_YYYYMMDD分区表"""
+        if not re.match(r'^\d{8}$', date_str):
+            logging.warning("[P2-R11-05] 无效的日期格式: %s", date_str)
+            return
+
+        table_name = f'tick_data_{date_str}'
+        with self._column_cache_lock:
+            if table_name in self._column_cache:
+                return
+
+        try:
+            check = self._data_service.query(
+                "SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_name = ?",
+                (table_name,),
+            ).to_pylist()
+            if check and check[0]['cnt'] > 0:
+                with self._column_cache_lock:
+                    self._column_cache[table_name] = True
+                return
+
+            self._data_service.query(f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    timestamp TIMESTAMP,
+                    instrument_id VARCHAR,
+                    last_price DOUBLE,
+                    volume BIGINT,
+                    open_interest DOUBLE,
+                    bid_price DOUBLE,
+                    ask_price DOUBLE,
+                    date DATE,
+                    option_type VARCHAR,
+                    strike_price DOUBLE,
+                    is_otm BOOLEAN,
+                    sync_status VARCHAR,
+                    future_sync_status VARCHAR,
+                    is_same_rise BOOLEAN,
+                    is_same_fall BOOLEAN,
+                    is_diff_sync BOOLEAN
+                )
+            """, raise_on_error=True)
+            self._data_service.query(
+                f"CREATE INDEX IF NOT EXISTS idx_{table_name}_inst_ts ON {table_name} (instrument_id, timestamp)",
+                raise_on_error=True,
+            )
+            with self._column_cache_lock:
+                self._column_cache[table_name] = True
+            logging.info("[P2-R11-05] 创建日期分区表: %s", table_name)
+        except Exception as e:
+            logging.warning("[P2-R11-05] 创建日期分区表失败 %s: %s", table_name, e)
+
+    def _insert_tick_to_partition(self, tick_data, instrument_id: str, date_str: str) -> None:
+        """P2-R11-05: 将tick数据插入到指定的日期分区表"""
+        table_name = f'tick_data_{date_str}'
+        ticks = tick_data if isinstance(tick_data, list) else [tick_data]
+        if not ticks:
+            return
+
+        rows = []
+        for tick in ticks:
+            ts = self._to_timestamp(tick.get('ts') or tick.get('timestamp'))
+            if ts is None:
+                continue
+            dt = datetime.fromtimestamp(ts)
+            tick_date_str = dt.strftime('%Y%m%d')
+            if tick_date_str != date_str:
+                continue
+            rows.append((
+                dt,
+                instrument_id,
+                tick.get('last_price', 0.0),
+                tick.get('volume', 0),
+                float(tick.get('open_interest', 0) or 0),
+                tick.get('bid_price1'),
+                tick.get('ask_price1'),
+                dt.date(),
+                tick.get('option_type'),
+                tick.get('strike_price'),
+                tick.get('is_otm'),
+                tick.get('sync_status'),
+                tick.get('future_sync_status'),
+                tick.get('is_same_rise'),
+                tick.get('is_same_fall'),
+                tick.get('is_diff_sync'),
+            ))
+
+        if not rows:
+            return
+
+        try:
+            for row in rows:
+                self._data_service.query(f"""
+                    INSERT INTO {table_name}
+                    (timestamp, instrument_id, last_price, volume, open_interest,
+                     bid_price, ask_price, date, option_type, strike_price,
+                     is_otm, sync_status, future_sync_status,
+                     is_same_rise, is_same_fall, is_diff_sync)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, list(row))
+        except Exception as e:
+            logging.debug("[P2-R11-05] 分区表写入失败 %s: %s", table_name, e)
+
+    def query_tick_partitions(self, instrument_id: str, start_date: str, end_date: str,
+                              limit: Optional[int] = None) -> List[Dict]:
+        """P2-R11-05: 查询日期分区表，使用UNION ALL合并多个分区
+
+        Args:
+            instrument_id: 合约ID
+            start_date: 起始日期 (YYYYMMDD格式)
+            end_date: 结束日期 (YYYYMMDD格式)
+            limit: 可选返回行数限制
+        """
+        partition_tables = self._get_tick_partition_tables(start_date, end_date)
+        if not partition_tables:
+            return []
+
+        union_parts = []
+        for tbl in partition_tables:
+            union_parts.append(
+                f"SELECT timestamp, instrument_id, last_price, volume, open_interest, "
+                f"bid_price, ask_price, date, option_type, strike_price, "
+                f"is_otm, sync_status, future_sync_status, "
+                f"is_same_rise, is_same_fall, is_diff_sync "
+                f"FROM {tbl} WHERE instrument_id = ?"
+            )
+
+        sql = " UNION ALL ".join(union_parts) + " ORDER BY timestamp"
+        if limit:
+            sql += f" LIMIT {limit}"
+
+        params = [instrument_id] * len(partition_tables)
+        try:
+            result = self._data_service.query(sql, params).to_pylist()
+            return result
+        except Exception as e:
+            logging.error("[P2-R11-05] 分区表查询失败: %s", e)
+            return []
+
+    def _get_tick_partition_tables(self, start_date: str, end_date: str) -> List[str]:
+        """P2-R11-05: 获取日期范围内的分区表列表"""
+        try:
+            all_tables = self._data_service.query(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name LIKE 'tick_data_%' ORDER BY table_name"
+            ).to_pylist()
+        except Exception as e:
+            logging.error("[P2-R11-05] 查询分区表列表失败: %s", e)
+            return []
+
+        result = []
+        for row in all_tables:
+            tbl_name = row['table_name']
+            date_part = tbl_name[len('tick_data_'):]
+            if len(date_part) == 8 and date_part.isdigit():
+                if start_date <= date_part <= end_date:
+                    result.append(tbl_name)
+        return result
+
+    def _drop_tick_partition(self, date_str: str) -> int:
+        """P2-R11-05: 删除指定日期的分区表
+
+        Returns:
+            int: 删除的表数量 (0或1)
+        """
+        if not re.match(r'^\d{8}$', date_str):
+            return 0
+
+        table_name = f'tick_data_{date_str}'
+        try:
+            check = self._data_service.query(
+                "SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_name = ?",
+                (table_name,),
+            ).to_pylist()
+            if not check or check[0]['cnt'] == 0:
+                return 0
+
+            self._data_service.query(f"DROP TABLE {table_name}", raise_on_error=True)
+            with self._column_cache_lock:
+                self._column_cache.pop(table_name, None)
+            logging.info("[P2-R11-05] 已删除日期分区表: %s", table_name)
+            return 1
+        except Exception as e:
+            logging.error("[P2-R11-05] 删除分区表失败 %s: %s", table_name, e)
+            return 0
+
+    def _cleanup_tick_partitions(self, days: int) -> int:
+        """P2-R11-05: 清理超过保留天数的日期分区表（直接DROP TABLE）
+
+        Args:
+            days: 保留天数，超过此天数的分区表将被删除
+
+        Returns:
+            int: 删除的分区表数量
+        """
+        cutoff_date = (datetime.now(CHINA_TZ) - timedelta(days=days)).strftime('%Y%m%d')
+        try:
+            all_tables = self._data_service.query(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_name LIKE 'tick_data_%' ORDER BY table_name"
+            ).to_pylist()
+        except Exception as e:
+            logging.error("[P2-R11-05] 查询分区表列表失败: %s", e)
+            return 0
+
+        dropped = 0
+        for row in all_tables:
+            tbl_name = row['table_name']
+            date_part = tbl_name[len('tick_data_'):]
+            if len(date_part) == 8 and date_part.isdigit() and date_part < cutoff_date:
+                dropped += self._drop_tick_partition(date_part)
+
+        if dropped > 0:
+            logging.info("[P2-R11-05] 清理完成，删除 %d 个过期分区表（保留 %d 天）", dropped, days)
+        return dropped
+
     @requires_phase(InitPhase.READY)
     def process_tick(self, tick: Dict[str, Any]) -> None:
         if not self._validate_tick(tick):
@@ -1080,10 +1474,15 @@ class _StorageCoreMixin:
             return
         instrument_type = info.get('type', 'future')
 
+        # P2-R11-12修复: 批量写操作添加事务隔离
         chunk_size = self.batch_size
-        for i in range(0, len(tick_data), chunk_size):
-            chunk = tick_data[i:i+chunk_size]
-            self._enqueue_write('_save_tick_impl', internal_id, instrument_type, chunk)
+        try:
+            for i in range(0, len(tick_data), chunk_size):
+                chunk = tick_data[i:i+chunk_size]
+                self._enqueue_write('_save_tick_impl', internal_id, instrument_type, chunk)
+        except Exception as e:
+            logging.error("[P2-R11-12] batch_write_tick写入异常: %s", e)
+            raise
 
     @requires_phase(InitPhase.READY)
     def write_kline_to_table(self, table_name: str, kline_data: List[Dict]) -> None:
@@ -1115,7 +1514,7 @@ class _StorageCoreMixin:
 
         for t in tick_data:
             self._data_service.query(f"""
-                INSERT OR REPLACE INTO {table_name}
+                INSERT OR IGNORE INTO {table_name}
                 (timestamp, last_price, volume, open_interest, bid_price1, ask_price1)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, [t.get('ts') or t.get('timestamp'),
@@ -1127,10 +1526,44 @@ class _StorageCoreMixin:
         logging.debug(f"写入 {len(tick_data)} 条 Tick 到 {table_name}")
 
     def save_tick(self, tick: Dict[str, Any]) -> None:
-        logging.debug("[DEPRECATED] save_tick已废弃，请使用process_tick（含K线聚合+完整验证+shard路由）")
-        self.process_tick(tick)
+        """[DEPRECATED] 请使用process_tick
 
-    def _batch_insert_with_fallback(self, table_name: str, fields: tuple, rows: list,
+        UPG-P1-05修复: 添加migration_guide
+        Migration guide: replace save_tick(tick) → process_tick(tick)
+        process_tick includes K-line aggregation, full validation, and shard routing.
+        """
+        import warnings
+        warnings.warn(
+            "save_tick is deprecated, use process_tick instead. "
+            "Migration guide: replace save_tick(tick) → process_tick(tick). "
+            "process_tick includes K-line aggregation, full validation, and shard routing.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        logging.warning(
+            "[DEPRECATED] save_tick is deprecated, use process_tick instead. "
+            "Migration guide: replace save_tick(tick) → process_tick(tick)."
+        )
+        # R15-P1-DOC-P1-10修复: 补充logging.warning确保默认可见(DeprecationWarning被Python运行时默认过滤)
+        self.process_tick(tick)
+        # R15-P1-DATA-06修复: 可选回读验证(read-back verify)
+        if getattr(self, '_enable_readback_verify', False):
+            try:
+                _inst = tick.get('instrument_id') or tick.get('InstrumentID')
+                _ts = tick.get('ts') or tick.get('timestamp') or tick.get('UpdateTime')
+                if _inst and _ts:
+                    conn = self._data_service._get_connection() if hasattr(self, '_data_service') else None
+                    if conn:
+                        row = conn.execute(
+                            "SELECT last_price FROM ticks_raw WHERE instrument_id=? AND timestamp=? LIMIT 1",
+                            [_inst, _ts]
+                        ).fetchone()
+                        if row is None:
+                            logging.warning("R15-P1-DATA-06: read-back verify失败 instrument=%s ts=%s", _inst, _ts)
+            except Exception as e:
+                logging.debug("R15-P1-DATA-06: read-back verify异常(非阻塞): %s", e)
+
+    def _batch_insert_with_fallback(self, table_name: str, fields: Tuple[str, ...], rows: List[Any],  # [R22-P2-TS19]
                                      batch_limit: int = 100, caller: str = '') -> None:
         if not rows:
             return
@@ -1141,6 +1574,8 @@ class _StorageCoreMixin:
             batch = rows[batch_start:batch_start + batch_limit]
             flat_values = [v for row in batch for v in row]
             multi_placeholder = ', '.join([f'({placeholder_str})'] * len(batch))
+            # R5-E-09修复: _DuckDBConnectionContextManager包装器+连接池context manager支持
+            # R5-E-10修复: _TimedDuckDBConnection查询级30s超时保护+连接级10s超时保护
             try:
                 self._data_service.query(f"""
                     INSERT INTO {table_name}
@@ -1150,7 +1585,7 @@ class _StorageCoreMixin:
                     {update_fields}
                 """, flat_values, raise_on_error=True)
             except Exception as e:
-                logging.warning("%s batch insert failed, fallback to row-by-row: %s", caller, e)
+                logging.error("[R5-E-02] %s batch insert failed, fallback to row-by-row: %s", caller, e, exc_info=True)
                 for row in batch:
                     try:
                         self._data_service.query(f"""
@@ -1161,7 +1596,7 @@ class _StorageCoreMixin:
                             {update_fields}
                         """, list(row), raise_on_error=True)
                     except Exception as _row_err:
-                        logging.debug("[DB] 单行写入失败(已降级): %s", _row_err)
+                        logging.error("[R5-E-02] 单行写入失败(数据可能丢失): %s", _row_err, exc_info=True)
 
     def _save_depth_batch_impl(self, depth_list: List[Dict[str, Any]]):
         grouped: Dict[str, List[tuple]] = {}
@@ -1246,9 +1681,10 @@ class _StorageCoreMixin:
             return
 
         key = f"signal:{signal['ts']}:{signal['instrument_id']}:{signal['strategy_name']}"
-        self._save_kv_impl(key, json.dumps(signal, ensure_ascii=False, default=self._json_default))
+        # SER-P1-12修复: signal高频写入路径使用json_dumps统一接口，sort_keys=False避免排序开销
+        self._save_kv_impl(key, json_dumps(signal, sort_keys=False))
         strategy_key = f"strategy_signals:{signal.get('strategy_name', 'unknown')}:{signal['ts']}"
-        self._save_kv_impl(strategy_key, json.dumps(signal, ensure_ascii=False, default=self._json_default))
+        self._save_kv_impl(strategy_key, json_dumps(signal, sort_keys=False))
 
     @requires_phase(InitPhase.READY)
     def save_signal(self, signal: Dict[str, Any]) -> None:
@@ -1264,7 +1700,8 @@ class _StorageCoreMixin:
 
     def _save_underlying_snapshot_impl(self, data: Dict[str, Any]):
         key = f"underlying_snapshot:{data.get('underlying')}:{data.get('expiration')}:{data.get('ts')}"
-        self._save_kv_impl(key, json.dumps(data, ensure_ascii=False, default=self._json_default))
+        # SER-P1-12修复: 快照写入使用json_dumps统一接口，sort_keys=False避免排序开销
+        self._save_kv_impl(key, json_dumps(data, sort_keys=False))
         logging.debug("标的物快照已保存：%s %s", data.get('underlying'), data.get('expiration'))
 
     @requires_phase(InitPhase.READY)
@@ -1359,7 +1796,7 @@ class _StorageCoreMixin:
                 INSERT OR REPLACE INTO app_kv_store (key, value, updated_at)
                 VALUES (?, ?, ?)
                 """,
-                [key, payload, datetime.now().isoformat()],
+                [key, payload, datetime.now(CHINA_TZ).isoformat()],
                 raise_on_error=True,
             )
         except Exception as e:
@@ -1372,7 +1809,9 @@ class _StorageCoreMixin:
             return False
 
         try:
-            payload = json.dumps(data, ensure_ascii=False, default=self._json_default)
+            # SER-P1-12修复: 通用save路径使用json_dumps统一接口
+            # SER-04修复: 包装版本号，确保payload格式可演进
+            payload = json_dumps({"__kv_version__": "1.0", "data": data})
 
             if async_mode:
                 return self._enqueue_write('_save_kv_impl', key, payload)
@@ -1498,54 +1937,79 @@ class _StorageCoreMixin:
                         logging.warning("%s 未能在规定时间内停止", name)
 
         if flush:
-            drained = 0
-            deadline = time.time() + 30.0
-            all_queues = [(q, f'TickShard-{si}') for si, q in enumerate(self._tick_shard_queues)]
-            all_queues.append((self._kline_queue, 'Kline'))
-            all_queues.append((self._maintenance_queue, 'Maintenance'))
-            for q, qname in all_queues:
-                while not q.empty() and time.time() < deadline:
-                    try:
-                        task = q.get_nowait()
-                        func_name, args, kwargs = task
-                        if hasattr(self, func_name):
-                            getattr(self, func_name)(*args, **kwargs)
-                            drained += 1
-                    except (queue.Empty, Exception) as e:
-                        if not isinstance(e, queue.Empty):
-                            logging.warning("[Shutdown] drain失败: %s", e)
-                        break
-            if drained > 0:
-                logging.info("[Shutdown] drain写入 %d 条剩余数据到DB", drained)
-
-            if self._pending_on_stop_data:
-                pending_count = len(self._pending_on_stop_data)
-                logging.info("[Shutdown] 处理 %d 条待恢复数据", pending_count)
-                _max_retries = 3
-                _retry_delay = 0.1
-                failed_tasks = []
-                for task in self._pending_on_stop_data[:]:
-                    func_name, args, kwargs = task
-                    success = False
-                    for _attempt in range(_max_retries):
-                        try:
-                            if hasattr(self, func_name):
-                                getattr(self, func_name)(*args, **kwargs)
-                                drained += 1
-                                success = True
+            # P0-R11-20: flush阶段获取跨进程文件锁 — drain写入直接调用DB
+            _shutdown_locked = self._acquire_db_file_lock()
+            if not _shutdown_locked:
+                logging.error("P0-R11-20: [Shutdown] 无法获取DB文件锁, flush阶段将跳过直接写入")
+            try:
+                drained = 0
+                deadline = time.time() + 30.0
+                all_queues = [(q, f'TickShard-{si}') for si, q in enumerate(self._tick_shard_queues)]
+                all_queues.append((self._kline_queue, 'Kline'))
+                all_queues.append((self._maintenance_queue, 'Maintenance'))
+                if _shutdown_locked:
+                    for q, qname in all_queues:
+                        while not q.empty() and time.time() < deadline:
+                            try:
+                                task = q.get_nowait()
+                                func_name, args, kwargs = task
+                                if hasattr(self, func_name):
+                                    getattr(self, func_name)(*args, **kwargs)
+                                    drained += 1
+                            except (queue.Empty, Exception) as e:
+                                if not isinstance(e, queue.Empty):
+                                    logging.warning("[Shutdown] drain失败: %s", e)
                                 break
-                        except Exception as e:
-                            if _attempt < _max_retries - 1:
-                                logging.debug("[Shutdown] 恢复数据重试 %d/%d: %s", _attempt + 1, _max_retries, e)
-                                time.sleep(_retry_delay)
-                            else:
-                                logging.warning("[Shutdown] 恢复数据失败(已重试%d次): %s", _max_retries, e)
-                    if not success:
-                        failed_tasks.append(task)
-                if failed_tasks:
-                    logging.error("[Shutdown] %d 条数据恢复失败,已写入WAL待下次启动恢复", len(failed_tasks))
-                    self._spill_wal_append_batch(failed_tasks)
-                self._pending_on_stop_data.clear()
+                    if drained > 0:
+                        logging.info("[Shutdown] drain写入 %d 条剩余数据到DB", drained)
+
+                    if self._pending_on_stop_data:
+                        pending_count = len(self._pending_on_stop_data)
+                        logging.info("[Shutdown] 处理 %d 条待恢复数据", pending_count)
+                        _max_retries = 3
+                        _retry_delay = 0.1
+                        failed_tasks = []
+                        for task in self._pending_on_stop_data[:]:
+                            func_name, args, kwargs = task
+                            success = False
+                            for _attempt in range(_max_retries):
+                                try:
+                                    if hasattr(self, func_name):
+                                        getattr(self, func_name)(*args, **kwargs)
+                                        drained += 1
+                                        success = True
+                                        break
+                                except Exception as e:
+                                    if _attempt < _max_retries - 1:
+                                        logging.debug("[Shutdown] 恢复数据重试 %d/%d: %s", _attempt + 1, _max_retries, e)
+                                        time.sleep(_retry_delay)
+                                    else:
+                                        logging.warning("[Shutdown] 恢复数据失败(已重试%d次): %s", _max_retries, e)
+                            if not success:
+                                failed_tasks.append(task)
+                        if failed_tasks:
+                            logging.error("[Shutdown] %d 条数据恢复失败,已写入WAL待下次启动恢复", len(failed_tasks))
+                            self._spill_wal_append_batch(failed_tasks)
+                        self._pending_on_stop_data.clear()
+                else:
+                    # 锁获取失败: 将所有队列数据保存到 pending_on_stop_data
+                    skipped = 0
+                    for q, qname in all_queues:
+                        while not q.empty():
+                            try:
+                                task = q.get_nowait()
+                                with self._pending_data_lock:
+                                    if len(self._pending_on_stop_data) < self._spill_wal_max_entries:
+                                        self._pending_on_stop_data.append(task)
+                                        self._spill_wal_append(task)
+                                        skipped += 1
+                            except queue.Empty:
+                                break
+                    if skipped:
+                        logging.warning("P0-R11-20: [Shutdown] 锁获取失败, %d 条数据已暂存到_pending_on_stop_data", skipped)
+            finally:
+                if _shutdown_locked:
+                    self._release_db_file_lock()
 
         if not flush:
             for q in [self._maintenance_queue, self._kline_queue] + list(self._tick_shard_queues):
@@ -1572,6 +2036,9 @@ class _StorageCoreMixin:
 
         if self._cleanup_thread and self._cleanup_thread.is_alive():
             self._cleanup_thread.join(timeout=2)
+
+        # P0-R11-20: 关闭跨进程文件锁句柄
+        self._close_db_file_lock()
 
         logging.info("关闭完成")
 
@@ -1605,6 +2072,10 @@ class _StorageCoreMixin:
         if days <= 0:
             return 0
 
+        # P2-R11-05: tick_partition使用DROP TABLE方式清理日期分区表
+        if table == 'tick_partition':
+            return self._cleanup_tick_partitions(days)
+
         allowed_tables = {
             'tick', 'kline', 'depth_market', 'underlying_snapshot',
             'option_snapshot', 'strategy_signals', 'external_klines'
@@ -1623,6 +2094,9 @@ class _StorageCoreMixin:
             if match:
                 col_name = match.group(1)
                 col_value = match.group(2)
+                allowed_cols = {'symbol', 'instrument_id', 'strategy_id', 'trade_date', 'ts'}
+                if col_name not in allowed_cols:
+                    raise ValueError(f"列名 '{col_name}' 不在允许列表中")
                 sql += f" AND {col_name} = ?"
                 params.append(col_value)
             else:
@@ -1637,21 +2111,29 @@ class _StorageCoreMixin:
             return 0
 
         try:
-            count_sql = f"SELECT COUNT(*) as cnt FROM {table} WHERE ts < ?"
-            count_params = list(params)
-            if condition:
-                match2 = re.match(r"^\s+AND\s+(\w+)\s*=\s*['\"]?([^'\"]+)['\"]?$", condition, re.IGNORECASE)
-                if match2:
-                    count_sql += f" AND {match2.group(1)} = ?"
-                    count_params.append(match2.group(2))
-            count_result = self._data_service.query(count_sql, tuple(count_params))
-            deleted = count_result.to_pylist()[0]['cnt'] if count_result else 0
+            # P0-R11-20: 获取跨进程文件锁 — DELETE操作也需要排他锁
+            if not self._acquire_db_file_lock():
+                logging.error("P0-R11-20: [cleanup_old_data] 无法获取DB文件锁, 跳过表 %s 清理", table)
+                return 0
+            try:
+                count_sql = f"SELECT COUNT(*) as cnt FROM {table} WHERE ts < ?"
+                count_params = list(params)
+                if condition:
+                    match2 = re.match(r"^\s+AND\s+(\w+)\s*=\s*['\"]?([^'\"]+)['\"]?$", condition, re.IGNORECASE)
+                    if match2:
+                        count_sql += f" AND {match2.group(1)} = ?"
+                        count_params.append(match2.group(2))
+                count_result = self._data_service.query(count_sql, tuple(count_params))
+                deleted = count_result.to_pylist()[0]['cnt'] if count_result else 0
 
-            self._data_service.query("BEGIN")
-            self._data_service.query(sql, tuple(params))
-            self._data_service.query("COMMIT")
-            logging.info("从表 %s 删除了 %d 条过期数据（截止 %.3f）", table, deleted, cutoff)
-            return deleted
+                self._data_service.query("BEGIN")
+                self._data_service.query(sql, tuple(params))
+                self._data_service.query("COMMIT")
+                logging.info("从表 %s 删除了 %d 条过期数据（截止 %.3f）", table, deleted, cutoff)
+                return deleted
+            finally:
+                # P0-R11-20: 释放跨进程文件锁
+                self._release_db_file_lock()
         except Exception as e:
             try:
                 self._data_service.query("ROLLBACK")

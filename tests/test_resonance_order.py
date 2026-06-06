@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.参数池.cycle_resonance_module import (
+from ali2026v3_trading.param_pool.cycle_resonance_module import (
     CycleResonanceModule,
     CycleResonanceOutput,
     RiskSurfaceAdjustment,

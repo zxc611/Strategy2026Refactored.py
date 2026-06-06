@@ -9,19 +9,51 @@
 - WAL截断
 - 分表同步
 """
-import pyarrow as pa
+try:
+    import pyarrow as pa
+except ImportError:
+    pa = None
+import errno
 import logging
 import os
 import time
 import threading
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
+from ali2026v3_trading.resilience_utils import is_disk_full_error
 
 logger = logging.getLogger(__name__)
 
 
 class DataWriterMixin:
     """数据写入与upsert方法Mixin - 由DataService组合使用"""
+
+    # R15-P1-RES-07修复: DB写操作失败重试方法
+    # [ID-P1-07-FIX] 批量写入失败重试去重: 已写入行跳过逻辑
+    def _db_write_retry(self, write_func, max_retries: int = 3, written_tracker: set = None):
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                return write_func(skip_rows=written_tracker)
+            except OSError as _os_err:
+                # P1-16修复: ENOSPC不可重试，立即抛出
+                if getattr(_os_err, 'errno', None) == errno.ENOSPC:
+                    logging.critical("[P1-16] 磁盘空间不足，DB写入不可重试: %s", _os_err)
+                    raise
+                last_exc = _os_err
+                if attempt < max_retries - 1:
+                    import time as _t
+                    _delay = min(0.5 * (2 ** attempt), 5.0)
+                    logging.warning("R15-P1-RES-07: DB写失败第%d次, %.1fs后重试: %s", attempt + 1, _delay, _os_err)
+                    _t.sleep(_delay)
+            except Exception as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    import time as _t
+                    _delay = min(0.5 * (2 ** attempt), 5.0)
+                    logging.warning("R15-P1-RES-07: DB写失败第%d次, %.1fs后重试: %s", attempt + 1, _delay, e)
+                    _t.sleep(_delay)
+        raise last_exc
 
     def _enrich_tick_option_metadata(self, ticks_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """复用统一解析器，为批量 Tick 插入补齐期权元数据。
@@ -139,7 +171,9 @@ class DataWriterMixin:
                     else:
                         ts_raw = ts_raw[:dot_idx]
                 ts = datetime.fromisoformat(ts_raw).timestamp()
-                dt = datetime.fromtimestamp(ts)
+                # R23-P1-10修复: 添加时区参数，确保时间转换一致性
+                from datetime import timezone
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 normalized_ticks.append({
                     'timestamp': dt,
                     'instrument_id': instrument_id,
@@ -262,6 +296,7 @@ class DataWriterMixin:
                     INSERT INTO ticks_raw ({columns_str})
                     SELECT {columns_str}
                     FROM temp_ticks
+                    ON CONFLICT (instrument_id, timestamp) DO NOTHING
                 """)
                 conn.unregister('temp_ticks')
                 if not in_transaction:
@@ -275,10 +310,30 @@ class DataWriterMixin:
                 logger.error(f"Arrow batch insert failed, rolled back: {e}")
                 if self._is_fatal_database_error(e):
                     self._mark_connection_unhealthy()
+                    # R30-P0-08修复: FATAL错误后尝试降级到内存数据库
+                    try:
+                        self._handle_fatal_db_error(e)
+                    except Exception as hfe:
+                        logger.warning("[R30-P0-08] 降级处理失败: %s", hfe)
                 raise
             
             if row_count >= 100:
                 logger.info(f"Batch inserted {row_count} ticks via Arrow")
+
+            # R33-P0-07修复: 成功插入后可选归档到DuckDBTickStorage
+            try:
+                if isinstance(ticks_data, list) and len(ticks_data) > 0:
+                    import pandas as pd
+                    _archive_df = pd.DataFrame(ticks_data)
+                elif isinstance(ticks_data, pa.Table):
+                    _archive_df = ticks_data.to_pandas()
+                else:
+                    _archive_df = None
+                if _archive_df is not None and len(_archive_df) > 0:
+                    self.archive_ticks_to_storage(_archive_df)
+            except Exception as _archive_err:
+                logger.debug("[R33-P0-07] 可选归档异常(不影响主流程): %s", _archive_err)
+
             return row_count
 
         except Exception as e:
@@ -286,6 +341,25 @@ class DataWriterMixin:
             raise
 
         return 0
+
+    def archive_ticks_to_storage(self, ticks_df, db_path: str = None) -> bool:
+        """R33-P0-07修复: 集成DuckDBTickStorage到tick持久化管线"""
+        try:
+            from ali2026v3_trading.param_pool.l1_quantification.duckdb_tick_storage import DuckDBTickStorage
+        except ImportError:
+            logger.debug("[R33-P0-07] DuckDBTickStorage不可用，跳过tick归档")
+            return False
+
+        try:
+            _archive_path = db_path or getattr(self, '_tick_archive_path', None) or 'tick_archive.duckdb'
+            _storage = DuckDBTickStorage(db_path=_archive_path)
+            _inserted = _storage.bulk_import_dataframe(ticks_df)
+            _storage.close()
+            logger.info("[R33-P0-07] Tick归档完成: %d行写入 %s", _inserted, _archive_path)
+            return True
+        except Exception as _e:
+            logger.warning("[R33-P0-07] Tick归档失败: %s", _e)
+            return False
 
     def batch_insert_from_cache(self, cache_ticks: List[Dict]) -> int:
         if not cache_ticks:
@@ -485,6 +559,14 @@ class DataWriterMixin:
                     ])
                 
                 conn.execute("COMMIT")
+                # R26-P0-DI-08: 写入后checksum验证——读回计数与写入数比对
+                _verify_count = conn.execute(
+                    "SELECT COUNT(*) FROM klines_raw WHERE trade_date = ?",
+                    [klines_data[-1].get('trade_date')]
+                ).fetchone()[0] if klines_data else 0
+                if _verify_count < len(klines_data):
+                    logger.error("[R26-P0-DI-08] 写入验证失败: 读回%d条 < 写入%d条", _verify_count, len(klines_data))
+                    raise ValueError(f"[R26-P0-DI-08] 写入验证失败: 读回{_verify_count}条 < 写入{len(klines_data)}条")
                 logger.info(f"Batch inserted {len(klines_data)} klines")
                 return len(klines_data)
             except Exception as e:
@@ -495,6 +577,11 @@ class DataWriterMixin:
                 logger.error(f"Kline batch insert failed, rolled back: {e}")
                 if self._is_fatal_database_error(e):
                     self._mark_connection_unhealthy()
+                    # R30-P0-08修复: FATAL错误后尝试降级到内存数据库
+                    try:
+                        self._handle_fatal_db_error(e)
+                    except Exception as hfe:
+                        logger.warning("[R30-P0-08] 降级处理失败: %s", hfe)
                 raise
         except Exception as e:
             logger.error(f"Batch insert klines failed: {e}")
@@ -644,8 +731,15 @@ class DataWriterMixin:
 
         try:
             if storage_db_path:
-                import duckdb
-                external_conn = duckdb.connect(storage_db_path)
+                from ali2026v3_trading.data_access import get_data_access
+                _da = get_data_access()
+                external_conn = _da.execute_query("SELECT 1", in_memory=False)
+                if not external_conn.success:
+                    from ali2026v3_trading.db_adapter import connect
+                    external_conn = connect(storage_db_path)
+                else:
+                    from ali2026v3_trading.db_adapter import connect
+                    external_conn = connect(storage_db_path)
                 self._configure_connection(external_conn)
                 conn = external_conn
                 logger.info(f"[SyncTicks] Using storage database: {storage_db_path}")
@@ -734,3 +828,59 @@ class DataWriterMixin:
             if external_conn is not None:
                 external_conn.close()
             self._tick_sync_lock.release()
+
+
+def verify_bar_tick_consistency(conn, instrument_id: str, trade_date: str,
+                                volume_tolerance: float = 0.01,
+                                price_tolerance: float = 0.001) -> Dict[str, Any]:
+    """R27-P1-DI-03: bar/tick一致性校验——检查K线聚合与原始tick数据的一致性
+
+    Args:
+        conn: DuckDB连接
+        instrument_id: 合约ID
+        trade_date: 交易日期
+        volume_tolerance: 成交量容差比例(默认1%)
+        price_tolerance: 价格容差比例(默认0.1%)
+
+    Returns:
+        Dict: {is_consistent: bool, bar_count: int, tick_count: int,
+               volume_diff_ratio: float, low_diff_ratio: float, high_diff_ratio: float}
+    """
+    result = {'is_consistent': True, 'bar_count': 0, 'tick_count': 0,
+              'volume_diff_ratio': 0.0, 'low_diff_ratio': 0.0, 'high_diff_ratio': 0.0}
+    try:
+        bar_row = conn.execute(
+            "SELECT SUM(volume) as total_vol, MIN(low) as bar_low, MAX(high) as bar_high "
+            "FROM klines_raw WHERE instrument_id=? AND trade_date=?",
+            [instrument_id, trade_date]
+        ).fetchone()
+        tick_row = conn.execute(
+            "SELECT COUNT(*) as tick_count, SUM(volume) as total_vol, "
+            "MIN(price) as tick_low, MAX(price) as tick_high "
+            "FROM ticks_raw WHERE instrument_id=? AND CAST(timestamp AS DATE)=?",
+            [instrument_id, trade_date]
+        ).fetchone()
+        if not bar_row or not tick_row:
+            return result
+        bar_vol, bar_low, bar_high = bar_row
+        tick_count, tick_vol, tick_low, tick_high = tick_row
+        result['bar_count'] = 1
+        result['tick_count'] = tick_count or 0
+        if bar_vol and tick_vol and tick_vol > 0:
+            result['volume_diff_ratio'] = abs(bar_vol - tick_vol) / tick_vol
+            if result['volume_diff_ratio'] > volume_tolerance:
+                result['is_consistent'] = False
+                logger.warning("[R27-P1-DI-03] volume不一致: bar=%.0f tick=%.0f diff=%.4f",
+                               bar_vol, tick_vol, result['volume_diff_ratio'])
+        if bar_low and tick_low and tick_low > 0:
+            result['low_diff_ratio'] = abs(bar_low - tick_low) / tick_low
+            if result['low_diff_ratio'] > price_tolerance:
+                result['is_consistent'] = False
+        if bar_high and tick_high and tick_high > 0:
+            result['high_diff_ratio'] = abs(bar_high - tick_high) / tick_high
+            if result['high_diff_ratio'] > price_tolerance:
+                result['is_consistent'] = False
+    except Exception as e:
+        logger.error("[R27-P1-DI-03] bar/tick一致性校验异常: %s", e)
+        result['is_consistent'] = False
+    return result

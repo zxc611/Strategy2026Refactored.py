@@ -12,7 +12,12 @@ import logging
 import os
 from typing import Any, Dict, Optional, Tuple
 
-import yaml
+from ali2026v3_trading.serialization_utils import yaml_safe_load
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 logger = logging.getLogger(__name__)
 
@@ -49,26 +54,33 @@ TVF_DEFAULT_PARAMS = {
 
 
 class TVFParamLoader:
-    """TVF参数加载器"""
 
-    _instance: Optional['TVFParamLoader'] = None
     _params: Dict[str, Any] = {}
     _loaded: bool = False
 
     def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        _registry = SingletonRegistry.get_registry('tvf_param_loader')
+        _inst = _registry.get('instance')
+        if _inst is None:
+            _inst = super().__new__(cls)
+            _registry.set('instance', _inst)
+        return _inst
 
     @classmethod
     def get_instance(cls) -> 'TVFParamLoader':
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        _registry = SingletonRegistry.get_registry('tvf_param_loader')
+        _inst = _registry.get('instance')
+        if _inst is None:
+            _inst = cls()
+        return _inst
 
     @classmethod
     def reset(cls):
-        cls._instance = None
+        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        _registry = SingletonRegistry.get_registry('tvf_param_loader')
+        _registry.remove('instance')
         cls._params = {}
         cls._loaded = False
 
@@ -82,14 +94,14 @@ class TVFParamLoader:
             加载的参数字典
         """
         if config_path is None:
-            config_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "参数池", "tvf_params.yaml",
-            )
+            _base_dir = os.path.dirname(os.path.abspath(__file__))
+            _pool_path = os.path.join(_base_dir, "param_pool", "tvf_params.yaml")
+            _root_path = os.path.join(_base_dir, "tvf_params.yaml")
+            config_path = _pool_path if os.path.exists(_pool_path) else _root_path
 
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
-                self._params = yaml.safe_load(f)
+                self._params = yaml_safe_load(f)
             self._loaded = True
             logger.info('[TVFParamLoader] 参数加载成功: %s', config_path)
 
@@ -128,7 +140,7 @@ class TVFParamLoader:
         params = self.get_params()
 
         new_kwargs = {
-            'tvf_enabled': params.get('tvf_enabled', True),
+            'tvf_enabled': params.get('tvf_enabled', True),  # R26-P0-CD-02修复: 三源统一为True(YAML=True, Code=True)
             'tvf_l1_weight': params['layer_weights']['l1_risk_return'],
             'tvf_l2_weight': params['layer_weights']['l2_market_micro'],
             'tvf_l3_weight': params['layer_weights']['l3_option_greeks'],
@@ -170,6 +182,21 @@ class TVFParamLoader:
         params = self._params
         errors = []
         warnings = []
+
+        # R24-P2-IV-04修复: 检查必要嵌套key是否存在，给出更明确的错误信息
+        _REQUIRED_NESTED_KEYS = {
+            'layer_weights': ['l1_risk_return', 'l2_market_micro', 'l3_option_greeks'],
+            'l1_tri_validation': ['sortino_tri_scale', 'calmar_tri_scale', 'sharpe_tri_scale'],
+            'l2_order_flow': ['ofi_scale', 'smf_scale'],
+            'l3_greeks': ['delta_scale', 'gamma_scale', 'theta_scale', 'vega_scale'],
+        }
+        for _group, _keys in _REQUIRED_NESTED_KEYS.items():
+            if _group not in params:
+                errors.append(f'缺少必要嵌套key: {_group}')
+            else:
+                for _k in _keys:
+                    if _k not in params[_group]:
+                        warnings.append(f'嵌套key {_group}.{_k} 缺失，将使用默认值0')
 
         # 1. 校验层间权重和
         lw = params.get('layer_weights', {})
@@ -236,7 +263,7 @@ class TVFParamLoader:
     def _default_params() -> Dict[str, Any]:
         p = TVF_DEFAULT_PARAMS
         return {
-            'tvf_enabled': True,
+            'tvf_enabled': True,  # R26-P0-CD-02修复: 三源统一为True
             'layer_weights': {
                 'l1_risk_return': p['tvf_l1_weight'],
                 'l2_market_micro': p['tvf_l2_weight'],

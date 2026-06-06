@@ -1,531 +1,115 @@
-"""
-ali2026v3_trading 共享工具函数模块
+"""shared_utils - Facade模块 (R27-CP-04-FIX: 拆分为5个子模块，本文件保留向后兼容re-export)
 
 ✅ ID唯一 / 方法唯一 / 传递渠道唯一：跨模块共享的工具函数统一定义在此
 禁止在其他模块中重复定义这些函数，必须从此模块导入。
 
-统一管理的函数：
-- normalize_option_type: 期权类型标准化
-- to_float32: float32精度转换
-- normalize_instrument_id: 合约ID标准化（移除交易所前缀）
-- extract_product_code: 从合约ID提取品种代码
-- extract_strike_price: 从期权合约ID提取行权价
-- safe_int / safe_float: 安全类型转换
-- RingBuffer: 线程安全环形缓冲区
-- ShardRouter: 确定性分片路由器（品种ID驱动自动通道绑定）
-- InitPhase / InitStateMachine / requires_phase: 初始化阶段管理
-- ThreadLifecycleManager: 线程生命周期形式化管理
+子模块拆分 (R27-CP-04-FIX):
+- shared_utils_sql: SQL安全相关 (sanitize_sql_identifier, sanitize_sql_value)
+- shared_utils_types: 类型转换相关 (to_float32, to_native_type, safe_int, safe_float, safe_price_check)
+- shared_utils_instrument: 合约工具相关 (normalize_option_type, normalize_instrument_id, extract_product_code, extract_strike_price, normalize_year_month, CHINA_TZ)
+- shared_utils_contracts: 契约编程相关 (requires_phase, require_precondition, ensure_postcondition, PreconditionError, PostconditionError, OperationTimeoutError, with_timeout)
+- shared_utils_infra: 基础设施相关 (RingBuffer, ShardRouter, get_shard_router, ThreadLifecycleManager, InitPhase, InitializationError, InitStateMachine, IdempotencyGuard, AutoRollbackContext, atomic_replace_file, cleanup_atomic_backup, check_version_sync, check_shared_utils_invariants)
 """
 
-import hashlib
-import struct
-import threading
 import logging
+import math
 import time
-from typing import Any, Dict, List, Optional
-from collections import deque
-
-
-def normalize_option_type(opt_type: str) -> str:
-    """标准化option_type（唯一实现）
-
-    Args:
-        opt_type: 期权类型字符串 ('C', 'CALL', 'P', 'PUT'等)
-
-    Returns:
-        str: 标准化的期权类型 ('CALL' 或 'PUT')
-    """
-    if not opt_type:
-        return ''
-    upper = opt_type.upper()
-    if upper in ('C', 'CALL'):
-        return 'CALL'
-    elif upper in ('P', 'PUT'):
-        return 'PUT'
-    elif upper in ('CE', 'PE', 'C_E', 'P_E'):
-        logging.warning("[normalize_option_type] 非标准期权类型 '%s'，尝试映射: CE→CALL, PE→PUT", opt_type)
-        return 'CALL' if upper.startswith('C') else 'PUT'
-    logging.warning("[normalize_option_type] 未知期权类型 '%s'，原样透传", opt_type)
-    return upper
-
-
-def to_float32(value) -> float:
-    """将数值转换为float32精度（唯一实现）
-
-    Args:
-        value: 输入数值
-
-    Returns:
-        float: float32精度的数值
-    """
-    try:
-        return struct.unpack('f', struct.pack('f', float(value)))[0]
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
-
-
-def normalize_instrument_id(instrument_id: str) -> str:
-    """移除交易所前缀和平台前缀，保留合约ID原始格式（品种ID直通，不做大写化）
-
-    Args:
-        instrument_id: 可能含交易所前缀或平台前缀的合约ID (如 "DCE.m2605" 或 "platform|m2605")
-
-    Returns:
-        str: 标准化后的合约ID (如 "m2605")，保留交易所原始大小写
-    """
-    normalized = str(instrument_id or '').strip()
-    if '.' in normalized:
-        normalized = normalized.split('.', 1)[-1]
-    if '|' in normalized:
-        normalized = normalized.split('|')[-1]
-    return normalized
-
-
-def extract_product_code(instrument_id: str) -> str:
-    """从合约ID提取品种代码（唯一实现）
-
-    Args:
-        instrument_id: 合约ID (如 "IO2506-C-4000" 或 "al2605C18900")
-
-    Returns:
-        str: 品种代码 (如 "IO" 或 "al")
-    """
-    normalized = normalize_instrument_id(instrument_id)
-    if not normalized:
-        return ''
-    i = 0
-    while i < len(normalized) and normalized[i].isalpha():
-        i += 1
-    return normalized[:i] if i > 0 else ''
-
-
-def extract_strike_price(instrument_id: str) -> Optional[float]:
-    """从期权合约ID提取行权价（唯一实现，委托SubscriptionManager）
-
-    Args:
-        instrument_id: 期权合约ID
-
-    Returns:
-        Optional[float]: 行权价，解析失败返回None
-    """
-    try:
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
-        parsed = SubscriptionManager.parse_option(instrument_id)
-        strike = parsed.get('strike_price')
-        return float(strike) if strike is not None else None
-    except (ValueError, KeyError, TypeError):
-        return None
-
-
-def normalize_year_month(year_month: str) -> str:
-    """归一化年月格式（唯一实现）
-
-    支持多种输入格式，统一输出为 YYMM 格式：
-    - '6M05' -> '2605' (6月05年 -> 26年05月)
-    - '26M05' -> '2605' (2位年份前缀+月份)
-    - '202605' -> '2605' (完整年份)
-    - '2605' -> '2605' (已是标准格式，直通)
-
-    Args:
-        year_month: 年月字符串
-
-    Returns:
-        str: 归一化后的 YYMM 格式年月
-    """
-    year_month = str(year_month or '').strip()
-    if not year_month:
-        return ''
-
-    if len(year_month) == 4 and year_month.isdigit():
-        month_part = int(year_month[2:])
-        if 1 <= month_part <= 12:
-            return year_month
-        return year_month
-
-    if len(year_month) == 6 and year_month.isdigit():
-        month_part = int(year_month[4:])
-        if 1 <= month_part <= 12:
-            return year_month[2:]
-        return year_month[2:]
-
-    import re
-    m = re.match(r'(\d{1,4})[M/\-](\d{1,2})$', year_month, re.IGNORECASE)
-    if m:
-        year_str = m.group(1)
-        month_str = m.group(2).zfill(2)
-        month_val = int(month_str)
-        if month_val < 1 or month_val > 12:
-            return year_month
-        if len(year_str) == 4:
-            return f'{year_str[2:]}{month_str}'
-        elif len(year_str) == 2:
-            return f'{year_str}{month_str}'
-        elif len(year_str) == 1:
-            from datetime import datetime
-            current_year = datetime.now().year
-            candidate_full = current_year - (current_year % 10) + int(year_str)
-            if candidate_full > current_year + 1:
-                candidate_full -= 10
-            yy = f'{candidate_full % 100:02d}'
-            return f'{yy}{month_str}'
-        return year_month
-
-    return year_month
-
-
-def safe_int(value: Any, default: int = 0) -> int:
-    """安全转换为整数"""
-    try:
-        if value is None:
-            return default
-        return int(float(value))
-    except (ValueError, TypeError) as e:
-        logging.warning(f"[safe_int] Conversion failed for value '{value}': {e}")
-        return default
-
-
-def safe_float(value: Any, default: float = 0.0) -> float:
-    """安全转换为浮点数"""
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (ValueError, TypeError) as e:
-        logging.warning(f"[safe_float] Conversion failed for value '{value}': {e}")
-        return default
-
-
-class RingBuffer:
-    """环形缓冲区，线程安全"""
-
-    def __init__(self, maxlen: int):
-        self.maxlen = maxlen
-        self.data = deque(maxlen=maxlen)
-        self._lock = threading.Lock()
-
-    def append(self, item):
-        with self._lock:
-            self.data.append(item)
-
-    def extend(self, items):
-        with self._lock:
-            self.data.extend(items)
-
-    def __len__(self):
-        with self._lock:
-            return len(self.data)
-
-    def __getitem__(self, index):
-        with self._lock:
-            return self.data[index]
-
-    def __iter__(self):
-        with self._lock:
-            return iter(list(self.data))
-
-    def clear(self):
-        with self._lock:
-            self.data.clear()
-
-    def to_list(self):
-        with self._lock:
-            return list(self.data)
-
-
-class ShardRouter:
-    """确定性分片路由器：品种ID驱动的自动通道绑定
-
-    核心设计：
-    1. 用 hashlib.md5 替代 Python hash()，保证跨进程/跨重启确定性
-    2. 品种代码全链路直通，零配置自动绑定
-    3. 同一品种始终命中固定通道，tick时序天然正确
-    4. 通道绑定注册表可审计（§8.4 路由规则可审计）
-    5. 简单取模路由：shard_key % shard_count，2^n时等价位掩码
-
-    用法：
-        router = ShardRouter(shard_count=16)
-        idx = router.route("IF2506")   # 返回确定性shard索引
-        router.get_binding_map()        # 返回品种→通道绑定表
-    """
-
-    def __init__(self, shard_count: int = 16):
-        self._shard_count = shard_count
-        self._binding_map: Dict[str, int] = {}
-        self._binding_lock = threading.Lock()
-
-    @staticmethod
-    def _deterministic_hash(key: str) -> int:
-        h = hashlib.md5(key.encode('utf-8')).digest()
-        return (h[0] << 24) | (h[1] << 16) | (h[2] << 8) | h[3]
-
-    @property
-    def shard_count(self) -> int:
-        return self._shard_count
-
-    def route(self, instrument_id: str) -> int:
-        _pc_raw = extract_product_code(instrument_id)
-        product_code = _pc_raw.lower() if _pc_raw else ''
-        return self.route_by_product_code(product_code)
-
-    def route_by_product_code(self, product_code: str) -> int:
-        if not product_code:
-            product_code = 'unknown'
-        product_code = product_code.lower()
-
-        with self._binding_lock:
-            if product_code in self._binding_map:
-                return self._binding_map[product_code]
-
-        h = self._deterministic_hash(product_code)
-        shard_idx = h % self._shard_count
-
-        with self._binding_lock:
-            self._binding_map[product_code] = shard_idx
-
-        return shard_idx
-
-    def get_binding_map(self) -> Dict[str, int]:
-        with self._binding_lock:
-            return dict(self._binding_map)
-
-    def get_shard_members(self) -> Dict[int, List[str]]:
-        result: Dict[int, List[str]] = {i: [] for i in range(self._shard_count)}
-        with self._binding_lock:
-            for product, shard_id in self._binding_map.items():
-                result[shard_id].append(product)
-        for shard_id in result:
-            result[shard_id].sort()
-        return result
-
-    def get_routing_audit_line(self) -> str:
-        members = self.get_shard_members()
-        parts = []
-        for sid in sorted(members.keys()):
-            prods = members[sid]
-            if prods:
-                parts.append(f"Shard-{sid:02d}: {','.join(prods)}")
-        return ' | '.join(parts)
-
-    def reconfigure(self, new_shard_count: int) -> Dict[str, int]:
-        with self._binding_lock:
-            old_map = dict(self._binding_map)
-            self._shard_count = new_shard_count
-            self._binding_map.clear()
-            migration = {}
-            for product, old_shard in old_map.items():
-                h = self._deterministic_hash(product)
-                new_shard = h % self._shard_count
-                self._binding_map[product] = new_shard
-                if new_shard != old_shard:
-                    migration[product] = (old_shard, new_shard)
-        return migration
-
-
-_GLOBAL_SHARD_ROUTER: Optional[ShardRouter] = None
-_GLOBAL_SHARD_ROUTER_LOCK = threading.Lock()
-DEFAULT_SHARD_COUNT = 16
-
-
-def get_shard_router(shard_count: int = None) -> ShardRouter:
-    """获取全局单例 ShardRouter（方法唯一原则）
-
-    全链路只创建一个 ShardRouter 实例，确保第一层和第二层路由完全一致。
-    """
-    global _GLOBAL_SHARD_ROUTER
-    if shard_count is None:
-        shard_count = DEFAULT_SHARD_COUNT
-    with _GLOBAL_SHARD_ROUTER_LOCK:
-        if _GLOBAL_SHARD_ROUTER is None:
-            _GLOBAL_SHARD_ROUTER = ShardRouter(shard_count=shard_count)
-        return _GLOBAL_SHARD_ROUTER
-
-
-class ThreadLifecycleManager:
-    """管理多服务线程的启停与排水顺序（§8.5 并发安全）
-
-    设计原则：
-    - 不包含业务逻辑，仅管理线程生命周期
-    - 强制停止顺序：(1) set StopEvent → (2) join Writers → (3) drain → (4) flush
-    - 部分启动失败自动回滚已启动线程
-    - 独立模块，不增加核心大模块负担
-    """
-
-    PHASE_CREATED = 'created'
-    PHASE_STARTING = 'starting'
-    PHASE_RUNNING = 'running'
-    PHASE_STOPPING = 'stopping'
-    PHASE_STOPPED = 'stopped'
-
-    def __init__(self, owner_label: str = ''):
-        self._owner_label = owner_label
-        self._phase = self.PHASE_CREATED
-        self._threads: Dict[str, threading.Thread] = {}
-        self._daemon_flags: Dict[str, bool] = {}
-        self._lock = threading.Lock()
-        self._started_at: Optional[float] = None
-
-    def register(self, name: str, thread: threading.Thread, daemon: bool = False) -> None:
-        with self._lock:
-            self._threads[name] = thread
-            self._daemon_flags[name] = daemon
-
-    def start_all(self, thread_configs: List[tuple]) -> None:
-        self._phase = self.PHASE_STARTING
-        self._started_at = time.time()
-        started = []
-        try:
-            for name, thread, daemon in thread_configs:
-                thread.start()
-                self.register(name, thread, daemon)
-                started.append(name)
-        except Exception:
-            logging.error("[ThreadMgr] 启动失败，已启动 %s/共%d，执行紧急清理", started, len(thread_configs))
-            self._force_stop_partial(started)
-            raise
-        self._phase = self.PHASE_RUNNING
-
-    def stop_all(self, stop_event: threading.Event, timeout: float = 30.0) -> dict:
-        self._phase = self.PHASE_STOPPING
-        stop_event.set()
-        result = {'stopped': 0, 'timeout': 0, 'daemon': 0}
-        for name, thread in list(self._threads.items()):
-            if not thread:
-                continue
-            if self._daemon_flags.get(name, False):
-                thread.join(timeout=min(timeout, 5.0))
-                result['daemon'] += 1
-                continue
-            thread.join(timeout=timeout)
-            if thread.is_alive():
-                logging.warning("[ThreadMgr] %s 在 %ss 内未停止", name, timeout)
-                result['timeout'] += 1
-            else:
-                result['stopped'] += 1
-        self._phase = self.PHASE_STOPPED
-        return result
-
-    def _force_stop_partial(self, started_names: list) -> None:
-        self._phase = self.PHASE_STOPPING
-        for name in started_names:
-            thread = self._threads.get(name)
-            if thread and thread.is_alive():
-                thread.join(timeout=2.0 if self._daemon_flags.get(name) else 10.0)
-        self._phase = self.PHASE_STOPPED
-
-    @property
-    def phase(self) -> str:
-        return self._phase
-
-    @property
-    def alive_count(self) -> int:
-        with self._lock:
-            return sum(1 for t in self._threads.values() if t and t.is_alive())
-
-    def health_check(self) -> dict:
-        with self._lock:
-            return {
-                'owner': self._owner_label,
-                'phase': self._phase,
-                'total_registered': len(self._threads),
-                'alive': self.alive_count,
-                'uptime_seconds': time.time() - self._started_at if self._started_at else 0,
-                'threads': {name: t.is_alive() for name, t in self._threads.items()},
-            }
+import threading
+import warnings as _warnings
+from dataclasses import dataclass, field
+from datetime import timezone, timedelta
+from typing import Any, Callable, Dict, List, Optional
+
+# ============================================================================
+# R27-CP-04-FIX: 从子模块re-export所有公开API（向后兼容）
+# ============================================================================
+
+from ali2026v3_trading.shared_utils_sql import (
+    sanitize_sql_identifier,
+    sanitize_sql_value,
+)
+
+from ali2026v3_trading.shared_utils_types import (
+    to_float32,
+    to_native_type,
+    safe_int,
+    safe_float,
+    safe_price_check,
+)
+
+from ali2026v3_trading.shared_utils_instrument import (
+    CHINA_TZ,
+    normalize_option_type,
+    normalize_instrument_id,
+    extract_product_code,
+    extract_strike_price,
+    normalize_year_month,
+)
+
+from ali2026v3_trading.shared_utils_contracts import (
+    requires_phase,
+    require_precondition,
+    ensure_postcondition,
+    PreconditionError,
+    PostconditionError,
+    OperationTimeoutError,
+    with_timeout,
+)
+
+from ali2026v3_trading.shared_utils_infra import (
+    RingBuffer,
+    ShardRouter,
+    DEFAULT_SHARD_COUNT,
+    get_shard_router,
+    ThreadLifecycleManager,
+    InitPhase,
+    InitializationError,
+    InitStateMachine,
+    IdempotencyGuard,
+    AutoRollbackContext,
+    atomic_replace_file,
+    cleanup_atomic_backup,
+    check_version_sync,
+    check_shared_utils_invariants,
+)
+
+# R27-P1修复: 导入浮点精度工具供全项目共享
+from ali2026v3_trading.resilience_utils import (
+    stable_sum, stable_mean, stable_variance, stable_std,
+    approx_equal, approx_less, approx_greater,
+    should_trigger_stop_loss, should_trigger_take_profit,
+    KahanSummation, safe_divide, compute_sharpe_stable,
+    safe_normalize_weights, PRICE_TOLERANCE, FLOAT_COMPARE_TOLERANCE,
+)
 
 
 # ============================================================================
-# InitPhase / InitStateMachine / requires_phase — 初始化阶段管理
+# 以下为未归入子模块的剩余定义，暂保留在facade中
 # ============================================================================
 
-from enum import IntEnum
+def unified_ts_ms() -> int:
+    """[R22-TIME-P1-15] 统一毫秒精度时间戳，用作缓存键，消除毫秒/微秒混用"""
+    return int(time.time() * 1000)
 
 
-class InitPhase(IntEnum):
-    NOT_STARTED = 0
-    MEMORY_ALLOC = 1
-    DB_CONNECT = 2
-    EXTERNAL_SERVICES = 3
-    DB_SCHEMA = 4
-    DB_CACHES = 5
-    WRITERS_START = 6
-    CLEANUP_START = 7
-    READY = 8
+# ============================================================================
+# FM-01修复: 无风险利率常量（与greeks_calculator.DEFAULT_RISK_FREE_RATE对齐）
+# ============================================================================
+DEFAULT_RISK_FREE_RATE: float = 0.02
+TRADING_DAYS_PER_YEAR_CHINA: float = 242.0
 
-
-class InitializationError(Exception):
-    def __init__(self, message: str, current_phase: 'InitPhase', required_phase: 'InitPhase'):
-        super().__init__(message)
-        self.current_phase = current_phase
-        self.required_phase = required_phase
-
-
-class InitStateMachine:
-    def __init__(self):
-        self._phase = InitPhase.NOT_STARTED
-        self._lock = threading.Lock()
-        self._ready_event = threading.Event()
-
-    @property
-    def phase(self) -> InitPhase:
-        with self._lock:
-            return self._phase
-
-    def advance(self, new_phase: InitPhase) -> None:
-        with self._lock:
-            if new_phase != self._phase + 1 and new_phase != self._phase:
-                raise InitializationError(
-                    f"非法阶段转换: {self._phase.name} -> {new_phase.name}",
-                    self._phase, new_phase
-                )
-            self._phase = new_phase
-            if new_phase == InitPhase.READY:
-                self._ready_event.set()
-
-    def check_phase(self, required: InitPhase) -> None:
-        with self._lock:
-            current = self._phase
-        if current < required:
-            raise InitializationError(
-                f"需要阶段 {required.name} 但当前为 {current.name}",
-                current, required
-            )
-
-    def wait_until_ready(self, timeout: float = 30.0) -> bool:
-        return self._ready_event.wait(timeout=timeout)
-
-    def is_ready(self) -> bool:
-        return self._ready_event.is_set()
-
-    def rollback_phase(self) -> InitPhase:
-        with self._lock:
-            if self._phase > InitPhase.NOT_STARTED:
-                self._phase = InitPhase(self._phase - 1)
-            return self._phase
-
-
-def requires_phase(required: InitPhase):
-    def decorator(method):
-        def wrapper(self, *args, **kwargs):
-            if hasattr(self, '_init_state'):
-                self._init_state.check_phase(required)
-            return method(self, *args, **kwargs)
-        wrapper.__name__ = method.__name__
-        wrapper.__doc__ = method.__doc__
-        wrapper.__wrapped__ = method
-        return wrapper
-    return decorator
+# ============================================================================
+# R17-12修复: 年化因子常量 — 统一管理Sharpe/Calmar等年化计算
+# ============================================================================
+ANNUALIZE_FACTOR_DAILY = 252.0
+ANNUALIZE_FACTOR_MINUTE = 252.0 * 240  # 假设: equity_curve逐分钟采样, 每天240根Bar
 
 
 # ========================================================================
 # 回撤开仓（Pullback Entry） — 通用基础设施
-# 非高频策略(resonance/box/spring/arbitrage/market_making)共用
-# 核心思想：权利金本位，信号触发后等待权利金回撤达标再入场
 # ========================================================================
 
-from dataclasses import dataclass, field
-
-
-@dataclass
+@dataclass(slots=True)
 class PendingPullbackSignal:
     signal_id: str
     strategy_type: str
@@ -536,16 +120,19 @@ class PendingPullbackSignal:
     signal_bar_index: int
     peak_bar_index: int = 0
     bars_elapsed: int = 0
+    ticks_elapsed: int = 0  # P0-2修复：逐tick计数器，支持HFT逐tick跟踪模式
     is_expired: bool = False
     dynamic_wait_bars: int = 0
     dynamic_retrace_pct: float = 0.0
+    dynamic_wait_ticks: int = 0  # P0-2修复：逐tick模式下的等待tick数
     ref_price: float = 0.0
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def check_retrace(self, current_price: float,
                       retrace_pct: float,
                       wait_bars: int,
-                      min_retrace_abs: float = 0.0) -> bool:
+                      min_retrace_abs: float = 0.0,
+                      wait_ticks: int = 0) -> bool:
         if self.is_expired:
             return False
         self.bars_elapsed += 1
@@ -554,12 +141,8 @@ class PendingPullbackSignal:
         if self.bars_elapsed > effective_wait:
             self.is_expired = True
             return False
+        # P0-裂缝10修复：禁止在回撤判断中动态上移peak_price
         ref = self.ref_price if self.ref_price > 0.0 else self.peak_price
-        if current_price > ref:
-            self.peak_price = current_price
-            if self.ref_price <= 0.0:
-                self.ref_price = current_price
-            self.peak_bar_index += self.bars_elapsed
         if ref <= 0:
             return False
         retrace_abs = ref - current_price
@@ -570,23 +153,32 @@ class PendingPullbackSignal:
             return False
         return retrace_pct_actual >= effective_retrace
 
+    def check_retrace_tick(self, current_price: float,
+                           retrace_pct: float,
+                           wait_ticks: int,
+                           min_retrace_abs: float = 0.0) -> bool:
+        """P0-2修复：逐tick实时跟踪模式 — 每个tick即时判断回撤"""
+        if self.is_expired:
+            return False
+        self.ticks_elapsed += 1
+        effective_wait_ticks = self.dynamic_wait_ticks if self.dynamic_wait_ticks > 0 else wait_ticks
+        if effective_wait_ticks > 0 and self.ticks_elapsed > effective_wait_ticks:
+            self.is_expired = True
+            return False
+        ref = self.ref_price if self.ref_price > 0.0 else self.peak_price
+        if ref <= 0:
+            return False
+        retrace_abs = ref - current_price
+        retrace_pct_actual = retrace_abs / ref
+        if retrace_pct_actual < 0:
+            return False
+        if min_retrace_abs > 0.0 and retrace_abs < min_retrace_abs:
+            return False
+        return retrace_pct_actual >= retrace_pct
+
 
 class PullbackManager:
-    """通用回撤开仓管理器 — 非高频策略共用
-
-    参数:
-        pullback_enabled: 是否启用回撤延迟
-        pullback_wait_bars: 基础最长等待Bar数
-        pullback_retrace_pct: 权利金/价格回撤百分比阈值(如0.15=15%)
-        pullback_iv_min_percentile: IV环境最低百分位
-        pullback_iv_max_percentile: IV环境最高百分位
-        pullback_ref_mode: 参照基准模式 "peak"(极值) | "atr"(ATR锚定) | "vwap"(VWAP) | "delta"(Delta锚定)
-        pullback_atr_wait_multiplier: ATR动态等待倍数(wait_bars += ATR_pct * multiplier)
-        pullback_retrace_pct_call: Call方向专用回撤幅度(None则用retrace_pct)
-        pullback_retrace_pct_put: Put方向专用回撤幅度(None则用retrace_pct)
-        pullback_theta_decay_accel: Theta衰减加速系数(临近到期缩短等待, 0=禁用)
-        pullback_min_retrace_abs: 最小回撤绝对值(防止权利金极薄时百分比无意义)
-    """
+    """通用回撤开仓管理器 — 非高频策略共用"""
 
     REF_MODES = frozenset({'peak', 'atr', 'vwap', 'delta'})
 
@@ -602,10 +194,13 @@ class PullbackManager:
             logging.warning("[Pullback] Unknown ref_mode='%s', falling back to 'peak'", self.ref_mode)
             self.ref_mode = 'peak'
         self.atr_wait_multiplier: float = p.get('pullback_atr_wait_multiplier', 0.0)
-        self.retrace_pct_call: Optional[float] = p.get('pullback_retrace_pct_call', None)
-        self.retrace_pct_put: Optional[float] = p.get('pullback_retrace_pct_put', None)
+        self.retrace_pct_call: Optional[float] = p.get('pullback_retrace_pct_call', 0.38)
+        self.retrace_pct_put: Optional[float] = p.get('pullback_retrace_pct_put', 0.42)
         self.theta_decay_accel: float = p.get('pullback_theta_decay_accel', 0.0)
         self.min_retrace_abs: float = p.get('pullback_min_retrace_abs', 0.0)
+        # P0-2修复：逐tick实时跟踪模式
+        self.tick_tracking: bool = p.get('pullback_tick_tracking', False)
+        self.wait_ticks: int = p.get('pullback_wait_ticks', self.wait_bars * 240)
         self._pending: Dict[str, PendingPullbackSignal] = {}
         self._bar_counter: int = 0
         self._lock = threading.RLock()
@@ -616,6 +211,7 @@ class PullbackManager:
             'iv_rejected': 0,
             'atr_wait_extended': 0,
             'theta_shortened': 0,
+            'tick_retrace_entries': 0,
         }
 
     def _compute_directional_retrace(self, direction: str) -> float:
@@ -681,6 +277,7 @@ class PullbackManager:
             signal_bar_index=self._bar_counter,
             dynamic_wait_bars=dynamic_wait,
             dynamic_retrace_pct=dynamic_retrace,
+            dynamic_wait_ticks=self.wait_ticks if self.tick_tracking else 0,
             ref_price=ref_price,
             extra=extra or {},
         )
@@ -726,6 +323,36 @@ class PullbackManager:
                 del self._pending[k]
         return ready
 
+    def process_tick(self, instrument_id: str, tick_price: float) -> List[PendingPullbackSignal]:
+        """P0-2修复：逐tick实时跟踪模式"""
+        if not self.enabled or not self._pending or not self.tick_tracking:
+            return []
+        ready = []
+        expired_keys = []
+        with self._lock:
+            for sig_id, pending in self._pending.items():
+                if pending.instrument_id != instrument_id:
+                    continue
+                if tick_price <= 0:
+                    continue
+                if pending.check_retrace_tick(tick_price, self.retrace_pct,
+                                              self.wait_ticks, self.min_retrace_abs):
+                    ready.append(pending)
+                    expired_keys.append(sig_id)
+                    self._stats['tick_retrace_entries'] += 1
+                    logging.info(
+                        "[Pullback-Tick] RETRACE ENTRY: %s type=%s ticks=%d retrace=%.1f%%",
+                        sig_id, pending.strategy_type, pending.ticks_elapsed,
+                        (pending.peak_price - tick_price) / pending.peak_price * 100
+                        if pending.peak_price > 0 else 0,
+                    )
+                elif pending.is_expired:
+                    expired_keys.append(sig_id)
+                    self._stats['retrace_timeouts'] += 1
+            for k in expired_keys:
+                del self._pending[k]
+        return ready
+
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -741,3 +368,493 @@ class PullbackManager:
                 'pullback_theta_decay_accel': self.theta_decay_accel,
                 'pullback_min_retrace_abs': self.min_retrace_abs,
             }
+
+
+# ============================================================================
+# R5-E-05修复: 带最大重试次数的重试辅助函数
+# ============================================================================
+def retry_with_limit(func, max_retries: int = 3, base_delay: float = 1.0,
+                     backoff_factor: float = 2.0, logger=None, max_delay: float = 60.0,
+                     cancel_event: 'threading.Event|None' = None):
+    """R5-E-05修复: 带最大重试次数和指数退避的重试辅助函数"""
+    last_exception = None
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries:
+                delay = min(base_delay * (backoff_factor ** attempt), max_delay)
+                if logger:
+                    logger.warning(
+                        "[R5-E-05] %s第%d次失败(共%d次重试)，%.1fs后重试: %s",
+                        getattr(func, '__name__', 'func'), attempt + 1, max_retries, delay, e
+                    )
+                if cancel_event is not None:
+                    if cancel_event.wait(timeout=delay):
+                        raise InterruptedError("R5-E-05: 重试被cancel_event中断")
+                else:
+                    time.sleep(delay)
+            else:
+                if logger:
+                    logger.error(
+                        "[R5-E-05] %s全部%d次重试失败: %s",
+                        getattr(func, '__name__', 'func'), max_retries, e
+                    )
+    raise last_exception
+
+
+# ============================================================================
+# UPG-P1-04修复: API版本标记装饰器
+# ============================================================================
+
+def api_version(version: str, changelog: str = ""):
+    """UPG-P1-04修复: API版本标记装饰器"""
+    def decorator(func):
+        func._api_version = version
+        func._api_changelog = changelog
+        func._api_versioned = True
+        return func
+    return decorator
+
+
+def get_api_version(func) -> Optional[str]:
+    """UPG-P1-04修复: 获取函数的API版本号"""
+    return getattr(func, '_api_version', None)
+
+
+def check_api_compatibility(func, min_version: str = "") -> bool:
+    """UPG-P1-04修复: 检查API版本兼容性"""
+    current = getattr(func, '_api_version', None)
+    if current is None:
+        return True
+    if not min_version:
+        return True
+    return current >= min_version
+
+
+# ============================================================================
+# UPG-P1-05修复: 废弃API装饰器
+# ============================================================================
+
+def deprecated(reason: str = "", migration_guide: str = "", removal_version: str = ""):
+    """UPG-P1-05修复: 废弃API装饰器"""
+    def decorator(func):
+        func._deprecated = True
+        func._deprecated_reason = reason
+        func._deprecated_migration_guide = migration_guide
+        func._deprecated_removal_version = removal_version
+
+        def wrapper(*args, **kwargs):
+            msg_parts = [f"{func.__name__} is deprecated"]
+            if reason:
+                msg_parts.append(f"原因: {reason}")
+            if migration_guide:
+                msg_parts.append(f"迁移指南: {migration_guide}")
+            if removal_version:
+                msg_parts.append(f"计划在版本 {removal_version} 中移除")
+            msg = ". ".join(msg_parts) + "."
+            _warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            return func(*args, **kwargs)
+
+        wrapper.__name__ = func.__name__
+        wrapper.__doc__ = func.__doc__
+        wrapper.__wrapped__ = func
+        # 保留装饰器元数据
+        wrapper._deprecated = True
+        wrapper._deprecated_reason = reason
+        wrapper._deprecated_migration_guide = migration_guide
+        wrapper._deprecated_removal_version = removal_version
+        # 保留api_version元数据（如果有的话）
+        for attr in ('_api_version', '_api_changelog', '_api_versioned'):
+            val = getattr(func, attr, None)
+            if val is not None:
+                setattr(wrapper, attr, val)
+        return wrapper
+    return decorator
+
+
+# ============================================================================
+# UPG-P1-13修复: 策略逻辑回归测试框架
+# ============================================================================
+
+class StrategyRegressionTest:
+    """UPG-P1-13修复: 策略逻辑回归测试框架"""
+
+    def __init__(self, test_name: str):
+        self._test_name = test_name
+        self._test_cases: List[Dict[str, Any]] = []
+
+    def register(self, case_name: str, input_data: Any,
+                 expected_output: Any, tolerance: float = 0.0,
+                 comparator: Optional[Callable[[Any, Any], bool]] = None) -> None:
+        self._test_cases.append({
+            'name': case_name,
+            'input': input_data,
+            'expected': expected_output,
+            'tolerance': tolerance,
+            'comparator': comparator,
+        })
+
+    def run_all(self, func: Callable) -> Dict[str, Any]:
+        results = []
+        passed = 0
+        failed = 0
+
+        for case in self._test_cases:
+            case_result = {
+                'name': case['name'],
+                'passed': False,
+                'error': '',
+                'actual': None,
+            }
+            try:
+                actual = func(case['input'])
+                case_result['actual'] = actual
+
+                if case['comparator']:
+                    case_result['passed'] = case['comparator'](actual, case['expected'])
+                elif case['tolerance'] > 0 and isinstance(actual, (int, float)):
+                    case_result['passed'] = abs(actual - case['expected']) <= case['tolerance']
+                else:
+                    case_result['passed'] = actual == case['expected']
+
+                if case_result['passed']:
+                    passed += 1
+                else:
+                    failed += 1
+                    case_result['error'] = f"输出不匹配: expected={case['expected']}, actual={actual}"
+            except Exception as e:
+                failed += 1
+                case_result['error'] = str(e)
+
+            results.append(case_result)
+
+        report = {
+            'test_name': self._test_name,
+            'passed': passed,
+            'failed': failed,
+            'total': len(self._test_cases),
+            'details': results,
+        }
+
+        if failed > 0:
+            logging.warning(
+                "UPG-P1-13: 回归测试[%s] %d/%d 通过, %d 失败",
+                self._test_name, passed, len(self._test_cases), failed,
+            )
+        else:
+            logging.info(
+                "UPG-P1-13: 回归测试[%s] 全部通过 (%d/%d)",
+                self._test_name, passed, len(self._test_cases),
+            )
+
+        return report
+
+
+# ============================================================================
+# CS-03修复: 基于波动率缩放的执行延迟滑点计算
+# ============================================================================
+
+def compute_execution_delay_slippage_bps(
+    price: float,
+    bar_high: float,
+    bar_low: float,
+    bar_duration_sec: float = 60.0,
+    exec_delay_ms: float = 50.0,
+    z_score: float = 1.0,
+) -> float:
+    """基于波动率缩放的执行延迟滑点（布朗运动理论）"""
+    if exec_delay_ms <= 0 or price <= 0:
+        return 0.0
+
+    # bar内波动率（bps）
+    bar_range = (bar_high - bar_low) if bar_high > bar_low else price * 0.002
+    bar_vol_bps = bar_range / price * 10000.0
+
+    # 延迟占bar时长的比例，sqrt缩放（布朗运动假设）
+    delay_ratio = min(exec_delay_ms / 1000.0 / max(bar_duration_sec, 1.0), 1.0)
+    vol_scaled = bar_vol_bps * math.sqrt(delay_ratio)
+
+    # z_score个标准差的不利变动
+    delay_slippage_bps = vol_scaled * z_score
+
+    return delay_slippage_bps
+
+
+# ============================================================================
+# CS-01: 统一滑点模型（生产/回测/评判三系统共享）
+# ============================================================================
+
+# 统一到期日滑点倍增系数
+UNIFIED_EXPIRY_SLIPPAGE_MULTIPLIERS = {
+    1: 20.0,
+    2: 10.0,
+    3: 5.0,
+    5: 3.0,
+    7: 2.0,
+    10: 1.5,
+    14: 1.2,
+}
+
+# 统一品种滑点乘数
+UNIFIED_INSTRUMENT_SLIPPAGE_MULTIPLIER = {
+    "ETF": 1.0,
+    "FUTURE": 1.2,
+    "OPTION_ETF": 1.5,
+    "OPTION_INDEX": 2.0,
+    "OPTION_COMMODITY": 2.5,
+}
+
+# 统一quality_scale映射
+UNIFIED_QUALITY_SCALE_MAP = {1: 0.75, 2: 0.5, 3: 0.3}
+
+# 统一流动性层级
+UNIFIED_LIQUIDITY_TIER_MAP = {
+    'future_main': 1.0,
+    'future_sub': 1.2,
+    'option_atm': 1.0,
+    'option_otm': 1.5,
+    'option_far': 2.0,
+}
+
+
+def compute_slippage_bps(
+    price: float,
+    bid_ask_spread: float = 0.0,
+    base_slippage_bps: float = 3.0,
+    spread_quality: int = 1,
+    days_to_expiry: int = 999,
+    instrument_type: str = "ETF",
+    liquidity_tier: str = "future_main",
+    backtest_premium_bps: float = 0.0,
+) -> float:
+    """统一滑点计算函数（生产/回测/评判三系统共享）"""
+    if price <= 0:
+        return base_slippage_bps + backtest_premium_bps
+
+    # 到期日倍增
+    expiry_mult = 1.0
+    if days_to_expiry >= 0:
+        for threshold_days, multiplier in sorted(UNIFIED_EXPIRY_SLIPPAGE_MULTIPLIERS.items()):
+            if days_to_expiry <= threshold_days:
+                expiry_mult = multiplier
+                break
+
+    # spread退化处理
+    if bid_ask_spread <= 0 or spread_quality == 0:
+        return base_slippage_bps * expiry_mult + backtest_premium_bps
+
+    # spread转为bps
+    spread_bps = bid_ask_spread / price * 10000.0
+
+    # quality缩放
+    quality_scale = UNIFIED_QUALITY_SCALE_MAP.get(spread_quality, 0.75)
+
+    # 流动性层级
+    liquidity_mult = UNIFIED_LIQUIDITY_TIER_MAP.get(liquidity_tier, 1.2)
+
+    # 品种乘数
+    instrument_mult = UNIFIED_INSTRUMENT_SLIPPAGE_MULTIPLIER.get(instrument_type, 1.0)
+
+    # 基础滑点 = max(固定base, spread动态)
+    base = max(base_slippage_bps, spread_bps * quality_scale * liquidity_mult) * instrument_mult
+
+    return base * expiry_mult + backtest_premium_bps
+
+
+# ============================================================================
+# 结构性补充: 模型版本管理（回滚框架）
+# ============================================================================
+
+class ModelVersionManager:
+    """模型版本管理器 — 支持运行时切换和回滚"""
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __init__(self):
+        self._versions = {
+            'slippage_model': 'v2',
+            'position_model': 'v2',
+            'execution_delay_model': 'v2',
+        }
+        self._rollback_history = []
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def get_version(self, model_name: str) -> str:
+        return self._versions.get(model_name, 'v1')
+
+    def is_v2(self, model_name: str) -> bool:
+        return self._versions.get(model_name, 'v1') == 'v2'
+
+    def rollback(self, model_name: str, reason: str = ""):
+        """回滚到旧版本"""
+        if model_name not in self._versions:
+            raise ValueError(f"Unknown model: {model_name}")
+        old_version = self._versions[model_name]
+        self._versions[model_name] = 'v1'
+        self._rollback_history.append({
+            'model': model_name,
+            'from_version': old_version,
+            'to_version': 'v1',
+            'reason': reason,
+            'timestamp': time.time(),
+        })
+        logging.warning("[ModelVersion] ROLLBACK: %s %s → v1, reason=%s",
+                       model_name, old_version, reason)
+
+    def get_rollback_history(self) -> list:
+        return list(self._rollback_history)
+
+
+# ============================================================================
+# 结构性补充: 运行时监控指标
+# ============================================================================
+
+class RuntimeMonitor:
+    """运行时监控 — 跟踪关键指标偏差"""
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __init__(self):
+        self._metrics = {
+            'slippage_model_deviation': [],
+            'position_size_ratio': [],
+            'execution_delay_actual': [],
+            'signal_latency_total': [],
+            'strategy_eviction_rate': [],
+            'model_version_consistency': True,
+        }
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def record_slippage_deviation(self, estimated_bps: float, actual_bps: float):
+        """记录滑点偏差"""
+        if actual_bps > 0:
+            deviation = abs(estimated_bps - actual_bps) / actual_bps
+            self._metrics['slippage_model_deviation'].append(deviation)
+            if len(self._metrics['slippage_model_deviation']) > 100:
+                self._metrics['slippage_model_deviation'] = self._metrics['slippage_model_deviation'][-100:]
+            recent = self._metrics['slippage_model_deviation'][-10:]
+            if len(recent) >= 10 and all(d > 0.5 for d in recent):
+                ModelVersionManager.get_instance().rollback(
+                    'slippage_model',
+                    f'连续10笔滑点偏差>50%, 最近偏差={recent}'
+                )
+
+    def record_position_ratio(self, production_lots: float, backtest_lots: float):
+        """记录仓位比值"""
+        if backtest_lots > 0:
+            ratio = production_lots / backtest_lots
+            self._metrics['position_size_ratio'].append(ratio)
+            if len(self._metrics['position_size_ratio']) > 100:
+                self._metrics['position_size_ratio'] = self._metrics['position_size_ratio'][-100:]
+
+    def record_execution_delay(self, delay_ms: float):
+        """记录执行延迟"""
+        self._metrics['execution_delay_actual'].append(delay_ms)
+        if len(self._metrics['execution_delay_actual']) > 1000:
+            self._metrics['execution_delay_actual'] = self._metrics['execution_delay_actual'][-1000:]
+
+    def record_signal_latency(self, latency_ms: float):
+        """记录信号延迟"""
+        self._metrics['signal_latency_total'].append(latency_ms)
+        if len(self._metrics['signal_latency_total']) > 1000:
+            self._metrics['signal_latency_total'] = self._metrics['signal_latency_total'][-1000:]
+
+    def get_summary(self) -> Dict[str, Any]:
+        """获取监控摘要"""
+        import statistics
+        summary = {}
+        for key, values in self._metrics.items():
+            if isinstance(values, list) and values:
+                summary[key] = {
+                    'count': len(values),
+                    'p50': statistics.median(values) if values else 0,
+                    'p99': sorted(values)[int(len(values) * 0.99)] if len(values) > 1 else values[0] if values else 0,
+                    'latest': values[-1] if values else None,
+                }
+            else:
+                summary[key] = values
+        return summary
+
+
+# ============================================================================
+# SIG-P2-01: 交易动作与方向枚举（消除字符串比对残留）
+# ============================================================================
+
+class TradeAction(str):
+    """交易动作枚举 — 继承str以保持序列化兼容性"""
+    OPEN = 'OPEN'
+    CLOSE = 'CLOSE'
+
+class TradeDirection(str):
+    """交易方向枚举 — 继承str以保持序列化兼容性"""
+    BUY = 'BUY'
+    SELL = 'SELL'
+
+class SignalType(str):
+    """信号类型枚举 — 继承str以保持序列化兼容性"""
+    BUY = 'BUY'
+    SELL = 'SELL'
+    CLOSE_LONG = 'CLOSE_LONG'
+    CLOSE_SHORT = 'CLOSE_SHORT'
+
+# 合法值集合（用于校验）
+VALID_TRADE_ACTIONS = {TradeAction.OPEN, TradeAction.CLOSE}
+VALID_TRADE_DIRECTIONS = {TradeDirection.BUY, TradeDirection.SELL}
+VALID_SIGNAL_TYPES = {SignalType.BUY, SignalType.SELL, SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT}
+OPEN_SIGNAL_TYPES = {SignalType.BUY, SignalType.SELL}
+CLOSE_SIGNAL_TYPES = {SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT}
+
+
+# ============================================================================
+# __all__ — 保持与原模块完全一致的公开API
+# ============================================================================
+
+__all__ = [
+    'CHINA_TZ', 'sanitize_sql_identifier', 'sanitize_sql_value', 'unified_ts_ms',
+    'DEFAULT_RISK_FREE_RATE', 'TRADING_DAYS_PER_YEAR_CHINA',
+    'ANNUALIZE_FACTOR_DAILY', 'ANNUALIZE_FACTOR_MINUTE',
+    'normalize_option_type', 'to_float32', 'normalize_instrument_id',
+    'extract_product_code', 'extract_strike_price', 'normalize_year_month',
+    'safe_int', 'safe_float', 'safe_price_check', 'RingBuffer', 'ShardRouter',
+    'DEFAULT_SHARD_COUNT', 'get_shard_router', 'ThreadLifecycleManager',
+    'InitPhase', 'InitializationError', 'InitStateMachine', 'requires_phase',
+    'PendingPullbackSignal', 'PullbackManager', 'retry_with_limit',
+    'PreconditionError', 'PostconditionError', 'OperationTimeoutError',
+    'require_precondition', 'ensure_postcondition', 'with_timeout',
+    'IdempotencyGuard', 'to_native_type', 'api_version', 'get_api_version',
+    'check_api_compatibility', 'deprecated', 'atomic_replace_file',
+    'cleanup_atomic_backup', 'AutoRollbackContext', 'check_version_sync',
+    'check_shared_utils_invariants', 'StrategyRegressionTest',
+    'stable_sum', 'stable_mean', 'stable_variance', 'stable_std',
+    'approx_equal', 'approx_less', 'approx_greater',
+    'should_trigger_stop_loss', 'should_trigger_take_profit',
+    'KahanSummation', 'safe_divide', 'compute_sharpe_stable',
+    'safe_normalize_weights', 'PRICE_TOLERANCE', 'FLOAT_COMPARE_TOLERANCE',
+    'compute_slippage_bps', 'UNIFIED_EXPIRY_SLIPPAGE_MULTIPLIERS',
+    'UNIFIED_INSTRUMENT_SLIPPAGE_MULTIPLIER', 'UNIFIED_QUALITY_SCALE_MAP',
+    'UNIFIED_LIQUIDITY_TIER_MAP',
+    'compute_execution_delay_slippage_bps',
+    'ModelVersionManager',
+    'RuntimeMonitor',
+    'TradeAction', 'TradeDirection', 'SignalType',
+    'VALID_TRADE_ACTIONS', 'VALID_TRADE_DIRECTIONS', 'VALID_SIGNAL_TYPES',
+    'OPEN_SIGNAL_TYPES', 'CLOSE_SIGNAL_TYPES',
+]

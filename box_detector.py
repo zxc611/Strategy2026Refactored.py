@@ -41,13 +41,13 @@ import time
 from bisect import bisect_left, insort
 from collections import deque
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class BoxProfile:
     """箱体轮廓"""
     box_id: str
@@ -72,7 +72,7 @@ class BoxProfile:
         return asdict(self)
 
 
-@dataclass
+@dataclass(slots=True)
 class ExtremeState:
     """极值子状态"""
     timestamp: str
@@ -93,7 +93,7 @@ class ExtremeState:
         return asdict(self)
 
 
-@dataclass
+@dataclass(slots=True)
 class BoxStrategyParams:
     """箱体策略参数（比趋势策略更苛刻）"""
     max_hold_minutes: int = 30
@@ -101,7 +101,7 @@ class BoxStrategyParams:
     stop_loss_ratio: float = 0.3
     max_risk_ratio: float = 0.05
     iv_percentile_min: float = 50.0
-    signal_cooldown_sec: float = 120.0
+    signal_cooldown_sec: float = 60.0  # R27-P0-CD-06修复: 120.0→60.0，与config_params全局默认值对齐
     position_scale: float = 0.3
     lots_min: int = 1
     option_buy_lots_max: int = 10
@@ -208,7 +208,7 @@ class BoxDetector:
             self._price_lows.append(low)
             self._price_closes.append(close)
             self._volumes.append(volume)
-            self._timestamps.append(timestamp or datetime.now().isoformat())
+            self._timestamps.append(timestamp or datetime.now(_CHINA_TZ).isoformat())
             self._stats['bars_processed'] += 1
 
     def update_iv(self, iv: float) -> None:
@@ -322,7 +322,7 @@ class BoxDetector:
 
     def detect_box(self) -> BoxProfile:
         with self._lock:
-            now_str = datetime.now().isoformat()
+            now_str = datetime.now(_CHINA_TZ).isoformat()
             self._box_id_counter += 1
             box_id = f"BOX-{self._box_id_counter:06d}"
 
@@ -426,7 +426,7 @@ class BoxDetector:
         cvd_slope: float = 0.0,
     ) -> ExtremeState:
         with self._lock:
-            now_str = datetime.now().isoformat()
+            now_str = datetime.now(_CHINA_TZ).isoformat()
 
             if self._current_box is None or not self._current_box.is_valid:
                 return ExtremeState(timestamp=now_str)

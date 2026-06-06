@@ -10,10 +10,18 @@ from ali2026v3_trading.shared_utils import RingBuffer
 __all__ = ['MicrostructureAnalyzer', 'MicrostructureConfig', 'VolumeWeightedOrderFlow',
            'ProductMicroData', 'FootprintBar']
 
+# R35-P1-6标注: 原analyze()方法已在重构中拆分删除，不再存在。
+# 旧接口analyze()已废弃，新接口为:
+#   - MicrostructureAnalyzer.get_composite_assessment() (综合评估)
+#   - VolumeWeightedOrderFlow.calc_volume_weighted_imbalance() (成交量加权失衡)
+#   - VolumeWeightedOrderFlow.calc_smart_money_flow() (聪明钱流向)
+# 调用链: OrderFlowBridge -> MicrostructureAnalyzer.get_composite_assessment()
+#         OrderFlowBridge -> VolumeWeightedOrderFlow (通过_hft_volume_flow成员)
+
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class MicrostructureConfig:
     """微结构分析器配置"""
     large_order_threshold: int = 50
@@ -50,7 +58,7 @@ def _get_data_service():
         return None
 
 
-@dataclass
+@dataclass(slots=True)
 class FootprintBar:
     """Footprint K线数据结构"""
     timestamp: float
@@ -176,6 +184,9 @@ class ProductMicroData:
 
             # 更新价格分布（根据品种精度动态取整）
             # P2 Bug #79修复：使用整数key避免float精度问题
+            # NP-P2-09: price极大时price_key溢出保护
+            if abs(price) > 1e8:
+                price = round(price, self.price_precision)
             price_key = int(round(price * (10 ** self.price_precision)))
             current.price_volume[price_key] = current.price_volume.get(price_key, 0) + volume
 
@@ -266,30 +277,48 @@ class ProductMicroData:
             depth_levels = self.config.imbalance_depth_levels
             
         with self._lock:
+            # MS-P2修复: 深度快照过期检测——若深度数据超过60秒未更新，
+            # 说明订单簿数据已失效，返回指数衰减后的值
+            now = time.time()
+            depth_age = now - self._depth_timestamp
+            if depth_age > 60.0:
+                decay = math.exp(-depth_age / 60.0)  # 每60秒衰减到1/e≈37%
+                logger.warning(f"Depth snapshot stale ({depth_age:.0f}s old), returning decayed imbalance")
+                # 如果深度数据存在，计算实际值后衰减；否则返回0
+                if not self._bids or not self._asks:
+                    return 0.0
+                raw_imb = self._calc_raw_imbalance(bid_levels=min(len(self._bids), depth_levels or self.config.imbalance_depth_levels),
+                                                    ask_levels=min(len(self._asks), depth_levels or self.config.imbalance_depth_levels))
+                return raw_imb * decay
+            
             if not self._bids or not self._asks:
                 return 0.0
             
-            bid_levels = min(len(self._bids), depth_levels)
-            ask_levels = min(len(self._asks), depth_levels)
+            bid_levels = min(len(self._bids), depth_levels or self.config.imbalance_depth_levels)
+            ask_levels = min(len(self._asks), depth_levels or self.config.imbalance_depth_levels)
             
             if bid_levels == 0 or ask_levels == 0:
                 return 0.0
                 
-            bid_weighted = 0.0
-            ask_weighted = 0.0
+            return self._calc_raw_imbalance(bid_levels, ask_levels)
+
+    def _calc_raw_imbalance(self, bid_levels: int, ask_levels: int) -> float:
+        """MS-P2: 提取为独立方法，供calc_instant_imbalance正常路径和过期衰减路径共用"""
+        bid_weighted = 0.0
+        ask_weighted = 0.0
+        
+        for i in range(bid_levels):
+            _, vol = self._bids[i]
+            bid_weighted += vol * (1.0 / (i + 1))
             
-            for i in range(bid_levels):
-                _, vol = self._bids[i]
-                bid_weighted += vol * (1.0 / (i + 1))
-                
-            for i in range(ask_levels):
-                _, vol = self._asks[i]
-                ask_weighted += vol * (1.0 / (i + 1))
-                
-            total = bid_weighted + ask_weighted
-            if total == 0:
-                return 0.0
-            return (bid_weighted - ask_weighted) / total
+        for i in range(ask_levels):
+            _, vol = self._asks[i]
+            ask_weighted += vol * (1.0 / (i + 1))
+            
+        total = bid_weighted + ask_weighted
+        if total == 0:
+            return 0.0
+        return (bid_weighted - ask_weighted) / total
 
     # ========================================================================
     # 订单流失衡指数 (OFI - Order Flow Imbalance)
@@ -353,7 +382,8 @@ class ProductMicroData:
                 best_bid = self._bids[0][0] if self._bids else 0.0
                 best_ask = self._asks[0][0] if self._asks else float('inf')
                 
-                if best_bid == 0.0 or best_ask == float('inf'):
+                MIN_PRICE_THRESHOLD = 1e-6  # NP-P2-26: 极小值保护
+                if best_bid == 0.0 or best_ask == float('inf') or best_bid < MIN_PRICE_THRESHOLD or best_ask < MIN_PRICE_THRESHOLD:
                     return {'error': 'invalid_depth'}
                     
                 mid_price = (best_bid + best_ask) / 2
@@ -964,6 +994,7 @@ class VolumeWeightedOrderFlow:
             }
 
 
+# R33-P2-6标记: 已集成到OrderFlowBridge生产链路
 class LiquidityConsumptionTracker:
     """流动性消耗追踪：实时计算大单对订单簿的消耗速率
 

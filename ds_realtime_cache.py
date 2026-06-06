@@ -8,9 +8,26 @@
 import threading
 import collections
 import logging
+from ali2026v3_trading.resilience_utils import deterministic_round
 import os
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+import time
+from ali2026v3_trading.shared_utils import CHINA_TZ
+
+try:
+    from ali2026v3_trading.config_params import _MISSING_VALUE_DEFAULTS
+except ImportError:
+    _MISSING_VALUE_DEFAULTS = {
+        'last_price': 0.0,
+        'volume': 0,
+        'open_interest': 0.0,
+        'bid_price': 0.0,
+        'ask_price': 0.0,
+        'spread_quality': 0.0,
+        'days_to_expiry': 999,
+        'implied_volatility': 0.0,
+    }
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +45,7 @@ def _get_data_paths_config():
         from ali2026v3_trading.config_service import get_config
         return get_config().data_paths
     except ImportError:
-        logger.debug("config_service not available, using default data paths")
+        logger.info("config_service not available, using default data paths")  # R24-P2-DF-03修复: debug→info，数据服务降级需可感知
         return None
     except Exception as e:
         logger.warning(f"Failed to get data paths config: {e}")
@@ -118,6 +135,16 @@ class RealTimeCache:
         self._max_recent_ticks = max_recent_ticks
         self._cache_hits = 0
         self._cache_misses = 0
+        self._cache_ttl_sec: float = 60.0  # R23-FR-02-FIX: 实时缓存TTL=60秒，停牌/流动性枯竭时返回过期标记
+        # R23-IN-P1-12-FIX: 缓存TTL参数初始化守卫 — 确保TTL为正数
+        try:
+            if self._cache_ttl_sec <= 0:
+                logging.warning("[R23-IN-P1-12] _cache_ttl_sec=%.1f非正数，重置为默认60.0", self._cache_ttl_sec)
+                self._cache_ttl_sec = 60.0
+        except Exception as _ttl_chk_e:
+            self._cache_ttl_sec = 60.0
+            logging.debug("[R23-IN-P1-12] TTL守卫异常，重置为60.0: %s", _ttl_chk_e)
+        self._cache_timestamps: Dict[str, float] = {}
         self._default_flush_windows = default_flush_windows or _DEFAULT_FLUSH_WINDOWS
         self._flush_windows = flush_windows or _resolve_flush_windows()
         self._internal_id_counter = 0
@@ -129,6 +156,9 @@ class RealTimeCache:
         self._tick_sequences: Dict[str, collections.deque] = {} if self._full_capture else None
         self._total_tick_count = 0
         self._total_dropped_overflow = 0
+        # INV-P1-04/INV-TIM-02修复: bar_time单调递增追踪
+        self._last_bar_time: Dict[str, datetime] = {}
+        self._bar_time_violations: int = 0
         mode_label = 'FULL_CAPTURE' if self._full_capture else 'LATEST_ONLY'
         logging.info(f"[IntradayMemoryState] Initialized mode={mode_label} "
                      f"max_per_symbol={self._max_per_symbol} max_total={self._max_total} "
@@ -162,9 +192,34 @@ class RealTimeCache:
         return c <= 5 or c in (10, 20, 50, 100, 200, 500, 1000) or c % 5000 == 0
 
     def update_tick(self, symbol: str, price: float, timestamp: datetime,
-                    volume: int = 0, bid_price: float = 0.0, ask_price: float = 0.0,
+                    volume: int = None, bid_price: float = None, ask_price: float = None,
                     option_type: str = None, strike_price: float = None,
                     internal_id: int = 0) -> int:
+        # [DATA-P2-05] 缺失值默认填充配置化
+        if volume is None:
+            volume = _MISSING_VALUE_DEFAULTS.get('volume', 0)
+        if bid_price is None:
+            bid_price = _MISSING_VALUE_DEFAULTS.get('bid_price', 0.0)
+        if ask_price is None:
+            ask_price = _MISSING_VALUE_DEFAULTS.get('ask_price', 0.0)
+        # INV-08/INV-DAT-01: 验证bid < ask，防止异常tick数据污染缓存
+        if bid_price > 0 and ask_price > 0 and bid_price >= ask_price:
+            logging.warning(
+                "[INV-08] bid>=ask异常: symbol=%s bid=%.4f ask=%.4f, 丢弃该tick",
+                symbol, bid_price, ask_price,
+            )
+            return 0
+        # INV-P1-04/INV-TIM-02修复: bar_time单调递增验证
+        if timestamp is not None:
+            last_bt = self._last_bar_time.get(symbol)
+            if last_bt is not None and timestamp < last_bt:
+                self._bar_time_violations += 1
+                logging.warning(
+                    "[INV-TIM-02] bar_time非单调递增: symbol=%s current=%s < last=%s violations=%d",
+                    symbol, timestamp, last_bt, self._bar_time_violations,
+                )
+                # 不丢弃，仅告警（时间回退可能是数据源重传）
+            self._last_bar_time[symbol] = timestamp
         with self._lock:
             if self._params_service is None:
                 pt = {'symbol': symbol, 'price': price, 'timestamp': timestamp,
@@ -198,6 +253,7 @@ class RealTimeCache:
             }
             with self._get_shard_lock(symbol):
                 self._latest_ticks[symbol] = tick_entry
+                self._cache_timestamps[symbol] = time.time()  # R23-FR-02-FIX: 记录缓存写入时间
                 if self._full_capture and self._tick_sequences is not None:
                     seq = self._tick_sequences.get(symbol)
                     if seq is None:
@@ -218,8 +274,20 @@ class RealTimeCache:
         with self._get_shard_lock(symbol):
             tick = self._latest_ticks.get(symbol)
             if tick is not None:
+                cache_ts = self._cache_timestamps.get(symbol, 0.0)
+                if (time.time() - cache_ts) > self._cache_ttl_sec:
+                    logging.warning("[R23-FR-02-FIX] 缓存过期: symbol=%s age=%.1fs > ttl=%.1fs",
+                                    symbol, time.time() - cache_ts, self._cache_ttl_sec)
+                    with self._stats_lock:
+                        self._cache_misses += 1
+                    return None
                 with self._stats_lock:
                     self._cache_hits += 1
+                    _total = self._cache_hits + self._cache_misses
+                    if _total % 1000 == 0:
+                        _rate = self._cache_hits / _total * 100
+                        logging.info("[R23-P2-03-FIX] 缓存命中率监控: hits=%d misses=%d hit_rate=%.2f%%",
+                                    self._cache_hits, self._cache_misses, _rate)
                 return tick['price']
         with self._stats_lock:
             self._cache_misses += 1
@@ -240,7 +308,7 @@ class RealTimeCache:
             tick = self._latest_ticks.get(symbol)
         if not tick:
             return None
-        bid, ask = tick.get('bid_price', 0), tick.get('ask_price', 0)
+        bid, ask = tick.get('bid_price', _MISSING_VALUE_DEFAULTS.get('bid_price', 0)), tick.get('ask_price', _MISSING_VALUE_DEFAULTS.get('ask_price', 0))
         return ask - bid if bid > 0 and ask > 0 else None
 
     def has_symbol(self, symbol: str) -> bool:
@@ -254,11 +322,19 @@ class RealTimeCache:
             'cache_misses': self._cache_misses,
         }
 
+    def get_cache_age(self, symbol: str) -> Optional[float]:
+        """[R23-P2-04-FIX] 返回指定品种缓存数据的年龄（秒），未缓存返回None"""
+        cache_ts = self._cache_timestamps.get(symbol)
+        if cache_ts is None or cache_ts == 0.0:
+            return None
+        return time.time() - cache_ts
+
     def get_cache_stats(self) -> Dict[str, Any]:
         with self._lock:
             base = self._collect_base_stats()
             total = base['cache_hits'] + base['cache_misses']
-            base['hit_rate_percent'] = round(base['cache_hits'] / total * 100, 2) if total > 0 else 0
+            # R27-P2-FP-12修复: round()→deterministic_round()
+            base['hit_rate_percent'] = deterministic_round(base['cache_hits'] / total * 100, 2) if total > 0 else 0
             return base
 
     def reset_stats(self):
@@ -302,7 +378,8 @@ class RealTimeCache:
             logging.info("[RealTimeCache] Cleared %d ticks after DB flush", count)
 
     def is_in_flush_window(self, check_time: Optional[datetime] = None) -> bool:
-        ct = check_time or datetime.now()
+        # R15-P1-DATA-03修复: 使用配置的night_session_end_hour取代硬编码
+        ct = check_time or datetime.now(CHINA_TZ)
         cm = ct.hour * 60 + ct.minute
         for sh, sm, eh, em in self._flush_windows:
             s, e = sh * 60 + sm, eh * 60 + em
@@ -379,7 +456,8 @@ class RealTimeCache:
                 stats['max_per_symbol'] = self._max_per_symbol
                 total_bytes = sum(len(s) for s in self._tick_sequences.values()) * 200
                 stats['estimated_bytes'] = total_bytes
-                stats['estimated_mb'] = round(total_bytes / (1024 * 1024), 1)
+                # R27-P2-FP-12修复: round()→deterministic_round()
+                stats['estimated_mb'] = deterministic_round(total_bytes / (1024 * 1024), 1)
             return stats
 
     def get_kline_from_memory(self, symbol: str, count: int = 10,
@@ -395,42 +473,92 @@ class RealTimeCache:
         klines = []
         if len(ticks) == 0:
             return klines
+        # DFG-P1-09修复: tick→Bar转换volume字段语义归一化
+        # 语义说明: 不同数据源的tick.volume语义不一致:
+        #   - 交易所原始tick: volume为累计成交量（单调递增，跨tick累加）
+        #   - Bar聚合需要: volume为周期内增量成交量（每个Bar独立计算）
+        # 修复策略: 检测volume字段是否为累计量（采样前20个tick判断单调递增），
+        #   若为累计量则转换为增量（当前tick.volume - 前一tick.volume），
+        #   确保Bar.volume始终为周期内增量成交量。
+        _prev_tick_vol = None
+        _volume_is_cumulative = False
+        _vol_sample_count = 0
+        for _t in ticks[:min(20, len(ticks))]:
+            _v = _t.get('volume', _MISSING_VALUE_DEFAULTS.get('volume', 0))
+            if _prev_tick_vol is not None and _v > _prev_tick_vol and _vol_sample_count < 10:
+                _volume_is_cumulative = True
+                _vol_sample_count += 1
+            elif _prev_tick_vol is not None and _v < _prev_tick_vol:
+                _volume_is_cumulative = False
+                break
+            _prev_tick_vol = _v
+        if _vol_sample_count < 3:
+            _volume_is_cumulative = False
+        _last_cumulative_vol = 0
         period_start = ticks[0].get('timestamp')
-        current_bar = {'open': None, 'high': -float('inf'), 'low': float('inf'),
+        current_bar = {'open': None, 'high': None, 'low': None,  # R27-P2-07-FIX: 用None替代inf避免序列化问题
                        'close': None, 'volume': 0, 'start_time': period_start, 'count': 0}
         for t in ticks:
             ts = t.get('timestamp')
-            price = t.get('price', 0)
-            vol = t.get('volume', 0)
+            price = t.get('price', _MISSING_VALUE_DEFAULTS.get('last_price', 0))
+            vol = t.get('volume', _MISSING_VALUE_DEFAULTS.get('volume', 0))
+            # DFG-P1-09修复: 累计volume转增量volume
+            if _volume_is_cumulative:
+                _delta_vol = max(0, vol - _last_cumulative_vol)
+                _last_cumulative_vol = vol
+                vol = _delta_vol
             if ts is None or price <= 0:
                 continue
             elapsed = (ts - period_start).total_seconds() if period_start else 0
             if elapsed >= period_seconds:
                 if current_bar['count'] > 0:
-                    klines.append({
-                        'timestamp': current_bar['start_time'],
-                        'open': current_bar['open'], 'high': current_bar['high'],
-                        'low': current_bar['low'], 'close': current_bar['close'],
-                        'volume': current_bar['volume'],
-                    })
+                    # INV-09/INV-DAT-04: 周期完成bar的OHLC一致性验证
+                    if not _validate_ohlcv(current_bar['open'], current_bar['high'],
+                                           current_bar['low'], current_bar['close'],
+                                           current_bar['volume']):
+                        logging.warning(
+                            "[DATA-P2-02] 周期bar OHLC一致性违反，丢弃异常Bar: "
+                            "open=%.4f high=%.4f low=%.4f close=%.4f volume=%.4f",
+                            current_bar['open'], current_bar['high'],
+                            current_bar['low'], current_bar['close'],
+                            current_bar['volume'],
+                        )
+                    else:
+                        klines.append({
+                            'timestamp': current_bar['start_time'],
+                            'open': current_bar['open'], 'high': current_bar['high'],
+                            'low': current_bar['low'], 'close': current_bar['close'],
+                            'volume': current_bar['volume'],
+                        })
                 period_start = ts
                 current_bar = {'open': price, 'high': price, 'low': price,
                                'close': price, 'volume': vol, 'start_time': ts, 'count': 1}
             else:
                 if current_bar['open'] is None:
                     current_bar['open'] = price
-                current_bar['high'] = max(current_bar['high'], price)
-                current_bar['low'] = min(current_bar['low'], price)
+                current_bar['high'] = price if current_bar['high'] is None else max(current_bar['high'], price)  # R27-P2-07-FIX: None检查
+                current_bar['low'] = price if current_bar['low'] is None else min(current_bar['low'], price)  # R27-P2-07-FIX: None检查
                 current_bar['close'] = price
                 current_bar['volume'] += vol
                 current_bar['count'] += 1
         if current_bar['count'] > 0:
-            klines.append({
-                'timestamp': current_bar['start_time'],
-                'open': current_bar['open'], 'high': current_bar['high'],
-                'low': current_bar['low'], 'close': current_bar['close'],
-                'volume': current_bar['volume'],
-            })
+            # INV-09/INV-DAT-04: OHLC一致性验证 — 校验失败丢弃异常Bar
+            _bar_open = current_bar['open']
+            _bar_high = current_bar['high']
+            _bar_low = current_bar['low']
+            _bar_close = current_bar['close']
+            if not _validate_ohlcv(_bar_open, _bar_high, _bar_low, _bar_close, current_bar['volume']):
+                logging.warning(
+                    "[DATA-P2-02] OHLC一致性违反，丢弃异常Bar: open=%.4f high=%.4f low=%.4f close=%.4f volume=%.4f",
+                    _bar_open, _bar_high, _bar_low, _bar_close, current_bar['volume'],
+                )
+            else:
+                klines.append({
+                    'timestamp': current_bar['start_time'],
+                    'open': current_bar['open'], 'high': current_bar['high'],
+                    'low': current_bar['low'], 'close': current_bar['close'],
+                    'volume': current_bar['volume'],
+                })
         if count > 0 and len(klines) > count:
             klines = klines[-count:]
         return klines
@@ -484,3 +612,26 @@ try:
     _HAS_REALTIME_CACHE = True
 except (NameError, AssertionError):
     _HAS_REALTIME_CACHE = False
+
+
+# ============================================================================
+# R15-P2 数据质量修复块
+# ============================================================================
+
+# R15-P2-DATA-02修复: Bar合成OHLC关系检查
+def _validate_ohlcv(open_price: float, high_price: float, low_price: float,
+                    close_price: float, volume: float) -> bool:
+    """校验OHLCV关系: high>=max(open,close), low<=min(open,close), volume>=0
+    
+    Returns:
+        bool: True=合法, False=违反OHLC关系(数据异常)
+    """
+    if volume < 0:
+        return False
+    if high_price < max(open_price, close_price):
+        return False
+    if low_price > min(open_price, close_price):
+        return False
+    if low_price > high_price:
+        return False
+    return True

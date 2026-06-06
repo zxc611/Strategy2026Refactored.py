@@ -15,9 +15,9 @@ import unittest
 from dataclasses import fields
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'ali2026v3_trading', '参数池'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'ali2026v3_trading', 'param_pool'))
 
-from ali2026v3_trading.参数池.cycle_resonance_module import (
+from ali2026v3_trading.param_pool.cycle_resonance_module import (
     CycleResonanceModule,
     CRParams,
     CR_PARAMS_DEFAULT,
@@ -27,7 +27,7 @@ from ali2026v3_trading.参数池.cycle_resonance_module import (
     get_cycle_resonance_module,
     reset_cycle_resonance_module,
 )
-from ali2026v3_trading.参数池.delay_time_sharpe_3d import (
+from ali2026v3_trading.param_pool.delay_time_sharpe_3d import (
     DELAY_TIERS,
     DELAY_TIER_LABELS,
     DEFAULT_TIME_PARAMS,
@@ -35,7 +35,7 @@ from ali2026v3_trading.参数池.delay_time_sharpe_3d import (
 )
 
 try:
-    from ali2026v3_trading.参数池.task_scheduler import CR_PARAM_GRID
+    from ali2026v3_trading.param_pool.task_scheduler import CR_PARAM_GRID
 except Exception:
     CR_PARAM_GRID = None
 
@@ -160,28 +160,28 @@ class TestRiskSurfaceNoHardcode(unittest.TestCase):
 class TestDelayTimeSharpe3D(unittest.TestCase):
     """delay_time_sharpe_3d: 20档延迟/80个时间参数"""
 
-    EXPECTED_TIERS = [0, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200]
+    EXPECTED_TIERS = [0, 25, 50, 80, 120, 200]  # P-10修复: 6核心延迟档位(手册4.2节)
 
     def test_delay_tiers_count(self):
-        self.assertEqual(len(DELAY_TIERS), 20)
+        self.assertEqual(len(DELAY_TIERS), 6)  # C-17修复: DELAY_TIERS已从20档收缩为6核心档位（手册4.2节）
 
     def test_delay_tiers_values(self):
         self.assertEqual(DELAY_TIERS, self.EXPECTED_TIERS)
 
     def test_labels_count(self):
-        self.assertEqual(len(DELAY_TIER_LABELS), 20)
+        self.assertEqual(len(DELAY_TIER_LABELS), 6)  # P-10修复: 6档
 
     def test_default_time_params_strategies(self):
-        for strat in ["high_freq", "resonance", "box", "spring"]:
+        for strat in ["high_freq", "resonance", "box", "spring", "arbitrage", "market_making"]:  # R27-P2-09-FIX: 补充6策略覆盖
             self.assertIn(strat, DEFAULT_TIME_PARAMS)
 
     def test_default_time_params_per_strategy(self):
-        for strat in ["high_freq", "resonance", "box", "spring"]:
+        for strat in ["high_freq", "resonance", "box", "spring", "arbitrage", "market_making"]:  # R27-P2-09-FIX: 补充6策略覆盖
             keys = list(DEFAULT_TIME_PARAMS[strat].keys())
             self.assertEqual(keys, self.EXPECTED_TIERS, f"{strat} delay keys mismatch")
 
     def test_time_params_delay_ms_consistency(self):
-        for strat in ["high_freq", "resonance", "box", "spring"]:
+        for strat in ["high_freq", "resonance", "box", "spring", "arbitrage", "market_making"]:  # R27-P2-09-FIX: 补充6策略覆盖
             for d in self.EXPECTED_TIERS:
                 tp = DEFAULT_TIME_PARAMS[strat][d]
                 self.assertEqual(tp.delay_ms, d, f"{strat}@{d} delay_ms={tp.delay_ms}")

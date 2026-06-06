@@ -18,7 +18,7 @@ import threading
 import time
 import unittest
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone  # ENV-P2修复
 from typing import Dict, Any
 
 from ali2026v3_trading.box_detector import (
@@ -394,7 +394,7 @@ class TestAbsoluteEVBottomline(unittest.TestCase):
         for _ in range(10):
             self.eco._master_trades.append(EcosystemTradeRecord(
                 trade_id=f'T{_}', strategy_id='master',
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 pnl=-100.0, net_pnl=-100.0, is_open=False,
             ))
         self.eco._master._closed_pnl_sum = -1000.0
@@ -408,6 +408,20 @@ class TestAbsoluteEVBottomline(unittest.TestCase):
         ok = self.eco.resume_strategy('master')
         self.assertTrue(ok)
         self.assertFalse(self.eco._master.paused)
+
+    def test_resume_strategy_blocked_when_frozen(self):
+        self.eco._master.paused = True
+        self.eco._master.frozen = True
+        ok = self.eco.resume_strategy('master')
+        self.assertFalse(ok)
+        self.assertTrue(self.eco._master.paused)
+
+    def test_resume_strategy_blocked_when_governance_degraded(self):
+        self.eco._master.paused = True
+        self.eco._governance_degraded = True
+        ok = self.eco.resume_strategy('master')
+        self.assertFalse(ok)
+        self.assertTrue(self.eco._master.paused)
 
 
 class TestHealthStatus(unittest.TestCase):
@@ -479,7 +493,7 @@ class TestRecordPnL(unittest.TestCase):
     def test_record_master_pnl(self):
         r = EcosystemTradeRecord(
             trade_id='T1', strategy_id='master',
-            timestamp=datetime.now().isoformat(), is_open=True,
+            timestamp=datetime.now(timezone.utc).isoformat(), is_open=True,
         )
         self.eco._master_trades.append(r)
         self.eco._master.position_count = 1
@@ -500,7 +514,7 @@ class TestComputeExpectedValue(unittest.TestCase):
         for pnl in [50, 30, 20]:
             r = EcosystemTradeRecord(
                 trade_id=f'T{pnl}', strategy_id='master',
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 pnl=float(pnl), net_pnl=float(pnl), is_open=False,
             )
             self.eco._master_trades.append(r)
@@ -511,7 +525,7 @@ class TestComputeExpectedValue(unittest.TestCase):
         for pnl in [-50, -30, -20]:
             r = EcosystemTradeRecord(
                 trade_id=f'T{pnl}', strategy_id='master',
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 pnl=float(pnl), net_pnl=float(pnl), is_open=False,
             )
             self.eco._master_trades.append(r)

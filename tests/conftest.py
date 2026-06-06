@@ -34,5 +34,16 @@ def _reset_all_singletons():
 @pytest.fixture(autouse=True)
 def _isolate_global_state():
     _reset_all_singletons()
+    # AP-03: SingletonRegistry全局重置
+    try:
+        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        SingletonRegistry.reset_all()
+    except Exception:
+        pass
     yield
     _reset_all_singletons()
+    try:
+        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        SingletonRegistry.reset_all()
+    except Exception:
+        pass

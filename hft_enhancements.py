@@ -24,11 +24,18 @@ from ali2026v3_trading.signal_service import (
     EMASignalFilter,
     SignalTimingFilter,
 )
-from ali2026v3_trading.order_service import (
-    SmartOrderSplitter,
-    OrderSplitStrategy,
-    SplitOrderResult,
-)
+try:
+    from ali2026v3_trading.order_service import (
+        SmartOrderSplitter,
+        OrderSplitStrategy,
+        SplitOrderResult,
+    )
+except ImportError as _e:
+    import logging as _log
+    _log.warning("[hft_enhancements] SmartOrderSplitter导入失败(降级运行): %s", _e)
+    SmartOrderSplitter = None  # type: ignore[assignment,misc]
+    OrderSplitStrategy = None  # type: ignore[assignment,misc]
+    SplitOrderResult = None  # type: ignore[assignment,misc]
 from ali2026v3_trading.strategy_tick_handler import (
     DynamicPursuitEngine,
     PursuitPosition,
@@ -95,11 +102,15 @@ class HFTEnhancementEngine:
             use_kalman=cfg.get('use_kalman', True),
         )
 
-        self.order_splitter = SmartOrderSplitter(
-            max_depth_levels=cfg.get('max_depth_levels', 5),
-            aggressive_signal_threshold=cfg.get('aggressive_threshold', 0.8),
-            passive_signal_threshold=cfg.get('passive_threshold', 0.6),
-        )
+        if SmartOrderSplitter is not None:
+            self.order_splitter = SmartOrderSplitter(
+                max_depth_levels=cfg.get('max_depth_levels', 5),
+                aggressive_signal_threshold=cfg.get('aggressive_threshold', 0.8),
+                passive_signal_threshold=cfg.get('passive_threshold', 0.6),
+            )
+        else:
+            self.order_splitter = None
+            logging.warning("[HFTEnhancementEngine] SmartOrderSplitter不可用, 拆单功能降级")
 
         self.pursuit_engine = DynamicPursuitEngine(
             surge_threshold=cfg.get('surge_threshold', 0.3),

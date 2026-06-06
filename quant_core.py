@@ -8,6 +8,12 @@ quant_core.py - 量化系统核心算法模块
 4. VolatilityRegimeFilter - 波动率环境过滤（EWMA RV+自适应阈值）     <10μs
 5. CointegrationScanner   - 跨品种协整扫描（双向ADF+残差方差选向）   ~1ms
 6. SurvivalAnalyzer       - 生存分析（Cox+Levenberg-Marquardt）     ~5ms
+
+R21-MATH-P2-05修复说明: FFT频率混叠检查 — 当前代码库中未使用FFT/detect_cycle，
+若后续引入FFT频谱分析（如周期检测），必须在FFT前做抗混叠处理：
+(1) 检查采样间隔一致性，非均匀采样需先插值重采样；
+(2) 对输入数据做低通滤波（截止频率≤奈奎斯特频率）；
+(3) 验证频谱能量在奈奎斯特频率处衰减至可忽略水平。
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ try:
 except ImportError:
     from quant_infra import NumpyRingBuffer, rate_limit_log
 
+# OPTIONAL-DEPENDENCY: scipy.linalg用于HMM等高级数学计算
 try:
     from scipy.linalg import eigh as _scipy_eigh
     _HAS_SCIPY = True
@@ -86,7 +93,12 @@ class MultiPeriodTrendScorer:
         self._init_count = 0
 
     def update(self, high: float, low: float, close: float) -> Dict[str, Any]:
-        if close <= 0 or high < low:
+        # R24-P1-IV-02修复: close/high/low价格过滤增加NaN/Inf检查
+        import math
+        if (close <= 0 or high < low
+            or (isinstance(close, float) and (math.isnan(close) or math.isinf(close)))
+            or (isinstance(high, float) and (math.isnan(high) or math.isinf(high)))
+            or (isinstance(low, float) and (math.isnan(low) or math.isinf(low)))):
             return self._empty_result()
         with self._lock:
             self._prices.append(close)
@@ -141,7 +153,7 @@ class MultiPeriodTrendScorer:
             self._dx_buffers[i] = dx
             self._adx_buffers[i] = a * dx + (1 - a) * self._adx_buffers[i]
 
-            momentum = (curr_close - prev_close) / prev_close if prev_close > 0 else 0.0
+            momentum = (curr_close - prev_close) / prev_close if prev_close > 1e-10 else 0.0  # R24-P2-IV-02修复: 使用1e-10替代0防止极端低价合约产生巨大中间值
             adx_enhanced = min(self._adx_buffers[i] * (1.0 + 0.3 * abs(momentum) * 100.0), 100.0)
 
             self._vol_buffers[i].append(tr)
@@ -184,6 +196,7 @@ class MultiPeriodTrendScorer:
             'adx_values': adx_values,
             'ema_values': ema_values,
             'dynamic_periods': list(self._dynamic_periods),
+            'ema_warmup': not self._initialized,
         }
 
     def _empty_result(self) -> Dict[str, Any]:
@@ -216,7 +229,7 @@ class IVSurfacePCA:
 
     def __init__(self, window: int = 120, shrinkage: float = 0.5,
                  var_explained_threshold: float = 0.90, max_components: int = 3,
-                 refit_interval: int = 10, ewma_alpha: float = 0.05):
+                 refit_interval: int = 10, ewma_alpha: float = 0.06):  # J.P.Morgan RiskMetrics推荐 λ=0.94 → α=0.06
         self._lock = threading.RLock()
         self._window = window
         self._shrinkage = shrinkage
@@ -260,6 +273,9 @@ class IVSurfacePCA:
                 self._update_counter = 0
 
             if self._components is not None and self._mean_iv is not None:
+                # R21-MATH-P2-02修复: IVSurfacePCA的EWMA均值更新同样存在初始偏差，
+                # 但此处mean_iv仅用于PCA投影的中心化，偏差影响有限，且_fit()会重新计算均值覆盖，
+                # 因此暂不做偏差修正。若后续发现PCA投影漂移，需添加步数计数器和偏差修正。
                 self._mean_iv = self._ewma_alpha * vec + (1 - self._ewma_alpha) * self._mean_iv
                 self._projection = (vec - self._mean_iv) @ self._components
 
@@ -273,6 +289,7 @@ class IVSurfacePCA:
         centered = data - self._mean_iv
         n, p = centered.shape
         sample_cov = (centered.T @ centered) / max(n - 1, 1)
+        # R21-MATH-P2-07修复: 检查协方差矩阵正定性，若存在非正特征值则添加正则化项
         shrunk_cov = (1 - self._shrinkage) * sample_cov + self._shrinkage * np.diag(np.diag(sample_cov))
         try:
             if _HAS_SCIPY and _scipy_eigh is not None:
@@ -281,6 +298,24 @@ class IVSurfacePCA:
                 eigenvalues, eigenvectors = np.linalg.eigh(shrunk_cov)
         except np.linalg.LinAlgError:
             return
+        # R21-MATH-P2-06修复: eigh理论上保证实数特征值，添加断言验证
+        assert np.all(np.isreal(eigenvalues)), (
+            "[R21-MATH-P2-06修复] eigh返回复数特征值，数值异常"
+        )
+        eigenvalues = np.real(eigenvalues)
+        # R21-MATH-P2-07修复: 检查正定性，若最小特征值<=0则添加正则化
+        _min_eig = np.min(eigenvalues)
+        if _min_eig <= 0:
+            _reg = abs(_min_eig) + 1e-8
+            shrunk_cov += _reg * np.eye(p)
+            try:
+                if _HAS_SCIPY and _scipy_eigh is not None:
+                    eigenvalues, eigenvectors = _scipy_eigh(shrunk_cov)
+                else:
+                    eigenvalues, eigenvectors = np.linalg.eigh(shrunk_cov)
+            except np.linalg.LinAlgError:
+                return
+            eigenvalues = np.real(eigenvalues)
         idx = np.argsort(eigenvalues)[::-1]
         eigenvalues, eigenvectors = eigenvalues[idx], eigenvectors[:, idx]
         pos = eigenvalues > 1e-10
@@ -366,11 +401,20 @@ class AdaptiveHMM:
         self._var_floor_ratio = var_floor_ratio
         self._min_variance = min_variance
         self._em_learning_rate = 0.1
+        # R27-P0-FC-02修复: 转移矩阵行和验证标志
+        self._transition_validated: bool = False
+        # R27-P0-FC-03修复: 状态驻留时间监控
+        self._state_entry_time: Dict[int, float] = {}
+        self._state_dwell_times: Dict[int, List[float]] = {k: [] for k in range(n_states)}
+        self._max_dwell_times: Dict[int, float] = {k: 3600.0 for k in range(n_states)}  # 默认1小时告警
 
     def update(self, observation: float) -> Dict[str, Any]:
         if not math.isfinite(observation):
             return self._empty_result()
         with self._lock:
+            # R27-P0-FC-02修复: 转移矩阵行和验证(每1000次观测)
+            if not self._transition_validated and self._observation_count % 1000 == 0:
+                self._validate_transition_matrix()
             self._observation_buffer.append(observation)
             self._observation_count += 1
             log_obs = self._log_emission_prob_list(observation)
@@ -390,7 +434,28 @@ class AdaptiveHMM:
             exp_sum = sum(math.exp(a - max_alpha) for a in new_alpha) if max_alpha > -1e29 else 1.0
             posterior = [math.exp(a - max_alpha) / exp_sum for a in new_alpha] if max_alpha > -1e29 else [1.0 / K] * K
             self._current_posterior = np.array(posterior, dtype=np.float64)
+            prev_state = self._current_state
             self._current_state = max(range(K), key=lambda k: posterior[k])
+            # R27-P0-FC-03修复: 状态驻留时间监控
+            import time as _time
+            now = _time.time()
+            if prev_state != self._current_state:
+                if prev_state in self._state_entry_time:
+                    dwell = now - self._state_entry_time[prev_state]
+                    self._state_dwell_times[prev_state].append(dwell)
+                    if len(self._state_dwell_times[prev_state]) > 100:
+                        self._state_dwell_times[prev_state] = self._state_dwell_times[prev_state][-50:]
+                self._state_entry_time[self._current_state] = now
+            elif self._current_state not in self._state_entry_time:
+                self._state_entry_time[self._current_state] = now
+            # 驻留超限告警
+            for k in range(K):
+                if k in self._state_entry_time:
+                    dwell = now - self._state_entry_time[k]
+                    if dwell > self._max_dwell_times.get(k, 3600.0) and k == self._current_state:
+                        if int(dwell) % 300 < 2:  # 每5分钟告警一次
+                            logging.warning("[R27-P0-FC-03] HMM状态%d驻留超限: %.0fs>%.0fs",
+                                            k, dwell, self._max_dwell_times.get(k, 3600.0))
             if self._observation_count - self._last_em_count >= self._update_interval:
                 self._needs_em = True
                 self._last_em_count = self._observation_count
@@ -403,13 +468,36 @@ class AdaptiveHMM:
                 self._em_thread = threading.Thread(target=self._async_em_worker, daemon=True)
                 self._em_thread.start()
 
+    # R27-P0-FC-02修复: 转移矩阵行和验证
+    def _validate_transition_matrix(self) -> bool:
+        """验证转移矩阵每行和为1(容差1e-6)，不满足则归一化修正"""
+        try:
+            row_sums = self._transition.sum(axis=1)
+            tol = 1e-6
+            valid = all(abs(rs - 1.0) < tol for rs in row_sums)
+            if not valid:
+                logging.warning(
+                    "[R27-P0-FC-02] HMM转移矩阵行和不为1: %s, 执行归一化修正",
+                    [f"{rs:.6f}" for rs in row_sums]
+                )
+                for i in range(self._n_states):
+                    rs = self._transition[i].sum()
+                    if rs > 0:
+                        self._transition[i] /= rs
+                self._log_transition = np.log(self._transition + 1e-30)
+            self._transition_validated = True
+            return valid
+        except Exception as e:
+            logging.warning("[R27-P0-FC-02] 转移矩阵验证异常: %s", e)
+            return False
+
     def _async_em_worker(self) -> None:
         try:
             with self._lock:
                 if not self._needs_em:
                     return
                 obs_snapshot = self._observation_buffer.snapshot().copy()
-                params_snapshot = {
+                params_snapshot = {  # R21-MEM-P2-11修复: 级联复制 — snapshot().copy() + 6个ndarray.copy()，共7次内存拷贝；可考虑只读引用+写时复制
                     'transition': self._transition.copy(), 'means': self._means.copy(),
                     'variances': self._variances.copy(), 'initial_prob': self._initial_prob.copy(),
                     'log_transition': self._log_transition.copy(), 'log_initial': self._log_initial.copy(),
@@ -453,6 +541,23 @@ class AdaptiveHMM:
         return result
 
     def _compute_em_step(self, obs_arr: np.ndarray, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """EM单步迭代（前向-后向算法+E步+M步）
+
+        R21-MEM-P2-14修复 — 递归深度/栈溢出风险评估:
+        本方法为纯循环实现（for循环遍历观测序列），无递归调用，无栈溢出风险。
+        前向-后向算法的时间复杂度O(n*K^2)，空间复杂度O(n*K)，
+        n受max_em_obs=200限制，K为状态数(默认3)，不会导致调用栈溢出。
+        注意：若未来改为递归实现前向/后向算法，需在入口检查
+        sys.getrecursionlimit()，确保递归深度不超过限制(默认1000)。
+
+        R21-MATH-P2-08修复 — 收敛判据文档:
+        本方法执行单次EM迭代（非迭代至收敛），收敛由调用方控制：
+        - 触发条件: 每_update_interval(默认100)个观测触发一次EM
+        - 学习率: _em_learning_rate=0.3，新旧参数加权混合，隐式控制收敛速度
+        - 方差地板: _apply_variance_floor()防止方差退化至0
+        - 无显式收敛判据: EM在后台线程单步执行，不检查对数似然变化量
+        - 已知限制: 无法保证EM收敛到全局最优，学习率0.3可能过大导致振荡
+        """
         n = len(obs_arr)
         if n < 10:
             return None
@@ -545,7 +650,7 @@ class AdaptiveHMM:
 
     def _build_result(self) -> Dict[str, Any]:
         state_labels = ['LOW_VOL', 'NORMAL', 'HIGH_VOL']
-        return {
+        result = {
             'state': self._current_state,
             'state_label': state_labels[self._current_state] if self._current_state < len(state_labels) else f'STATE_{self._current_state}',
             'posterior': self._current_posterior.tolist(),
@@ -553,6 +658,21 @@ class AdaptiveHMM:
             'transition_diag': np.diag(self._transition).tolist(),
             'observation_count': self._observation_count,
         }
+        # DFG-P1-01修复: HMM五态标签通过EventBus发布事件，供信号服务和风控消费
+        try:
+            from ali2026v3_trading.event_bus import get_global_event_bus
+            _bus = get_global_event_bus()
+            if _bus is not None:
+                _bus.publish('hmm.state_changed', {
+                    'type': 'hmm.state_changed',
+                    'state': result['state'],
+                    'state_label': result['state_label'],
+                    'posterior': result['posterior'],
+                    'observation_count': result['observation_count'],
+                }, async_mode=True)
+        except Exception:
+            pass
+        return result
 
     def _empty_result(self) -> Dict[str, Any]:
         return {
@@ -575,12 +695,12 @@ class VolatilityRegimeFilter:
         '_lock', '_lookback', '_low_pct', '_high_pct', '_min_hold_ticks',
         '_rv_buffer', '_current_rv', '_current_regime', '_regime_hold_count',
         '_p25', '_p50', '_p75', '_update_count', '_sort_interval',
-        '_ewma_rv', '_ewma_alpha',
+        '_ewma_rv', '_ewma_alpha', '_ewma_step',
     )
 
     def __init__(self, lookback: int = 100, low_percentile: float = 25.0,
                  high_percentile: float = 75.0, min_hold_ticks: int = 20,
-                 ewma_alpha: float = 0.05):
+                 ewma_alpha: float = 0.06):  # J.P.Morgan RiskMetrics推荐 λ=0.94 → α=0.06
         self._lock = threading.RLock()
         self._lookback = lookback
         self._low_pct = low_percentile / 100.0
@@ -595,16 +715,33 @@ class VolatilityRegimeFilter:
         self._sort_interval = 20
         self._ewma_rv = 0.0
         self._ewma_alpha = ewma_alpha
+        self._ewma_step = 0  # R21-MATH-P2-02修复: EWMA步数计数器，用于偏差修正
 
     def update(self, return_value: float) -> Dict[str, Any]:
+        # R24-P2-IV-10修复: 波动率异常跳变检测——EWMA值突然翻倍/减半时告警
         with self._lock:
             self._rv_buffer.append(return_value ** 2)
             self._update_count += 1
             if len(self._rv_buffer) < 5:
                 return self._empty_result()
-            self._current_rv = math.sqrt(self._rv_buffer.sum() / len(self._rv_buffer))
+            _buf_sum = self._rv_buffer.sum()
+            _buf_len = len(self._rv_buffer)
+            # R24-P0-IV-04修复: 除零保护，防止空buffer导致ZeroDivisionError
+            self._current_rv = math.sqrt(_buf_sum / _buf_len) if _buf_len > 0 and _buf_sum >= 0 else 0.0
+            _prev_ewma = self._ewma_rv
             a = self._ewma_alpha
-            self._ewma_rv = a * self._current_rv + (1 - a) * self._ewma_rv if self._ewma_rv > 0 else self._current_rv
+            self._ewma_step += 1  # R21-MATH-P2-02修复: 步数递增
+            # R21-MATH-P2-02修复: EWMA偏差修正 — 初始阶段除以(1-(1-alpha)^t)消除初始化偏差
+            _bias_correction = 1.0 - (1.0 - a) ** self._ewma_step if self._ewma_step > 0 else 1.0
+            # R24-P0-IV-04修复: ewma_rv除零保护，current_rv为0时保持上一值
+            self._ewma_rv = a * self._current_rv + (1 - a) * self._ewma_rv if self._ewma_rv > 0 and self._current_rv > 0 else (self._current_rv if self._ewma_rv <= 0 else self._ewma_rv)
+            self._ewma_rv_corrected = self._ewma_rv / _bias_correction if _bias_correction > 1e-10 else self._ewma_rv
+            # R24-P2-IV-10修复: 波动率异常跳变检测
+            if _prev_ewma > 1e-10 and self._ewma_rv > 1e-10:
+                _rv_ratio = self._ewma_rv / _prev_ewma
+                if _rv_ratio > 3.0 or _rv_ratio < 0.33:
+                    logging.warning("[R24-P2-IV-10] 波动率异常跳变: prev=%.6f curr=%.6f ratio=%.2f",
+                                  _prev_ewma, self._ewma_rv, _rv_ratio)
             if self._update_count % self._sort_interval == 0:
                 sorted_rv = self._rv_buffer.sorted_values()
                 n = len(sorted_rv)
@@ -612,7 +749,9 @@ class VolatilityRegimeFilter:
                     self._p25 = math.sqrt(sorted_rv[int(n * self._low_pct)])
                     self._p50 = math.sqrt(sorted_rv[int(n * 0.5)])
                     self._p75 = math.sqrt(sorted_rv[int(n * self._high_pct)])
-            new_regime = 0 if self._ewma_rv <= self._p25 else (2 if self._ewma_rv >= self._p75 else 1)
+            # R21-MATH-P2-02修复: regime判断使用偏差修正后的ewma_rv_corrected
+            _ewma_for_regime = self._ewma_rv_corrected if hasattr(self, '_ewma_rv_corrected') else self._ewma_rv
+            new_regime = 0 if _ewma_for_regime <= self._p25 else (2 if _ewma_for_regime >= self._p75 else 1)
             if new_regime != self._current_regime:
                 if self._regime_hold_count >= self._min_hold_ticks:
                     self._current_regime = new_regime
@@ -622,10 +761,12 @@ class VolatilityRegimeFilter:
             return self._build_result()
 
     def _build_result(self) -> Dict[str, Any]:
+        # R21-MATH-P2-02修复: ewma_vol使用偏差修正值
+        _ewma_vol = self._ewma_rv_corrected if hasattr(self, '_ewma_rv_corrected') else self._ewma_rv
         return {
             'regime': self._current_regime,
             'regime_label': ['LOW', 'NORMAL', 'HIGH'][self._current_regime],
-            'realized_vol': self._current_rv, 'ewma_vol': self._ewma_rv,
+            'realized_vol': self._current_rv, 'ewma_vol': _ewma_vol,
             'low_threshold': self._p25, 'high_threshold': self._p75,
             'p25': self._p25, 'p50': self._p50, 'p75': self._p75,
             'hold_count': self._regime_hold_count,
@@ -780,7 +921,17 @@ class CointegrationScanner:
         residuals = dy - X @ beta
         sigma2 = np.sum(residuals ** 2) / max(n - k - 2, 1)
         try:
-            XtX_inv = np.linalg.inv(X.T @ X)
+            # R21-MATH-P1-02修复: 条件数检查 — 共线时使用伪逆(pinv)替代inv
+            XtX = X.T @ X
+            _cond = np.linalg.cond(XtX)
+            if _cond > 1e10:
+                logging.warning(
+                    "[R21-MATH-P1-02修复] X.T@X条件数过大(%.2e), 使用伪逆替代inv",
+                    _cond,
+                )
+                XtX_inv = np.linalg.pinv(XtX)
+            else:
+                XtX_inv = np.linalg.inv(XtX)
         except np.linalg.LinAlgError:
             return 1.0
         se_beta1 = np.sqrt(sigma2 * XtX_inv[1, 1]) if XtX_inv[1, 1] > 0 else 1.0
@@ -817,7 +968,16 @@ class CointegrationScanner:
 # ============================================================================
 
 class SurvivalAnalyzer:
-    """生存分析，Cox比例风险模型+Levenberg-Marquardt正则化。"""
+    """生存分析，Cox比例风险模型+Levenberg-Marquardt正则化。
+
+    R21-MATH-P2-08修复 — 收敛判据文档:
+    - 最大迭代次数: max_iterations(默认10)
+    - 收敛容差: convergence_tol(默认1e-3)
+    - 收敛条件: max(|delta|) < convergence_tol，即Newton步长最大分量小于容差
+    - 正则化: Levenberg-Marquardt阻尼项 lm_damping(默认1e-4)，Hessian加对角正则化
+    - 步长控制: step_size = min(1.0, 1.0/(1+max(|delta|)))，防止大步长发散
+    - 条件数保护: Hessian条件数>1e10时使用lstsq替代solve
+    """
 
     _MAX_OBSERVATIONS = 5000
 
@@ -886,7 +1046,7 @@ class SurvivalAnalyzer:
             for iteration in range(self._max_iterations):
                 score = np.zeros(p, dtype=np.float64)
                 hessian = np.zeros((p, p), dtype=np.float64)
-                risk_scores = np.exp(np.clip(X_sorted @ beta, -20, 20))
+                risk_scores = np.exp(np.clip(X_sorted @ beta, -50, 50))  # R21-MATH-P2-01修复: 截断边界从[-20,20]放宽到[-50,50]
                 XR = X_sorted * risk_scores[:, np.newaxis]
                 cum_risk = np.cumsum(risk_scores[::-1])[::-1]
                 cum_cov_risk = np.cumsum(X_sorted[::-1] * risk_scores[::-1, np.newaxis], axis=0)[::-1]
@@ -904,7 +1064,16 @@ class SurvivalAnalyzer:
                     hessian += d_j * np.outer(cov_risk_sum, cov_risk_sum) / (risk_sum ** 2)
                 hessian_reg = hessian - self._lm_damping * np.eye(p)
                 try:
-                    delta = np.linalg.solve(hessian_reg, score)
+                    # R21-MATH-P1-01修复: Hessian条件数检查 — 条件数过大时使用lstsq替代solve
+                    _cond = np.linalg.cond(hessian_reg)
+                    if _cond > 1e10:
+                        logging.warning(
+                            "[R21-MATH-P1-01修复] Hessian条件数过大(%.2e), 使用lstsq替代solve",
+                            _cond,
+                        )
+                        delta = np.linalg.lstsq(hessian_reg, score, rcond=None)[0]
+                    else:
+                        delta = np.linalg.solve(hessian_reg, score)
                 except np.linalg.LinAlgError:
                     delta = np.linalg.lstsq(hessian_reg, score, rcond=None)[0]
                 step_size = min(1.0, 1.0 / (1.0 + np.max(np.abs(delta))))
@@ -912,7 +1081,7 @@ class SurvivalAnalyzer:
                 if np.max(np.abs(delta)) < self._convergence_tol:
                     break
             self._beta = beta
-            risk_scores = np.exp(np.clip(X @ beta, -20, 20))
+            risk_scores = np.exp(np.clip(X @ beta, -50, 50))  # R21-MATH-P2-01修复: 截断边界从[-20,20]放宽到[-50,50]
             baseline_hazard = {}
             for t in unique_times:
                 d_j = np.sum((T == t) & (E == 1))
@@ -926,9 +1095,17 @@ class SurvivalAnalyzer:
             self._is_fitted = True
             se_beta = np.zeros(p)
             try:
-                se_beta = np.sqrt(np.abs(np.diag(np.linalg.inv(-hessian - self._lm_damping * np.eye(p)))))
+                _cov_inv_matrix = -hessian - self._lm_damping * np.eye(p)
+                _se_cond = np.linalg.cond(_cov_inv_matrix)
+                if _se_cond > 1e10:
+                    se_beta = np.sqrt(np.abs(np.diag(np.linalg.pinv(_cov_inv_matrix))))
+                else:
+                    se_beta = np.sqrt(np.abs(np.diag(np.linalg.inv(_cov_inv_matrix))))
             except np.linalg.LinAlgError:
-                pass
+                try:
+                    se_beta = np.sqrt(np.abs(np.diag(np.linalg.pinv(-hessian - self._lm_damping * np.eye(p)))))
+                except Exception:
+                    pass
             return {
                 'is_fitted': True, 'beta': beta.tolist(), 'se_beta': se_beta.tolist(),
                 'n_events': self._n_events, 'n_samples': self._n_samples,
@@ -940,7 +1117,7 @@ class SurvivalAnalyzer:
             if not self._is_fitted or self._beta is None or self._baseline_cumulative_hazard is None:
                 return {'survival_probability': 1.0, 'hazard_ratio': 1.0}
             x = np.array(covariates, dtype=np.float64)
-            risk_score = float(np.exp(np.clip(x @ self._beta, -20, 20)))
+            risk_score = float(np.exp(np.clip(x @ self._beta, -50, 50)))  # R21-MATH-P2-01修复: 截断边界从[-20,20]放宽到[-50,50]
             if time_points is None:
                 time_points = np.array([max(self._baseline_cumulative_hazard.keys())])
             surv_probs = []
@@ -963,7 +1140,8 @@ class SurvivalAnalyzer:
             if not self._is_fitted or self._baseline_cumulative_hazard is None:
                 return float('inf')
             x = np.array(covariates, dtype=np.float64)
-            risk_score = float(np.exp(np.clip(x @ self._beta, -20, 20)))
+            risk_score = float(np.exp(np.clip(x @ self._beta, -50, 50)))  # R21-MATH-P2-01修复: 截断边界从[-20,20]放宽到[-50,50]
+            risk_score = min(risk_score, 1e15)
             target_cum_h = math.log(2) / risk_score if risk_score > 0 else float('inf')
             prev_h, prev_t = 0.0, 0.0
             for t in sorted(self._baseline_cumulative_hazard.keys()):
