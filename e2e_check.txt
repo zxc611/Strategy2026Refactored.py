@@ -1,0 +1,21 @@
+﻿python : WARNING:root:[config_option_loader] 鏈壘鍒癮uto_generated_option_params.json锛屼娇鐢ㄩ粯璁ゆ湡鏉冨弬鏁?
+所在位置 行:1 字符: 1
++ python -c "import sys; sys.path.insert(0,'..'); from ali2026v3_tradin ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (WARNING:root:[c...n锛屼娇鐢ㄩ粯璁ゆ湡鏉冨弬鏁?:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+WARNING:root:[R24-P2-DF-09] 鏈熸潈鍙傛暟涓虹┖锛屾湡鏉冪瓥鐣ュ彲鑳戒娇鐢ㄦā鍧楀唴榛樿鍊?
+ERROR:root:[ConfigService] R32-P2-09: cascade_threshold_grid.yaml 涓嶅瓨鍦? C:\Users\xu\AppData\Roaming\InfiniTrader_Simula
+tionX64\pyStrategy\demo\ali2026v3_trading\config\config\cascade_threshold_grid.yaml (绛栫暐璇勫垎灏嗘棤闃堝€煎熀鍑?
+ERROR:root:[ConfigService] R32-P2-09: plr_thresholds.yaml 涓嶅瓨鍦?(param_pool/ 鍜?鍙傛暟姹? 鍧囨湭鎵惧埌, PLR璇勫垽灏嗘棤闃堝€?
+WARNING:root:Using 20 hardcoded monitored contracts as fallback
+ERROR:root:[SEC-P2-02] 寮傚父(宸叉埅鏂?:
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\..\ali2026v3_trading\l
+ifecycle\lifecycle_init.py", line 13, in <module>
+    from ali2026v3_trading.params_service import _read_param, get_param_value
+  File "C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\..\ali2026v3_trading\p
+arams_service.py", line 70, in <module>
+    from ali2026v3_t
