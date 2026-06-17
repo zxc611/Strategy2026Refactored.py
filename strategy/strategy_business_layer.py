@@ -1,3 +1,4 @@
+# MODULE_ID: M1-265
 """
 StrategyCoreService 业务层 — 从strategy_core_service.py拆分
 职责: 交易执行、订单/持仓服务惰性初始化、生态系统互斥、影子策略推送
@@ -8,10 +9,10 @@ import collections
 import logging
 import threading
 import time
-import uuid as _uuid
+from ali2026v3_trading.infra.shared_utils import generate_prefixed_id  # R9-3
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.strategy.strategy_lifecycle_mixin import StrategyState
+from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
 
 
 class StrategyBusinessLayer:
@@ -34,7 +35,7 @@ class StrategyBusinessLayer:
                 if _store:
                     _store.set_ref('_order_service', provider._order_service)
                 logging.debug("[StrategyBusinessLayer] OrderService initialized (singleton)")
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                 logging.warning("[StrategyBusinessLayer] Failed to initialize OrderService: %s", e)
                 provider._order_service = None
 
@@ -52,7 +53,7 @@ class StrategyBusinessLayer:
             if _store:
                 _store.set_ref('_position_service', provider._position_service)
             logging.debug("[StrategyBusinessLayer] PositionService initialized (scope=%s)", scope_id)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             logging.warning("[StrategyBusinessLayer] Failed to initialize PositionService: %s", e)
             provider._position_service = None
 
@@ -61,7 +62,7 @@ class StrategyBusinessLayer:
         if provider._hft_engine is not None:
             return
         try:
-            from ali2026v3_trading.hft_enhancements import get_hft_engine
+            from ali2026v3_trading.strategy.hft_enhancements import get_hft_engine
             provider._hft_engine = get_hft_engine()
             provider._ensure_order_service()
             if provider._order_service:
@@ -70,7 +71,7 @@ class StrategyBusinessLayer:
             if _store:
                 _store.set_ref('_hft_engine', provider._hft_engine)
             logging.debug("[StrategyBusinessLayer] HFT增强引擎已初始化(七大竞争优势-分散架构)")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             logging.warning("[StrategyBusinessLayer] HFT增强引擎初始化失败: %s", e)
             provider._hft_engine = None
 
@@ -91,7 +92,7 @@ class StrategyBusinessLayer:
             if provider._order_service and hasattr(provider._order_service, 'set_snapshot_collector'):
                 provider._order_service.set_snapshot_collector(provider._snapshot_collector)
             logging.debug("[StrategyBusinessLayer] MarketSnapshotCollector已初始化(18策略覆盖), symbol=%s", sym)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             logging.warning("[StrategyBusinessLayer] MarketSnapshotCollector初始化失败: %s", e)
             provider._snapshot_collector = None
 
@@ -112,13 +113,13 @@ class StrategyBusinessLayer:
             logging.info("[StrategyBusinessLayer.on_order] OrderID=%s, Status=%s", oid, sts)
             if provider._order_service:
                 provider._order_service.on_trade_update(order_data)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[StrategyBusinessLayer.on_order] Error: %s", e)
 
     def on_trade(self, trade_data: Any, *args, **kwargs) -> None:
         try:
             self.update_position_from_trade(trade_data)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[StrategyBusinessLayer.on_trade] Error: %s", e)
 
     def update_position_from_trade(self, trade_data: Any) -> None:
@@ -127,16 +128,47 @@ class StrategyBusinessLayer:
             trade_id = getattr(trade_data, 'trade_id', None) or (trade_data.get('trade_id') if isinstance(trade_data, dict) else None) or str(id(trade_data))
             if trade_id in provider._processed_trade_ids:
                 return
-            provider._processed_trade_ids[trade_id] = True
-            if len(provider._processed_trade_ids) > provider.MAX_PROCESSED_TRADE_IDS:
-                remove_count = len(provider._processed_trade_ids) - int(provider.MAX_PROCESSED_TRADE_IDS * 0.8)
-                for _ in range(remove_count):
-                    provider._processed_trade_ids.popitem(last=False)
-            from ali2026v3_trading.position.position_service import get_position_service
-            scope_id = str(getattr(provider, 'strategy_id', '') or 'global')
-            pos_svc = get_position_service(scope_id=scope_id)
-            pos_svc.on_trade(trade_data)
-        except Exception as e:
+
+            # [R28-C011修复] 先风控检查再更新持仓，防止中间状态暴露
+            from ali2026v3_trading.strategy_judgment.causal_chain_utils import CyclicDependencyGuard
+            _guard = CyclicDependencyGuard.get_instance()
+            if not _guard.enter("position_update_from_trade"):
+                logging.warning("[R28-C011] 拒绝在循环依赖上下文中更新持仓, trade_id=%s", trade_id)
+                return
+            try:
+                # 步骤1: 风控前置检查（在持仓更新前）
+                risk_svc = getattr(provider, '_risk_service', None)
+                if risk_svc is not None and hasattr(risk_svc, 'check_before_trade'):
+                    try:
+                        trade_instrument = getattr(trade_data, 'instrument_id', '') or (trade_data.get('instrument_id') if isinstance(trade_data, dict) else '')
+                        trade_direction = getattr(trade_data, 'direction', '') or (trade_data.get('direction') if isinstance(trade_data, dict) else '')
+                        trade_volume = getattr(trade_data, 'volume', 0) or (trade_data.get('volume', 0) if isinstance(trade_data, dict) else 0)
+                        trade_price = getattr(trade_data, 'price', 0.0) or (trade_data.get('price', 0.0) if isinstance(trade_data, dict) else 0.0)
+                        risk_level = risk_svc.check_before_trade(
+                            instrument_id=trade_instrument,
+                            direction=trade_direction,
+                            volume=trade_volume,
+                            price=trade_price,
+                        )
+                        if risk_level is not None and hasattr(risk_level, 'blocked') and risk_level.blocked:
+                            logging.warning("[R28-C011] 风控阻断持仓更新: trade_id=%s instrument=%s", trade_id, trade_instrument)
+                            return
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as risk_e:
+                        logging.debug("[R28-C011] 风控前置检查异常(允许继续): %s", risk_e)
+
+                # 步骤2: 风控通过后才更新持仓
+                provider._processed_trade_ids[trade_id] = True
+                if len(provider._processed_trade_ids) > provider.MAX_PROCESSED_TRADE_IDS:
+                    remove_count = len(provider._processed_trade_ids) - int(provider.MAX_PROCESSED_TRADE_IDS * 0.8)
+                    for _ in range(remove_count):
+                        provider._processed_trade_ids.popitem(last=False)
+                from ali2026v3_trading.position.position_service import get_position_service
+                scope_id = str(getattr(provider, 'strategy_id', '') or 'global')
+                pos_svc = get_position_service(scope_id=scope_id)
+                pos_svc.on_trade(trade_data)
+            finally:
+                _guard.exit("position_update_from_trade")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             # R13-P2-API-12修复: 不再静默吞掉异常，改为warning级别记录
             logging.warning("[StrategyBusinessLayer.update_position_from_trade] 持仓更新失败: %s", e, exc_info=True)
 
@@ -180,7 +212,9 @@ class StrategyBusinessLayer:
                 rs = get_risk_service(None, scope_id=scope_id)
                 passed_targets = []
                 for t in targets:
-                    _sig_id = t.get('signal_id', '') or f"SIG_{_uuid.uuid4().hex[:12]}"
+                    # P1-52修复: 使用generate_prefixed_id统一ID生成
+                    from ali2026v3_trading.infra.shared_utils import generate_prefixed_id
+                    _sig_id = t.get('signal_id', '') or generate_prefixed_id('SIG', 12)
                     signal = {
                         'symbol': t.get('instrument_id', ''),
                         'direction': t.get('direction', 'BUY'),
@@ -204,7 +238,7 @@ class StrategyBusinessLayer:
                     logging.info("[OptionTrading] 所有target均被风控阻断，跳过本次周期")
                     return
                 targets = passed_targets
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                 # R10-P0-11修复: 风控检查异常时fail-safe阻断交易，而非"继续交易"
                 # 与P0-R10-10叠加修复：安全元层异常→阻断，外层也必须阻断
                 # R10-P2-02: 关键异常日志添加exc_info=True
@@ -225,7 +259,7 @@ class StrategyBusinessLayer:
                     logging.warning("[OptionTrading] 系统健康状态=%s, 暂停新开仓",
                                     health.get('health'))
                     return
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[OptionTrading] 健康检查异常: %s", e)
             provider._ensure_order_service()
             if provider._order_service:
@@ -242,13 +276,13 @@ class StrategyBusinessLayer:
                     if _gov_result.get('any_triggered', False):
                         logging.warning("[OptionTrading] R14-P1-DEAD-08: 治理检测触发降级: %s",
                                         _gov_result.get('degradation_reasons', []))
-            except Exception as _gov_err:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _gov_err:
                 logging.warning("[R22-EP-P1] governance check跳过(合规检查可能放行违规交易): %s", _gov_err)
             # ✅ P1-9修复: 集成box_spring_strategy的箱体弹簧扫描
             # R13-API-01修复: 传递完整tick参数(high/low/volume/timestamp)，否则箱体检测失效
             # R15-P1-PERF-02修复: 使用全局单例get_box_spring_strategy()，避免绕过单例创建多实例
             try:
-                from ali2026v3_trading.strategy.box_spring_strategy import get_box_spring_strategy
+                from ali2026v3_trading.strategy.box_spring_strategy_impl import get_box_spring_strategy
                 bss = get_box_spring_strategy()
             except ImportError as _bss_ie:
                 logging.warning("[P1-FIX] box_spring_strategy导入失败, 箱体弹簧扫描不可用: %s", _bss_ie)
@@ -267,9 +301,9 @@ class StrategyBusinessLayer:
                                 volume=t.get('volume', 0),  # R13-API-01: 补充volume参数
                                 timestamp=t.get('timestamp'),  # R13-API-01: 补充timestamp参数
                             )
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[R22-EP-P1-17] [StrategyBusinessLayer] box_spring_strategy tick error: %s", e)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             # R10-P2-02: 关键异常日志添加exc_info=True
             logging.error("[StrategyBusinessLayer.execute_option_trading_cycle] Error: %s", e, exc_info=True)
         finally:
@@ -298,7 +332,7 @@ class StrategyBusinessLayer:
                     logging.warning("[OptionTrading] 互斥阻断: strategy=%s dir=%s reason=%s", strategy_id, direction, reason)
                     return False
             return True
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             logging.error("[R16-P1-4.2] StrategyBusinessLayer._check_ecosystem_exclusion Error: %s, 阻断交易以保护安全", e)
             provider._health_pause_new_open = True
             return False
@@ -311,7 +345,7 @@ class StrategyBusinessLayer:
         try:
             se = getattr(provider, '_shadow_engine', None)
             if se is None:
-                from ali2026v3_trading.shadow_strategy_engine import get_shadow_strategy_engine
+                from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
                 se = get_shadow_strategy_engine()
                 provider._shadow_engine = se
             if hasattr(se, 'are_params_locked') and not se.are_params_locked():
@@ -330,7 +364,7 @@ class StrategyBusinessLayer:
                 }
                 _sid = eco.resolve_strategy_id_from_state(market_state) if eco else 'master'
                 strategy_group = _STRATEGY_ID_TO_SHADOW_GROUP.get(_sid, 's2_resonance')
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
                 logging.warning("[R22-EP-P1] StrategyBusinessLayer exception swallowed")
                 pass
             for t in targets:
@@ -345,5 +379,5 @@ class StrategyBusinessLayer:
                 )
             if not se.is_shadow_mode():
                 logging.warning("[StrategyBusinessLayer] 影子策略隔离性验证失败")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[StrategyBusinessLayer._feed_shadow_engine] Error: %s", e)

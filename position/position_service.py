@@ -1,3 +1,4 @@
+# MODULE_ID: M1-207
 """Position Service - Facade编排 (CC-09拆分重构)
 
 从2609行瘦身为Facade，委托调用子服务:
@@ -12,19 +13,19 @@ from __future__ import annotations
 
 import json
 import logging
-from ali2026v3_trading.serialization_utils import json_dumps, json_loads, json_default_serializer
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer
 from ali2026v3_trading.infra.performance_monitor import count_call
-from ali2026v3_trading import config_params
+from ali2026v3_trading.config import config_params
 
 try:
-    from ali2026v3_trading.causal_chain_utils import (
+    from ali2026v3_trading.strategy_judgment.causal_chain_utils import (
         CyclicDependencyGuard, ContaminationGuard,
     )
     _HAS_CAUSAL_CHAIN = True
 except ImportError:
     _HAS_CAUSAL_CHAIN = False
 
-from ali2026v3_trading.resilience_utils import (
+from ali2026v3_trading.infra.resilience import (
     ExponentialBackoff, BoundedRetry, Watchdog, HeartbeatMonitor,
     CircuitBreakerHalfOpen, SlowQueryDetector, DataStalenessDetector,
     RateLimitedLogger, ResourceLeakDetector, safe_callback_wrapper,
@@ -38,17 +39,17 @@ from ali2026v3_trading.resilience_utils import (
 import os
 import threading
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Any, Tuple
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
-from ali2026v3_trading.risk.risk_service import api_version
+from ali2026v3_trading.infra.shared_utils import api_version  # P1-21: 统一从shared_utils导入
 from ali2026v3_trading.risk.risk_position_bridge import RiskBridgeAdapter, PositionBridgeAdapter, BridgeRiskLevel
 
 try:
-    from ali2026v3_trading.audit_log_utils import structured_audit_log as _structured_audit_log  # R27-CP-05-FIX
+    from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log as _structured_audit_log  # R1-4修复
 except ImportError:
     _structured_audit_log = None
 
@@ -61,7 +62,7 @@ from ali2026v3_trading.infra.shared_trading_constants import REASON_MULTIPLIERS 
 # - event_bus (get_global_event_bus) — 服务懒初始化
 
 try:
-    from ali2026v3_trading.t_type_service import get_t_type_service
+    from ali2026v3_trading.data.t_type_service import get_t_type_service
     _HAS_T_TYPE = True
 except ImportError as e:
     import logging
@@ -225,20 +226,22 @@ class PositionService(object):
             self.self_trade_detector = SelfTradeDetector()
             self.network_retry_manager = NetworkRetryManager(max_retries=3, base_interval_sec=2.0)
             self.partial_fill_handler = PartialFillHandler(timeout_sec=300.0)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[PositionService] 订单安全功能集成失败: %s", e)
             self.self_trade_detector = None
             self.network_retry_manager = None
             self.partial_fill_handler = None
 
         try:
-            from ali2026v3_trading.infra.health_check_api import StructuredJsonlLogger
-            self._structured_logger = StructuredJsonlLogger(log_dir="logs")
-        except Exception:
+            from ali2026v3_trading.infra.health_monitor import StructuredJsonlLogger
+            from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR
+            self._structured_logger = StructuredJsonlLogger(log_dir=DEFAULT_LOG_DIR)
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             self._structured_logger = None
 
         self.t_type_service = get_t_type_service() if _HAS_T_TYPE else None
-        self._position_state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'position_state.jsonl')
+        from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR as _DEFAULT_LOG_DIR2
+        self._position_state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), _DEFAULT_LOG_DIR2, 'position_state.jsonl')
         self._position_state_lock = threading.Lock()
         self._cross_shard_lock = threading.RLock()
         self._position_watchdog = Watchdog(timeout_sec=config_params.WATCHDOG_TIMEOUT_POSITION_SEC, name='position_service')
@@ -265,7 +268,9 @@ class PositionService(object):
         try:
             from ali2026v3_trading.config.config_params import register_param_change_callback
             register_param_change_callback(self._on_config_param_change)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
             from ali2026v3_trading.infra.event_bus import get_global_event_bus
@@ -274,12 +279,15 @@ class PositionService(object):
                 _bus.subscribe_weak('order.partial_fill', self._on_partial_fill_event)
                 _bus.subscribe_weak('ParamChangedEvent', self._on_param_changed_event)
                 _bus.subscribe_weak('tick_dropped', self.on_tick_dropped)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
 
-    def _on_config_param_change(self, event: Dict[str, Any]) -> None:
+    def _update_tp_sl_from_params(self) -> None:
+        """R1-5修复: 提取公共方法，从配置更新止盈止损比率"""
         try:
-            from ali2026v3_trading.config.config_params import get_cached_params
+            from ali2026v3_trading.config.config_service import get_cached_params
             params = get_cached_params() or {}
             tp = params.get('close_take_profit_ratio', self.DEFAULT_TP_RATIO)
             sl = params.get('close_stop_loss_ratio', self.DEFAULT_SL_RATIO)
@@ -288,8 +296,13 @@ class PositionService(object):
                 self.DEFAULT_TP_RATIO = tp_val
                 self.DEFAULT_SL_RATIO = sl_val
                 self._FALLBACK_TP_SL = (tp_val, sl_val)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
             pass
+            pass
+
+    def _on_config_param_change(self, event: Dict[str, Any]) -> None:
+        self._update_tp_sl_from_params()
 
     def _on_partial_fill_event(self, event: Any) -> None:
         try:
@@ -303,24 +316,29 @@ class PositionService(object):
                         if _remaining > 0 and getattr(_rec, 'status', '') != 'PARTIAL_CLOSING':
                             setattr(_rec, 'status', 'PARTIAL_CLOSING')
                             break
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
 
     def _on_param_changed_event(self, event: Any) -> None:
-        try:
-            from ali2026v3_trading.config.config_params import get_cached_params
-            params = get_cached_params() or {}
-            tp = params.get('close_take_profit_ratio', self.DEFAULT_TP_RATIO)
-            sl = params.get('close_stop_loss_ratio', self.DEFAULT_SL_RATIO)
-            tp_val, sl_val = float(tp), float(sl)
-            if tp_val > 0 and 0 < sl_val < 1:
-                self.DEFAULT_TP_RATIO = tp_val
-                self.DEFAULT_SL_RATIO = sl_val
-        except Exception:
-            pass
+        """P2-26修复: 与_on_config_param_change功能完全相同，统一委托到_update_tp_sl_from_params"""
+        self._update_tp_sl_from_params()
 
     @staticmethod
     def _get_platform_attr(obj: Any, *attr_names: str, default: Any = None) -> Any:
+        """P1-55修复: 优先委托到shared_utils.get_tick_field，回退到原始逻辑"""
+        try:
+            from ali2026v3_trading.infra.shared_utils import get_tick_field, TICK_FIELD_NAMES
+            # 查找attr_names是否匹配某个field_name的候选列表
+            for field_name, candidates in TICK_FIELD_NAMES.items():
+                if any(a in candidates for a in attr_names):
+                    return get_tick_field(obj, field_name, default)
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
+            pass
+        # 回退：原始逻辑
         for attr in attr_names:
             val = getattr(obj, attr, None)
             if val is not None and val != '':
@@ -362,7 +380,7 @@ class PositionService(object):
             if _drop_count <= 5 or _drop_count % 100 == 0:
                 logging.warning("[R31-P0-04] tick断流: instrument=%s reason=%s (累计%d合约断流)",
                               instrument_id, event_data.get('reason', '?'), _drop_count)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[PositionService.on_tick_dropped] Error: %s", e)
 
     def set_position_limit(self, account_id: str, limit_amount: float, valid_hours: Optional[int] = None, force_set: bool = False) -> bool:
@@ -378,11 +396,17 @@ class PositionService(object):
                 try:
                     self._risk_bridge.set_position_limit(account_id=account_id, limit_amount=limit_amount, effective_until=until)
                     return True
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                     return False
             return False
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return False
+
+    def _total_volume(self, instrument_id: str) -> int:
+        """P2-32修复: 提取volume求和，消除3处重复sum(rec.volume for rec in ...)"""
+        if instrument_id not in self.positions:
+            return 0
+        return sum(rec.volume for rec in self.positions[instrument_id].values())
 
     def get_position(self, instrument_id: str) -> Dict[str, Any]:
         import time as _t
@@ -394,7 +418,7 @@ class PositionService(object):
             if instrument_id not in self.positions:
                 return {"volume": 0, "average_price": 0, "positions": []}
             positions = list(self.positions[instrument_id].values())
-            total_volume = sum(rec.volume for rec in positions)
+            total_volume = self._total_volume(instrument_id)  # P2-32: 使用提取的方法
             if total_volume == 0:
                 return {"volume": 0, "average_price": 0, "positions": []}
             weighted_sum = sum(Decimal(str(abs(rec.volume))) * Decimal(str(rec.open_price)) for rec in positions)
@@ -403,9 +427,7 @@ class PositionService(object):
 
     def get_net_position(self, instrument_id: str) -> int:
         with self._get_instrument_lock(instrument_id):
-            if instrument_id not in self.positions:
-                return 0
-            return sum(rec.volume for rec in self.positions[instrument_id].values())
+            return self._total_volume(instrument_id)  # P2-32: 使用提取的方法
 
     def validate_net_position_consistency(self, instrument_id: str) -> bool:
         return self._check_svc.validate_net_position_consistency(instrument_id)
@@ -465,7 +487,7 @@ class PositionService(object):
 
     def _get_tp_sl_ratios_by_reason(self, open_reason: str) -> Tuple[float, float]:
         try:
-            from .state_param_manager import get_state_param_manager
+            from ali2026v3_trading.config.state_param import get_state_param_manager
             spm = get_state_param_manager()
             reason_params = spm.get_params(open_reason)
             tp = reason_params.get('close_take_profit_ratio')
@@ -474,7 +496,9 @@ class PositionService(object):
                 tp_val, sl_val = float(tp), float(sl)
                 if tp_val > 0 and 0 < sl_val < 1:
                     return (tp_val, sl_val)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         return self._HARDCODED_REASON_DEFAULTS.get(open_reason, self._FALLBACK_TP_SL)
 
@@ -499,7 +523,7 @@ class PositionService(object):
     def _apply_crm_stop_loss_adjustment(self, sl_ratio: float, open_reason: str) -> float:
         try:
             import importlib
-            crm_module = importlib.import_module('param_pool.cycle_resonance_module')
+            crm_module = importlib.import_module('ali2026v3_trading.param_pool.cycle_resonance_module')
             crm = crm_module.get_cycle_resonance_module()
             strategy = self._map_reason_to_strategy(open_reason)
             rs = crm.get_risk_surface(strategy)
@@ -507,7 +531,7 @@ class PositionService(object):
             return float(np.clip(adjusted, self.CRM_SL_CLIP_LOWER, self.CRM_SL_CLIP_UPPER)) if _HAS_NUMPY else max(self.CRM_SL_CLIP_LOWER, min(self.CRM_SL_CLIP_UPPER, adjusted))
         except (ImportError, ModuleNotFoundError):
             return sl_ratio
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return sl_ratio
 
     def _get_open_reason_from_order(self, instrument_id: str, order_id: str = '') -> str:
@@ -523,7 +547,9 @@ class PositionService(object):
                 for o in orders:
                     if o.get('action') == 'OPEN' and o.get('status') in ('SUBMITTED', 'FILLED', 'ALL_FILLED', '全成'):
                         return o.get('open_reason', '')
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         return ''
 
@@ -567,7 +593,9 @@ class PositionService(object):
         try:
             if hasattr(self, '_command_svc') and self._command_svc:
                 self._command_svc._cleanup_close_retry_executor()
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
 
     def get_status(self) -> str:

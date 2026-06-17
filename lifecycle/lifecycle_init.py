@@ -1,3 +1,5 @@
+# MODULE_ID: M1-122
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """lifecycle_init.py — 初始化逻辑（从strategy_lifecycle_mixin.py拆分）
 职责: on_init, analytics初始化, 合约加载, 调度器初始化, 日志初始化, prepare_restart
 """
@@ -10,8 +12,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.params_service import _read_param, get_param_value
-from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState, _state_is
+from ali2026v3_trading.config.params_service import _read_param, get_param_value
+from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_is
 
 
 class LifecycleInit:
@@ -45,7 +47,7 @@ class LifecycleInit:
                         f"期货新增={product_result['future_added']}(已有={product_result['future_existing']}), "
                         f"期权新增={product_result['option_added']}(已有={product_result['option_existing']})"
                     )
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error(f"[Init-Step1] 品种加载失败: {e}")
                     raise RuntimeError(f"品种加载失败，策略无法继续初始化: {e}") from e
                 p._init_kwargs = kwargs
@@ -56,7 +58,7 @@ class LifecycleInit:
                 logging.info("[Init-Step2] 从合约配置文件加载合约列表+预注册...")
                 if p.storage is None:
                     raise RuntimeError("[Init-Step2] storage初始化失败，无法加载合约列表")
-                from ali2026v3_trading.query_service import QueryService
+                from ali2026v3_trading.data.query_service import QueryService
                 _qs = QueryService(p.storage)
                 p._init_instruments_result = _qs.load_and_preregister_instruments(p.storage, p.params)
                 total_f = len(p._init_instruments_result['futures_list'])
@@ -83,7 +85,7 @@ class LifecycleInit:
                 if _lm is not None:
                     _lm.initialized = True
                 return True
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error(f"[StrategyCoreService.on_init] Failed: {e}")
                 p.transition_to(StrategyState.ERROR)
                 p._initialized = False
@@ -156,7 +158,7 @@ class LifecycleInit:
                 "[AnalyticsInit] "
                 f"analytics_service initialized, futures={len(p._future_ids)}, options={len(p._option_ids)}"
             )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[StrategyCoreService._init_analytics_services] Error: {e}", exc_info=True)
             p.analytics_service = None
 
@@ -168,8 +170,8 @@ class LifecycleInit:
             logging.debug("[InitServices] storage 未初始化，跳过合约查询")
             return futures_instruments, option_instruments
         try:
-            from ali2026v3_trading.query_service import QueryService
-            from ali2026v3_trading.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.data.query_service import QueryService
+            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
             qs = QueryService(storage)
             registered_ids = storage.get_registered_instrument_ids()
             logging.debug(f"[InitServices] 已注册合约数量: {len(registered_ids)}")
@@ -180,22 +182,24 @@ class LifecycleInit:
                         option_instruments.setdefault(underlying, []).append(inst_id)
                 else:
                     futures_instruments.append(inst_id)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning(f"[InitServices] 从 storage 查询合约失败: {e}")
         return futures_instruments, option_instruments
 
     def _resolve_option_underlying_id(self, inst_id: str, storage) -> Optional[str]:
         p = self.p
         try:
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             ps = get_params_service()
             meta = ps.get_instrument_meta_by_id(inst_id) if ps else None
             if meta and meta.get('underlying_future_id'):
                 return meta['underlying_future_id']
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
-            from ali2026v3_trading.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
             from ali2026v3_trading.data.data_service import get_data_service
             parsed = SubscriptionManager.parse_option(inst_id)
             option_product = parsed['product']
@@ -214,13 +218,13 @@ class LifecycleInit:
                     f"（期权{option_product}{year_month}），跳过期权{inst_id}"
                 )
                 return None
-        except Exception as db_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as db_err:
             logging.warning(f"[InitServices] underlying_future_id缺失且DB查询失败: {inst_id} - {db_err}")
             return None
 
     def _init_t_type_service_and_preload(self, storage) -> None:
         p = self.p
-        from ali2026v3_trading.t_type_service import get_t_type_service
+        from ali2026v3_trading.data.t_type_service import get_t_type_service
         p.t_type_service = get_t_type_service()
         logging.info("[AnalyticsInit] t_type_service initialized")
         if hasattr(p, 'storage') and p.storage and hasattr(p.storage, 'subscription_manager'):
@@ -250,7 +254,7 @@ class LifecycleInit:
                 year_month = meta.get('year_month') or p._extract_contract_year_month(inst_id) or ''
                 p.t_type_service._width_cache.register_future(future_internal_id, float(price), month=year_month)
                 futures_registered += 1
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error("[AnalyticsInit] 注册期货 %s 失败: %s", inst_id, e)
         if futures_registered == 0:
             raise RuntimeError(
@@ -290,7 +294,7 @@ class LifecycleInit:
                         internal_id=int(internal_id),
                     )
                     options_registered += 1
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error("[AnalyticsInit] 注册期权 %s 失败: %s", opt_id, e)
         if options_registered == 0 and options_total > 0:
             raise RuntimeError(
@@ -339,7 +343,7 @@ class LifecycleInit:
                 logging.info("[WarmStorage] storage 后台预热完成")
             else:
                 logging.warning("[WarmStorage] storage 未能初始化")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning(f"[WarmStorage] 后台预热失败：{e}")
 
     @staticmethod
@@ -367,7 +371,7 @@ class LifecycleInit:
                 holidays = [_date.fromisoformat(item['date']) for item in data if item.get('date')]
                 logging.info("[P1-R11-13] 在线获取中国%d年节假日成功 (count=%d)", year, len(holidays))
                 return holidays
-        except Exception as _e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
             logging.warning("[P1-R11-13] 在线获取节假日失败 (%s)，回退到内置列表", _e)
         return _builtin_as_dates(year)
 
@@ -390,13 +394,15 @@ class LifecycleInit:
                             has_valid_file_handler = True
                         else:
                             stale_handlers.append(h)
-                    except Exception:
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                         stale_handlers.append(h)
         for h in stale_handlers:
             try:
                 root_logger.removeHandler(h)
                 h.close()
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
         if has_valid_file_handler:
             logging.debug("[StrategyCoreService._init_logging] Logging already initialized, skipping")
@@ -495,7 +501,9 @@ class LifecycleInit:
             existing = p._scheduler_manager.scheduler.get_job(job_id)
             if existing is not None:
                 return
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
             p._scheduler_manager.add_job_with_owner(
@@ -508,5 +516,5 @@ class LifecycleInit:
                 seconds=3
             )
             logging.info("[StrategyCoreService] 补偿注册check_pending_orders job成功")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[StrategyCoreService] 补偿注册check_pending_orders job失败: %s", e)

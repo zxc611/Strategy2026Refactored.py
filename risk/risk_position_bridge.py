@@ -1,12 +1,14 @@
-"""Risk-Position Bridge Interface — Phase 1 architectural refactoring.
+# [M1-33] Risk-Position�Žӽӿ�
+# MODULE_ID: M1-216
+"""Risk-Position Bridge Interface �?Phase 1 architectural refactoring.
 
 Breaks the circular dependency between risk_service.py and position_service.py
 by introducing a protocol-based interface layer.
 
-Before: position_service → risk_service (9 direct refs)
-        risk_service → position_service (6 lazy imports)
-After:  position_service → RiskPositionBridge (protocol)
-        risk_service → PositionBridge (protocol)
+Before: position_service �?risk_service (9 direct refs)
+        risk_service �?position_service (6 lazy imports)
+After:  position_service �?RiskPositionBridge (protocol)
+        risk_service �?PositionBridge (protocol)
         Both protocols defined here, no circular import.
 """
 from __future__ import annotations
@@ -15,8 +17,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum, auto
 from dataclasses import dataclass, field
 import logging
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
 
 class BridgeRiskLevel(Enum):
@@ -106,7 +109,7 @@ class RiskBridgeAdapter(RiskPositionBridge):
                 reason=getattr(result, 'reason', ''),
                 message=getattr(result, 'message', '')
             )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("RiskBridgeAdapter.check_position_limit error: %s", e)
             return BridgeRiskResponse(level=BridgeRiskLevel.PASS, reason="adapter_error")
 
@@ -127,7 +130,7 @@ class RiskBridgeAdapter(RiskPositionBridge):
                 limit_amount=getattr(pl, 'limit_amount', 0.0),
                 effective_until=getattr(pl, 'effective_until', None),
             )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("RiskBridgeAdapter.get_position_limit error: %s", e)
             return None
 
@@ -152,7 +155,7 @@ class RiskBridgeAdapter(RiskPositionBridge):
                 level=BridgeRiskLevel.BLOCK,
                 reason=getattr(result, 'reason', ''),
             )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("RiskBridgeAdapter.check_cross_instrument_limit error: %s", e)
             return BridgeRiskResponse(level=BridgeRiskLevel.PASS, reason="adapter_error")
 
@@ -184,5 +187,5 @@ class PositionBridgeAdapter(PositionBridge):
             return None
         try:
             return getattr(self._position_service, '_position_limits', {}).get(account_id)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return None

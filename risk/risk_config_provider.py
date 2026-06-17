@@ -1,3 +1,6 @@
+# [M1-32] ��������ṩ��
+# MODULE_ID: M1-215
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 from __future__ import annotations
 
 import logging
@@ -5,33 +8,15 @@ import threading
 from typing import Any, Dict
 
 from ali2026v3_trading.infra.shared_utils import safe_int, safe_float
-
-
-def _safe_get(obj: Any, attr: str, default: Any = None, target_type: type = float) -> Any:
-    try:
-        val = getattr(obj, attr, default)
-        if val is None:
-            return default
-        return target_type(val) if target_type == int else float(val)
-    except (ValueError, TypeError, AttributeError) as e:
-        logging.warning("[safe_get_%s] Error getting %s: %s", target_type.__name__, attr, e)
-        return default
-
-
-def _safe_get_float(obj: Any, attr: str, default: float = 0.0) -> float:
-    return _safe_get(obj, attr, default, float)
-
-
-def _safe_get_int(obj: Any, attr: str, default: int = 0) -> int:
-    return _safe_get(obj, attr, default, int)
+from ._utils import safe_get_float as _safe_get_float, safe_get_int as _safe_get_int
 
 
 class RiskConfigProvider:
-    """CC-03/AP-02修复: 风控配置参数提供者
+    """CC-03/AP-02修复: 风控配置参数提供�?
 
     从RiskService提取的D类方法（配置/参数管理），
-    统一管理风控参数的读取和默认值。
-    构造函数接受risk_service引用（用于访问共享状态）。
+    统一管理风控参数的读取和默认值�?
+    构造函数接受risk_service引用（用于访问共享状态）�?
     """
 
     _CONTRACT_MULTIPLIER_CACHE: Dict[str, float] = {}
@@ -47,10 +32,13 @@ class RiskConfigProvider:
         return _safe_get_int(self._rs.params, "max_signals_per_window", 10)
 
     def _get_rate_limit_window(self) -> float:
-        return _safe_get_float(self._rs.params, "rate_limit_window_sec", 60.0)
+        return _safe_get_float(self._rs.params, "rate_limit_window_sec", 120.0)
 
     def _get_max_risk_ratio(self) -> float:
-        return _safe_get_float(self._rs.params, "max_risk_ratio", 0.8)
+        """P1-57修复: 默认值从get_param_default获取"""
+        from ali2026v3_trading.config.config_params import get_param_default
+        default = get_param_default('max_risk_ratio')
+        return _safe_get_float(self._rs.params, "max_risk_ratio", default if default is not None else 0.8)
 
     def _get_total_position_limit(self) -> float:
         return _safe_get_float(self._rs.params, "total_position_limit", 1000000.0)
@@ -69,13 +57,13 @@ class RiskConfigProvider:
                 future_product = info.get('future_product', '')
                 if future_product and future_product in calc._contract_multiplier:
                     multiplier = calc._contract_multiplier[future_product]
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[R22-EP-P1] RiskService exception swallowed")
             pass
 
         if multiplier == 1.0:
             try:
-                from ali2026v3_trading.params_service import get_params_service
+                from ali2026v3_trading.config.params_service import get_params_service
                 params_svc = get_params_service()
                 meta = params_svc.get_instrument_meta_by_id(instrument_id)
                 if meta:
@@ -83,17 +71,17 @@ class RiskConfigProvider:
                     product_cache = params_svc.get_product_cache(product)
                     if product_cache:
                         multiplier = safe_float(product_cache.get('contract_size', 1.0))
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 logging.warning("[R22-EP-P1] RiskService exception swallowed")
                 pass
 
         if multiplier == 1.0:
             try:
-                from ali2026v3_trading.config.config_params import get_cached_params
+                from ali2026v3_trading.config.config_service import get_cached_params
                 _params = get_cached_params()
                 if instrument_id and ('C' in instrument_id or 'P' in instrument_id):
                     multiplier = safe_float(_params.get('option_contract_multiplier', 10000))
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 logging.warning("[R22-EP-P1] RiskService exception swallowed")
                 pass
 
@@ -108,7 +96,7 @@ class RiskConfigProvider:
             return RiskConfigProvider._MARGIN_RATIO_CACHE[instrument_id]
         margin_ratio = 0.1
         try:
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             params_svc = get_params_service()
             meta = params_svc.get_instrument_meta_by_id(instrument_id)
             if meta:
@@ -116,7 +104,7 @@ class RiskConfigProvider:
                 product_cache = params_svc.get_product_cache(product)
                 if product_cache:
                     margin_ratio = safe_float(product_cache.get('margin_ratio', 0.1))
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[P0-4-1] margin_ratio fallback to 0.1")
             pass
         if margin_ratio <= 0 or margin_ratio > 1.0:
@@ -154,14 +142,14 @@ class RiskConfigProvider:
     def _get_stage1_minutes(self) -> float:
         _bar_period = _safe_get_float(self._rs.params, "bar_period", 1.0)
         if _bar_period <= 0:
-            logging.warning("[R5-L-01] bar_period=%s<=0，使用默认1.0", _bar_period)
+            logging.warning("[R5-L-01] bar_period=%s<=0，使用默�?.0", _bar_period)
             _bar_period = 1.0
         val = _safe_get_float(self._rs.params, "stage1_min_minutes", None)
         if val is not None and val > 0:
             return val * _bar_period
         _fallback = _safe_get_float(self._rs.params, "stage1_minutes", 90.0)
         if _fallback <= 0:
-            logging.warning("[R5-L-01] stage1_minutes=%s<=0，使用默认90.0", _fallback)
+            logging.warning("[R5-L-01] stage1_minutes=%s<=0，使用默�?0.0", _fallback)
             _fallback = 90.0
         return _fallback * _bar_period
 
@@ -173,11 +161,11 @@ class RiskConfigProvider:
 
 
     def _get_greeks_calculator(self):
-        # P2-R3-D-18: GreeksCalculator不可用时跳过 — 当greeks_calculator模块
+        # P2-R3-D-18: GreeksCalculator不可用时跳过 �?当greeks_calculator模块
         # 导入失败(ImportError)或初始化失败(RuntimeError)时返回None,
-        # 所有依赖Greeks的功能(仪表盘/限仓/Gamma路径验证)退化为无数据状态。
-        # 已知限制: Greeks数据缺失时风险判断依赖其他维度补偿，但组合风险盲区增大。
-        # 建议在系统启动时预检GreeksCalculator可用性并输出WARNING级别告警。
+        # 所有依赖Greeks的功�?仪表�?限仓/Gamma路径验证)退化为无数据状态�?
+        # 已知限制: Greeks数据缺失时风险判断依赖其他维度补偿，但组合风险盲区增大�?
+        # 建议在系统启动时预检GreeksCalculator可用性并输出WARNING级别告警�?
         if self._rs.__class__._greeks_calc is None:
             with self._rs.__class__._greeks_calc_lock:
                 if self._rs.__class__._greeks_calc is None:
@@ -193,17 +181,17 @@ class RiskConfigProvider:
     def _get_life_estimator(self) -> Any:
         """懒加载行情寿命估计器
 
-        R4-D-03修复: 懒加载单例防护 —
-        首次调用返回None时记录WARNING，后续调用不再重复尝试导入。
-        使用_SENTINEL标记区分「未初始化」和「初始化失败」。
-        R5-T-04修复: 添加线程安全锁，防止并发初始化。
+        R4-D-03修复: 懒加载单例防�?�?
+        首次调用返回None时记录WARNING，后续调用不再重复尝试导入�?
+        使用_SENTINEL标记区分「未初始化」和「初始化失败」�?
+        R5-T-04修复: 添加线程安全锁，防止并发初始化�?
         """
         if self._rs._life_estimator is not None:
             return self._rs._life_estimator
-        # R4-D-03: 使用sentinel避免重复尝试已失败的初始化
+        # R4-D-03: 使用sentinel避免重复尝试已失败的初始�?
         if getattr(self, '_life_estimator_init_failed', False):
             return None
-        # R5-T-04修复: 线程安全初始化
+        # R5-T-04修复: 线程安全初始�?
         with self._rs._lock:
             # double-check
             if self._rs._life_estimator is not None:
@@ -211,31 +199,31 @@ class RiskConfigProvider:
             if getattr(self, '_life_estimator_init_failed', False):
                 return None
             try:
-                from ali2026v3_trading.param_pool.l1_quantification.bayesian_shrinkage_life_estimator import BayesianShrinkageLifeEstimator
+                from ali2026v3_trading.param_pool.quantification._quantification_core import BayesianShrinkageLifeEstimator
                 self._rs._life_estimator = BayesianShrinkageLifeEstimator()
                 if self._rs._life_estimator is None:
                     logging.warning("[R4-D-03] BayesianShrinkageLifeEstimator构造返回None")
                     self._rs._life_estimator_init_failed = True
                 return self._rs._life_estimator
-            except Exception as e:
-                logging.warning("[R4-D-03] BayesianShrinkageLifeEstimator不可用(后续不再重试): %s", e)
-                # P2-R3-P-15: BayesianShrinkageLifeEstimator不可用时跳过 — 寿命检查降级，D3维度评分退化为0.5
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                logging.warning("[R4-D-03] BayesianShrinkageLifeEstimator不可�?后续不再重试): %s", e)
+                # P2-R3-P-15: BayesianShrinkageLifeEstimator不可用时跳过 �?寿命检查降级，D3维度评分退化为0.5
                 self._rs._life_estimator_init_failed = True
                 return None
 
     def confirm_alpha_decay_recovery(self):
-        # R17重审计修复: 重构后该方法丢失，补全实现
+        # R17重审计修�? 重构后该方法丢失，补全实�?
         # 1. 设置恢复确认标志
         self._rs._alpha_decay_recovery_confirmed = True
-        logging.info("[R16-P1-11] Alpha衰减恢复已确认")
-        # 2. 联动清除shadow_engine降级状态
+        logging.info("[R16-P1-11] Alpha衰减恢复已确�?)
+        # 2. 联动清除shadow_engine降级状�?
         try:
-            from ali2026v3_trading.shadow_strategy_engine import get_shadow_strategy_engine
+            from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
             _se = get_shadow_strategy_engine()
             if _se is not None and hasattr(_se, 'clear_degradation'):
                 _se.clear_degradation()
                 logging.info("[R16-P1-11] ShadowStrategyEngine降级状态已联动清除")
-        except Exception as _e:
-            logging.warning("[R16-P1-11] ShadowStrategyEngine降级清除失败(非阻断): %s", _e)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
+            logging.warning("[R16-P1-11] ShadowStrategyEngine降级清除失败(非阻�?: %s", _e)
 
 

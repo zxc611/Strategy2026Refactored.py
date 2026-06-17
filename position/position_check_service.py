@@ -1,3 +1,4 @@
+# MODULE_ID: M1-202
 """Position Check Service - 风控检查联动
 
 从position_service.py拆分(CC-09):
@@ -11,10 +12,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Dict, Optional, Any
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
 
 class PositionCheckService:
@@ -37,7 +38,7 @@ class PositionCheckService:
             else:
                 logging.error("[PositionService.check_position_limit] RiskService not available, BLOCKING position check (fail-safe)")
                 return False
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[PositionService.check_position_limit] Error: {e}")
             return False
 
@@ -48,17 +49,17 @@ class PositionCheckService:
             average_price = position_info.get("average_price", 0)
             multiplier = 1.0
             try:
-                from ali2026v3_trading.params_service import get_params_service
+                from ali2026v3_trading.config.params_service import get_params_service
                 ps = get_params_service()
                 meta = ps.get_instrument_meta_by_id(instrument_id)
                 if meta:
                     multiplier = float(meta.get("contract_size", 1.0))
-            except Exception as _e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
                 logging.debug(f"[PositionService.calculate_position_risk] 获取合约乘数失败，使用默认值1.0: {_e}")
             risk = abs(volume) * average_price * multiplier
             self.validate_net_position_consistency(instrument_id)
             return risk
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[PositionService.calculate_position_risk] Error: {e}")
             return 0.0
 
@@ -92,7 +93,7 @@ class PositionCheckService:
                                     f"long={long_volume} short={short_volume} "
                                     f"independent_net={independent_net} stored_net={stored_net}",
                         ), async_mode=True)
-                except Exception as _eb_e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _eb_e:
                     logging.debug("[PositionService] INV-P1-02: 事件总线告警失败: %s", _eb_e)
                 return False
             return True
@@ -139,7 +140,7 @@ class PositionCheckService:
 
     def check_all_positions(self) -> None:
         try:
-            from ali2026v3_trading.causal_chain_utils import CyclicDependencyGuard
+            from ali2026v3_trading.strategy_judgment.causal_chain_utils import CyclicDependencyGuard
             from ali2026v3_trading.position.position_service import _HAS_CAUSAL_CHAIN
             _cyclic_guard = CyclicDependencyGuard.get_instance() if _HAS_CAUSAL_CHAIN else None
         except ImportError:
@@ -185,7 +186,9 @@ class PositionCheckService:
                                     mp = ds.realtime_cache.get_latest_price(rec.instrument_id)
                                     if mp and mp > 0:
                                         market_price = mp
-                            except Exception:
+                            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                                pass
                                 pass
                             total_equity += abs(rec.volume) * market_price
             if total_equity > 0:
@@ -245,7 +248,7 @@ class PositionCheckService:
                                     f"realized_pnl={realized_pnl:.2f} expected_pnl={expected_pnl:.2f} "
                                     f"equity={equity:.2f} initial_capital={initial_capital:.2f}",
                         ), async_mode=True)
-                except Exception as _eb_e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _eb_e:
                     logging.debug("[PositionService] INV-P1-01: 事件总线告警失败: %s", _eb_e)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[PositionService] INV-P1-01: PnL权益一致性校验异常: %s", e)

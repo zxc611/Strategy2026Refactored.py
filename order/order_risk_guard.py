@@ -1,13 +1,16 @@
+# [M1-50] ������ط���
+# MODULE_ID: M1-140
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
 order_risk_guard.py - OrderRiskGuard
-Phase 2 (CC-P1-01): 从OrderService提取的风控/防护职责域
+Phase 2 (CC-P1-01): 从OrderService提取的风�?防护职责�?
 
-职责：
-- 跨策略PnL相关性检查 (_compute_pnl_correlation, _check_cross_strategy_risk)
+职责�?
+- 跨策略PnL相关性检�?(_compute_pnl_correlation, _check_cross_strategy_risk)
 - 价格修正/对齐 (_correct_price, _get_tick_size)
 - 市场价格获取 (_get_last_market_price)
 - 滑点估算 (_estimate_slippage)
-- 保证金释放 (_release_margin_reservation)
+- 保证金释�?(_release_margin_reservation)
 - 风控阻断 (check_risk_block, set_risk_block)
 """
 from __future__ import annotations
@@ -18,10 +21,11 @@ import numpy as np
 from typing import Dict, Optional
 
 from ali2026v3_trading.infra.shared_utils import compute_slippage_bps
+from ali2026v3_trading.risk.risk_service import get_risk_service
 
 
 class OrderRiskGuard:
-    """订单风控/防护 — 从OrderService提取的独立可测试组件"""
+    """订单风控/防护 �?从OrderService提取的独立可测试组件"""
 
     _PNL_CORR_THRESHOLD = 0.7
 
@@ -48,7 +52,7 @@ class OrderRiskGuard:
             if denom < 1e-12:
                 return 0.0
             return float(cov / denom)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return 0.0
 
     def check_cross_strategy_risk(self) -> float:
@@ -72,11 +76,11 @@ class OrderRiskGuard:
                         max_corr = abs(corr)
             if max_corr > self._PNL_CORR_THRESHOLD:
                 logging.warning(
-                    "[OrderRiskGuard] P0-CS-001: 跨策略PnL相关系数%.3f超过阈值%.1f",
+                    "[OrderRiskGuard] P0-CS-001: 跨策略PnL相关系数%.3f超过阈�?.1f",
                     max_corr, self._PNL_CORR_THRESHOLD,
                 )
             return max_corr
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return 0.0
 
     def correct_price(self, price: float, instrument_id: str) -> float:
@@ -88,7 +92,7 @@ class OrderRiskGuard:
 
     def get_tick_size(self, instrument_id: str) -> float:
         try:
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             params_svc = get_params_service()
             meta = params_svc.get_instrument_meta_by_id(instrument_id)
             product = meta.get('product') if meta else instrument_id
@@ -97,7 +101,7 @@ class OrderRiskGuard:
                 tick_size = float(product_cache.get('tick_size', 0))
                 if tick_size > 0:
                     return tick_size
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[OrderRiskGuard.get_tick_size] Failed: %s", e)
         default_tick_sizes = {
             'IF': 0.2, 'IC': 0.2, 'IH': 0.2, 'IM': 0.2,
@@ -109,19 +113,23 @@ class OrderRiskGuard:
 
     def get_last_market_price(self, instrument_id: str, orders_by_id: Dict = None) -> Optional[float]:
         try:
-            from ali2026v3_trading.query_service import get_query_service
+            from ali2026v3_trading.data.query_service import get_query_service
             qs = get_query_service()
             tick = qs.get_last_tick(instrument_id)
             if tick and isinstance(tick, dict):
                 return tick.get('last_price') or tick.get('price')
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         if orders_by_id:
             try:
                 for order in orders_by_id.values():
                     if order.get('instrument_id') == instrument_id and order.get('status') in ('FILLED', 'ALL_FILLED'):
                         return order.get('price')
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
         return None
 
@@ -147,11 +155,10 @@ class OrderRiskGuard:
 
     def release_margin_reservation(self, order_id: str) -> None:
         try:
-            from ali2026v3_trading.risk.risk_service import get_risk_service
             rs = get_risk_service()
             rs.release_margin(order_id)
-        except Exception as e:
-            logging.debug("[R14-P0-BIZ-01] 释放保证金预留失败(可忽略): order_id=%s err=%s", order_id, e)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.debug("[R14-P0-BIZ-01] 释放保证金预留失�?可忽�?: order_id=%s err=%s", order_id, e)
 
     def check_risk_block(self, instrument_id: str) -> bool:
         _until = self._risk_block_until.get(instrument_id, 0.0)

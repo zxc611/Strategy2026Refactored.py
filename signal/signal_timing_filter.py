@@ -1,3 +1,4 @@
+# MODULE_ID: M1-242
 """
 信号时序滤波器 — 从signal_service.py拆分
 包含: KalmanFilter1D, EMASignalFilter, SignalTimingFilter, AdaptiveSignalThreshold

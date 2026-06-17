@@ -1,3 +1,4 @@
+# MODULE_ID: M2-346
 """
 R17-P0-TEST-10/11: P0铁律2反事实验证 + Greeks仪表盘测试
 添加E7触发行为真实功能测试
@@ -8,9 +9,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.governance_engine import GovernanceEngine, E7UnexplainedReturnChecker
-from ali2026v3_trading.greeks_calculator import GreeksCalculator
-from ali2026v3_trading.config_params import DEFAULT_PARAM_TABLE
+from ali2026v3_trading.governance.governance_engine import GovernanceEngine, E7UnexplainedReturnChecker
+from ali2026v3_trading.governance.greeks_calculator import GreeksCalculator
+from ali2026v3_trading.config.config_params import DEFAULT_PARAM_TABLE
 
 
 class TestAntiFactualValidation:
@@ -23,7 +24,7 @@ class TestAntiFactualValidation:
         assert E7UnexplainedReturnChecker is not None
 
     def test_e12_detector_exists(self):
-        from ali2026v3_trading.governance_engine import E12ReverseStrategyPseudoIndependenceDetector
+        from ali2026v3_trading.governance.governance_engine import E12ReverseStrategyPseudoIndependenceDetector
         assert E12ReverseStrategyPseudoIndependenceDetector is not None
 
 

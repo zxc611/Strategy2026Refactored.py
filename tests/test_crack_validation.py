@@ -1,3 +1,4 @@
+# MODULE_ID: M2-327
 """
 V7实盘前边缘裂缝验证测试 (裂缝14-30)
 
@@ -7,7 +8,7 @@ import pytest
 import math
 import numpy as np
 
-from ali2026v3_trading.crack_validation import (
+from ali2026v3_trading.risk.crack_validation import (
     validate_circuit_breaker_halts,
     validate_shadow_b_stability,
     apply_tick_rounding,
@@ -26,7 +27,7 @@ from ali2026v3_trading.crack_validation import (
     validate_indicator_multiscale_consistency,
     compute_sharpe_ci,
     validate_alpha_confidence_overlap,
-    validate_logic_reversal_no_future,
+    validate_logic_reversal_timestamp_causality,
     compute_kl_divergence,
     validate_shadow_param_orthogonality,
     validate_attribution_residual_significance,
@@ -115,13 +116,15 @@ class TestCrack19CascadeSlippage:
         assert abs(slip - 1.0 * CASCADE_SLIPPAGE_MULTIPLIER_DEFAULT) < 1e-6
 
     def test_with_volume_impact(self):
+        import math
         slip = compute_cascade_slippage(1.0, 500, 1000)
-        expected = 1.0 * (1 + 0.5) * 1.5
+        expected = 1.0 * (1 + math.sqrt(0.5)) * 1.5
         assert abs(slip - expected) < 1e-6
 
     def test_large_close_volume(self):
+        import math
         slip = compute_cascade_slippage(1.0, 2000, 1000)
-        expected = 1.0 * (1 + 2.0) * 1.5
+        expected = min(1.0 * (1 + math.sqrt(2.0)) * 1.5, 50.0)
         assert abs(slip - expected) < 1e-6
 
     def test_impact_ok(self):
@@ -261,15 +264,15 @@ class TestCrack26MultiscaleIndicator:
         assert result[0] == 0.0
         assert result[1] == 5.0
 
-    def test_consistency_high_corr(self):
-        np.random.seed(42)
+    def test_consistency_high_corr(self, seeded_random):
+        np.random.seed(seeded_random)
         native = np.random.randn(100).cumsum()
         resampled = native + np.random.randn(100) * 0.01
         result = validate_indicator_multiscale_consistency(native, resampled)
         assert result['passed'] and result['corr'] > 0.95
 
-    def test_consistency_low_corr(self):
-        np.random.seed(42)
+    def test_consistency_low_corr(self, seeded_random):
+        np.random.seed(seeded_random)
         native = np.random.randn(100).cumsum()
         resampled = np.random.randn(100).cumsum()
         result = validate_indicator_multiscale_consistency(native, resampled, min_corr=0.95)
@@ -315,7 +318,7 @@ class TestCrack27SharpeCIOverlap:
 
 class TestCrack28LogicReversalNoFuture:
     def test_no_future_violation(self):
-        result = validate_logic_reversal_no_future(
+        result = validate_logic_reversal_timestamp_causality(
             ['10:01', '10:02', '10:03'],
             ['10:00', '10:01', '10:02'],
         )
@@ -323,14 +326,14 @@ class TestCrack28LogicReversalNoFuture:
         assert result['needs_bar_level_audit']
 
     def test_future_violation(self):
-        result = validate_logic_reversal_no_future(
+        result = validate_logic_reversal_timestamp_causality(
             ['10:00', '10:01'],
             ['10:01', '10:02'],
         )
         assert result['n_violations'] == 2
 
     def test_bar_level_no_future(self):
-        result = validate_logic_reversal_no_future(
+        result = validate_logic_reversal_timestamp_causality(
             ['10:02', '10:03'],
             ['10:01', '10:02'],
             wrong_pct_bar_timestamps=['10:02', '10:03'],
@@ -338,7 +341,7 @@ class TestCrack28LogicReversalNoFuture:
         assert result['passed'] and result['n_bar_violations'] == 0
 
     def test_bar_level_future_violation(self):
-        result = validate_logic_reversal_no_future(
+        result = validate_logic_reversal_timestamp_causality(
             ['10:02', '10:03'],
             ['10:01', '10:02'],
             wrong_pct_bar_timestamps=['10:03', '10:04'],
@@ -346,7 +349,7 @@ class TestCrack28LogicReversalNoFuture:
         assert not result['passed'] and result['n_bar_violations'] == 2
 
     def test_missing_bar_timestamps_needs_audit(self):
-        result = validate_logic_reversal_no_future(
+        result = validate_logic_reversal_timestamp_causality(
             ['10:01', '10:02'],
             ['10:00', '10:01'],
         )
@@ -390,15 +393,15 @@ class TestCrack29ShadowParamKL:
 # =====================================================================
 
 class TestCrack30AttributionResidual:
-    def test_no_significant_residual(self):
-        np.random.seed(42)
+    def test_no_significant_residual(self, seeded_random):
+        np.random.seed(seeded_random)
         residuals = np.random.normal(0, 0.01, 100)
         pnls = np.random.normal(1, 0.5, 100)
         result = validate_attribution_residual_significance(residuals, pnls)
         assert result['passed'] and not result['e7_should_trigger']
 
-    def test_significant_large_residual(self):
-        np.random.seed(42)
+    def test_significant_large_residual(self, seeded_random):
+        np.random.seed(seeded_random)
         residuals = np.random.normal(0.5, 0.1, 100)
         pnls = np.random.normal(1, 0.5, 100)
         result = validate_attribution_residual_significance(residuals, pnls)

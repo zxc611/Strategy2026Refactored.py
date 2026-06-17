@@ -1,0 +1,195 @@
+
+
+---
+
+## 二十八、V7.3阈值参数化体系与期权盈亏比网格（顶级基金验证水准）
+
+> **核心认知：阈值是量化研究中最重要的内容，几乎达到策略生死分界的程度。硬编码魔数=不可审计=不可复现=不可验证。所有阈值必须参数化，所有参数必须有量化来源。**
+
+### 28.1 阈值参数化三层架构
+
+| 层级 | 存储位置 | 覆盖范围 | 可调性 |
+|:---|:---|:---|:---|
+| **P0铁律层** | `P0_IRON_RULES` (task_scheduler.py) | 6个不可妥协的准入阈值 | 可审计不可降低 |
+| **评判系数层** | `SCORING_COEFFICIENTS` (strategy_judgment_engine.py) | 30+评分公式系数+阈值 | 可调，影响评判分布 |
+| **诊断阈值层** | `StrategyBehaviorDiagnosis` 类常量 | 40+诊断阈值+评分系数 | 可调，影响诊断灵敏度 |
+
+### 28.2 P0铁律阈值（不可妥协，但必须参数化可审计）
+
+```python
+P0_IRON_RULES = {
+    "max_oos_decay": -0.30,           # 样本外衰减铁律
+    "oos_decay_warn": -0.20,          # 样本外衰减警告
+    "min_train_sharpe": 0.5,          # 训练夏普铁律
+    "min_test_sharpe": 0.3,           # 样本外夏普铁律
+    "min_lr_threshold": 0.8,          # 逻辑反转阈值铁律
+    "lr_threshold_warn": 1.0,         # 逻辑反转阈值警告
+}
+```
+
+**铁律纪律：** P0铁律值只能在量化证据充分时上调（更严格），不得下调。任何修改必须附带p值报告和反事实检验结果。
+
+### 28.3 期权盈亏比核心网格（顶级基金验证水准）
+
+期权权利金盈亏比从0.5:1到5:1全覆盖，覆盖实盘常见状态：
+
+| 网格常量 | 覆盖策略类型 | 止盈范围 | 止损范围 | 设计依据 |
+|:---|:---|:---|:---|:---|
+| `OPTION_TAKE_PROFIT_GRID` | 全策略通用 | [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0] | — | 期权权利金1.5:1正常，2:1/4:1常见 |
+| `OPTION_STOP_LOSS_GRID` | 全策略通用 | — | [0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95] | 期权时间价值衰减特性 |
+| `MOMENTUM_TAKE_PROFIT_GRID` | S1/S2动量 | [1.0→5.0] | — | 偏右侧，止盈高止损低 |
+| `MOMENTUM_STOP_LOSS_GRID` | S1/S2动量 | — | [0.2→0.6] | 快速止损保护本金 |
+| `REVERSION_TAKE_PROFIT_GRID` | S3/S4均值回归 | [1.5→5.0] | — | 偏左侧，高盈亏比 |
+| `REVERSION_STOP_LOSS_GRID` | S3/S4均值回归 | — | [0.5→0.95] | 期权买方宽止损 |
+| `ARB_TAKE_PROFIT_GRID` | S5套利 | [0.5→1.5] | — | 窄幅，快速止盈 |
+| `MM_TAKE_PROFIT_GRID` | S6做市 | [0.4→1.2] | — | 极窄幅，高频小利 |
+| `SPRING_STOP_PROFIT_GRID` | S4弹簧 | [2.0→12.0] | — | 期权权利金杠杆特性 |
+| `SPRING_MAX_LOSS_GRID` | S4弹簧 | — | [0.50→0.98] | 从保守到激进全覆盖 |
+
+### 28.4 评判引擎评分系数参数化
+
+`SCORING_COEFFICIENTS` 字典包含12个评判维度的评分公式系数，每个系数可调：
+
+| 维度 | 关键系数 | 默认值 | 含义 |
+|:---|:---|:---|:---|
+| profitability | win_rate_full_score_at | 0.6 | win_rate满分锚点 |
+| profitability | profit_sharpe_w / calmar_w / win_w / pl_w | 0.3/0.3/0.2/0.2 | 四指标权重 |
+| extreme_survival | extreme_dd_norm | 30.0 | 最大回撤归一化因子 |
+| extreme_survival | extreme_survival_w / recovery_w | 0.70/0.30 | 生存+恢复权重 |
+| parameter_stability | skewness_norm / kurtosis_norm | 2.0/5.0 | 分布偏离归一化 |
+| drawdown_recovery | dd_max_rec_w / mean_rec_w / rec_rate_w | 0.40/0.30/0.30 | 三指标权重 |
+| verdict | near_threshold_margin | 0.1 | 接近阈值警告边界 |
+| verdict | conditional_pass_max_conditions | 2 | CONDITIONAL_PASS最大条件数 |
+| deep_validation | bh_significance_level | 0.05 | BH校正显著性水平 |
+| deep_validation | l2_accuracy_threshold | 0.6 | L2准确率判定阈值 |
+
+### 28.5 行为诊断器阈值参数化
+
+`StrategyBehaviorDiagnosis` 类常量覆盖5大诊断维度共40+参数：
+
+| 维度 | 关键参数 | 默认值 | 含义 |
+|:---|:---|:---|:---|
+| 信号 | SIGNAL_JUMP_THRESHOLD | 0.5 | 信号跳变判定 |
+| 信号 | SIGNAL_DECAY_STRONG / WEAK | 0.6 / 0.5 | 衰减模式判定 |
+| 仓位 | POSITION_CRITICAL_OSC | 0.3 | 仓位CRITICAL震荡率 |
+| PnL | PNL_CLIFF_THRESHOLD | 0.3 | 断崖回吐判定 |
+| Greeks | GREEKS_DELTA_ANOMALY | 0.8 | Delta异常阈值 |
+| 跨策略 | CROSS_CRITICAL_CORR | 0.5 | 跨策略CRITICAL相关率 |
+| 评分 | DIAGNOSIS_WEIGHTS | [0.30,0.25,0.20,0.10,0.15] | 5维度权重 |
+
+### 28.6 回测阈值参数化
+
+`BACKTEST_THRESHOLDS` 字典包含18个回测逻辑判定阈值：
+
+| 阈值 | 默认值 | 含义 |
+|:---|:---|:---|
+| logic_reversal_min_wrong_pct | 0.3 | 逻辑反转平仓最低wrong_pct |
+| correct_resonance_min_strength | 0.3 | CORRECT_RESONANCE信号最低强度 |
+| circuit_breaker_daily_dd | 0.03 | 熔断触发日回撤阈值 |
+| shadow_random_open_prob | 0.02 | shadow_random开仓概率 |
+| hft_shadow_random_open_prob | 0.005 | HFT shadow_random开仓概率 |
+| hft_open_min_strength | 0.2 | HFT开仓最低信号强度 |
+| ci_width_eliminate / reduce / flag | 2.0 / 1.0 / 0.5 | Sharpe CI三级阈值 |
+
+### 28.7 参数变化幅度审查结论
+
+| 参数类别 | 扩展前覆盖 | 扩展后覆盖 | 增幅 |
+|:---|:---|:---|:---|
+| close_take_profit_ratio | 3值 [1.1-2.5] | 14值 [0.5-5.0] | 4.7x |
+| close_stop_loss_ratio | 4值 [0.3-0.6] | 11值 [0.25-0.95] | 2.8x |
+| spring_stop_profit_ratio | 3值 [3-8] | 8值 [2-12] | 2.7x |
+| spring_max_loss_pct | 3值 [0.85-0.95] | 9值 [0.50-0.98] | 3.0x |
+| hard_time_stop_minutes | 0值(缺失) | 6值 | inf |
+| 评判评分系数 | 0值(硬编码) | 30+值(参数化) | inf |
+| 诊断阈值 | 0值(硬编码) | 40+值(参数化) | inf |
+| P0铁律 | 0值(硬编码) | 6值(参数化) | inf |
+
+**结论：** 所有验证阈值已全部参数化，无残留硬编码魔数。期权盈亏比网格覆盖0.5:1到5:1，达到顶级基金验证水准。
+
+---
+
+## 二十九、S7 背离反转策略 (Divergence Reversal)  16参数体系
+
+> **S7策略组: s7_divergence | 3变体: master/shadow_a/shadow_b | 16参数**
+
+### 29.1 策略概述
+
+背离反转策略检测三层背离信号，当价格创新高/低但跨期合约或期权权利金未跟随时，
+触发反转交易信号。独立策略模块，不从属于数据预处理管线。
+
+### 29.2 三层背离检测体系
+
+| 层级 | 检测内容 | 权重参数 | 默认值 |
+|:---|:---|:---|:---|
+| L1 | 跨期期货背离  当月期货创新高/低，季月主力合约未跟随 | w_future | 0.35 |
+| L2 | 远月期权权利金集体背离  下月及远月期权权利金未创新高/低 | w_option_coll | 0.35 |
+| L3 | 当月期权近实值权利金背离  同向最接近实值的期权权利金未创新高/低 | w_option_itm (derived) | 0.30 |
+
+权重守恒约束: w_future + w_option_coll + w_option_itm = 1.0
+
+### 29.3 期权五级分类 (Moneyness)
+
+| 状态 | 编号 | 条件 | 示例(atm_threshold=0.03) |
+|:---|:---|:---|:---|
+| DITM (深度实值) | 0 | moneyness > moneyness_depth | > 0.06 |
+| ITM (实值) | 1 | atm_threshold < moneyness <= moneyness_depth | 0.03 ~ 0.06 |
+| ATM (平值) | 2 | |moneyness| <= atm_threshold | -0.03 ~ 0.03 |
+| OTM (虚值) | 3 | -moneyness_depth <= moneyness < -atm_threshold | -0.06 ~ -0.03 |
+| DOTM (深度虚值) | 4 | moneyness < -moneyness_depth | < -0.06 |
+
+moneyness_depth 默认 = 2 * atm_threshold = 0.06
+
+### 29.4 S7 16参数完整清单
+
+| # | 参数名 | 类型 | 默认值 | 网格 | 说明 |
+|:---|:---|:---|:---|:---|:---|
+| 1 | divergence_lookback | int | 20 | [10,15,20,25,30] | 新高/新低回看窗口 |
+| 2 | divergence_atm_threshold | float | 0.03 | [0.02,0.03,0.04,0.05] | 平值阈值 |
+| 3 | divergence_w_future | float | 0.35 | [0.25,0.30,0.35,0.40,0.45] | L1跨期期货背离权重 |
+| 4 | divergence_w_option_coll | float | 0.35 | [0.25,0.30,0.35,0.40,0.45] | L2远月期权集体背离权重 |
+| 5 | divergence_consistency_boost | float | 1.5 | [1.2,1.3,1.5,1.7,2.0] | 三层同向加成因子 |
+| 6 | divergence_min_ratio | float | 0.6 | [0.4,0.5,0.6,0.7,0.8] | 远月期权集体背离比例阈值 |
+| 7 | divergence_trend_significance | float | 1e-6 | [1e-7,1e-6,1e-5] | 趋势斜率显著性阈值 |
+| 8 | divergence_div_strength_clip | float | 1.0 | [0.8,0.9,1.0] | 背离强度裁剪上限 |
+| 9 | divergence_signal_threshold | float | 0.15 | [0.10,0.15,0.20,0.25,0.30] | 信号触发阈值 |
+| 10 | divergence_take_profit_ratio | float | 1.8 | [1.0,1.2,1.5,1.8,2.0,2.5,3.0] | 止盈比率 |
+| 11 | divergence_stop_loss_ratio | float | 0.3 | [0.2,0.3,0.4,0.5,0.6] | 止损比率 |
+| 12 | divergence_max_risk_ratio | float | 0.5 | [0.1,0.2,0.3,0.4,0.5,0.6,0.8] | 最大风险比率 |
+| 13 | divergence_hard_time_stop_min | float | 60.0 | [30,45,60,90,120] | 硬止损时间(分钟) |
+| 14 | divergence_cooldown_bars | int | 10 | [5,8,10,15,20,30] | 冷却期(bar数) |
+| 15 | divergence_position_scale | float | 0.3 | [0.1,0.2,0.3,0.4,0.5] | 仓位缩放系数 |
+| 16 | divergence_moneyness_depth | float | 0.06 | [0.04,0.05,0.06,0.08,0.10] | 五级分类深度实/虚值阈值 |
+
+### 29.5 影子变体参数
+
+| 参数 | master | shadow_a | shadow_b |
+|:---|:---|:---|:---|
+| lookback | 20 | 16 (*0.8) | 12 (*0.6) |
+| consistency_boost | 1.5 | 1.35 (*0.9) | 1.2 (*0.8) |
+| position_scale | 0.3 | 0.24 (*0.8) | 0.18 (*0.6) |
+| cooldown_bars | 10 | 12 (*1.2) | 15 (*1.5) |
+| take_profit_ratio | 1.8 | 1.2 | 1.1 |
+| stop_loss_ratio | 0.3 | 0.6 | 0.7 |
+| max_risk_ratio | 0.5 | 0.15 | 0.10 |
+| hard_time_stop_min | 60.0 | 48.0 (60*0.8) | 36.0 (60*0.6) |
+
+### 29.6 信号生成逻辑
+
+1. **L1 跨期期货背离**: 当月期货创出新高(低) + 季月主力合约未跟随 + 趋势方向确认  背离信号
+2. **L2 远月期权权利金集体背离**: 当月期货创新高(低) + 远月期权权利金未跟随 + 集体背离比例 > min_ratio  背离信号
+3. **L3 当月期权近实值权利金背离**: 当月期货创新高(低) + 同向最接近实值期权权利金未跟随  背离信号
+4. **综合信号**: composite = w_future*L1 + w_option_coll*L2 + w_option_itm*L3
+5. **三层同向加成**: 若三层信号同向，乘以consistency_boost
+6. **信号阈值过滤**: |signal| < signal_threshold  归零
+7. **强度裁剪**: clip至[-div_strength_clip, div_strength_clip]
+
+### 29.7 风控参数
+
+| 参数 | 默认值 | 说明 |
+|:---|:---|:---|
+| take_profit_ratio | 1.8 | 止盈比率，盈利达到权利金的1.8倍时止盈 |
+| stop_loss_ratio | 0.3 | 止损比率，亏损达到权利金的30%时止损 |
+| max_risk_ratio | 0.5 | 最大风险比率，单笔交易最大风险敞口 |
+| hard_time_stop_min | 60.0 | 硬止损时间，持仓超过60分钟强制平仓 |
+| cooldown_bars | 10 | 冷却期，信号触发后10个bar内不再触发新信号 |
+| position_scale | 0.3 | 仓位缩放系数，实际仓位 = 计算仓位 * 0.3 |

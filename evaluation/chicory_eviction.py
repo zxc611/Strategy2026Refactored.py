@@ -1,17 +1,19 @@
+# MODULE_ID: M1-062
 """菊苣驱逐策略 — 策略淘汰评估与生命周期管理
 
 LC-02修复: 增加淘汰编码、复活策略、冷静期、审计日志
 """
 import enum
-import json
 import logging
 import math
 import os
 import time
+from ali2026v3_trading.infra.serialization_utils import json_dumps
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
 
 class EvictionCode(enum.Enum):
@@ -125,8 +127,8 @@ class ChicoryEvictionPolicy:
             if log_dir and not os.path.exists(log_dir):
                 os.makedirs(log_dir, exist_ok=True)
             with open(self._audit_log_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
-        except Exception as e:
+                f.write(json_dumps(log_entry, ensure_ascii=False) + '\n')
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("[LC-02] 审计日志写入失败: %s", e)
 
     def evaluate(self, strategy_id: str, overall_score: float,

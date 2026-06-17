@@ -1,3 +1,4 @@
+# MODULE_ID: M2-582
 import pytest
 import sys
 import os
@@ -6,7 +7,7 @@ import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.state_store import StateStore, StateSnapshot, get_state_store, reset_state_store
+from ali2026v3_trading.infra.state_store import StateStore, StateSnapshot, get_state_store, reset_state_store
 
 
 class TestStateStore:
@@ -54,7 +55,7 @@ class TestStateStore:
             try:
                 for i in range(100):
                     store.set(f'key_{n}', i)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 errors.append(e)
 
         threads = [threading.Thread(target=writer, args=(i,)) for i in range(10)]

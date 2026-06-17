@@ -1,8 +1,11 @@
+# [M1-55] ƽ̨��֤��
+# MODULE_ID: M1-139
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
 order_platform_auth.py - PlatformAuthenticator
 R27: 从order_service.py提取的平台认证类
 
-职责：
+职责�?
 - 平台Token管理 (get_token, set_token)
 - 防重放攻击nonce验证 (validate_nonce)
 - 请求签名 (generate_signed_request)
@@ -23,7 +26,7 @@ class PlatformAuthenticator:
         self._token: Optional[str] = None
         self._token_expiry: float = 0.0
         self._lock = threading.Lock()
-        # P1-R8-14修复: 防重放攻击 — nonce缓存+时间窗口
+        # P1-R8-14修复: 防重放攻�?�?nonce缓存+时间窗口
         self._nonce_cache: Dict[str, float] = {}
         self._nonce_window_seconds: float = 300.0
         self._max_nonce_cache: int = 1000
@@ -40,7 +43,7 @@ class PlatformAuthenticator:
             self._token_expiry = time.time() + expires_in
 
     def validate_nonce(self, nonce: str, timestamp: Optional[float] = None) -> bool:
-        """P1-R8-14修复: 验证请求nonce防重放攻击
+        """P1-R8-14修复: 验证请求nonce防重放攻�?
 
         规则:
         1. nonce在时间窗口内必须单调递增(拒绝已使用过的nonce)
@@ -72,7 +75,7 @@ class PlatformAuthenticator:
         _hmac_key = os.environ.get('ORDER_SIGN_KEY', 'default_order_sign_key_change_in_prod')
         _signature = hmac.new(_hmac_key.encode(), _sign_payload.encode(), hashlib.sha256).hexdigest()[:16]
         if not self.validate_nonce(_nonce, _timestamp):
-            logging.warning("[PlatformAuthenticator] nonce验证失败，可能重放攻击: nonce=%s", _nonce)
+            logging.warning("[PlatformAuthenticator] nonce验证失败，可能重放攻�? nonce=%s", _nonce)
             return {}
         signed = dict(request_data)
         signed['_nonce'] = _nonce

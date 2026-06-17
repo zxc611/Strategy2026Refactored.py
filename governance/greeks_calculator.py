@@ -1,5 +1,12 @@
+# MODULE_ID: M1-070
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
-Greeks Calculator - Independent option risk management module.
+Greeks Calculator - Independent option risk management module.（合并后单一文件）
+
+合并来源：
+- greeks_math.py: _norm_cdf, _norm_pdf, _normalize_option_type, _bs_price, _bs_greeks 数学函数
+- greeks_pricers.py: IVCalculator, BinomialTreePricer, MonteCarloPricer, TradingCalendar 定价模型类
+- greeks_calculator.py: GreeksCalculator类 + validate_greeks_calendar_iv_noise
 
 Features:
 - Black-Scholes Greeks calculation (Delta, Gamma, Theta, Vega)
@@ -13,7 +20,6 @@ Features:
 """
 
 import math
-import functools
 import random
 import threading
 import time
@@ -21,37 +27,44 @@ import logging
 import json
 import os
 from datetime import datetime, date, timedelta
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ, TRADING_DAYS_PER_YEAR_CHINA as TRADING_DAYS_PER_YEAR
+from typing import Dict, List, Optional, Tuple, Any, Callable
+from collections import defaultdict
+import functools
+
+from ali2026v3_trading.infra.shared_utils import (
+    CHINA_TZ, TRADING_DAYS_PER_YEAR_CHINA as TRADING_DAYS_PER_YEAR,
+    DEFAULT_RISK_FREE_RATE, DAYS_PER_YEAR_CALENDAR,
+)
 # R27-P1-FP-04修复: 引入浮点稳定计算替代内置sum/divide
 try:
-    from ali2026v3_trading.resilience_utils import stable_sum, safe_divide
+    from ali2026v3_trading.infra.resilience import stable_sum, safe_divide
 except ImportError:
     stable_sum = sum
     safe_divide = lambda a, b, default=0.0: a / b if b != 0 else default
-from typing import Dict, List, Optional, Tuple, Any, Callable
-from collections import defaultdict
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
-# ----------------------------------------------------------------------------
-# 配置日志
-# ----------------------------------------------------------------------------
-logger = logging.getLogger(__name__)
-# [R14-P0-LOG-04] 移除模块级StreamHandler,由root logger统一配置
+logger = get_logger(__name__)  # R9-5
 
-# ----------------------------------------------------------------------------
-# 辅助数学函数
-# ----------------------------------------------------------------------------
+
+# ============================================================================
+# Greeks 数学函数（原 greeks_math.py）
+# ============================================================================
+
 def _norm_cdf(x: float) -> float:
     """Standard normal CDF (precision ~1e-5)."""
     return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
 
 def _norm_pdf(x: float) -> float:
     """标准正态分布概率密度函数"""
     return math.exp(-x * x / 2.0) / math.sqrt(2.0 * math.pi)
 
+
 def _normalize_option_type(opt_type: str) -> str:
     """ID唯一: 委托shared_utils.normalize_option_type, 不再独立实现"""
     from ali2026v3_trading.infra.shared_utils import normalize_option_type
     return normalize_option_type(opt_type)
+
 
 @functools.lru_cache(maxsize=4096)
 def _bs_price(S: float, K: float, T: float, r: float, q: float, sigma: float, option_type: str) -> float:
@@ -61,28 +74,27 @@ def _bs_price(S: float, K: float, T: float, r: float, q: float, sigma: float, op
     Note: option_type should be normalized before calling
     """
     if T <= 0 or sigma <= 0:
-        # option_type 已在入口标准化,直接使用
         return max(0.0, (S - K) if option_type == 'CALL' else (K - S))
     # R31-P1-13修复: S<=0或K<=0时math.log(S/K)触发ValueError/ZeroDivisionError
     if S <= 0 or K <= 0:
         return 0.0
-    
+
     try:
         d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
         d2 = d1 - sigma * math.sqrt(T)
-        
-        # option_type 已在入口标准化,直接使用
+
         if option_type == 'CALL':
             return S * math.exp(-q * T) * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
         else:
             return K * math.exp(-r * T) * _norm_cdf(-d2) - S * math.exp(-q * T) * _norm_cdf(-d1)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logger.error("BS price calculation error: %s", e)
         return 0.0
 
+
 def _bs_greeks(
     S: float, K: float, T: float, r: float, q: float, sigma: float, option_type: str
-) -> Dict[str, float]:
+) -> dict:
     """
     Calculate option Greeks.
 
@@ -103,12 +115,11 @@ def _bs_greeks(
     # R31-P1-13修复: K<=0时math.log(S/K)触发ValueError/ZeroDivisionError
     if K <= 0:
         return {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
-    
+
     try:
         d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
         d2 = d1 - sigma * math.sqrt(T)
 
-        # option_type 已在入口标准化,直接使用
         if option_type == 'CALL':
             delta = math.exp(-q * T) * _norm_cdf(d1)
             gamma = math.exp(-q * T) * _norm_pdf(d1) / (S * sigma * math.sqrt(T))
@@ -121,37 +132,38 @@ def _bs_greeks(
             theta = (-math.exp(-q * T) * S * _norm_pdf(d1) * sigma / (2 * math.sqrt(T))
                      + r * K * math.exp(-r * T) * _norm_cdf(-d2)
                      - q * S * math.exp(-q * T) * _norm_cdf(-d1)) / TRADING_DAYS_PER_YEAR
-        
-        vega = S * math.exp(-q * T) * _norm_pdf(d1) * math.sqrt(T) / 100.0  # ?% IV变化
-        
+
+        vega = S * math.exp(-q * T) * _norm_pdf(d1) * math.sqrt(T) / 100.0  # 1% IV变化
+
         return {
             'delta': round(delta, 6),
             'gamma': round(gamma, 4),
             'theta': round(theta, 6),
             'vega': round(vega, 4)
         }
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logger.error("BS Greeks calculation error: S=%s, K=%s, T=%s, sigma=%s, error=%s", S, K, T, sigma, e)
         return {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
 
 
-# ----------------------------------------------------------------------------
-# IV 计算?(牛顿迭代?
-# ----------------------------------------------------------------------------
+# ============================================================================
+# 定价模型（原 greeks_pricers.py）
+# ============================================================================
+
 class IVCalculator:
     """Implied volatility calculator using Newton iteration."""
 
     @staticmethod
     def implied_volatility(
-        market_price: float, 
-        S: float, 
-        K: float, 
+        market_price: float,
+        S: float,
+        K: float,
         T: float,
-        r: float, 
-        q: float, 
+        r: float,
+        q: float,
         option_type: str,
         initial_guess: float = 0.2,
-        max_iter: int = 100, 
+        max_iter: int = 100,
         tol: float = 1e-6
     ) -> float:
         """
@@ -176,12 +188,11 @@ class IVCalculator:
             return 0.2
 
         sigma = initial_guess
-        i = 0  # ?P2#121修复:初始化i,防止max_iter=0时i未定?
+        i = 0  # P2#121修复:初始化i,防止max_iter=0时i未定义
         for i in range(max_iter):
-            # 计算当前 sigma 下的期权价格?Vega
             price = _bs_price(S, K, T, r, q, sigma, option_type)
             greeks = _bs_greeks(S, K, T, r, q, sigma, option_type)
-            vega = greeks.get('vega', 0.0) * 100  # vega是每1%变化,转换为每单位变?
+            vega = greeks.get('vega', 0.0) * 100  # vega是每1%变化,转换为每单位变化
 
             if vega < 1e-6:
                 logger.warning(f"Vega too small ({vega:.2e}), falling back to bisection search")
@@ -201,19 +212,13 @@ class IVCalculator:
             if abs(diff) < tol:
                 return sigma
 
-            # 牛顿迭代:sigma_new = sigma - diff / vega
             sigma = sigma - diff / vega
-            
-            # 限制波动率范?[0.01, 5.0]
             sigma = max(0.01, min(5.0, sigma))
 
         logger.debug(f"IV calculation converged to {sigma:.4f} after {i+1} iterations")
         return sigma
 
 
-# ----------------------------------------------------------------------------
-# 二叉树定价模?(CRR - Cox-Ross-Rubinstein)
-# ----------------------------------------------------------------------------
 class BinomialTreePricer:
     """Binomial tree option pricing model (CRR)"""
 
@@ -239,7 +244,6 @@ class BinomialTreePricer:
         p = (math.exp((r - q) * dt) - d) / (u - d)
         discount = math.exp(-q * dt)
 
-        # 确保概率在有效范围内
         p = max(0.0, min(1.0, p))
 
         prices = [S * (u ** (steps - j)) * (d ** j) for j in range(steps + 1)]
@@ -297,9 +301,6 @@ class BinomialTreePricer:
         }
 
 
-# ----------------------------------------------------------------------------
-# 蒙特卡洛定价模型 (GBM模拟 + 对偶变量方差缩减)
-# ----------------------------------------------------------------------------
 class MonteCarloPricer:
     """Monte Carlo option pricing model using GBM with antithetic variance reduction."""
 
@@ -325,7 +326,8 @@ class MonteCarloPricer:
             return intrinsic, 0.0
 
         if seed is not None:
-            random.seed(seed)
+            from ali2026v3_trading.infra.shared_utils import set_global_seed  # P2-23: 统一入口
+            set_global_seed(seed)
 
         # P0-R9-19修复: historical bootstrap分布
         if distribution_mode == "historical" and historical_returns and len(historical_returns) >= 20:
@@ -428,9 +430,6 @@ class MonteCarloPricer:
         }
 
 
-# ----------------------------------------------------------------------------
-# 交易日历辅助?(简化版,支持工作日计算)
-# ----------------------------------------------------------------------------
 class TradingCalendar:
     """Trading calendar for calculating remaining trading days."""
 
@@ -466,27 +465,23 @@ class TradingCalendar:
         try:
             _hols = chinese_calendar.get_holidays(f'{year}-01-01', f'{year}-12-31')
             return set(_hols) if _hols else set()
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return set()
 
     def add_holiday(self, d: date):
         """Add a holiday."""
         self.holidays.add(d)
 
-    # ?P2修复:使用注入的MarketTimeService,避免延迟导?
     def is_trading_day(self, d: date) -> bool:
         """Check if a date is a trading day."""
         if self._market_time_service is not None:
             return self._market_time_service.is_trading_day(d, holiday_dates=self.holidays)
-        
-        # 降级方案:如果没有注入service,则仅检查节假日
         return d.weekday() < 5 and d not in self.holidays
 
     def trading_days_between(self, start: date, end: date) -> int:
         """Return the number of trading days between two dates."""
         if start >= end:
             return 0
-        
         days = 0
         current = start
         while current < end:
@@ -515,7 +510,7 @@ class TradingCalendar:
         if expiry_date <= today:
             logging.warning("[P0-EX-002] 期权已到期: expiry=%s, today=%s, instrument可能需强制平仓", expiry_date, today)
             return 1.0 / (252.0 * 240.0)
-        
+
         if use_trading_days:
             days = self.trading_days_between(today, expiry_date)
             if days <= 5:
@@ -525,12 +520,13 @@ class TradingCalendar:
             days = (expiry_date - today).days
             if days <= 5:
                 logging.warning("[P0-EX-002] 期权临近到期: expiry=%s, days_remaining=%d", expiry_date, days)
-            return max(1.0 / (252.0 * 24.0), days / 365.0)
+            return max(1.0 / (252.0 * 24.0), days / DAYS_PER_YEAR_CALENDAR)
 
 
-# ----------------------------------------------------------------------------
-# 增强?GreeksCalculator
-# ----------------------------------------------------------------------------
+# ============================================================================
+# 增强的 GreeksCalculator（原 greeks_calculator.py 主体）
+# ============================================================================
+
 class GreeksCalculator:
     """
     Independent Greeks calculator supporting:
@@ -549,12 +545,12 @@ class GreeksCalculator:
         self._lock = threading.RLock()
 
         # 默认配置
-        self._risk_free_rate = 0.02
+        self._risk_free_rate = DEFAULT_RISK_FREE_RATE
         self._update_strategy = {
             'time_interval_sec': 1.0,      # 时间间隔超过1秒则更新
-            'price_change_pct': 0.5,       # 价格变化超过0.5%则更?
-            'iv_change_pct': 5.0,          # IV变化超过5%则更?
-            'min_tick_interval': 5,        # 最小tick间隔(兼容旧逻辑?
+            'price_change_pct': 0.5,       # 价格变化超过0.5%则更新
+            'iv_change_pct': 5.0,          # IV变化超过5%则更新
+            'min_tick_interval': 5,        # 最小tick间隔(兼容旧逻辑)
         }
         self._contract_multiplier: Dict[str, int] = {}
         self._dividend_yield: Dict[str, float] = {}
@@ -570,11 +566,11 @@ class GreeksCalculator:
         # 缓存数据
         self._option_greeks: Dict[str, Dict[str, float]] = {}
         self._option_iv: Dict[str, float] = {}
-        self._option_last_update: Dict[str, float] = {}          # 上次更新时间?
+        self._option_last_update: Dict[str, float] = {}          # 上次更新时间戳
         self._option_last_price: Dict[str, float] = {}           # 上次期权价格
         self._option_last_iv: Dict[str, float] = {}              # 上次IV
         self._option_tick_counter: Dict[str, int] = {}           # tick计数(备用)
-        
+
         # 期权基本信息缓存 (避免重复传入)
         self._option_info_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -601,7 +597,7 @@ class GreeksCalculator:
         stats = self.get_stats()
         return (
             f"GreeksCalculator:\n"
-            f"  缓存期权? {stats['cached_options']}\n"
+            f"  缓存期权: {stats['cached_options']}\n"
             f"  更新次数: {stats['greeks_update_count']}\n"
             f"  IV计算次数: {stats['iv_calc_count']}\n"
             f"  平均Greeks计算耗时: {stats['avg_greeks_compute_time_ms']:.4f}ms\n"
@@ -629,31 +625,29 @@ class GreeksCalculator:
         """Load configuration from JSON file."""
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
-            
+                cfg = json_loads(f.read())  # R5-2
+
             self._risk_free_rate = cfg.get('risk_free_rate', self._risk_free_rate)
             self._update_strategy.update(cfg.get('update_strategy', {}))
             self._use_trading_days = cfg.get('use_trading_days', self._use_trading_days)
 
-            # 加载乘数和股息率
             if 'contract_multiplier' in cfg:
                 self._contract_multiplier.update(cfg['contract_multiplier'])
             if 'dividend_yield' in cfg:
                 self._dividend_yield.update(cfg['dividend_yield'])
 
-            # 加载节假日(可选)
             if 'holidays' in cfg:
                 self._load_holidays_from_config(cfg['holidays'])
 
             logger.info("Loaded config from %s", path)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.error("Failed to load config from %s: %s", path, e)
 
     def _load_holidays_from_config(self, holiday_list):
         for h in holiday_list:
             try:
                 self._calendar.add_holiday(date.fromisoformat(h))
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logger.warning(f"[TradingCalendar] Failed to parse holiday '{h}': {e}")
 
     # ------------------------------------------------------------------------
@@ -711,13 +705,12 @@ class GreeksCalculator:
             self._evict_cache_if_needed()
 
     # ------------------------------------------------------------------------
-    # 核心计算与更?
+    # 核心计算与更新
     # ------------------------------------------------------------------------
     def _time_to_expiry(self, expiry_date: Optional[date], bar_date: Optional[date] = None) -> float:
         """Calculate annualized time to expiry, supporting trading days."""
         if expiry_date is None:
-            return 30.0 / 365.0
-        
+            return 30.0 / DAYS_PER_YEAR_CALENDAR
         return self._calendar.time_to_expiry(expiry_date, self._use_trading_days, bar_date=bar_date)
 
     def _parse_strike_from_id(self, instrument_id: str) -> Optional[float]:
@@ -727,7 +720,7 @@ class GreeksCalculator:
         Delegates to SubscriptionManager.parse_option to extract strike_price.
         """
         try:
-            from ali2026v3_trading.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
             parsed = SubscriptionManager.parse_option(instrument_id)
             strike = parsed.get('strike_price')
             return float(strike) if strike is not None else None
@@ -746,47 +739,38 @@ class GreeksCalculator:
         2. Price change exceeds threshold
         3. IV change exceeds threshold (if current_iv provided)
         4. Tick count reaches minimum interval
-
-        Args:
-            instrument_id: Contract ID
-            current_price: Current price
-            current_iv: Current IV (optional, skip IV check if not provided)
-            last_time: Last update time (read by caller inside lock)
-            last_price: Last price (read by caller inside lock)
-            last_iv: Last IV (read by caller inside lock)
-            tick_count: Tick count (read by caller inside lock)
         """
         now = time.time()
 
         # 条件1: 时间间隔
         time_condition = (now - last_time) >= self._update_strategy.get('time_interval_sec', 1.0)
-        
+
         # 条件2: 价格变化
         if last_price > 0:
             price_change_pct = abs(current_price - last_price) / last_price * 100
             price_condition = price_change_pct >= self._update_strategy.get('price_change_pct', 0.5)
         else:
             price_condition = True  # 首次更新
-        
-        # 条件3: IV变化 (仅在提供current_iv时检?
+
+        # 条件3: IV变化 (仅在提供current_iv时检查)
         if current_iv is not None and last_iv is not None and last_iv > 0:
             iv_change_pct = abs(current_iv - last_iv) / last_iv * 100
             iv_condition = iv_change_pct >= self._update_strategy.get('iv_change_pct', 5.0)
         else:
-            iv_condition = False  # 不提供IV时跳过此检?
-        
+            iv_condition = False  # 不提供IV时跳过此检查
+
         # 条件4: Tick计数 (保底机制)
         min_interval = self._update_strategy.get('min_tick_interval', 5)
         tick_condition = tick_count >= min_interval
-        
+
         should_update = time_condition or price_condition or iv_condition or tick_condition
-        
+
         if should_update and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 f"[UpdateTrigger] {instrument_id}: time={time_condition}, "
                 f"price={price_condition}, iv={iv_condition}, tick={tick_condition}"
             )
-        
+
         return should_update
 
     def _should_update_with_cached_iv(self, instrument_id: str, current_price: float,
@@ -811,31 +795,17 @@ class GreeksCalculator:
     ) -> Dict[str, float]:
         """
         Calculate and update Greeks (full pipeline).
-
-        Args:
-            instrument_id: Option contract ID
-            underlying_price: Underlying price
-            strike: Strike price
-            expiry_date: Expiry date
-            option_type: 'CALL' or 'PUT'
-            future_product: Futures product code (for multiplier and dividend yield)
-            market_price: Option market price (for IV calculation, optional)
-            iv: Implied volatility (if provided, use directly; otherwise calculate from market_price)
-
-        Returns:
-            Dict: Greeks {'delta', 'gamma', 'theta', 'vega'}
         """
         with self._lock:
             # 1. 计算剩余时间
             T = self._time_to_expiry(expiry_date, bar_date=bar_date)
-            
-            # 2. 获取股息?
+
+            # 2. 获取股息率
             q = self._dividend_yield.get(future_product, 0.0)
-            
+
             # 3. 计算或获取IV
             if iv is None or iv <= 0:
                 if market_price and market_price > 0:
-                    # 计算IV
                     start_iv = time.perf_counter()
                     iv = IVCalculator.implied_volatility(
                         market_price=market_price,
@@ -849,14 +819,13 @@ class GreeksCalculator:
                     elapsed_ms = (time.perf_counter() - start_iv) * 1000
                     self._iv_calc_count += 1
                     self._total_iv_compute_time_ms += elapsed_ms
-                    
+
                     if elapsed_ms > 1.0:
                         logger.warning(f"[IVCalc] Slow: {instrument_id} took {elapsed_ms:.2f}ms")
                 else:
-                    # 使用缓存的IV或默认?
                     iv = self._option_iv.get(instrument_id, 0.2)
                     logger.debug(f"[IVCalc] Using cached/default IV={iv:.4f} for {instrument_id}")
-            
+
             # 4. 计算希腊字母
             start_calc = time.perf_counter()
             greeks = _bs_greeks(
@@ -869,7 +838,7 @@ class GreeksCalculator:
                 option_type=option_type
             )
             elapsed_ms = (time.perf_counter() - start_calc) * 1000
-            
+
             # 5. 更新缓存
             self._option_greeks[instrument_id] = greeks
             self._option_iv[instrument_id] = iv
@@ -877,20 +846,20 @@ class GreeksCalculator:
             self._option_last_price[instrument_id] = market_price or 0.0
             self._option_last_iv[instrument_id] = iv
             self._option_tick_counter[instrument_id] = 0  # 重置tick计数
-            
+
             self._update_count += 1
             self._total_compute_time_ms += elapsed_ms
-            
+
             # 6. 性能监控
             if elapsed_ms > 1.0:
                 logger.warning(f"[GreeksCalc] Slow: {instrument_id} took {elapsed_ms:.2f}ms")
-            
+
             logger.debug(
                 f"[GreeksUpdated] {instrument_id}: Delta={greeks['delta']:.4f}, "
                 f"Gamma={greeks['gamma']:.4f}, Theta={greeks['theta']:.4f}, "
                 f"Vega={greeks['vega']:.4f}, IV={iv:.4f}"
             )
-            
+
             return greeks.copy()
 
     def update_greeks_from_tick(
@@ -907,52 +876,34 @@ class GreeksCalculator:
     ) -> Optional[Dict[str, float]]:
         """
         Update Greeks from option tick data (smart decision on whether to recalculate).
-
-        This is a Greeks calculation engine, not a tick handler.
-        Should be called from strategy_tick_handler.on_tick() after extracting parameters.
-
-        Optimization: check if update is needed before performing expensive IV calculation.
-
-        Args:
-            instrument_id: Option contract ID
-            price: Option latest price
-            underlying_price: Underlying price
-            expiry_date: Expiry date
-            option_type: 'CALL' or 'PUT'
-            future_product: Futures product code
-            strike: Strike price (optional, read from cache first)
-            iv: Implied volatility (optional, calculated from price if not provided)
-
-        Returns:
-            Optional[Dict]: Updated Greeks if recalculated, otherwise None
         """
-        # ?P1#76修复:将IV计算移到锁外,减少持锁时?
+        # P1#76修复:将IV计算移到锁外,减少持锁时间
         # 第一步:锁内做低成本判断,决定是否需要计算IV
         with self._lock:
             tick_cnt = self._option_tick_counter.get(instrument_id, 0) + 1
             self._option_tick_counter[instrument_id] = tick_cnt
-            
+
             info = self._option_info_cache.get(instrument_id, {})
             if strike is None:
                 strike = info.get('strike')
-            
+
             if strike is None:
                 strike = self._parse_strike_from_id(instrument_id)
                 if strike is not None:
                     logger.debug(f"[OnTick] Parsed strike={strike} from {instrument_id}")
-            
+
             if strike is None:
                 logger.warning(f"[OnTick] Strike not found for {instrument_id}")
                 return None
-            
+
             cached_iv = self._option_iv.get(instrument_id)
             has_cached_iv = cached_iv is not None and cached_iv > 0
-            
-            # ?P1修复:在锁内读取所有状态,消除TOCTOU竞?
+
+            # P1修复:在锁内读取所有状态,消除TOCTOU竞争
             last_time = self._option_last_update.get(instrument_id, 0)
             last_price = self._option_last_price.get(instrument_id, price)
             last_iv = self._option_last_iv.get(instrument_id)
-            
+
             need_compute_iv = False
             if iv is None and not has_cached_iv:
                 need_compute_iv = True
@@ -961,8 +912,8 @@ class GreeksCalculator:
                                                       last_time, last_price, last_iv, tick_cnt):
                     need_compute_iv = True
                 else:
-                    return None  # 不需要更?
-        
+                    return None  # 不需要更新
+
         # 第二步:锁外执行昂贵的IV计算
         if need_compute_iv and iv is None:
             start_iv = time.perf_counter()
@@ -976,24 +927,24 @@ class GreeksCalculator:
                 option_type=option_type
             )
             elapsed_ms = (time.perf_counter() - start_iv) * 1000
-            
+
             if elapsed_ms > 1.0:
                 logger.warning(f"[IVCalc] Slow: {instrument_id} took {elapsed_ms:.2f}ms")
-        
+
         # 第三步:锁内做最终判断和更新,计数器递增移到锁内
         with self._lock:
             if need_compute_iv and iv is not None:
                 self._iv_calc_count += 1
                 self._total_iv_compute_time_ms += elapsed_ms
-            
-            # ?P1修复:使用锁内读取的状态数?
+
+            # P1修复:使用锁内读取的状态数据
             last_time = self._option_last_update.get(instrument_id, 0)
             last_price = self._option_last_price.get(instrument_id, price)
-            
+
             if has_cached_iv and not self._should_update(instrument_id, price, iv,
                                                          last_time, last_price, last_iv, tick_cnt):
                 return None
-            
+
             return self.calculate_and_update(
                 instrument_id=instrument_id,
                 underlying_price=underlying_price,
@@ -1043,12 +994,12 @@ class GreeksCalculator:
             Dict: {'delta', 'gamma', 'theta', 'vega'} portfolio totals
         """
         portfolio = {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
-        
+
         with self._lock:
             for inst_id, size in positions.items():
                 if size == 0:
                     continue
-                
+
                 greeks = self._option_greeks.get(inst_id)
                 if not greeks:
                     logger.debug(f"[PortfolioRisk] No greeks for {inst_id}, skipping")
@@ -1057,24 +1008,22 @@ class GreeksCalculator:
                 if _update_time > 0 and (time.time() - _update_time) > self._GREEKS_CACHE_TTL:
                     del self._option_greeks[inst_id]
                     continue
-                
-                # 获取合约乘数
+
                 info = self._option_info_cache.get(inst_id, {})
                 future_product = info.get('future_product', '')
                 multiplier = self._contract_multiplier.get(future_product, 1)
-                
-                # 加权累加
+
                 portfolio['delta'] += greeks['delta'] * multiplier * size
                 portfolio['gamma'] += greeks['gamma'] * multiplier * size
                 portfolio['theta'] += greeks['theta'] * multiplier * size
                 portfolio['vega'] += greeks['vega'] * multiplier * size
-        
+
         logger.debug(
             f"[PortfolioRisk] Delta={portfolio['delta']:.2f}, "
             f"Gamma={portfolio['gamma']:.4f}, Theta={portfolio['theta']:.2f}, "
             f"Vega={portfolio['vega']:.2f}"
         )
-        
+
         return portfolio
 
     def get_product_summary(
@@ -1086,26 +1035,15 @@ class GreeksCalculator:
     ) -> Dict[str, float]:
         """
         Summarize Greeks for a specified product.
-
-        Args:
-            product: Product code (e.g. 'IF')
-            months: Month filter (e.g. ['2603', '2604'])
-            option_type: Type filter ('CALL'/'PUT')
-            include_multiplier: Whether to include contract multiplier
-
-        Returns:
-            Dict: {'delta', 'gamma', 'theta', 'vega'}
         """
         total = {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
-        
+
         with self._lock:
             for inst_id, info in self._option_info_cache.items():
-                # 过滤产品 - 统一使用 future_product
                 future_prod = info.get('future_product', '')
                 if future_prod != product:
                     continue
-                
-                # 过滤月份 - 从缓存中读取 month 字段
+
                 if months:
                     inst_month = info.get('month', '')
                     if not inst_month:
@@ -1114,15 +1052,13 @@ class GreeksCalculator:
                             continue
                     if inst_month not in months:
                         continue
-                
-                # 过滤类型
+
                 if option_type:
                     info_type = _normalize_option_type(info.get('option_type', ''))
                     input_type = _normalize_option_type(option_type)
                     if info_type != input_type:
                         continue
-                
-                # 累加希腊字母
+
                 g = self._option_greeks.get(inst_id, {})
                 if not g:
                     continue
@@ -1130,20 +1066,20 @@ class GreeksCalculator:
                 if _update_time > 0 and (time.time() - _update_time) > self._GREEKS_CACHE_TTL:
                     del self._option_greeks[inst_id]
                     continue
-                
+
                 mult = 1
                 if include_multiplier:
                     mult = self._contract_multiplier.get(future_prod, 1)
-                
+
                 for key in total:
                     total[key] += g.get(key, 0.0) * mult
-        
+
         return total
 
     @staticmethod
     def _parse_option_month(inst_id):
         try:
-            from ali2026v3_trading.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
             parsed = SubscriptionManager.parse_option(inst_id)
             return parsed.get('year_month', '')
         except (ValueError, KeyError, TypeError):
@@ -1159,95 +1095,73 @@ class GreeksCalculator:
     ) -> List[str]:
         """
         Check risk limits.
-
-        Args:
-            positions: Position dict
-            delta_limit: Delta limit (default 1000)
-            gamma_limit: Gamma limit (default 50)
-            theta_min: Theta minimum (default -500, negative means time decay cost)
-            vega_limit: Vega limit (default 200)
-
-        Returns:
-            List[str]: Warning list
-
-        Note:
-            All limit parameters are absolute values. Users should set them
-            explicitly based on strategy risk preference.
         """
         portfolio = self.get_portfolio_greeks(positions)
-        
-        # P0-GR-001修复: 优先从参数池读取约束阈值,异常时回退硬编码默认?
+
+        # P0-GR-001修复: 优先从参数池读取约束阈值,异常时回退硬编码默认值
         if delta_limit is None:
             try:
-                from ali2026v3_trading.params_service import get_params_service
+                from ali2026v3_trading.config.params_service import get_params_service
                 _ps = get_params_service()
-                delta_limit = _ps.get_float('max_net_delta_pct', 0.30) * 1000  # R34-P0修复: 百分比->绝对值量纲转换,0.30*1000=300
-            except Exception:
-                delta_limit = 300  # R34-P0修复: 回退默认?00,与max_net_delta_pct=0.30*1000一?
+                delta_limit = _ps.get_float('max_net_delta_pct', 0.30) * 1000
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                delta_limit = 300
         if gamma_limit is None:
             try:
-                from ali2026v3_trading.params_service import get_params_service
+                from ali2026v3_trading.config.params_service import get_params_service
                 _ps = get_params_service()
-                gamma_limit = _ps.get_float('max_net_gamma_pct', 0.08) * 625  # R34-P0修复: 百分比->绝对值量纲转换,0.08*625=50
-            except Exception:
+                gamma_limit = _ps.get_float('max_net_gamma_pct', 0.08) * 625
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 gamma_limit = 50
         if theta_min is None:
             try:
-                from ali2026v3_trading.params_service import get_params_service
+                from ali2026v3_trading.config.params_service import get_params_service
                 _ps = get_params_service()
                 theta_min = -_ps.get_float('max_theta_ratio', 0.5) * 1000
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 theta_min = -500
         if vega_limit is None:
             try:
-                from ali2026v3_trading.params_service import get_params_service
+                from ali2026v3_trading.config.params_service import get_params_service
                 _ps = get_params_service()
                 vega_limit = _ps.get_float('max_net_vega_bps', 0.02) * 10000
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 vega_limit = 200
-        
+
         warnings = []
-        
+
         if abs(portfolio['delta']) > delta_limit:
-            warnings.append(
-                f"[WARN] Delta超限: {portfolio['delta']:.2f} / ±{delta_limit}"
-            )
-        
+            warnings.append(f"[WARN] Delta超限: {portfolio['delta']:.2f} / ±{delta_limit}")
+
         if portfolio['gamma'] > gamma_limit:
-            warnings.append(
-                f"[WARN] Gamma超限: {portfolio['gamma']:.4f} / {gamma_limit:.2f}"
-            )
-        
+            warnings.append(f"[WARN] Gamma超限: {portfolio['gamma']:.4f} / {gamma_limit:.2f}")
+
         if portfolio['theta'] < theta_min:
-            warnings.append(
-                f"[WARN] Theta成本过高: {portfolio['theta']:.2f}/?(限额: {theta_min})"
-            )
-        
+            warnings.append(f"[WARN] Theta成本过高: {portfolio['theta']:.2f}/日(限额: {theta_min})")
+
         if abs(portfolio['vega']) > vega_limit:
-            warnings.append(
-                f"[WARN] Vega超限: {portfolio['vega']:.2f} / ±{vega_limit:.2f}"
-            )
-        
+            warnings.append(f"[WARN] Vega超限: {portfolio['vega']:.2f} / ±{vega_limit:.2f}")
+
         if warnings:
             logger.warning(f"[RiskAlert] {'; '.join(warnings)}")
-        
+
         return warnings
 
-    # ?ID唯一:get_stats统一接口,返回值含service_name="GreeksCalculator"
+    # ID唯一:get_stats统一接口,返回值含service_name="GreeksCalculator"
     def get_stats(self) -> Dict[str, Any]:
         """Get performance statistics."""
         with self._lock:
             avg_calc_time = (
-                self._total_compute_time_ms / self._update_count 
+                self._total_compute_time_ms / self._update_count
                 if self._update_count > 0 else 0.0
             )
             avg_iv_time = (
-                self._total_iv_compute_time_ms / self._iv_calc_count 
+                self._total_iv_compute_time_ms / self._iv_calc_count
                 if self._iv_calc_count > 0 else 0.0
             )
-            
+
             return {
-                'service_name': 'GreeksCalculator',  # ?ID唯一:统一标识服务来源
+                'service_name': 'GreeksCalculator',
                 'cached_options': len(self._option_greeks),
                 'cached_iv': len(self._option_iv),
                 'greeks_update_count': self._update_count,
@@ -1259,7 +1173,7 @@ class GreeksCalculator:
                 'update_strategy': self._update_strategy.copy(),
             }
 
-    # ?ID唯一:clear_cache统一接口,服?GreeksCalculator
+    # ID唯一:clear_cache统一接口,服务GreeksCalculator
     def clear_cache(self):
         """clear_cache: R10-P1-13 fix"""
         with self._lock:
@@ -1272,7 +1186,7 @@ class GreeksCalculator:
             self._option_info_cache.clear()
 
     _MAX_CACHE_SIZE = 5000
-    _GREEKS_CACHE_TTL = 120  # R23-FR-03-FIX: 从300s降至120s，Greeks计算较重取折中值（config_params.CACHE_TTL=60s）
+    _GREEKS_CACHE_TTL = 120  # R23-FR-03-FIX: 从300s降至120s
 
     def _evict_cache_if_needed(self):
         if len(self._option_greeks) > self._MAX_CACHE_SIZE:
@@ -1325,7 +1239,7 @@ def validate_greeks_calendar_iv_noise(
     # 提取缓存的IV数据
     try:
         iv_data = dict(greeks_calculator._option_iv)
-    except Exception:
+    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
         return {
             'passed': True,
             'calendar_anomaly_count': 0,
@@ -1346,7 +1260,7 @@ def validate_greeks_calendar_iv_noise(
     if calendar is None:
         try:
             calendar = TradingCalendar()
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             calendar = None
 
     today = datetime.now(CHINA_TZ).date() if CHINA_TZ else date.today()
@@ -1369,7 +1283,6 @@ def validate_greeks_calendar_iv_noise(
     # 对每个期权，检查相邻交易日IV变化是否超过阈值
     iv_values_by_date: Dict[str, Dict[date, float]] = {}
     for inst_id, iv in iv_data.items():
-        # 简化处理：将当前IV关联到today
         iv_values_by_date[inst_id] = {today: iv}
 
     if len(check_dates) >= 2:
@@ -1385,7 +1298,7 @@ def validate_greeks_calendar_iv_noise(
     iv_noise_max_delta_change = 0.0
     try:
         greeks_cache = dict(greeks_calculator._option_greeks)
-    except Exception:
+    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
         greeks_cache = {}
 
     for inst_id, base_iv in iv_data.items():
@@ -1396,8 +1309,6 @@ def validate_greeks_calendar_iv_noise(
             noisy_iv = base_iv + random.gauss(0, iv_noise_sigma)
             if noisy_iv <= 0:
                 continue
-            # 用噪声IV重新估算delta（简化：delta对IV的敏感度近似）
-            # dDelta/dIV ≈ -vega / (S * sqrt(T)) ，此处用线性近似
             vega = greeks_cache.get(inst_id, {}).get('vega', 0.0)
             if vega != 0 and base_iv > 0:
                 delta_change = abs(vega * (noisy_iv - base_iv) / base_iv)
@@ -1407,19 +1318,67 @@ def validate_greeks_calendar_iv_noise(
 
         iv_noise_max_delta_change = max(iv_noise_max_delta_change, max_delta_change)
 
-    passed = (calendar_anomaly_count == 0) and (iv_noise_max_delta_change < 0.1)
+    # P2-裂缝9-10/21修复: 自然日vs交易日theta差异对比 + 约束违反率统计
+    theta_natural_vs_trading_diff = 0.0
+    theta_violation_rate = 0.0
+    try:
+        # 从greeks_cache中提取theta值进行双轨计算
+        thetas = []
+        for inst_id, greeks in greeks_cache.items():
+            theta_val = greeks.get('theta', 0.0)
+            if theta_val != 0:
+                thetas.append(theta_val)
+        if thetas:
+            # 自然日假设: 全年365天，theta按日历日衰减
+            # 交易日假设: 约252个交易日，theta按交易日衰减
+            avg_theta = sum(thetas) / len(thetas)
+            # 差异 = |自然日年化theta - 交易日年化theta| / |交易日年化theta|
+            theta_trading_annual = avg_theta * 252
+            theta_natural_annual = avg_theta * 365
+            theta_natural_vs_trading_diff = abs(theta_natural_annual - theta_trading_annual) / (abs(theta_trading_annual) + 1e-10)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        theta_natural_vs_trading_diff = 0.0
+
+    # 约束违反率: IV噪声导致的delta变化超过0.1阈值的占比
+    iv_violations = 0
+    iv_total = 0
+    for inst_id, base_iv in iv_data.items():
+        base_delta = greeks_cache.get(inst_id, {}).get('delta', 0.0)
+        vega = greeks_cache.get(inst_id, {}).get('vega', 0.0)
+        for _ in range(n_simulations):
+            noisy_iv = base_iv + random.gauss(0, iv_noise_sigma)
+            if noisy_iv <= 0 or base_iv <= 0:
+                continue
+            iv_total += 1
+            if vega != 0:
+                delta_change = abs(vega * (noisy_iv - base_iv) / base_iv)
+            else:
+                delta_change = abs(base_delta * (noisy_iv - base_iv) / max(base_iv, 1e-9))
+            if delta_change >= 0.1:
+                iv_violations += 1
+    theta_violation_rate = (iv_violations / max(iv_total, 1)) * 100.0
+
+    passed = (
+        (calendar_anomaly_count == 0)
+        and (theta_natural_vs_trading_diff < 0.05)  # 自然日vs交易日theta差异<5%
+        and (theta_violation_rate < 5.0)  # 约束违反率<5%
+    )
 
     details_parts = []
     if calendar_anomaly_count > 0:
         details_parts.append(f"calendar anomalies: {calendar_anomaly_count}")
-    if iv_noise_max_delta_change >= 0.1:
-        details_parts.append(f"IV noise max delta change: {iv_noise_max_delta_change:.6f} >= 0.1")
+    if theta_natural_vs_trading_diff >= 0.05:
+        details_parts.append(f"theta natural vs trading diff: {theta_natural_vs_trading_diff:.4f} >= 0.05")
+    if theta_violation_rate >= 5.0:
+        details_parts.append(f"IV noise violation rate: {theta_violation_rate:.2f}% >= 5%")
     details = '; '.join(details_parts) if details_parts else 'All checks passed'
 
     return {
         'passed': passed,
         'calendar_anomaly_count': calendar_anomaly_count,
         'iv_noise_max_delta_change': round(iv_noise_max_delta_change, 6),
+        'theta_natural_vs_trading_diff': round(theta_natural_vs_trading_diff, 6),
+        'theta_violation_rate_pct': round(theta_violation_rate, 2),
         'details': details,
     }
 
@@ -1435,5 +1394,8 @@ __all__ = [
     'TradingCalendar',
     '_bs_greeks',
     '_bs_price',
+    '_norm_cdf',
+    '_norm_pdf',
+    '_normalize_option_type',
     'validate_greeks_calendar_iv_noise',
 ]

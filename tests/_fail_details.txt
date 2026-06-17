@@ -1,0 +1,1172 @@
+........................................................................ [  1%]
+............FFFF......F................................................. [  3%]
+..............................................................s......... [  4%]
+.F..FFF.FFF...F.F..FF..FF.FF.FF....FFFF..FF...F.F....FFF...F.......F.F.. [  6%]
+..................................F..................................... [  8%]
+............FF.......................................................... [  9%]
+...............................F..........................F............. [ 11%]
+................F..............................F....................F... [ 13%]
+.................................FF..................................... [ 14%]
+.........................................F.....FF.F.FF.................. [ 16%]
+........................................................................ [ 17%]
+........................................................................ [ 19%]
+...............F........................................................ [ 21%]
+........................................................................ [ 22%]
+..........F.....................FFF.................F................... [ 24%]
+........................................................................ [ 26%]
+FFF..F.F..F..F.......................................................... [ 27%]
+....FF.................................................................. [ 29%]
+........................................................................ [ 31%]
+........................................................................ [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+............FF..F............................................F.......... [ 37%]
+........................................................................ [ 39%]
+........................................................................ [ 40%]
+..................FFF....F.............................................. [ 42%]
+................................F............................F.......... [ 44%]
+....FFF................................................................. [ 45%]
+........................................................................ [ 47%]
+........................................................................ [ 48%]
+.....................................................................F.. [ 50%]
+........................................................................ [ 52%]
+...............................F........................................ [ 53%]
+....F.............................F..................................... [ 55%]
+........................................................................ [ 57%]
+....................................................F..................F [ 58%]
+FF...............FF...FFFFF.FFFFFFF...........F.F....................... [ 60%]
+..FF...........................F....FFFF....F........................... [ 62%]
+........................................................................ [ 63%]
+...............F......................... [ 64%]
+........................................................................ [ 66%]
+......F........................................................F........ [ 67%]
+........................F...F.........................F..FF............. [ 69%]
+.F.....F................................................................ [ 71%]
+............................................FF.......................... [ 72%]
+....................................................FFF................. [ 74%]
+........................................................................ [ 76%]
+...................................FFFF.F.FFF.FFFF...FF................. [ 77%]
+........F........F......FFF.F........................................... [ 79%]
+..................F....F.................FF...F......................... [ 80%]
+........................................................................ [ 82%]
+........................................................................ [ 84%]
+........................................................................ [ 85%]
+........................................................................ [ 87%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+.......................................................................F [ 92%]
+........................................................................ [ 94%]
+........................................................................ [ 95%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+................................................                         [100%]
+================================== FAILURES ===================================
+__________________ TestBacktestIntegrationHooks.test_on_bar ___________________
+ali2026v3_trading\tests\test_backtest_integration_hooks.py:30: in test_on_bar
+    hooks.on_bar(bar=bar)
+ali2026v3_trading\strategy_judgment\backtest_integration_hooks.py:137: in on_bar
+    return self._on_bar_complete(bar)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\strategy_judgment\backtest_integration_hooks.py:170: in _on_bar_complete
+    self._snapshot_collector.process_bar_for_weekly_monthly(bar=bar)
+ali2026v3_trading\strategy_judgment\market_snapshot_collector.py:729: in process_bar_for_weekly_monthly
+    ts = bar.timestamp if hasattr(bar, 'timestamp') else bar.get('timestamp')
+                                                         ^^^^^^^
+E   AttributeError: 'EnhancedBar' object has no attribute 'get'
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:[StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:253 [StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:258 策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+____________ TestBacktestIntegrationHooks.test_on_signal_generated ____________
+ali2026v3_trading\tests\test_backtest_integration_hooks.py:34: in test_on_signal_generated
+    with patch.object(hooks._snapshot_collector, 'capture_signal_point', return_value=None):
+         ^^^^^
+E   NameError: name 'patch' is not defined
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:[StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:253 [StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:258 策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+______________ TestBacktestIntegrationHooks.test_on_order_opened ______________
+ali2026v3_trading\tests\test_backtest_integration_hooks.py:39: in test_on_order_opened
+    with patch.object(hooks._snapshot_collector, 'capture_order_event', return_value=None):
+         ^^^^^
+E   NameError: name 'patch' is not defined
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:[StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:253 [StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:258 策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+______________ TestBacktestIntegrationHooks.test_on_order_closed ______________
+ali2026v3_trading\tests\test_backtest_integration_hooks.py:44: in test_on_order_closed
+    with patch.object(hooks._snapshot_collector, 'capture_order_event', return_value=None):
+         ^^^^^
+E   NameError: name 'patch' is not defined
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:[StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:253 [StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:258 策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+____________ TestBacktestIntegrationHooks.test_on_backtest_finish _____________
+ali2026v3_trading\tests\test_backtest_integration_hooks.py:74: in test_on_backtest_finish
+    with patch('ali2026v3_trading.strategy_judgment.strategy_judgment_facade.run_ecosystem_integrations', return_value=0.5):
+         ^^^^^
+E   NameError: name 'patch' is not defined
+---------------------------- Captured stderr call -----------------------------
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:[StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING:ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+------------------------------ Captured log call ------------------------------
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:253 [StrategyBehaviorDiagnosis] strategy_id为空，行为诊断可能无法正确关联策略
+WARNING  ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis:strategy_behavior_diagnosis.py:258 策略类型''无预设逻辑定义，行为一致性诊断将使用通用宽松标准。已知类型: ['high_freq', 'resonance', 'box', 'spring', 'arbitrage', 'market_making']
+________________ TestDbAdapter.test_connection_config_defaults ________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:44: in test_connection_config_defaults
+    assert cfg.pool_size > 0
+           ^^^^^^^^^^^^^
+E   AttributeError: 'ConnectionConfig' object has no attribute 'pool_size'
+____________________ TestSortEntry.test_create_call_option ____________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:58: in test_create_call_option
+    entry = SortEntry.create(
+E   TypeError: SortEntry.create() missing 3 required positional arguments: 'price', 'month', and 'product'
+____________________ TestSortEntry.test_create_put_option _____________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:67: in test_create_put_option
+    entry = SortEntry.create(
+E   TypeError: SortEntry.create() missing 3 required positional arguments: 'price', 'month', and 'product'
+______________ TestSortEntry.test_sort_order_sync_flag_priority _______________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:76: in test_sort_order_sync_flag_priority
+    e1 = SortEntry.create(1, 'A', 100.0, 100.0, 'C', 10, 1.0, sync_flag=True)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: SortEntry.create() got multiple values for argument 'sync_flag'
+_________ TestRiskPositionBridge.test_risk_bridge_adapter_no_service __________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:93: in test_risk_bridge_adapter_no_service
+    result = adapter.check_position_limit('AL2401', 'BUY', 1)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: RiskBridgeAdapter.check_position_limit() takes 3 positional arguments but 4 were given
+________ TestRiskPositionBridge.test_risk_bridge_adapter_with_service _________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:100: in test_risk_bridge_adapter_with_service
+    result = adapter.check_position_limit('AL2401', 'BUY', 1)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: RiskBridgeAdapter.check_position_limit() takes 3 positional arguments but 4 were given
+_____ TestRiskPositionBridge.test_risk_bridge_adapter_exception_fallback ______
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:107: in test_risk_bridge_adapter_exception_fallback
+    result = adapter.check_position_limit('AL2401', 'BUY', 1)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: RiskBridgeAdapter.check_position_limit() takes 3 positional arguments but 4 were given
+___________ TestInputBuilder.test_build_snapshot_with_mock_service ____________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:137: in test_build_snapshot_with_mock_service
+    result = build_snapshot(rs)
+             ^^^^^^^^^^^^^^^^^^
+E   TypeError: build_snapshot() missing 1 required positional argument: 'risk_service'
+______ TestCircuitBreakerServiceDeep.test_is_trading_paused_during_pause ______
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:161: in test_is_trading_paused_during_pause
+    assert is_paused is True
+E   assert False is True
+___________ TestRiskCheckEngineDeep.test_position_limit_rule_blocks ___________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:178: in test_position_limit_rule_blocks
+    rule = PositionLimitRule(max_positions=3)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: PositionLimitRule() takes no arguments
+___________ TestRiskCheckEngineDeep.test_position_limit_rule_passes ___________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:185: in test_position_limit_rule_passes
+    rule = PositionLimitRule(max_positions=5)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: PositionLimitRule() takes no arguments
+_________________ TestMarketRisk.test_check_risk_ratio_blocks _________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:218: in test_check_risk_ratio_blocks
+    result = check_risk_ratio(snapshot)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_risk_ratio() missing 1 required positional argument: 'risk_service'
+_________________ TestMarketRisk.test_check_risk_ratio_passes _________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:226: in test_check_risk_ratio_passes
+    result = check_risk_ratio(snapshot)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_risk_ratio() missing 1 required positional argument: 'risk_service'
+______________ TestOperationalRisk.test_check_shadow_ev_critical ______________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:241: in test_check_shadow_ev_critical
+    result = check_shadow_ev(snapshot)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_shadow_ev() missing 1 required positional argument: 'risk_service'
+_____________ TestOperationalRisk.test_check_shadow_ev_no_engine ______________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:248: in test_check_shadow_ev_no_engine
+    result = check_shadow_ev(snapshot)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_shadow_ev() missing 1 required positional argument: 'risk_service'
+______ TestSafetyMetaPositionDeep.test_confirm_daily_resume_no_approver _______
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:266: in test_confirm_daily_resume_no_approver
+    result = svc.confirm_daily_resume(approver_id='')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: HardTimeStopAndComplianceService.confirm_daily_resume() got an unexpected keyword argument 'approver_id'
+______ TestSafetyMetaPositionDeep.test_confirm_daily_resume_wrong_token _______
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:271: in test_confirm_daily_resume_wrong_token
+    result = svc.confirm_daily_resume(approver_id='admin', token='wrong')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: HardTimeStopAndComplianceService.confirm_daily_resume() got an unexpected keyword argument 'approver_id'
+__________ TestModeExitRules.test_drawdown_manager_should_full_stop ___________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:304: in test_drawdown_manager_should_full_stop
+    dm = DrawdownManager()
+         ^^^^^^^^^^^^^^^^^
+E   TypeError: DrawdownManager.__init__() missing 1 required positional argument: 'action'
+_____ TestModeExitRules.test_drawdown_manager_should_full_stop_no_trigger _____
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:309: in test_drawdown_manager_should_full_stop_no_trigger
+    dm = DrawdownManager()
+         ^^^^^^^^^^^^^^^^^
+E   TypeError: DrawdownManager.__init__() missing 1 required positional argument: 'action'
+______________ TestModeExitRules.test_defensive_drawdown_checker ______________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:316: in test_defensive_drawdown_checker
+    result = checker.check(sortino=0.1, calmar=0.05, entry_indicator=0.0)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: DefensiveDrawdownChecker.check() got an unexpected keyword argument 'sortino'
+______________ TestModeExitRules.test_exit_rule_engine_creation _______________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:320: in test_exit_rule_engine_creation
+    engine = ExitRuleEngine()
+             ^^^^^^^^^^^^^^^^
+E   TypeError: ExitRuleEngine.__init__() missing 2 required positional arguments: 'method' and 'stop_method'
+____________ TestParamsCanaryEnv.test_should_apply_canary_disabled ____________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:342: in test_should_apply_canary_disabled
+    result = should_apply_canary('AL2401', enabled=False)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: should_apply_canary() got an unexpected keyword argument 'enabled'
+_________________ TestParamsCanaryEnv.test_diff_env_profiles __________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:348: in test_diff_env_profiles
+    result = diff_env_profiles(env1, env2)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\config\_params_canary_env.py:146: in diff_env_profiles
+    p1 = _ENV_CONFIG_PROFILES.get(env1, {})
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: unhashable type: 'dict'
+________________ TestSchedulerService.test_add_job_returns_id _________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:375: in test_add_job_returns_id
+    job_id = svc.add_job(func=lambda: None, interval=60.0, name='test')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: SchedulerService.add_job() got an unexpected keyword argument 'name'
+___________________ TestSchedulerService.test_add_once_job ____________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:385: in test_add_once_job
+    job_id = svc.add_once_job(func=lambda: None, delay_sec=3600.0, name='once_test')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: SchedulerService.add_once_job() got an unexpected keyword argument 'delay_sec'
+___________________ TestOrderWALStateService.test_creation ____________________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:416: in test_creation
+    svc = OrderWALStateService()
+          ^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: OrderWALStateService.__init__() missing 1 required positional argument: 'provider'
+______________ TestOrderWALStateService.test_wal_write_callable _______________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:420: in test_wal_write_callable
+    svc = OrderWALStateService()
+          ^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: OrderWALStateService.__init__() missing 1 required positional argument: 'provider'
+_______ TestOrderWALStateService.test_recover_orphaned_orders_callable ________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:424: in test_recover_orphaned_orders_callable
+    svc = OrderWALStateService()
+          ^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: OrderWALStateService.__init__() missing 1 required positional argument: 'provider'
+_________ TestOrderFlowBridge.test_microstructure_arbitrage_detector __________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:447: in test_microstructure_arbitrage_detector
+    result = detector.detect_arbitrage(
+E   TypeError: MicrostructureArbitrageDetector.detect_arbitrage() got an unexpected keyword argument 'bid_price'
+__________ TestQueryDataExport.test_get_instrument_summary_callable ___________
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:506: in test_get_instrument_summary_callable
+    from ali2026v3_trading.data.query_data_export import get_instrument_summary
+E   ImportError: cannot import name 'get_instrument_summary' from 'ali2026v3_trading.data.query_data_export' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\data\query_data_export.py)
+_______ TestQueryInstrumentService.test_infer_exchange_from_id_callable _______
+ali2026v3_trading\tests\test_coverage_boost_25modules.py:516: in test_infer_exchange_from_id_callable
+    from ali2026v3_trading.data.query_instrument_service import infer_exchange_from_id
+E   ImportError: cannot import name 'infer_exchange_from_id' from 'ali2026v3_trading.data.query_instrument_service' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\data\query_instrument_service.py)
+_________________ TestMetricsRegistry.test_observe_histogram __________________
+ali2026v3_trading\tests\test_coverage_boost_batch2.py:232: in test_observe_histogram
+    stats = mr.get_histogram_stats('test_hist')
+            ^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'MetricsRegistry' object has no attribute 'get_histogram_stats'
+___________ TestTradingEVService.test_is_same_delta_direction_same ____________
+ali2026v3_trading\tests\test_coverage_boost_deep3.py:293: in test_is_same_delta_direction_same
+    svc._master.last_open_reason = ''
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'StrategySlot' object has no attribute 'last_open_reason'
+___________ TestTradingEVService.test_is_same_delta_direction_hedge ___________
+ali2026v3_trading\tests\test_coverage_boost_deep3.py:302: in test_is_same_delta_direction_hedge
+    svc._master.last_open_reason = 'DELTA_HEDGE position'
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'StrategySlot' object has no attribute 'last_open_reason'
+___________________ TestLifecycleManager.test_lock_property ___________________
+ali2026v3_trading\tests\test_coverage_boost_lifecycle.py:130: in test_lock_property
+    assert isinstance(lm.lock, threading.RLock)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: isinstance() arg 2 must be a type, a tuple of types, or a union
+______ TestDrawdownMonitorService.test_daily_drawdown_triggers_hard_stop ______
+ali2026v3_trading\tests\test_coverage_boost_risk_infra.py:83: in test_daily_drawdown_triggers_hard_stop
+    assert dms._daily_hard_stop_triggered is True
+E   assert False is True
+E    +  where False = <ali2026v3_trading.risk.safety_meta_equity.DrawdownMonitorService object at 0x000001E0FE0F5AF0>._daily_hard_stop_triggered
+________________ TestPLRCalculator.test_assess_quality_no_data ________________
+ali2026v3_trading\tests\test_coverage_boost_signal_governance.py:81: in test_assess_quality_no_data
+    assert result['quality_level'] == 'no_data'
+           ^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'quality_level'
+______________ TestKellyPositionSize.test_option_buyer_discount _______________
+ali2026v3_trading\tests\test_coverage_boost_signal_governance.py:297: in test_option_buyer_discount
+    assert option < future
+E   assert 1.6 < 1.6
+___________________ TestLogDeduplicator.test_cache_eviction ___________________
+ali2026v3_trading\tests\test_coverage_boost_signal_governance.py:400: in test_cache_eviction
+    assert len(ld._recent) <= 500
+E   AssertionError: assert 600 <= 500
+E    +  where 600 = len({'msg_0': 1781571151.043222, 'msg_1': 1781571151.043222, 'msg_10': 1781571151.043222, 'msg_100': 1781571151.043222, ...})
+E    +    where {'msg_0': 1781571151.043222, 'msg_1': 1781571151.043222, 'msg_10': 1781571151.043222, 'msg_100': 1781571151.043222, ...} = <ali2026v3_trading.risk_engine.log_deduplicator.LogDeduplicator object at 0x000001E0FE163290>._recent
+_____ TestStrategyMonitoringLayer.test_confirm_daily_resume_allows_manual _____
+ali2026v3_trading\tests\test_coverage_boost_strategy_order_risk.py:279: in test_confirm_daily_resume_allows_manual
+    with patch('ali2026v3_trading.strategy.strategy_monitoring_layer.get_safety_meta_layer', side_effect=ImportError):
+..\..\..\..\Local\Programs\Python\Python312\Lib\unittest\mock.py:1455: in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\unittest\mock.py:1428: in get_original
+    raise AttributeError(
+E   AttributeError: <module 'ali2026v3_trading.strategy.strategy_monitoring_layer' from 'C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\strategy\\strategy_monitoring_layer.py'> does not have the attribute 'get_safety_meta_layer'
+______ TestStrategyMonitoringLayer.test_is_hard_stop_triggered_no_safety ______
+ali2026v3_trading\tests\test_coverage_boost_strategy_order_risk.py:286: in test_is_hard_stop_triggered_no_safety
+    with patch('ali2026v3_trading.strategy.strategy_monitoring_layer.get_safety_meta_layer', side_effect=ImportError):
+..\..\..\..\Local\Programs\Python\Python312\Lib\unittest\mock.py:1455: in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\unittest\mock.py:1428: in get_original
+    raise AttributeError(
+E   AttributeError: <module 'ali2026v3_trading.strategy.strategy_monitoring_layer' from 'C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\strategy\\strategy_monitoring_layer.py'> does not have the attribute 'get_safety_meta_layer'
+__________________ TestQuantServices.test_singleton_manager ___________________
+ali2026v3_trading\tests\test_data_quant_modules.py:35: in test_singleton_manager
+    assert inst is not None
+E   assert None is not None
+_________________ TestQuantPlatform.test_atomic_system_state __________________
+ali2026v3_trading\tests\test_data_quant_modules.py:98: in test_atomic_system_state
+    v = state.version()
+        ^^^^^^^^^^^^^^^
+E   TypeError: 'int' object is not callable
+________________ TestQuantPlatform.test_system_health_monitor _________________
+ali2026v3_trading\tests\test_data_quant_modules.py:104: in test_system_health_monitor
+    shm.record_latency(latency_us=10000)
+E   TypeError: SystemHealthMonitor.record_latency() missing 1 required positional argument: 'module'
+______________ TestQuantVolatility.test_volatility_regime_filter ______________
+ali2026v3_trading\tests\test_data_quant_modules.py:123: in test_volatility_regime_filter
+    result = vrf.update(return_value=np.random.randn() * 0.02)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\data\quant_volatility.py:220: in update
+    self._ewma_rv_corrected = self._ewma_rv / _bias_correction if _bias_correction > 1e-10 else self._ewma_rv
+    ^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'VolatilityRegimeFilter' object has no attribute '_ewma_rv_corrected'
+_____________________ TestQuantInfra.test_rate_limit_log ______________________
+ali2026v3_trading\tests\test_data_quant_modules.py:141: in test_rate_limit_log
+    rate_limit_log(logger, 'debug', 'test message', 'test_key', min_interval=1.0)
+ali2026v3_trading\data\quant_infra.py:29: in rate_limit_log
+    logger.log(level, msg)
+..\..\..\..\Local\Programs\Python\Python312\Lib\logging\__init__.py:1605: in log
+    raise TypeError("level must be an integer")
+E   TypeError: level must be an integer
+____________________ TestQuantInfra.test_numpy_ring_buffer ____________________
+ali2026v3_trading\tests\test_data_quant_modules.py:148: in test_numpy_ring_buffer
+    assert buf.count() == 10
+           ^^^^^^^^^^^
+E   TypeError: 'int' object is not callable
+_____________________________ test_full_pipeline ______________________________
+ali2026v3_trading\tests\test_e2e_pipeline.py:109: in test_full_pipeline
+    val = run_deep_validation_tiered('must_run', params, params, params, params, bar_data, train=True)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\param_pool\validation\validation_deep_orchestrator.py:70: in run_deep_validation_tiered
+    core_report = run_deep_validation_suite(
+ali2026v3_trading\param_pool\validation\validation_deep_orchestrator.py:182: in run_deep_validation_suite
+    corr_result = validate_cross_strategy_correlation(params_s1, params_s2, params_s3, params_s4, bar_data, train)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\param_pool\validation\validation_deep_orchestrator.py:662: in validate_cross_strategy_correlation
+    r1 = _r.run_backtest_hft(params_s1, day_data, train, "hft")
+         ^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\param_pool\backtest_runner_base.py:14: in __getattr__
+    return getattr(mod, name)
+           ^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\param_pool\backtest\backtest_runner_base.py:140: in __getattr__
+    _mod = importlib.import_module('ali2026v3_trading.param_pool._backtest_runners_hft')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1324: in _find_and_load_unlocked
+    ???
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool._backtest_runners_hft'
+---------------------------- Captured stdout call -----------------------------
+================================================================================
+Step1: L-2 Parameter Optimization
+================================================================================
+  best_params: {'non_other_ratio_threshold': 0.3, 'state_confirm_bars': 5, 'logic_reversal_threshold': 1.0}
+  best_accuracy: 0.2372
+  qualified: False
+  qualified_count: 0/325
+
+================================================================================
+Step1.5: Smoke Test
+================================================================================
+  passed: True
+  states_seen: ['correct_trending', 'incorrect_reversal', 'incorrect_reversal_defensive', 'other']
+  state_transitions: 5
+
+================================================================================
+Alpha Confidence Interval Validation
+================================================================================
+  S1_HFT: Sharpe=2.0, n=200 → CI=[1.760, 2.240], action=reliable
+  S2_Box: Sharpe=1.5, n=100 → CI=[1.214, 1.786], action=flag
+  S3_Ext: Sharpe=0.8, n=50 → CI=[0.482, 1.118], action=flag
+  S4_Spr: Sharpe=1.2, n=30 → CI=[0.731, 1.669], action=flag
+
+================================================================================
+L-2 Conflict Resolution
+================================================================================
+  Same params: any_conflict=False, action=proceed_to_step2
+
+================================================================================
+Deep Validation: must_run tier
+================================================================================
+______________ TestHealthMonitorExtended.test_health_aggregator _______________
+ali2026v3_trading\tests\test_infra_low_cov.py:39: in test_health_aggregator
+    agg = HealthCheckAggregator(MagicMock())
+                                ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+_______________ TestSharedProviders.test_default_state_provider _______________
+ali2026v3_trading\tests\test_infra_zero_modules.py:144: in test_default_state_provider
+    assert isinstance(sp.is_running(), bool)
+                      ^^^^^^^^^^^^^^^
+E   TypeError: 'bool' object is not callable
+_______________ TestSharedProviders.test_default_lock_provider ________________
+ali2026v3_trading\tests\test_infra_zero_modules.py:150: in test_default_lock_provider
+    lock = lp.lock()
+           ^^^^^^^^^
+E   TypeError: '_thread.RLock' object is not callable
+_______________ TestSharedProviders.test_default_stats_provider _______________
+ali2026v3_trading\tests\test_infra_zero_modules.py:158: in test_default_stats_provider
+    sp.record_signal(direction='BUY')
+E   TypeError: DefaultStatsProvider.record_signal() got an unexpected keyword argument 'direction'
+___________ TestBuildSnapshot.test_safety_meta_layer_import_failure ___________
+ali2026v3_trading\tests\test_input_builder.py:38: in test_safety_meta_layer_import_failure
+    with patch('ali2026v3_trading.risk_engine.safety_meta_layer.get_safety_meta_layer', side_effect=ImportError):
+..\..\..\..\Local\Programs\Python\Python312\Lib\unittest\mock.py:1439: in __enter__
+    self.target = self.getter()
+                  ^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\pkgutil.py:528: in resolve_name
+    result = getattr(result, p)
+             ^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'ali2026v3_trading.risk_engine' has no attribute 'safety_meta_layer'
+______________ TestQuantPlatform.test_system_health_monitor_init ______________
+ali2026v3_trading\tests\test_integrated_modules.py:189: in test_system_health_monitor_init
+    monitor.record_latency(0.005)
+E   TypeError: SystemHealthMonitor.record_latency() missing 1 required positional argument: 'latency_us'
+_____________ TestQuantServices.test_lightweight_persistence_init _____________
+ali2026v3_trading\tests\test_integrated_modules.py:202: in test_lightweight_persistence_init
+    lp = LightweightPersistence(db_path=os.path.join(tmpdir, "test.db"))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: LightweightPersistence.__init__() got an unexpected keyword argument 'db_path'
+__________ TestQuantServices.test_lightweight_persistence_save_load ___________
+ali2026v3_trading\tests\test_integrated_modules.py:208: in test_lightweight_persistence_save_load
+    lp = LightweightPersistence(db_path=os.path.join(tmpdir, "test.db"))
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: LightweightPersistence.__init__() got an unexpected keyword argument 'db_path'
+_________ TestQuantTrendScorer.test_multi_period_trend_scorer_update __________
+ali2026v3_trading\tests\test_integrated_modules.py:232: in test_multi_period_trend_scorer_update
+    scorer.update(100.0 + i * 0.5)
+E   TypeError: MultiPeriodTrendScorer.update() missing 2 required positional arguments: 'low' and 'close'
+___________ TestQuantVolatility.test_volatility_regime_filter_init ____________
+ali2026v3_trading\tests\test_integrated_modules.py:246: in test_volatility_regime_filter_init
+    vrf = VolatilityRegimeFilter(window=20)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: VolatilityRegimeFilter.__init__() got an unexpected keyword argument 'window'
+_______ TestStorageQueryModules.test_storage_query_base_infer_exchange ________
+ali2026v3_trading\tests\test_integrated_modules.py:263: in test_storage_query_base_infer_exchange
+    from ali2026v3_trading.data.storage_query_base import infer_exchange_from_id
+E   ImportError: cannot import name 'infer_exchange_from_id' from 'ali2026v3_trading.data.storage_query_base' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\data\storage_query_base.py)
+________ TestStorageQueryModules.test_storage_instrument_register_func ________
+ali2026v3_trading\tests\test_integrated_modules.py:276: in test_storage_instrument_register_func
+    from ali2026v3_trading.data.storage_query_instrument import register_instrument
+E   ImportError: cannot import name 'register_instrument' from 'ali2026v3_trading.data.storage_query_instrument' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\data\storage_query_instrument.py)
+____________ TestOptunaMultiobjectiveSearch.test_lhs_to_param_grid ____________
+ali2026v3_trading\tests\test_integrated_modules.py:767: in test_lhs_to_param_grid
+    result = lhs_to_param_grid(lhs)
+             ^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: lhs_to_param_grid() missing 1 required positional argument: 'param_ranges'
+______________ TestOptunaMultiobjectiveSearch.test_sigmoid_score ______________
+ali2026v3_trading\tests\test_integrated_modules.py:772: in test_sigmoid_score
+    result = sigmoid_score(0.5)
+             ^^^^^^^^^^^^^^^^^^
+E   TypeError: sigmoid_score() missing 3 required positional arguments: 'profit_loss_ratio', 'test_max_drawdown', and 'win_rate'
+__________________ TestVerdictService.test_determine_verdict __________________
+ali2026v3_trading\tests\test_judgment_services.py:17: in test_determine_verdict
+    result = svc.determine_verdict(overall=0.75, dimensions={}, report={})
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\strategy_judgment\_judgment_services.py:527: in determine_verdict
+    if report is not None and report.extreme_point_count < self._min_samples:
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'extreme_point_count'
+________________ TestVerdictService.test_determine_verdict_low ________________
+ali2026v3_trading\tests\test_judgment_services.py:22: in test_determine_verdict_low
+    result = svc.determine_verdict(overall=0.2, dimensions={}, report={})
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\strategy_judgment\_judgment_services.py:527: in determine_verdict
+    if report is not None and report.extreme_point_count < self._min_samples:
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'dict' object has no attribute 'extreme_point_count'
+_______________ TestScoringHelper.test_activity_weighted_score ________________
+ali2026v3_trading\tests\test_judgment_services.py:40: in test_activity_weighted_score
+    assert isinstance(result, dict)
+E   assert False
+E    +  where False = isinstance(0.3515, dict)
+_________ TestSoftConstrainedOptimizer.test_no_penalty_no_constraints _________
+ali2026v3_trading\tests\test_l1_l2_pipeline.py:144: in test_no_penalty_no_constraints
+    result = optimizer.optimize(
+ali2026v3_trading\param_pool\quantification\_quantification_core.py:658: in optimize
+    study = optuna.create_study(direction=direction)
+            ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'optuna' has no attribute 'create_study'
+__________________ TestCheckRiskRatio.test_blocks_over_limit __________________
+ali2026v3_trading\tests\test_market_risk_boost.py:15: in test_blocks_over_limit
+    result = check_risk_ratio(snap)
+             ^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_risk_ratio() missing 1 required positional argument: 'risk_service'
+_________________ TestCheckRiskRatio.test_passes_under_limit __________________
+ali2026v3_trading\tests\test_market_risk_boost.py:23: in test_passes_under_limit
+    result = check_risk_ratio(snap)
+             ^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_risk_ratio() missing 1 required positional argument: 'risk_service'
+_____________________ TestCheckRiskRatio.test_zero_ratio ______________________
+ali2026v3_trading\tests\test_market_risk_boost.py:30: in test_zero_ratio
+    result = check_risk_ratio(snap)
+             ^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_risk_ratio() missing 1 required positional argument: 'risk_service'
+___________________ TestCheckMarketRisks.test_close_action ____________________
+ali2026v3_trading\tests\test_market_risk_boost.py:58: in test_close_action
+    result = check_market_risks(snap)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_market_risks() missing 1 required positional argument: 'risk_service'
+____________ TestExitRuleEngine.test_compute_take_profit_fixed_buy ____________
+ali2026v3_trading\tests\test_mode_exit_rules_boost.py:46: in test_compute_take_profit_fixed_buy
+    assert levels[0]['price'] == 110.0
+E   assert 110.00000000000001 == 110.0
+________________ TestDrawdownManager.test_is_recovered_failure ________________
+ali2026v3_trading\tests\test_mode_exit_rules_boost.py:215: in test_is_recovered_failure
+    assert dm.is_recovered(100.5, 100.0) is False
+E   assert True is False
+E    +  where True = is_recovered(100.5, 100.0)
+E    +    where is_recovered = <ali2026v3_trading.governance.mode_exit_rules.DrawdownManager object at 0x000001E0FFC547A0>.is_recovered
+---------------------------- Captured stderr call -----------------------------
+DEBUG:root:[EventBus] Subscribed to 'DailyDrawdownHaltEvent' with priority 0 (total: 1 subscribers)
+------------------------------ Captured log call ------------------------------
+DEBUG    root:event_bus.py:705 [EventBus] Subscribed to 'DailyDrawdownHaltEvent' with priority 0 (total: 1 subscribers)
+____________ TestCheckShadowEv.test_critical_on_absolute_ev_pause _____________
+ali2026v3_trading\tests\test_operational_risk_boost.py:15: in test_critical_on_absolute_ev_pause
+    result = check_shadow_ev(snap)
+             ^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_shadow_ev() missing 1 required positional argument: 'risk_service'
+________________ TestCheckShadowEv.test_no_engine_returns_none ________________
+ali2026v3_trading\tests\test_operational_risk_boost.py:22: in test_no_engine_returns_none
+    result = check_shadow_ev(snap)
+             ^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_shadow_ev() missing 1 required positional argument: 'risk_service'
+___________________ TestCheckShadowEv.test_degraded_engine ____________________
+ali2026v3_trading\tests\test_operational_risk_boost.py:30: in test_degraded_engine
+    result = check_shadow_ev(snap)
+             ^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: check_shadow_ev() missing 1 required positional argument: 'risk_service'
+____________ TestOrderStateManager.test_scan_timeouts_with_timeout ____________
+ali2026v3_trading\tests\test_order_state_manager_boost.py:46: in test_scan_timeouts_with_timeout
+    mgr = OrderStateManager(timeout_sec=0.0)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: OrderStateManager.__init__() got an unexpected keyword argument 'timeout_sec'
+___ TestP205LoggingCoupling.test_enhanced_phase_scan_gates_no_basic_config ____
+ali2026v3_trading\tests\test_p2_05_logging_coupling.py:26: in test_enhanced_phase_scan_gates_no_basic_config
+    src = self._read("param_pool/phase_scan_core.py")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\tests\test_p2_05_logging_coupling.py:22: in _read
+    return (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\pathlib.py:1027: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\pathlib.py:1013: in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\param_pool\\phase_scan_core.py'
+______________ TestOptimizationPhaseScan.test_gate_check_result _______________
+ali2026v3_trading\tests\test_param_pool_low_cov.py:14: in test_gate_check_result
+    gcr = GateCheckResult.__new__(GateCheckResult)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: GateCheckResult.__new__() missing 3 required positional arguments: 'passed', 'failures', and 'warnings'
+________ TestBacktestFidelity.test_get_instrument_type_slippage_future ________
+ali2026v3_trading\tests\test_param_pool_residual.py:95: in test_get_instrument_type_slippage_future
+    assert s == 6.0
+E   assert 12.5 == 6.0
+---------------------------- Captured stderr call -----------------------------
+DEBUG:ali2026v3_trading.param_pool.backtest._backtest_fidelity:BF-P1-07占位: 品种=OPTION_COMMODITY, 滑点乘数=2.5, 调整后滑点=12.5bps
+------------------------------ Captured log call ------------------------------
+DEBUG    ali2026v3_trading.param_pool.backtest._backtest_fidelity:_backtest_fidelity.py:144 BF-P1-07占位: 品种=OPTION_COMMODITY, 滑点乘数=2.5, 调整后滑点=12.5bps
+_______ TestDownstreamCompatibility.test_strategy_runners_imports_work ________
+ali2026v3_trading\tests\test_phase1_r2_loop_core_migration.py:231: in test_strategy_runners_imports_work
+    from ali2026v3_trading.param_pool.backtest.backtest_strategy_runners import (
+ali2026v3_trading\param_pool\backtest\backtest_strategy_runners.py:989: in __getattr__
+    from ali2026v3_trading.param_pool import _backtest_runners_hft
+E   ImportError: cannot import name '_backtest_runners_hft' from 'ali2026v3_trading.param_pool' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\__init__.py)
+_____ TestDownstreamCompatibility.test_runner_base_gets_pricing_functions _____
+ali2026v3_trading\tests\test_phase1_r4_pricing_separation.py:110: in test_runner_base_gets_pricing_functions
+    from ali2026v3_trading.param_pool.backtest_base import _infer_exchange_id as b_fn
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+______ TestDownstreamCompatibility.test_runner_base_gets_option_pricing _______
+ali2026v3_trading\tests\test_phase1_r4_pricing_separation.py:115: in test_runner_base_gets_option_pricing
+    from ali2026v3_trading.param_pool.backtest_base import _compute_option_mtm_price as b_fn
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+_______ TestDownstreamCompatibility.test_runner_base_gets_limit_prices ________
+ali2026v3_trading\tests\test_phase1_r4_pricing_separation.py:120: in test_runner_base_gets_limit_prices
+    from ali2026v3_trading.param_pool.backtest_base import _calculate_limit_prices as b_fn
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+__________ TestTypesMigration.test_types_removed_import_from_config ___________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:21: in test_types_removed_import_from_config
+    from ali2026v3_trading.param_pool.backtest_base import BacktestStateEnum as BSE_base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+___________ TestTypesMigration.test_state_reason_map_same_identity ____________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:26: in test_state_reason_map_same_identity
+    from ali2026v3_trading.param_pool.backtest_base import _STATE_REASON_MAP as MAP_base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+___________ TestResultMigration.test_build_result_defined_in_utils ____________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:50: in test_build_result_defined_in_utils
+    from ali2026v3_trading.param_pool.backtest_utils import _build_backtest_result
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_utils'
+__________ TestResultMigration.test_result_removed_import_from_utils __________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:54: in test_result_removed_import_from_utils
+    from ali2026v3_trading.param_pool.backtest_utils import _build_backtest_result as fn_utils
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_utils'
+____________ TestResultMigration.test_build_result_is_not_wrapper _____________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:59: in test_build_result_is_not_wrapper
+    from ali2026v3_trading.param_pool.backtest_utils import _build_backtest_result
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_utils'
+______________ TestSpecialImportChain.test_special_direct_import ______________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:69: in test_special_direct_import
+    import ali2026v3_trading.param_pool.backtest_base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+_____________ TestSpecialImportChain.test_special_functions_exist _____________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:75: in test_special_functions_exist
+    import ali2026v3_trading.param_pool.backtest_base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+____ TestDownstreamCompatibility.test_runner_base_star_import_from_config _____
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:94: in test_runner_base_star_import_from_config
+    from ali2026v3_trading.param_pool.backtest_base import BacktestStateEnum
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+_______ TestDownstreamCompatibility.test_utils_imports_state_reason_map _______
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:98: in test_utils_imports_state_reason_map
+    from ali2026v3_trading.param_pool.backtest_utils import _STATE_REASON_MAP
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_utils'
+____________ TestFacadeCompleteness.test_facade_exports_arbitrage _____________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:106: in test_facade_exports_arbitrage
+    import ali2026v3_trading.param_pool.backtest_base as base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+__________ TestFacadeCompleteness.test_facade_exports_market_making ___________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:110: in test_facade_exports_market_making
+    import ali2026v3_trading.param_pool.backtest_base as base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+_______ TestFacadeCompleteness.test_facade_exports_hft_with_disturbance _______
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:114: in test_facade_exports_hft_with_disturbance
+    import ali2026v3_trading.param_pool.backtest_base as base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+________ TestFacadeCompleteness.test_facade_exports_hft_tick_fidelity _________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:118: in test_facade_exports_hft_tick_fidelity
+    import ali2026v3_trading.param_pool.backtest_base as base
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+________ TestFacadeCompleteness.test_facade_arbitrage_same_as_runners _________
+ali2026v3_trading\tests\test_phase1_r5_cleanup.py:122: in test_facade_arbitrage_same_as_runners
+    from ali2026v3_trading.param_pool.backtest_base import run_backtest_arbitrage as base_fn
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+___________________ TestShimReExport.test_hft_from_runners ____________________
+ali2026v3_trading\tests\test_phase1_strategy_runners.py:64: in test_hft_from_runners
+    from ali2026v3_trading.param_pool.backtest.backtest_strategy_runners import (
+ali2026v3_trading\param_pool\backtest\backtest_strategy_runners.py:989: in __getattr__
+    from ali2026v3_trading.param_pool import _backtest_runners_hft
+E   ImportError: cannot import name '_backtest_runners_hft' from 'ali2026v3_trading.param_pool' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\__init__.py)
+_________________ TestShimReExport.test_runners_direct_import _________________
+ali2026v3_trading\tests\test_phase1_strategy_runners.py:81: in test_runners_direct_import
+    from ali2026v3_trading.param_pool.backtest.backtest_runner_base import run_backtest_box_extreme as base
+ali2026v3_trading\param_pool\backtest\backtest_runner_base.py:137: in __getattr__
+    _mod = importlib.import_module('ali2026v3_trading.param_pool.backtest_strategy_runners')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1324: in _find_and_load_unlocked
+    ???
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_strategy_runners'
+________ TestDownstreamCompatibility.test_backtest_runner_base_facade _________
+ali2026v3_trading\tests\test_phase1_strategy_runners.py:369: in test_backtest_runner_base_facade
+    from ali2026v3_trading.param_pool.backtest.backtest_runner_base import (
+ali2026v3_trading\param_pool\backtest\backtest_runner_base.py:140: in __getattr__
+    _mod = importlib.import_module('ali2026v3_trading.param_pool._backtest_runners_hft')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1324: in _find_and_load_unlocked
+    ???
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool._backtest_runners_hft'
+________ TestDownstreamCompatibility.test_backtest_runner_base_getattr ________
+ali2026v3_trading\tests\test_phase1_strategy_runners.py:379: in test_backtest_runner_base_getattr
+    fn = _ga("run_backtest_box_extreme")
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\param_pool\backtest\backtest_runner_base.py:137: in __getattr__
+    _mod = importlib.import_module('ali2026v3_trading.param_pool.backtest_strategy_runners')
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen importlib._bootstrap>:1387: in _gcd_import
+    ???
+<frozen importlib._bootstrap>:1360: in _find_and_load
+    ???
+<frozen importlib._bootstrap>:1324: in _find_and_load_unlocked
+    ???
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_strategy_runners'
+______________ TestAttributionEngine.test_add_trade_and_generate ______________
+ali2026v3_trading\tests\test_pnl_attribution.py:173: in test_add_trade_and_generate
+    strategy='test', instrument='AU2506', direction=Direction.BUY,
+                                                    ^^^^^^^^^^^^^
+E   AttributeError: type object 'Direction' has no attribute 'BUY'
+______________ TestProductionQuantSystem.test_get_system_status _______________
+ali2026v3_trading\tests\test_production_quant_system.py:16: in test_get_system_status
+    status = pqs.get_system_status()
+             ^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\ProductionQuantSystem.py:368: in get_system_status
+    'symbols': self._symbols,
+               ^^^^^^^^^^^^^
+E   AttributeError: 'ProductionQuantSystem' object has no attribute '_symbols'
+___________________ TestProductionQuantSystem.test_shutdown ___________________
+ali2026v3_trading\tests\test_production_quant_system.py:23: in test_shutdown
+    pqs.shutdown()
+ali2026v3_trading\ProductionQuantSystem.py:405: in shutdown
+    self.hot_config.stop_watching()
+    ^^^^^^^^^^^^^^^
+E   AttributeError: 'ProductionQuantSystem' object has no attribute 'hot_config'
+____________ TestProductionQuantSystem.test_load_config_from_file _____________
+ali2026v3_trading\tests\test_production_quant_system.py:27: in test_load_config_from_file
+    result = _load_config_from_file(config_path='nonexistent.json')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\ProductionQuantSystem.py:488: in _load_config_from_file
+    with open(config_path, 'r', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: 'nonexistent.json'
+____________ TestProductionQuantSystem.test_build_config_from_args ____________
+ali2026v3_trading\tests\test_production_quant_system.py:32: in test_build_config_from_args
+    result = _build_config_from_args(args=None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\ProductionQuantSystem.py:510: in _build_config_from_args
+    if args.config:
+       ^^^^^^^^^^^
+E   AttributeError: 'NoneType' object has no attribute 'config'
+---------------------------- Captured stderr call -----------------------------
+DEBUG:root:[ProductionQuantSystem] ConfigService加载失败: unsupported operand type(s) for /: 'str' and 'str'
+------------------------------ Captured log call ------------------------------
+DEBUG    root:ProductionQuantSystem.py:507 [ProductionQuantSystem] ConfigService加载失败: unsupported operand type(s) for /: 'str' and 'str'
+____________ TestDataExportService.test_diagnose_contract_no_data _____________
+ali2026v3_trading\tests\test_query_data_export.py:25: in test_diagnose_contract_no_data
+    result = svc._diagnose_contract('NONEXISTENT')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: DataExportService._diagnose_contract() missing 1 required positional argument: 'is_future'
+_________________ test_validate_out_of_order_ticks_delegates __________________
+ali2026v3_trading\tests\test_r14_f3_p1_55_tick_field_unify.py:58: in test_validate_out_of_order_ticks_delegates
+    from ali2026v3_trading.param_pool import feature_engine
+E   ImportError: cannot import name 'feature_engine' from 'ali2026v3_trading.param_pool' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\__init__.py)
+___ TestR1_5_CascadeJudgeImportUnification.test_trading_ev_absolute_import ____
+ali2026v3_trading\tests\test_r1_data_flow_fix.py:177: in test_trading_ev_absolute_import
+    src = open(os.path.join(_PROJECT_ROOT, 'strategy', 'strategy_ecosystem', '_trading_ev.py'), encoding='utf-8').read()
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\strategy\\strategy_ecosystem\\_trading_ev.py'
+______________________ test_all_modified_files_parseable ______________________
+ali2026v3_trading\tests\test_r2_05_yaml_retry.py:111: in test_all_modified_files_parseable
+    content = _read_file(rel_path)
+              ^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\tests\test_r2_05_yaml_retry.py:11: in _read_file
+    with open(full, 'r', encoding='utf-8') as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\infra\\_ops_framework.py'
+__________ TestCheckBacktestHealthImport.test_defined_in_validation ___________
+ali2026v3_trading\tests\test_r3_02_health_monotonic.py:44: in test_defined_in_validation
+    import ali2026v3_trading.param_pool.backtest_validation as mod
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_validation'
+___ TestCheckBarDataMonotonicImport.test_no_local_definition_in_runner_base ___
+ali2026v3_trading\tests\test_r3_02_health_monotonic.py:74: in test_no_local_definition_in_runner_base
+    import ali2026v3_trading.param_pool.backtest_base as mod
+E   ModuleNotFoundError: No module named 'ali2026v3_trading.param_pool.backtest_base'
+____________ TestToDictMixin.test_14_classes_inherit_todict_mixin _____________
+ali2026v3_trading\tests\test_r3_04_todict_mixin.py:66: in test_14_classes_inherit_todict_mixin
+    assert issubclass(cls, ToDictMixin), f"{cls.__name__} 未继承ToDictMixin"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: issubclass() arg 1 must be a class
+_____________ TestToDictMixin.test_todict_mixin_runtime_behavior ______________
+ali2026v3_trading\tests\test_r3_04_todict_mixin.py:94: in test_todict_mixin_runtime_behavior
+    assert isinstance(result, dict), "to_dict()应返回dict"
+E   AssertionError: to_dict()应返回dict
+E   assert False
+E    +  where False = isinstance(<MagicMock name='mock.StrategyStateSnapshot().to_dict()' id='2065848775840'>, dict)
+__________ TestToDictMixin.test_market_snapshot_custom_todict_works ___________
+ali2026v3_trading\tests\test_r3_04_todict_mixin.py:107: in test_market_snapshot_custom_todict_works
+    trigger=SnapshotTrigger.SIGNAL_GENERATED,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: type object 'MagicMock' has no attribute 'SIGNAL_GENERATED'
+_____ TestR3_1_NoBareExceptInProduction.test_no_bare_except_in_param_pool _____
+ali2026v3_trading\tests\test_r3_soft_integration.py:24: in test_no_bare_except_in_param_pool
+    assert count == 0, f"R3-1失败: param_pool/仍有{count}处bare except Exception"
+E   AssertionError: R3-1失败: param_pool/仍有15处bare except Exception
+E   assert 15 == 0
+______ TestR3_1_NoBareExceptInProduction.test_total_bare_except_is_zero _______
+ali2026v3_trading\tests\test_r3_soft_integration.py:55: in test_total_bare_except_is_zero
+    assert total == 0, f"R3-1失败: 全项目仍有{total}处bare except Exception"
+E   AssertionError: R3-1失败: 全项目仍有15处bare except Exception
+E   assert 15 == 0
+___________________ test_global_no_json_load_in_active_code ___________________
+ali2026v3_trading\tests\test_r6_05_json_load_zero_residual.py:66: in test_global_no_json_load_in_active_code
+    assert len(violations) == 0, f"仍有json.load残留: {violations}"
+E   AssertionError: 仍有json.load残留: ['param_pool\\precompute\\_calendar.py:132', 'param_pool\\precompute\\_engine.py:142']
+E   assert 2 == 0
+E    +  where 2 = len(['param_pool\\precompute\\_calendar.py:132', 'param_pool\\precompute\\_engine.py:142'])
+___________________ test_global_no_json_dump_in_active_code ___________________
+ali2026v3_trading\tests\test_r6_05_json_load_zero_residual.py:96: in test_global_no_json_dump_in_active_code
+    assert len(violations) == 0, f"仍有json.dump残留: {violations}"
+E   AssertionError: 仍有json.dump残留: ['param_pool\\precompute\\_engine.py:150']
+E   assert 1 == 0
+E    +  where 1 = len(['param_pool\\precompute\\_engine.py:150'])
+________________ TestPositionLimitRule.test_blocks_over_limit _________________
+ali2026v3_trading\tests\test_risk_check_engine.py:12: in test_blocks_over_limit
+    rule = PositionLimitRule(max_positions=3)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: PositionLimitRule() takes no arguments
+________________ TestPositionLimitRule.test_passes_under_limit ________________
+ali2026v3_trading\tests\test_risk_check_engine.py:19: in test_passes_under_limit
+    rule = PositionLimitRule(max_positions=5)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: PositionLimitRule() takes no arguments
+_________________ TestPositionLimitRule.test_passes_at_limit __________________
+ali2026v3_trading\tests\test_risk_check_engine.py:26: in test_passes_at_limit
+    rule = PositionLimitRule(max_positions=5)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: PositionLimitRule() takes no arguments
+___________________ TestRiskBridgeAdapter.test_pass_result ____________________
+ali2026v3_trading\tests\test_risk_position_bridge.py:97: in test_pass_result
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+___________________ TestRiskBridgeAdapter.test_block_result ___________________
+ali2026v3_trading\tests\test_risk_position_bridge.py:104: in test_block_result
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+__________________ TestRiskBridgeAdapter.test_warning_result __________________
+ali2026v3_trading\tests\test_risk_position_bridge.py:112: in test_warning_result
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+______________ TestRiskBridgeAdapter.test_exception_returns_pass ______________
+ali2026v3_trading\tests\test_risk_position_bridge.py:119: in test_exception_returns_pass
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+_________ TestRiskBridgeAdapter.test_set_position_limit_with_service __________
+ali2026v3_trading\tests\test_risk_position_bridge.py:131: in test_set_position_limit_with_service
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+_________ TestRiskBridgeAdapter.test_get_position_limit_with_service __________
+ali2026v3_trading\tests\test_risk_position_bridge.py:141: in test_get_position_limit_with_service
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+_____ TestRiskBridgeAdapter.test_get_position_limit_service_returns_none ______
+ali2026v3_trading\tests\test_risk_position_bridge.py:149: in test_get_position_limit_service_returns_none
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+___________ TestRiskBridgeAdapter.test_get_position_limit_exception ___________
+ali2026v3_trading\tests\test_risk_position_bridge.py:155: in test_get_position_limit_exception
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+___________ TestRiskBridgeAdapter.test_cross_instrument_limit_pass ____________
+ali2026v3_trading\tests\test_risk_position_bridge.py:166: in test_cross_instrument_limit_pass
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+___________ TestRiskBridgeAdapter.test_cross_instrument_limit_block ___________
+ali2026v3_trading\tests\test_risk_position_bridge.py:173: in test_cross_instrument_limit_block
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+_________ TestRiskBridgeAdapter.test_cross_instrument_limit_exception _________
+ali2026v3_trading\tests\test_risk_position_bridge.py:180: in test_cross_instrument_limit_exception
+    rs = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+_________________ TestPositionBridgeAdapter.test_with_service _________________
+ali2026v3_trading\tests\test_risk_position_bridge.py:189: in test_with_service
+    ps = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+____ TestPositionBridgeAdapter.test_get_position_limit_config_with_service ____
+ali2026v3_trading\tests\test_risk_position_bridge.py:208: in test_get_position_limit_config_with_service
+    ps = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+__ TestPositionBridgeAdapter.test_get_position_limit_config_missing_account ___
+ali2026v3_trading\tests\test_risk_position_bridge.py:215: in test_get_position_limit_config_missing_account
+    ps = MagicMock()
+         ^^^^^^^^^
+E   NameError: name 'MagicMock' is not defined
+__________________ TestRiskPriorityMatrix.test_risk_item_rpn __________________
+ali2026v3_trading\tests\test_risk_signal_governance_zero.py:46: in test_risk_item_rpn
+    assert item.rpn() == 30
+           ^^^^^^^^^^
+E   TypeError: 'int' object is not callable
+__________________ TestSignalGenerator.test_generate_signal ___________________
+ali2026v3_trading\tests\test_risk_signal_governance_zero.py:103: in test_generate_signal
+    result = sg.generate_signal(ctx)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\signal\signal_generator.py:70: in generate_signal
+    ctx = getattr(self, filter_name)(ctx)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ali2026v3_trading\signal\signal_generator.py:78: in _filter_by_strength
+    self._svc._stats['filtered_signals'] += 1
+    ^^^^^^^^^^^^^^^^
+E   AttributeError: 'MockSvc' object has no attribute '_stats'
+________________ TestParamPoolShims.test_leaf_core_importable _________________
+ali2026v3_trading\tests\test_risk_signal_governance_zero.py:158: in test_leaf_core_importable
+    from ali2026v3_trading.param_pool import _leaf_core
+E   ImportError: cannot import name '_leaf_core' from 'ali2026v3_trading.param_pool' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\__init__.py)
+___________ TestParamPoolShims.test_leaf_runner_helpers_importable ____________
+ali2026v3_trading\tests\test_risk_signal_governance_zero.py:162: in test_leaf_runner_helpers_importable
+    from ali2026v3_trading.param_pool import _leaf_runner_helpers
+E   ImportError: cannot import name '_leaf_runner_helpers' from 'ali2026v3_trading.param_pool' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\__init__.py)
+___________ TestParamPoolShims.test_backtest_param_grids_importable ___________
+ali2026v3_trading\tests\test_risk_signal_governance_zero.py:166: in test_backtest_param_grids_importable
+    from ali2026v3_trading.param_pool import backtest_param_grids
+E   ImportError: cannot import name 'backtest_param_grids' from 'ali2026v3_trading.param_pool' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\__init__.py)
+_____________ TestParamPoolShims.test_backtest_runner_importable ______________
+ali2026v3_trading\tests\test_risk_signal_governance_zero.py:174: in test_backtest_runner_importable
+    from ali2026v3_trading.param_pool import backtest_runner
+E   ImportError: cannot import name 'backtest_runner' from 'ali2026v3_trading.param_pool' (C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\__init__.py)
+______ TestCircuitBreakerServiceDeep.test_is_trading_paused_during_pause ______
+ali2026v3_trading\tests\test_safety_meta_circuit.py:23: in test_is_trading_paused_during_pause
+    assert paused is True
+E   assert False is True
+---------------------------- Captured stderr call -----------------------------
+INFO:root:[P1-R9-21] 交易暂停已恢复, 原暂停原因: test_circuit
+------------------------------ Captured log call ------------------------------
+INFO     root:safety_meta_circuit.py:351 [P1-R9-21] 交易暂停已恢复, 原暂停原因: test_circuit
+__________ TestCircuitBreakerServiceDeep.test_creation_sets_defaults __________
+ali2026v3_trading\tests\test_safety_meta_circuit.py:46: in test_creation_sets_defaults
+    assert hasattr(svc, '_trading_paused_until')
+E   AssertionError: assert False
+E    +  where False = hasattr(<ali2026v3_trading.risk.safety_meta_circuit.CircuitBreakerService object at 0x000001E0FF601820>, '_trading_paused_until')
+_ TestHardTimeStopAndComplianceService.test_confirm_daily_resume_no_approver __
+ali2026v3_trading\tests\test_safety_meta_position_boost.py:13: in test_confirm_daily_resume_no_approver
+    result = svc.confirm_daily_resume(approver_id='')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: HardTimeStopAndComplianceService.confirm_daily_resume() got an unexpected keyword argument 'approver_id'
+_ TestHardTimeStopAndComplianceService.test_confirm_daily_resume_wrong_token __
+ali2026v3_trading\tests\test_safety_meta_position_boost.py:18: in test_confirm_daily_resume_wrong_token
+    result = svc.confirm_daily_resume(approver_id='admin', token='wrong')
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: HardTimeStopAndComplianceService.confirm_daily_resume() got an unexpected keyword argument 'approver_id'
+______ TestHardTimeStopAndComplianceService.test_creation_sets_defaults _______
+ali2026v3_trading\tests\test_safety_meta_position_boost.py:35: in test_creation_sets_defaults
+    assert hasattr(svc, '_daily_hard_stop_triggered')
+E   AssertionError: assert False
+E    +  where False = hasattr(<ali2026v3_trading.risk.safety_meta_position.HardTimeStopAndComplianceService object at 0x000001E0C2B88290>, '_daily_hard_stop_triggered')
+_______________ TestCausalChainUtils.test_causal_chain_tracker ________________
+ali2026v3_trading\tests\test_strategy_judgment_coverage.py:80: in test_causal_chain_tracker
+    cct.record_event(CausalEvent.__new__(CausalEvent))
+                     ^^^^^^^^^^^
+E   NameError: name 'CausalEvent' is not defined
+============================== warnings summary ===============================
+ali2026v3_trading\tests\test_p1_03_greeks.py:6
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_p1_03_greeks.py:6: DeprecationWarning: preprocess_ticks.py 已弃用(P1-60)，请使用 _preprocess.py 代替
+    from ali2026v3_trading.param_pool._preprocess import _bs_price_scalar, _bs_greeks_scalar
+
+tests/test_config_service_p2.py::TestConfigService::test_config_version_defined
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_config_service_p2.py:15: DeprecationWarning: ConfigService() direct construction is deprecated; use get_config_service() instead
+    svc = ConfigService.__new__(ConfigService)
+
+tests/test_coverage_boost_25modules.py::TestStrategy2026::test_class_exists
+  C:\Users\xu\AppData\Local\Programs\Python\Python312\Lib\site-packages\pyqtgraph\graphicsItems\DateAxisItem.py:22: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    _epoch = datetime.utcfromtimestamp(0)
+
+tests/test_e2e_mixin_elim.py::TestFacadeDelegation::test_config_service_delegates_to_query
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_e2e_mixin_elim.py:347: DeprecationWarning: ConfigService() direct construction is deprecated; use get_config_service() instead
+    cs = ConfigService.__new__(ConfigService)
+
+tests/test_v7_meta_audit_v2.py::TestAutoFieldLineageSyntaxError::test_invalid_syntax_no_crash
+  C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\param_pool\quantification\meta_audit_passport.py:269: UserWarning: Source code has syntax errors, lineage tracking skipped
+    warnings.warn("Source code has syntax errors, lineage tracking skipped")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED ali2026v3_trading\tests\test_backtest_integration_hooks.py::TestBacktestIntegrationHooks::test_on_bar
+FAILED ali2026v3_trading\tests\test_backtest_integration_hooks.py::TestBacktestIntegrationHooks::test_on_signal_generated
+FAILED ali2026v3_trading\tests\test_backtest_integration_hooks.py::TestBacktestIntegrationHooks::test_on_order_opened
+FAILED ali2026v3_trading\tests\test_backtest_integration_hooks.py::TestBacktestIntegrationHooks::test_on_order_closed
+FAILED ali2026v3_trading\tests\test_backtest_integration_hooks.py::TestBacktestIntegrationHooks::test_on_backtest_finish
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestDbAdapter::test_connection_config_defaults
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestSortEntry::test_create_call_option
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestSortEntry::test_create_put_option
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestSortEntry::test_sort_order_sync_flag_priority
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestRiskPositionBridge::test_risk_bridge_adapter_no_service
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestRiskPositionBridge::test_risk_bridge_adapter_with_service
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestRiskPositionBridge::test_risk_bridge_adapter_exception_fallback
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestInputBuilder::test_build_snapshot_with_mock_service
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestCircuitBreakerServiceDeep::test_is_trading_paused_during_pause
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestRiskCheckEngineDeep::test_position_limit_rule_blocks
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestRiskCheckEngineDeep::test_position_limit_rule_passes
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestMarketRisk::test_check_risk_ratio_blocks
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestMarketRisk::test_check_risk_ratio_passes
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestOperationalRisk::test_check_shadow_ev_critical
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestOperationalRisk::test_check_shadow_ev_no_engine
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestSafetyMetaPositionDeep::test_confirm_daily_resume_no_approver
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestSafetyMetaPositionDeep::test_confirm_daily_resume_wrong_token
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestModeExitRules::test_drawdown_manager_should_full_stop
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestModeExitRules::test_drawdown_manager_should_full_stop_no_trigger
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestModeExitRules::test_defensive_drawdown_checker
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestModeExitRules::test_exit_rule_engine_creation
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestParamsCanaryEnv::test_should_apply_canary_disabled
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestParamsCanaryEnv::test_diff_env_profiles
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestSchedulerService::test_add_job_returns_id
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestSchedulerService::test_add_once_job
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestOrderWALStateService::test_creation
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestOrderWALStateService::test_wal_write_callable
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestOrderWALStateService::test_recover_orphaned_orders_callable
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestOrderFlowBridge::test_microstructure_arbitrage_detector
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestQueryDataExport::test_get_instrument_summary_callable
+FAILED ali2026v3_trading\tests\test_coverage_boost_25modules.py::TestQueryInstrumentService::test_infer_exchange_from_id_callable
+FAILED ali2026v3_trading\tests\test_coverage_boost_batch2.py::TestMetricsRegistry::test_observe_histogram
+FAILED ali2026v3_trading\tests\test_coverage_boost_deep3.py::TestTradingEVService::test_is_same_delta_direction_same
+FAILED ali2026v3_trading\tests\test_coverage_boost_deep3.py::TestTradingEVService::test_is_same_delta_direction_hedge
+FAILED ali2026v3_trading\tests\test_coverage_boost_lifecycle.py::TestLifecycleManager::test_lock_property
+FAILED ali2026v3_trading\tests\test_coverage_boost_risk_infra.py::TestDrawdownMonitorService::test_daily_drawdown_triggers_hard_stop
+FAILED ali2026v3_trading\tests\test_coverage_boost_signal_governance.py::TestPLRCalculator::test_assess_quality_no_data
+FAILED ali2026v3_trading\tests\test_coverage_boost_signal_governance.py::TestKellyPositionSize::test_option_buyer_discount
+FAILED ali2026v3_trading\tests\test_coverage_boost_signal_governance.py::TestLogDeduplicator::test_cache_eviction
+FAILED ali2026v3_trading\tests\test_coverage_boost_strategy_order_risk.py::TestStrategyMonitoringLayer::test_confirm_daily_resume_allows_manual
+FAILED ali2026v3_trading\tests\test_coverage_boost_strategy_order_risk.py::TestStrategyMonitoringLayer::test_is_hard_stop_triggered_no_safety
+FAILED ali2026v3_trading\tests\test_data_quant_modules.py::TestQuantServices::test_singleton_manager
+FAILED ali2026v3_trading\tests\test_data_quant_modules.py::TestQuantPlatform::test_atomic_system_state
+FAILED ali2026v3_trading\tests\test_data_quant_modules.py::TestQuantPlatform::test_system_health_monitor
+FAILED ali2026v3_trading\tests\test_data_quant_modules.py::TestQuantVolatility::test_volatility_regime_filter
+FAILED ali2026v3_trading\tests\test_data_quant_modules.py::TestQuantInfra::test_rate_limit_log
+FAILED ali2026v3_trading\tests\test_data_quant_modules.py::TestQuantInfra::test_numpy_ring_buffer
+FAILED ali2026v3_trading\tests\test_e2e_pipeline.py::test_full_pipeline - Mod...
+FAILED ali2026v3_trading\tests\test_infra_low_cov.py::TestHealthMonitorExtended::test_health_aggregator
+FAILED ali2026v3_trading\tests\test_infra_zero_modules.py::TestSharedProviders::test_default_state_provider
+FAILED ali2026v3_trading\tests\test_infra_zero_modules.py::TestSharedProviders::test_default_lock_provider
+FAILED ali2026v3_trading\tests\test_infra_zero_modules.py::TestSharedProviders::test_default_stats_provider
+FAILED ali2026v3_trading\tests\test_input_builder.py::TestBuildSnapshot::test_safety_meta_layer_import_failure
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestQuantPlatform::test_system_health_monitor_init
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestQuantServices::test_lightweight_persistence_init
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestQuantServices::test_lightweight_persistence_save_load
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestQuantTrendScorer::test_multi_period_trend_scorer_update
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestQuantVolatility::test_volatility_regime_filter_init
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestStorageQueryModules::test_storage_query_base_infer_exchange
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestStorageQueryModules::test_storage_instrument_register_func
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestOptunaMultiobjectiveSearch::test_lhs_to_param_grid
+FAILED ali2026v3_trading\tests\test_integrated_modules.py::TestOptunaMultiobjectiveSearch::test_sigmoid_score
+FAILED ali2026v3_trading\tests\test_judgment_services.py::TestVerdictService::test_determine_verdict
+FAILED ali2026v3_trading\tests\test_judgment_services.py::TestVerdictService::test_determine_verdict_low
+FAILED ali2026v3_trading\tests\test_judgment_services.py::TestScoringHelper::test_activity_weighted_score
+FAILED ali2026v3_trading\tests\test_l1_l2_pipeline.py::TestSoftConstrainedOptimizer::test_no_penalty_no_constraints
+FAILED ali2026v3_trading\tests\test_market_risk_boost.py::TestCheckRiskRatio::test_blocks_over_limit
+FAILED ali2026v3_trading\tests\test_market_risk_boost.py::TestCheckRiskRatio::test_passes_under_limit
+FAILED ali2026v3_trading\tests\test_market_risk_boost.py::TestCheckRiskRatio::test_zero_ratio
+FAILED ali2026v3_trading\tests\test_market_risk_boost.py::TestCheckMarketRisks::test_close_action
+FAILED ali2026v3_trading\tests\test_mode_exit_rules_boost.py::TestExitRuleEngine::test_compute_take_profit_fixed_buy
+FAILED ali2026v3_trading\tests\test_mode_exit_rules_boost.py::TestDrawdownManager::test_is_recovered_failure
+FAILED ali2026v3_trading\tests\test_operational_risk_boost.py::TestCheckShadowEv::test_critical_on_absolute_ev_pause
+FAILED ali2026v3_trading\tests\test_operational_risk_boost.py::TestCheckShadowEv::test_no_engine_returns_none
+FAILED ali2026v3_trading\tests\test_operational_risk_boost.py::TestCheckShadowEv::test_degraded_engine
+FAILED ali2026v3_trading\tests\test_order_state_manager_boost.py::TestOrderStateManager::test_scan_timeouts_with_timeout
+FAILED ali2026v3_trading\tests\test_p2_05_logging_coupling.py::TestP205LoggingCoupling::test_enhanced_phase_scan_gates_no_basic_config
+FAILED ali2026v3_trading\tests\test_param_pool_low_cov.py::TestOptimizationPhaseScan::test_gate_check_result
+FAILED ali2026v3_trading\tests\test_param_pool_residual.py::TestBacktestFidelity::test_get_instrument_type_slippage_future
+FAILED ali2026v3_trading\tests\test_phase1_r2_loop_core_migration.py::TestDownstreamCompatibility::test_strategy_runners_imports_work
+FAILED ali2026v3_trading\tests\test_phase1_r4_pricing_separation.py::TestDownstreamCompatibility::test_runner_base_gets_pricing_functions
+FAILED ali2026v3_trading\tests\test_phase1_r4_pricing_separation.py::TestDownstreamCompatibility::test_runner_base_gets_option_pricing
+FAILED ali2026v3_trading\tests\test_phase1_r4_pricing_separation.py::TestDownstreamCompatibility::test_runner_base_gets_limit_prices
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestTypesMigration::test_types_removed_import_from_config
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestTypesMigration::test_state_reason_map_same_identity
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestResultMigration::test_build_result_defined_in_utils
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestResultMigration::test_result_removed_import_from_utils
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestResultMigration::test_build_result_is_not_wrapper
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestSpecialImportChain::test_special_direct_import
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestSpecialImportChain::test_special_functions_exist
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestDownstreamCompatibility::test_runner_base_star_import_from_config
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestDownstreamCompatibility::test_utils_imports_state_reason_map
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestFacadeCompleteness::test_facade_exports_arbitrage
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestFacadeCompleteness::test_facade_exports_market_making
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestFacadeCompleteness::test_facade_exports_hft_with_disturbance
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestFacadeCompleteness::test_facade_exports_hft_tick_fidelity
+FAILED ali2026v3_trading\tests\test_phase1_r5_cleanup.py::TestFacadeCompleteness::test_facade_arbitrage_same_as_runners
+FAILED ali2026v3_trading\tests\test_phase1_strategy_runners.py::TestShimReExport::test_hft_from_runners
+FAILED ali2026v3_trading\tests\test_phase1_strategy_runners.py::TestShimReExport::test_runners_direct_import
+FAILED ali2026v3_trading\tests\test_phase1_strategy_runners.py::TestDownstreamCompatibility::test_backtest_runner_base_facade
+FAILED ali2026v3_trading\tests\test_phase1_strategy_runners.py::TestDownstreamCompatibility::test_backtest_runner_base_getattr
+FAILED ali2026v3_trading\tests\test_pnl_attribution.py::TestAttributionEngine::test_add_trade_and_generate
+FAILED ali2026v3_trading\tests\test_production_quant_system.py::TestProductionQuantSystem::test_get_system_status
+FAILED ali2026v3_trading\tests\test_production_quant_system.py::TestProductionQuantSystem::test_shutdown
+FAILED ali2026v3_trading\tests\test_production_quant_system.py::TestProductionQuantSystem::test_load_config_from_file
+FAILED ali2026v3_trading\tests\test_production_quant_system.py::TestProductionQuantSystem::test_build_config_from_args
+FAILED ali2026v3_trading\tests\test_query_data_export.py::TestDataExportService::test_diagnose_contract_no_data
+FAILED ali2026v3_trading\tests\test_r14_f3_p1_55_tick_field_unify.py::test_validate_out_of_order_ticks_delegates
+FAILED ali2026v3_trading\tests\test_r1_data_flow_fix.py::TestR1_5_CascadeJudgeImportUnification::test_trading_ev_absolute_import
+FAILED ali2026v3_trading\tests\test_r2_05_yaml_retry.py::test_all_modified_files_parseable
+FAILED ali2026v3_trading\tests\test_r3_02_health_monotonic.py::TestCheckBacktestHealthImport::test_defined_in_validation
+FAILED ali2026v3_trading\tests\test_r3_02_health_monotonic.py::TestCheckBarDataMonotonicImport::test_no_local_definition_in_runner_base
+FAILED ali2026v3_trading\tests\test_r3_04_todict_mixin.py::TestToDictMixin::test_14_classes_inherit_todict_mixin
+FAILED ali2026v3_trading\tests\test_r3_04_todict_mixin.py::TestToDictMixin::test_todict_mixin_runtime_behavior
+FAILED ali2026v3_trading\tests\test_r3_04_todict_mixin.py::TestToDictMixin::test_market_snapshot_custom_todict_works
+FAILED ali2026v3_trading\tests\test_r3_soft_integration.py::TestR3_1_NoBareExceptInProduction::test_no_bare_except_in_param_pool
+FAILED ali2026v3_trading\tests\test_r3_soft_integration.py::TestR3_1_NoBareExceptInProduction::test_total_bare_except_is_zero
+FAILED ali2026v3_trading\tests\test_r6_05_json_load_zero_residual.py::test_global_no_json_load_in_active_code
+FAILED ali2026v3_trading\tests\test_r6_05_json_load_zero_residual.py::test_global_no_json_dump_in_active_code
+FAILED ali2026v3_trading\tests\test_risk_check_engine.py::TestPositionLimitRule::test_blocks_over_limit
+FAILED ali2026v3_trading\tests\test_risk_check_engine.py::TestPositionLimitRule::test_passes_under_limit
+FAILED ali2026v3_trading\tests\test_risk_check_engine.py::TestPositionLimitRule::test_passes_at_limit
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_pass_result
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_block_result
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_warning_result
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_exception_returns_pass
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_set_position_limit_with_service
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_get_position_limit_with_service
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_get_position_limit_service_returns_none
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_get_position_limit_exception
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_cross_instrument_limit_pass
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_cross_instrument_limit_block
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestRiskBridgeAdapter::test_cross_instrument_limit_exception
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestPositionBridgeAdapter::test_with_service
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestPositionBridgeAdapter::test_get_position_limit_config_with_service
+FAILED ali2026v3_trading\tests\test_risk_position_bridge.py::TestPositionBridgeAdapter::test_get_position_limit_config_missing_account
+FAILED ali2026v3_trading\tests\test_risk_signal_governance_zero.py::TestRiskPriorityMatrix::test_risk_item_rpn
+FAILED ali2026v3_trading\tests\test_risk_signal_governance_zero.py::TestSignalGenerator::test_generate_signal
+FAILED ali2026v3_trading\tests\test_risk_signal_governance_zero.py::TestParamPoolShims::test_leaf_core_importable
+FAILED ali2026v3_trading\tests\test_risk_signal_governance_zero.py::TestParamPoolShims::test_leaf_runner_helpers_importable
+FAILED ali2026v3_trading\tests\test_risk_signal_governance_zero.py::TestParamPoolShims::test_backtest_param_grids_importable
+FAILED ali2026v3_trading\tests\test_risk_signal_governance_zero.py::TestParamPoolShims::test_backtest_runner_importable
+FAILED ali2026v3_trading\tests\test_safety_meta_circuit.py::TestCircuitBreakerServiceDeep::test_is_trading_paused_during_pause
+FAILED ali2026v3_trading\tests\test_safety_meta_circuit.py::TestCircuitBreakerServiceDeep::test_creation_sets_defaults
+FAILED ali2026v3_trading\tests\test_safety_meta_position_boost.py::TestHardTimeStopAndComplianceService::test_confirm_daily_resume_no_approver
+FAILED ali2026v3_trading\tests\test_safety_meta_position_boost.py::TestHardTimeStopAndComplianceService::test_confirm_daily_resume_wrong_token
+FAILED ali2026v3_trading\tests\test_safety_meta_position_boost.py::TestHardTimeStopAndComplianceService::test_creation_sets_defaults
+FAILED ali2026v3_trading\tests\test_strategy_judgment_coverage.py::TestCausalChainUtils::test_causal_chain_tracker
+153 failed, 4255 passed, 1 skipped, 5 warnings, 31 subtests passed in 189.91s (0:03:09)

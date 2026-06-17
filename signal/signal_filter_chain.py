@@ -1,3 +1,4 @@
+# MODULE_ID: M1-238
 """
 signal_filter_chain.py - SignalFilterChain
 Phase 2 (CC-P1-02): 从SignalService提取的信号过滤职责域
@@ -66,6 +67,7 @@ class SignalFilterChain:
         signal_states[signal_id] = new_state
         return True
 
+    # [P2-08] 计划统一到signal/模块的信号过期函数
     def expire_stale_signals(self, signal_history: List[Dict],
                               signal_states: Dict[str, str],
                               signal_max_age_sec: float,

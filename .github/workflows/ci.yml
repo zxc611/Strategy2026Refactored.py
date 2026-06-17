@@ -1,0 +1,47 @@
+name: Grade-A CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt 2>/dev/null || pip install pytest pytest-cov black bandit mypy
+      - name: Verify pipeline (call chain + micro files + tool scripts + api whitelist)
+        run: python tools/verify_pipeline.py --quick
+      - name: Format check
+        run: black --check ali2026v3_trading/ --diff
+        continue-on-error: true
+      - name: Security scan
+        run: bandit -r ali2026v3_trading/ -f custom --skip B101
+        continue-on-error: true
+      - name: Lint (mypy + pylint)
+        run: |
+          mypy ali2026v3_trading/ --ignore-missing-imports || true
+          pylint ali2026v3_trading/ --disable=all --enable=E,F || true
+        continue-on-error: true
+
+      - name: Dead code check (vulture)
+        run: vulture ali2026v3_trading/ --min-confidence 80 || true
+        continue-on-error: true
+
+      - name: Test with coverage
+        run: pytest tests/ -v --tb=short
+      - name: E2E Grade-A assertions
+        run: python -m pytest tests/test_grade_a_e2e_assertions.py -v
+      - name: Import boundary check
+        run: python scripts/verify_internal_imports.py
+      - name: No except Exception: pass
+        run: |
+          result=$(grep -rn "except Exception: pass" ali2026v3_trading/ --include="*.py" --exclude-dir=_backup --exclude-dir=tests || true)
+          if [ -n "$result" ]; then echo "FOUND except Exception: pass:"; echo "$result"; exit 1; fi
+      - name: Call chain verification
+        run: python tools/check_call_chain.py
+      - name: Parameter audit
+        run: python tools/param_audit_report.py

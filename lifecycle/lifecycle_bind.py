@@ -1,3 +1,5 @@
+# MODULE_ID: M1-120
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """lifecycle_bind.py — 平台API绑定/订阅逻辑（从strategy_lifecycle_mixin.py拆分）
 职责: bind_platform_apis, 平台订阅/退订, 市场中心提取, 运行时上下文注入, 历史K线异步加载
 """
@@ -7,8 +9,8 @@ import threading
 import logging
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.params_service import _read_param
-from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState
+
+from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
 
 
 class LifecycleBind:
@@ -49,6 +51,7 @@ class LifecycleBind:
         else:
             p.unsubscribe = None
         p.get_instrument = getattr(strategy_obj, 'get_instrument', None)
+        from ali2026v3_trading.config.params_service import _read_param
         p._platform_insert_order = _read_param(strategy_obj, 'insert_order') or _read_param(strategy_obj, 'send_order')
         p._platform_cancel_order = _read_param(strategy_obj, 'cancel_order') or _read_param(strategy_obj, 'cancel_order_ref')
         p._platform_get_position = getattr(strategy_obj, 'get_position', None)
@@ -65,7 +68,7 @@ class LifecycleBind:
         try:
             from ali2026v3_trading.data.data_service import DataService
             DataService.bind_subscribe_api(p.subscribe, p.unsubscribe)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[StrategyLifecycleMixin] DataService.bind_subscribe_api failed: %s", e)
         if p._platform_insert_order:
             p._ensure_order_service()
@@ -95,7 +98,7 @@ class LifecycleBind:
                 _apis_to_bind['get_instrument'] = p.get_instrument
             if _apis_to_bind:
                 p._lifecycle_platform.bind_platform_apis(_apis_to_bind)
-        except Exception as _lp_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lp_err:
             logging.debug("[LifecyclePlatform] bind_platform_apis 委托失败: %s", _lp_err)
 
     @staticmethod
@@ -131,7 +134,7 @@ class LifecycleBind:
                 params['strategy_instance'] = params['strategy']
             else:
                 setattr(params, 'strategy_instance', params.strategy)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning(f"[Context] Inject failed: {e}")
 
     def _get_fallback_market_center(self) -> Any:
@@ -148,7 +151,7 @@ class LifecycleBind:
         try:
             p._fallback_market_center = MarketCenter()
             return p._fallback_market_center
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning(f"[Fallback] Create failed: {e}")
             return None
 
@@ -188,7 +191,7 @@ class LifecycleBind:
                     success += 1
                 else:
                     failed += 1
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 failed += 1
                 logging.warning(f"[Subscribe] Failed {inst}: {e}")
             if i % 500 == 0 or i == total:
@@ -198,7 +201,7 @@ class LifecycleBind:
         try:
             for inst in instrument_ids:
                 p._lifecycle_platform.subscribe_instrument(inst)
-        except Exception as _lp_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lp_err:
             logging.debug("[LifecyclePlatform] subscribe_instrument 委托失败: %s", _lp_err)
         if failed > 0 and failed == total:
             logging.error("[Subscribe] 全部订阅失败，策略进入DEGRADED状态")
@@ -219,12 +222,12 @@ class LifecycleBind:
                 try:
                     p.unsubscribe(inst)
                     success_count += 1
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                     failed_count += 1
             logging.info(
                 f"[Unsubscribe] Summary: total={len(subscribed)}, success={success_count}, failed={failed_count}"
             )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[StrategyCoreService._unsubscribe_all_instruments] Error: {e}", exc_info=True)
 
     def _start_historical_kline_load_async(self) -> None:
@@ -234,7 +237,7 @@ class LifecycleBind:
                 logging.info("[KlineLoadAsync] 后台历史K线加载开始...")
                 p._start_historical_kline_load()
                 logging.info("[KlineLoadAsync] 后台历史K线加载完成")
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error(f"[KlineLoadAsync] 后台历史K线加载失败: {e}", exc_info=True)
         threading.Thread(
             target=_kline_worker,

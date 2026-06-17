@@ -1,5 +1,7 @@
+# [M1-45] �����־û�
+# MODULE_ID: M1-138
 """
-订单持久化模块 — WAL写前日志 + JSONL状态持久化 + 自成交检测 + 网络重试 + 部分成交
+订单持久化模�?�?WAL写前日志 + JSONL状态持久化 + 自成交检�?+ 网络重试 + 部分成交
 从order_service.py拆分，委托到order_wal_state_service.py
 """
 from __future__ import annotations
@@ -12,7 +14,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 from dataclasses import dataclass, field
 from collections import defaultdict
 
-logger = logging.getLogger(__name__)
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads
+from ali2026v3_trading.infra.shared_utils import atomic_replace_file, sanitize_filename
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+
+logger = get_logger(__name__)  # R9-5
 
 
 @dataclass(slots=True)
@@ -68,45 +74,38 @@ class SelfTradeDetector:
         return list(self._self_trade_history)
 
 
+# P2-12修复: NetworkRetryManager简化为BoundedRetry的薄包装，消除重复重试逻辑
 class NetworkRetryManager:
+    """网络重试管理器——委托到infra.resilience_retry.BoundedRetry统一实现"""
+
     def __init__(self, max_retries: int = 3, base_interval_sec: float = 2.0):
         self._max_retries = max_retries
         self._base_interval = base_interval_sec
-        self._retry_counts: Dict[str, int] = defaultdict(int)
-        self._last_retry_time: Dict[str, float] = {}
-
-    def get_retry_interval(self, operation_id: str) -> float:
-        count = self._retry_counts.get(operation_id, 0)
-        return self._base_interval * (2 ** count)
-
-    def should_retry(self, operation_id: str) -> bool:
-        return self._retry_counts.get(operation_id, 0) < self._max_retries
-
-    def record_retry(self, operation_id: str) -> None:
-        self._retry_counts[operation_id] += 1
-        self._last_retry_time[operation_id] = time.time()
-
-    def reset_retry(self, operation_id: str) -> None:
-        self._retry_counts[operation_id] = 0
-        self._last_retry_time.pop(operation_id, None)
+        # P2-12修复: 移除独立的_retry_counts/_last_retry_time跟踪�?
+        # 重试逻辑完全委托到BoundedRetry
 
     def execute_with_retry(self, operation_id: str, func, *args, **kwargs) -> Any:
-        while self.should_retry(operation_id):
-            try:
-                result = func(*args, **kwargs)
-                self.reset_retry(operation_id)
-                return result
-            except Exception as e:
-                self.record_retry(operation_id)
-                interval = self.get_retry_interval(operation_id)
-                logger.warning(
-                    "[NetworkRetry] operation=%s retry=%d/%d interval=%.1fs error=%s",
-                    operation_id, self._retry_counts[operation_id], self._max_retries, interval, e,
-                )
-                if not self.should_retry(operation_id):
-                    raise
-                time.sleep(interval)
-        return None
+        from ali2026v3_trading.infra.resilience import BoundedRetry as _BoundedRetry
+        br = _BoundedRetry(
+            max_retries=self._max_retries,
+            base_delay=self._base_interval,
+            max_delay=self._base_interval * (2 ** self._max_retries),
+            on_exhausted="raise",
+        )
+        return br.execute(func, *args, **kwargs)
+
+    # P2-12修复: 以下方法保留为兼容接口，内部委托到BoundedRetry
+    def get_retry_interval(self, operation_id: str) -> float:
+        return self._base_interval  # BoundedRetry内部管理指数退�?
+
+    def should_retry(self, operation_id: str) -> bool:
+        return True  # BoundedRetry内部管理重试次数
+
+    def record_retry(self, operation_id: str) -> None:
+        pass  # BoundedRetry内部管理重试记录
+
+    def reset_retry(self, operation_id: str) -> None:
+        pass  # BoundedRetry内部管理重试状�?
 
 
 class PartialFillHandler:
@@ -144,7 +143,7 @@ class PartialFillHandler:
             if cancel_func is not None:
                 try:
                     cancel_func(order_id)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logger.error("[PartialFill] cancel failed: %s", e)
             record["status"] = "cancelled"
             logger.warning(
@@ -184,7 +183,7 @@ class OrderPersistenceService:
             os.makedirs(self._wal_dir, exist_ok=True)
 
     def wal_path(self, order_id: str) -> str:
-        safe_id = order_id.replace('/', '_').replace('\\', '_')
+        safe_id = sanitize_filename(order_id)  # R2-3修复: 使用统一sanitize_filename
         return os.path.join(self._wal_dir, f"{safe_id}.wal")
 
     def wal_write(self, order_id: str, state: str, order: Dict) -> None:
@@ -198,11 +197,11 @@ class OrderPersistenceService:
                 'timestamp': time.time(),
             }
             _wal_path = self.wal_path(order_id)
-            _tmp_path = _wal_path + '.tmp'
-            with open(_tmp_path, 'w', encoding='utf-8') as f:
-                f.write(json.dumps(entry))
-            os.replace(_tmp_path, _wal_path)
-        except Exception as e:
+            # P2-22修复: 使用 atomic_replace_file 替代内联 os.replace
+            _result = atomic_replace_file(_wal_path, json_dumps(entry))
+            if not _result['success']:
+                raise RuntimeError(_result.get('error', 'atomic_replace_file failed'))
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.error("[OrderPersistence] WAL写入失败: order=%s state=%s err=%s", order_id, state, e)
 
     def wal_read(self, order_id: str) -> Optional[Dict]:
@@ -210,8 +209,8 @@ class OrderPersistenceService:
             path = self.wal_path(order_id)
             if os.path.exists(path):
                 with open(path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-        except Exception as e:
+                    return json_loads(f.read())  # R3-2修复: 使用统一json_loads
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("[OrderPersistence] WAL读取失败: order=%s err=%s", order_id, e)
         return None
 
@@ -220,7 +219,7 @@ class OrderPersistenceService:
             path = self.wal_path(order_id)
             if os.path.exists(path):
                 os.remove(path)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("[OrderPersistence] WAL删除失败: order=%s err=%s", order_id, e)
 
     def persist_idempotent_key(self, key: str) -> None:
@@ -228,26 +227,14 @@ class OrderPersistenceService:
         try:
             if self._idempotent_state_file:
                 with open(self._idempotent_state_file, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps({'key': key, 'ts': time.time()}) + '\n')
-        except Exception as e:
+                    f.write(json_dumps({'key': key, 'ts': time.time()}) + '\n')
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("[OrderPersistence] 幂等键持久化失败: %s", e)
 
+    # P2-01修复: 委托到infra/serialization_utils.py的公共函�?
     def rotate_jsonl_if_needed(self, filepath: str) -> None:
-        try:
-            if not os.path.exists(filepath):
-                return
-            if os.path.getsize(filepath) > self._ORDER_STATE_MAX_BYTES:
-                for i in range(self._ORDER_STATE_BACKUP_COUNT, 0, -1):
-                    src = f"{filepath}.{i}"
-                    dst = f"{filepath}.{i + 1}"
-                    if os.path.exists(src):
-                        if i == self._ORDER_STATE_BACKUP_COUNT:
-                            os.remove(src)
-                        else:
-                            os.rename(src, dst)
-                os.rename(filepath, f"{filepath}.1")
-        except Exception:
-            pass
+        from ali2026v3_trading.serialization_utils import rotate_jsonl_if_needed as _rotate
+        _rotate(filepath, self._ORDER_STATE_MAX_BYTES, self._ORDER_STATE_BACKUP_COUNT)
 
     def append_order_state(self, order_id: str, state: str, order: Dict) -> None:
         try:
@@ -262,8 +249,8 @@ class OrderPersistenceService:
             if self._order_state_file:
                 self.rotate_jsonl_if_needed(self._order_state_file)
                 with open(self._order_state_file, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(record) + '\n')
-        except Exception as e:
+                    f.write(json_dumps(record) + '\n')
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.error("[OrderPersistence] 订单状态追加写失败: order=%s state=%s err=%s", order_id, state, e)
 
     def recover_order_state(self) -> Dict[str, Dict]:
@@ -277,14 +264,14 @@ class OrderPersistenceService:
                     if not line:
                         continue
                     try:
-                        record = json.loads(line)
+                        record = json_loads(line)
                         order_id = record.get('order_id', '')
                         if order_id:
                             recovered[order_id] = record
                     except (json.JSONDecodeError, KeyError):
                         continue
-        except Exception as e:
-            logger.warning("[OrderPersistence] 订单状态恢复失败: %s", e)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logger.warning("[OrderPersistence] 订单状态恢复失�? %s", e)
         return recovered
 
     def recover_idempotent_state(self) -> Set[str]:
@@ -297,14 +284,14 @@ class OrderPersistenceService:
                     if not line:
                         continue
                     try:
-                        record = json.loads(line)
+                        record = json_loads(line)
                         key = record.get('key', '')
                         if key:
                             self._order_idempotent_set.add(key)
                     except (json.JSONDecodeError, KeyError):
                         continue
-        except Exception as e:
-            logger.warning("[OrderPersistence] 幂等状态恢复失败: %s", e)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logger.warning("[OrderPersistence] 幂等状态恢复失�? %s", e)
         return self._order_idempotent_set
 
     def recover_orphaned_orders(self, orders_by_id: Dict[str, Dict]) -> int:
@@ -318,7 +305,7 @@ class OrderPersistenceService:
                 fpath = os.path.join(self._wal_dir, fname)
                 try:
                     with open(fpath, 'r', encoding='utf-8') as f:
-                        entry = json.load(f)
+                        entry = json_loads(f.read())  # R3-2修复
                     if entry.get('state') == 'PENDING':
                         order_id = entry.get('order_id', '')
                         order = orders_by_id.get(order_id)
@@ -326,9 +313,9 @@ class OrderPersistenceService:
                             order['status'] = 'ORPHANED'
                             orphaned_count += 1
                             self.wal_write(order_id, 'ORPHANED', {'order_id': order_id})
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logger.warning("[OrderPersistence] WAL文件恢复异常: %s err=%s", fname, e)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logger.warning("[OrderPersistence] 孤儿订单恢复过程异常: %s", e)
         return orphaned_count
 

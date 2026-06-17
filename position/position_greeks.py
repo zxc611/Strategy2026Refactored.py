@@ -1,3 +1,4 @@
+# MODULE_ID: M1-204
 """Position Greeks - 跨策略Greeks敞口聚合+跨策略风控守卫
 
 从position_service.py拆分(CC-09 Step3):
@@ -52,7 +53,8 @@ def _is_option_instrument(instrument_id: str) -> bool:
     return '-C-' in instrument_id or '-P-' in instrument_id
 
 
-def _estimate_option_delta(instrument_id: str, direction: str, volume: int) -> float:
+def _try_greeks_calculator(instrument_id: str, greek_name: str) -> Optional[float]:
+    """P1-03修复: 统一委托GreeksCalculator获取精确Greeks值。返回None表示不可用需fallback。"""
     try:
         from ali2026v3_trading.risk.risk_service import get_risk_service
         _rs = get_risk_service()
@@ -60,11 +62,20 @@ def _estimate_option_delta(instrument_id: str, direction: str, volume: int) -> f
             _gc = _rs._get_greeks_calculator() if hasattr(_rs, '_get_greeks_calculator') else None
             if _gc:
                 _greeks = _gc.get_greeks(instrument_id)
-                if _greeks and 'delta' in _greeks:
-                    sign = 1.0 if direction in ('long', 'BUY') else -1.0
-                    return sign * _greeks['delta'] * abs(volume)
-    except Exception:
-        pass
+                if _greeks and greek_name in _greeks:
+                    return _greeks[greek_name]
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        logging.debug("[P1-03] GreeksCalculator委托失败(将降级到常量): %s", e)
+    return None
+
+
+def _estimate_option_delta(instrument_id: str, direction: str, volume: int) -> float:
+    # P1-03修复: 优先委托GreeksCalculator，fallback时记录降级日志
+    precise = _try_greeks_calculator(instrument_id, 'delta')
+    if precise is not None:
+        sign = 1.0 if direction in ('long', 'BUY') else -1.0
+        return sign * precise * abs(volume)
+    logging.debug("[P1-03] delta降级到常量估算: %s", instrument_id)
     from ali2026v3_trading.position.position_service import PositionService
     delta_per_lot = PositionService.OPTION_DELTA_PER_LOT_CALL if '-C-' in instrument_id else (PositionService.OPTION_DELTA_PER_LOT_PUT if '-P-' in instrument_id else 0.0)
     sign = 1.0 if direction in ('long', 'BUY') else -1.0
@@ -72,13 +83,23 @@ def _estimate_option_delta(instrument_id: str, direction: str, volume: int) -> f
 
 
 def _estimate_option_vega(instrument_id: str, volume: int) -> float:
+    # P1-03修复: 优先委托GreeksCalculator，fallback时记录降级日志
+    precise = _try_greeks_calculator(instrument_id, 'vega')
+    if precise is not None:
+        return precise * abs(volume)
+    logging.debug("[P1-03] vega降级到常量估算: %s", instrument_id)
     from ali2026v3_trading.position.position_service import PositionService
-    return PositionService.OPTION_VEGA_PER_LOT * abs(volume) if ('-C-' in instrument_id or '-P-' in instrument_id) else 0.0
+    return PositionService.OPTION_VEGA_PER_LOT * abs(volume) if ("-C-" in instrument_id or "-P-" in instrument_id) else 0.0
 
 
 def _estimate_option_gamma(instrument_id: str, volume: int) -> float:
+    # P1-03修复: 优先委托GreeksCalculator，fallback时记录降级日志
+    precise = _try_greeks_calculator(instrument_id, 'gamma')
+    if precise is not None:
+        return precise * abs(volume)
+    logging.debug("[P1-03] gamma降级到常量估算: %s", instrument_id)
     from ali2026v3_trading.position.position_service import PositionService
-    return PositionService.OPTION_GAMMA_PER_LOT * abs(volume) if ('-C-' in instrument_id or '-P-' in instrument_id) else 0.0
+    return PositionService.OPTION_GAMMA_PER_LOT * abs(volume) if ("-C-" in instrument_id or "-P-" in instrument_id) else 0.0
 
 
 def aggregate_greeks_exposure(positions: Dict[str, Dict[str, Any]]) -> GreeksExposure:

@@ -1,3 +1,4 @@
+# MODULE_ID: M1-123
 """
 lifecycle_manager.py - LifecycleManager
 Phase 2 (CC-02+CC-04): 从_LifecycleMixin提取的生命周期管理Manager
@@ -27,7 +28,7 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from ali2026v3_trading.strategy.strategy_lifecycle_mixin import StrategyState, _state_key, _state_is
+from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 
 
@@ -127,7 +128,7 @@ class LifecycleManager:
                     if _sid:
                         invalidate_strategy_cache(_sid)
                         logging.info("[LifecycleManager] 策略%s降级/停止，已清理策略级参数缓存", _sid)
-                except Exception as _e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
                     logging.warning("[LifecycleManager] 缓存清理失败: %s", _e)
             logging.info("[LifecycleManager] State transition: %s -> %s", old_state.value, new_state.value)
             return True
@@ -146,7 +147,9 @@ class LifecycleManager:
             from ali2026v3_trading.infra.scheduler_service import is_market_open
             if is_market_open():
                 return True
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         return self._is_trading
 

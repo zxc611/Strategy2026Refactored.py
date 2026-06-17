@@ -1,3 +1,5 @@
+# [M1-41] OrderService��������
+# MODULE_ID: M1-131
 """
 order_base.py - OrderService基础定义
 提取: OrderResult, BaseService, 状态转换表, 单例工厂
@@ -13,6 +15,8 @@ from collections import deque
 from dataclasses import dataclass
 
 from ali2026v3_trading.infra.event_bus import RateLimiter
+from ali2026v3_trading.infra.service_contracts import ServiceProtocol
+from ali2026v3_trading.infra.shared_utils import generate_prefixed_id
 from ali2026v3_trading.order.order_risk_guard import OrderRiskGuard
 from ali2026v3_trading.order.order_chase_service import OrderChaseService
 from ali2026v3_trading.order.order_state_manager import OrderStateManager
@@ -26,7 +30,7 @@ except ImportError:
     OrderPersistenceService = None
 
 try:
-    from ali2026v3_trading.causal_chain_utils import CyclicDependencyGuard, ContaminationGuard
+    from ali2026v3_trading.strategy_judgment.causal_chain_utils import CyclicDependencyGuard, ContaminationGuard
     _HAS_CAUSAL_CHAIN = True
 except ImportError:
     _HAS_CAUSAL_CHAIN = False
@@ -47,14 +51,34 @@ class OrderResult:
         return self.success
     def __str__(self) -> str:
         return self.order_id or ''
+    def __eq__(self, other) -> bool:
+        if isinstance(other, str):
+            return self.order_id == other
+        if not isinstance(other, OrderResult):
+            return NotImplemented
+        return (self.order_id == other.order_id and
+                self.success == other.success and
+                self.error_code == other.error_code and
+                self.error_message == other.error_message)
+    def __hash__(self) -> int:
+        return hash((self.order_id, self.success, self.error_code, self.error_message))
 
-class BaseService:
+class BaseService(ServiceProtocol):
     def __init__(self, event_bus=None):
         self.event_bus = event_bus
-    def health_check(self) -> bool:
-        return True
+    def health_check(self) -> Dict[str, Any]:
+        return {'healthy': True, 'service_name': self.get_service_name()}
     def get_service_name(self) -> str:
         return self.__class__.__name__
+
+
+class OrderBase:
+    """P1-裂缝46: 订单基础类，包含自成交禁止时�?""
+
+    def __init__(self, **kwargs):
+        self._self_trade_ban_minutes = 30.0
+        for k, v in kwargs.items():
+            setattr(self, k, v)
 
 _VALID_ORDER_TRANSITIONS = {
     'PENDING': {'SUBMITTED', 'CANCELLED', 'FAILED'},
@@ -82,6 +106,16 @@ _order_service_lock = threading.Lock()
 def reset_order_service() -> None:
     global _order_service_instance
     with _order_service_lock:
+        if _order_service_instance is not None:
+            try:
+                _wal_dir = getattr(_order_service_instance, '_wal_dir', None)
+                if _wal_dir and os.path.isdir(_wal_dir):
+                    import shutil
+                    shutil.rmtree(_wal_dir, ignore_errors=True)
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
+                pass
         _order_service_instance = None
 
 def get_order_service() -> Any:
@@ -108,13 +142,17 @@ def init_order_service_attrs(svc, params=None):
     if _HAS_PERSISTENCE_SERVICE:
         try:
             svc._persistence_service = OrderPersistenceService()
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
     _rate = 60
     try:
-        from ali2026v3_trading.params_service import get_params_service
+        from ali2026v3_trading.config.params_service import get_params_service
         _rate = get_params_service().get_int('rate_limit_global_per_min', 60) or 60
-    except Exception:
+    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+        logging.debug("[R3-L2] suppressed exception", exc_info=True)
+        pass
         pass
     svc.rate_limiter = RateLimiter(rate=max(_rate / 60.0, 1.0))
     svc._orders_by_id = {}
@@ -174,11 +212,31 @@ def init_order_service_attrs(svc, params=None):
     svc._recover_order_state()
 
 
-class OrderQueryMixin:
-    """OrderService查询/工具方法Mixin，从Facade提取"""
+class OrderQueryService:
+    """OrderService查询/工具方法（从OrderQueryMixin重构为独立Service�?""
     _PLATFORM_ATTR_MAP = {'order_id': 'OrderRef', 'status': 'OrderStatus', 'filled_volume': 'VolumeTraded'}
 
-    def bind_position_count_func(self, func): self._get_position_count = func; logging.info("[OrderService] R25-TO-02-FIX: 仓位快照查询回调已绑定")
+    def __init__(self, facade=None):
+        self._facade = facade
+
+    def __getattr__(self, name):
+        # 递归保护: 防止�?facade 双向委托导致无限递归
+        if '__getattr__recursing' in self.__dict__:
+            raise AttributeError(name)
+        self.__dict__['__getattr__recursing'] = True
+        try:
+            if self._facade is not None:
+                try:
+                    return getattr(self._facade, name)
+                except AttributeError:
+                    pass
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        finally:
+            self.__dict__.pop('__getattr__recursing', None)
+
+
+
+    def bind_position_count_func(self, func): self._get_position_count = func; logging.info("[OrderService] R25-TO-02-FIX: 仓位快照查询回调已绑�?)
 
     @staticmethod
     def _get_platform_attr(obj, *attr_names, default=None):
@@ -204,14 +262,18 @@ class OrderQueryMixin:
     def get_stats(self):
         self._cleanup_orders()
         with self._lock: return {'service_name': 'OrderService', **self._stats, 'active_orders': self._state_manager.pending_count, 'total_tracked': len(self._orders_by_id), 'chase_tasks': len(self._chase_tasks)}
-    def _generate_order_id(self): import uuid; return f"ORD_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
-    def _generate_chase_order_id(self, original_order_id): import uuid; return f"CHASE_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+    def _generate_order_id(self): return f"ORD_{int(time.time() * 1000)}_{generate_prefixed_id('', 8)}"  # R9-3
+    def _generate_chase_order_id(self, original_order_id): return f"CHASE_{int(time.time() * 1000)}_{generate_prefixed_id('', 8)}"  # R9-3
     def get_order_data_age(self, order_id):
         _last = self._order_last_update_time.get(order_id); return (time.time() - _last) if _last is not None else None
     def _get_rate_limit(self):
         try:
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             rate = get_params_service().get_int('rate_limit_global_per_min', 60)
             if rate > 0: return rate
-        except Exception: pass
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
         return 60
+
+OrderQueryMixin = OrderQueryService

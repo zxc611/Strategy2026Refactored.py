@@ -1,3 +1,0 @@
-"""lifecycle_init.py — 重导出模块(P1-R2目录重组后)"""
-from ali2026v3_trading.lifecycle.lifecycle_init import *
-from ali2026v3_trading.lifecycle.lifecycle_init import _read_param, _state_is

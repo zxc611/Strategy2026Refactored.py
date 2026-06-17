@@ -1,9 +1,10 @@
+# MODULE_ID: M2-566
 import time
 import threading
 import pytest
 from unittest.mock import patch, MagicMock
 
-from risk_service import SafetyMetaLayer, get_safety_meta_layer, RiskService, RiskCheckResponse
+from ali2026v3_trading.risk.risk_service import SafetyMetaLayer, get_safety_meta_layer, RiskService, RiskCheckResponse
 
 
 class TestDailyHardStopTrigger:
@@ -58,7 +59,7 @@ class TestConfirmDailyResume:
         s = SafetyMetaLayer()
         s._daily_hard_stop_triggered = True
         s._daily_new_open_blocked = True
-        result = s.confirm_daily_resume()
+        result = s.confirm_daily_resume(caller_id="MANUAL_test", approval_context={"approver_id": "test_approver"})
         assert result is True
         assert not s.is_hard_stop_triggered()
         assert not s.is_new_open_blocked()
@@ -74,7 +75,7 @@ class TestConfirmDailyResume:
         s._daily_hard_stop_triggered = True
         s._daily_new_open_blocked = True
         s._daily_drawdown = 0.06
-        s.confirm_daily_resume()
+        s.confirm_daily_resume(caller_id="MANUAL_test", approval_context={"approver_id": "test_approver"})
         assert s._daily_drawdown == 0.0
 
 
@@ -101,13 +102,14 @@ class TestCheckSafetyMetaLayerIntegration:
         result = svc._check_safety_meta_layer(open_signal)
         assert result.is_block
 
-    def test_hard_stop_blocks_close_too(self):
+    def test_hard_stop_allows_close(self):
+        # P0-裂缝25修复: 硬止损期间平仓应被允许(保护性操作豁免)
         svc = self._make_risk_service()
         safety = get_safety_meta_layer(svc.params)
         safety._daily_hard_stop_triggered = True
         close_signal = {"action": "CLOSE", "symbol": "test", "amount": 1}
         result = svc._check_safety_meta_layer(close_signal)
-        assert result.is_block
+        assert not result.is_block
 
     def test_new_open_blocked_still_allows_close(self):
         svc = self._make_risk_service()
@@ -135,7 +137,9 @@ class TestCircuitBreakerCalmPeriod:
         s._daily_start_equity = 10000.0
         s._current_date = "2026-05-10"
         now = time.time()
-        s._circuit_breaker_calm_until = now + 600
+        # [P0-29修复] 通过 _risk_cb_half_open 和 _calm_period_duration 设置冷静期
+        s._circuit_breaker_svc._risk_cb_half_open.force_open(open_duration_sec=10.0, opened_at=now)
+        s._circuit_breaker_svc._calm_period_duration = 600.0
         for i in range(12):
             s._equity_series.append(10000.0 if i < 10 else 9500.0)
             s._equity_timestamps.append(now - (12 - i) * 10)
@@ -150,7 +154,9 @@ class TestCircuitBreakerCalmPeriod:
         s._daily_start_equity = 10000.0
         s._current_date = "2026-05-10"
         now = time.time()
-        s._circuit_breaker_calm_until = now - 1
+        # [P0-29修复] 通过 _risk_cb_half_open 和 _calm_period_duration 设置已过期的冷静期
+        s._circuit_breaker_svc._risk_cb_half_open.force_open(open_duration_sec=10.0, opened_at=now - 700)
+        s._circuit_breaker_svc._calm_period_duration = 600.0
         for i in range(12):
             val = 10000.0 if i < 10 else 9500.0
             s._equity_series.append(val)

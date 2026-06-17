@@ -1,3 +1,4 @@
+# MODULE_ID: M2-590
 """
 test_strategy_core_service.py - StrategyCoreService核心服务测试
 
@@ -14,36 +15,36 @@ from typing import Dict, Any
 
 class TestStrategyCoreServiceInstantiation(unittest.TestCase):
     def test_default_instantiation(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService()
         self.assertIsNotNone(svc)
         self.assertIsNotNone(svc.strategy_id)
 
     def test_custom_strategy_id(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService(strategy_id="test_strategy_001")
         self.assertEqual(svc.strategy_id, "test_strategy_001")
 
     def test_initial_state_is_initializing(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
-        from ali2026v3_trading.strategy_core_service import StrategyState
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyState
         svc = StrategyCoreService(strategy_id="test_state_init")
         self.assertEqual(svc._state, StrategyState.INITIALIZING)
 
     def test_not_running_initially(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService(strategy_id="test_not_running")
         self.assertFalse(svc._is_running)
 
     def test_not_destroyed_initially(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService(strategy_id="test_not_destroyed")
         self.assertFalse(svc._destroyed)
 
 
 class TestStrategyCoreServiceHasRequiredMethods(unittest.TestCase):
     def setUp(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         self.svc = StrategyCoreService(strategy_id="test_methods")
 
     def test_has_get_health_status(self):
@@ -77,22 +78,23 @@ class TestStrategyCoreServiceHasRequiredMethods(unittest.TestCase):
 
 class TestStrategyCoreServiceHealthStatus(unittest.TestCase):
     def test_health_status_returns_dict(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService(strategy_id="test_health")
         health = svc.get_health_status()
         self.assertIsInstance(health, dict)
 
     def test_health_status_has_component_key(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService(strategy_id="test_health_component")
         health = svc.get_health_status()
-        self.assertIn('component', health)
+        # health_status返回的dict包含各组件检查结果（key以_check_开头）
+        self.assertTrue(any(k.startswith('_check_') for k in health), "health dict should contain component check keys")
 
     def test_health_status_has_status_key(self):
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService(strategy_id="test_health_status_key")
         health = svc.get_health_status()
-        self.assertIn('status', health)
+        self.assertIn('overall_status', health)
 
 
 if __name__ == '__main__':

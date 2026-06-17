@@ -1,3 +1,4 @@
+# MODULE_ID: M2-464
 import pytest
 import sys
 import os
@@ -5,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.instrument_manager import InstrumentManager
-from ali2026v3_trading.historical_data_manager import HistoricalDataManager
+from ali2026v3_trading.strategy.instrument_service import InstrumentManager
+from ali2026v3_trading.data.historical_data_manager import HistoricalDataManager
 
 
 class TestInstrumentManager:
@@ -14,7 +15,7 @@ class TestInstrumentManager:
         mgr = InstrumentManager()
         mock_ps = MagicMock()
         mock_ps.get_instrument_meta_by_id.return_value = {'year_month': '2501'}
-        with patch('ali2026v3_trading.params_service.get_params_service', return_value=mock_ps):
+        with patch('ali2026v3_trading.config.params_service.get_params_service', return_value=mock_ps):
             result = mgr.extract_contract_year_month('IF2501')
             assert result == '2501'
 
@@ -22,8 +23,8 @@ class TestInstrumentManager:
         mgr = InstrumentManager()
         mock_ps = MagicMock()
         mock_ps.get_instrument_meta_by_id.return_value = None
-        with patch('ali2026v3_trading.params_service.get_params_service', return_value=mock_ps), \
-             patch('ali2026v3_trading.subscription_manager.SubscriptionManager.is_option', return_value=False):
+        with patch('ali2026v3_trading.config.params_service.get_params_service', return_value=mock_ps), \
+             patch('ali2026v3_trading.infra.subscription_manager.SubscriptionManager.is_option', return_value=False):
             result = mgr.extract_contract_year_month('')
             assert result is None
 
@@ -31,8 +32,8 @@ class TestInstrumentManager:
         mgr = InstrumentManager()
         mock_ps = MagicMock()
         mock_ps.get_instrument_meta_by_id.return_value = None
-        with patch('ali2026v3_trading.params_service.get_params_service', return_value=mock_ps), \
-             patch('ali2026v3_trading.subscription_manager.SubscriptionManager.is_option', return_value=False):
+        with patch('ali2026v3_trading.config.params_service.get_params_service', return_value=mock_ps), \
+             patch('ali2026v3_trading.infra.subscription_manager.SubscriptionManager.is_option', return_value=False):
             result = mgr.extract_contract_year_month(None)
             assert result is None
 

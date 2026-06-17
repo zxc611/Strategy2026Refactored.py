@@ -1,11 +1,14 @@
+# [M1-53] �Գɽ������Ϲ�
+# MODULE_ID: M1-133
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
-order_compliance.py - 自成交检测/算法交易报备/洗盘检测
-R27: 从order_service.py提取的合规检测类和函数
+order_compliance.py - 自成交检�?算法交易报备/洗盘检�?
+R27: 从order_service.py提取的合规检测类和函�?
 
-职责：
-- 拆单自成交检测 (check_self_trade_across_splits)
+职责�?
+- 拆单自成交检�?(check_self_trade_across_splits)
 - 算法交易报备 (AlgoTradingCompliance)
-- 洗盘检测 (WashTradeDetector)
+- 洗盘检�?(WashTradeDetector)
 """
 from __future__ import annotations
 
@@ -15,29 +18,23 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List
 
-from ali2026v3_trading.infra.shared_utils import TradeDirection
-
-try:
-    from ali2026v3_trading.config.config_params import CHINA_TZ
-except Exception:
-    from datetime import timezone, timedelta
-    CHINA_TZ = timezone(timedelta(hours=8))
+from ali2026v3_trading.infra.shared_utils import TradeDirection, CHINA_TZ
 
 
 def check_self_trade_across_splits(
     orders: List[Dict[str, Any]],
     ban_minutes: float = 30.0,
 ) -> List[Dict[str, Any]]:
-    """R18-06修复: 自成交检测覆盖拆分子单
+    """R18-06修复: 自成交检测覆盖拆分子�?
 
-    对一组拆分子单进行原子性自成交检查，检测同合约反方向的子单对
+    对一组拆分子单进行原子性自成交检查，检测同合约反方向的子单�?
 
     Args:
         orders: 拆分子单列表, 每个dict含instrument_id/direction/price
         ban_minutes: 自成交禁止期(分钟)
 
     Returns:
-        List[Dict]: 检测到的自成交对, 含{buy_idx, sell_idx, instrument_id, ban_until}
+        List[Dict]: 检测到的自成交�? 含{buy_idx, sell_idx, instrument_id, ban_until}
     """
     violations = []
     try:
@@ -67,13 +64,13 @@ def check_self_trade_across_splits(
                                 'ban_until': now + ban_minutes * 60.0,
                             })
                             logging.warning(
-                                "[R18-06] 拆单自成交检测: BUY[%d]@%.2f >= SELL[%d]@%.2f instrument=%s",
+                                "[R18-06] 拆单自成交检�? BUY[%d]@%.2f >= SELL[%d]@%.2f instrument=%s",
                                 buy_idx, buy_price, sell_idx, sell_price,
                                 order_a.get('instrument_id', ''),
                             )
         return violations
-    except Exception as e:
-        logging.error("[R18-06] 拆单自成交检测异常: %s", e)
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        logging.error("[R18-06] 拆单自成交检测异�? %s", e)
         return violations
 
 
@@ -83,7 +80,7 @@ class AlgoTradingCompliance:
     满足中国证监会程序化交易报备要求:
     - 记录每笔算法交易决策
     - 生成报备日志
-    - 检测报备违规(超频/超量)
+    - 检测报备违�?超频/超量)
     """
 
     def __init__(self, max_orders_per_sec: float = 30.0, max_daily_algo_orders: int = 10000):
@@ -109,7 +106,7 @@ class AlgoTradingCompliance:
             recent = [t for t in self._order_timestamps if now - t < 1.0]
             if len(recent) > self._max_orders_per_sec:
                 freq_violation = True
-                logging.warning("[R18-07] 算法交易超频: %.0f单/秒 > 限制%.0f单/秒",
+                logging.warning("[R18-07] 算法交易超频: %.0f�?�?> 限制%.0f�?�?,
                                 len(recent), self._max_orders_per_sec)
         daily_violation = self._daily_count > self._max_daily_algo_orders
         if daily_violation:
@@ -145,12 +142,12 @@ class AlgoTradingCompliance:
 
 
 class WashTradeDetector:
-    """R18-08修复: 洗盘检测
+    """R18-08修复: 洗盘检�?
 
-    检测疑似洗盘行为:
-    - 同合约短时间内频繁对倒(买后即卖/卖后即买)
+    检测疑似洗盘行�?
+    - 同合约短时间内频繁对�?买后即卖/卖后即买)
     - 净持仓接近零但交易量异常高
-    - 价格未有效偏离但成交量放大
+    - 价格未有效偏离但成交量放�?
     """
 
     def __init__(self, window_sec: float = 300.0, min_round_trips: int = 3,
@@ -191,7 +188,7 @@ class WashTradeDetector:
         if round_trips >= self._min_round_trips and net_ratio < self._net_ratio_threshold:
             result['suspected'] = True
             result['reason'] = (
-                f"window={self._window_sec}s内{round_trips}次往返, "
+                f"window={self._window_sec}s内{round_trips}次往�? "
                 f"净持仓比{net_ratio:.2%}<{self._net_ratio_threshold:.0%}"
             )
             logging.warning(

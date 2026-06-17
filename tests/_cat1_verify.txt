@@ -1,0 +1,7 @@
+﻿...............................................................F.        [100%]
+================================== FAILURES ===================================
+E   AttributeError: 'CausalEvent' object has no attribute 'event_id'
+C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\strategy_judgment\causal_chain_utils.py:78: AttributeError: 'CausalEvent' object has no attribute 'event_id'
+=========================== short test summary info ===========================
+FAILED ali2026v3_trading\tests\test_strategy_judgment_coverage.py::TestCausalChainUtils::test_causal_chain_tracker
+1 failed, 64 passed in 2.41s

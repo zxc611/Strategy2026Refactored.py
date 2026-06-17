@@ -1,9 +1,10 @@
+# MODULE_ID: M1-231
 from __future__ import annotations
 
 import logging
 from typing import Dict, Any, Optional
 from ali2026v3_trading.risk_engine.snapshot import RiskSnapshot
-from ali2026v3_trading.risk_service import RiskCheckResponse, RiskLevel
+from ali2026v3_trading.risk.risk_service import RiskCheckResponse, RiskLevel
 
 
 def check_strategy_status(snapshot: RiskSnapshot, risk_service: Any) -> Optional[RiskCheckResponse]:
@@ -56,7 +57,7 @@ def check_capital_sufficiency_in_trade(snapshot: RiskSnapshot, risk_service: Any
 def check_shadow_ev(snapshot: RiskSnapshot, risk_service: Any) -> Optional[RiskCheckResponse]:
     if snapshot.action != "CLOSE":
         try:
-            from ali2026v3_trading.shadow_strategy_engine import get_shadow_strategy_engine
+            from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
             _sse = get_shadow_strategy_engine()
             if _sse is not None:
                 if _sse.is_absolute_ev_paused():
@@ -76,7 +77,7 @@ def check_shadow_ev(snapshot: RiskSnapshot, risk_service: Any) -> Optional[RiskC
                         "INV-IRN-03: Alpha衰减降级中，禁止新开仓（仅允许平仓）",
                         RiskLevel.HIGH
                     )
-        except Exception as _ev_err:
+        except (ImportError, AttributeError, KeyError, TypeError, RuntimeError) as _ev_err:
             logging.error("[R22-EP-01] 影子引擎EV/降级检查异常，fail-safe阻断: %s", _ev_err, exc_info=True)
             return RiskCheckResponse.block_result(
                 "shadow_check_error",

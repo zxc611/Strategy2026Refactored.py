@@ -1,39 +1,12 @@
+# MODULE_ID: M2-558
 """P3.1: 风控引擎4域契约测试"""
 from __future__ import annotations
 
 import pytest
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
+from ali2026v3_trading.tests._stubs import RiskSnapshotStub
 
-
-class RiskSnapshotStub:
-    def __init__(
-        self,
-        action: str = "OPEN",
-        symbol: str = "IF2606",
-        instrument_id: str = "IF2606",
-        amount: float = 1.0,
-        price: float = 4000.0,
-        equity: float = 1000000.0,
-        account_id: str = "test_account",
-        hedge_type: str = "none",
-        signal: dict = None,
-        is_valid: bool = True,
-        days_to_expiry: int = 30,
-        bar_datetime: Any = None,
-    ):
-        self.action = action
-        self.symbol = symbol
-        self.instrument_id = instrument_id
-        self.amount = amount
-        self.price = price
-        self.equity = equity
-        self.account_id = account_id
-        self.hedge_type = hedge_type
-        self.signal = signal or {}
-        self.is_valid = is_valid
-        self.days_to_expiry = days_to_expiry
-        self.bar_datetime = bar_datetime
 
 
 def _make_risk_service():
@@ -132,7 +105,7 @@ class TestOperationalRiskContract:
 
     def test_check_signal_validity_blocks_invalid(self):
         from ali2026v3_trading.risk_engine.operational_risk import check_signal_validity
-        from ali2026v3_trading.risk_service import RiskCheckResponse
+        from ali2026v3_trading.risk.risk_service import RiskCheckResponse
         snapshot = RiskSnapshotStub(is_valid=False)
         rs = _make_risk_service()
         result = check_signal_validity(snapshot, rs)

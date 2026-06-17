@@ -1,3 +1,5 @@
+﻿# [M3-09] 策略行为诊断
+# MODULE_ID: M3-625
 """
 策略行为诊断 (Strategy Behavior Diagnosis) — 生产就绪版 v1.1
 
@@ -26,8 +28,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .market_snapshot_collector import MarketSnapshot, SnapshotTrigger
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
 
 class DiagnosisSeverity(Enum):

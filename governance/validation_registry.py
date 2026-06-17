@@ -1,6 +1,8 @@
+# MODULE_ID: M1-078
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
-Phase4-Sprint12: ValidationRegistry — backtest_validation验证器注册模式
-将backtest_validation.py(1689行)的硬编码验证链重构为可注册验证器
+Phase4-Sprint12: ValidationRegistry — backtest_state验证器注册模式
+将backtest_state.py的硬编码验证链重构为可注册验证器
 """
 from __future__ import annotations
 
@@ -50,7 +52,7 @@ class ValidationReport:
 
 
 class ValidationRegistry:
-    """验证器注册中心 — 替代backtest_validation硬编码验证链
+    """验证器注册中心 — 替代backtest_state硬编码验证链
 
     支持动态注册/注销验证器，按注册顺序执行
     """
@@ -82,7 +84,7 @@ class ValidationRegistry:
                 vr = validator.validate(result)
                 results.append(vr)
                 _total_score += vr.score
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[ValidationRegistry] 验证器%s异常: %s", name, e)
                 results.append(ValidationResult(validator_name=name, passed=False, reason=f'异常: {e}'))
         _avg_score = _total_score / len(results) if results else 0.0
@@ -98,7 +100,7 @@ class ValidationRegistry:
             return None
         try:
             return validator.validate(result)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
             return ValidationResult(validator_name=name, passed=False, reason=f'异常: {e}')
 
     @property

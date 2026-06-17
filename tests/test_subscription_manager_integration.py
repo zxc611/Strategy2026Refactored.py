@@ -1,3 +1,4 @@
+# MODULE_ID: M2-594
 """
 subscription_manager 集成测试套件
 覆盖: WAL恢复、重试退避、后台线程生命周期、背压保护
@@ -37,7 +38,7 @@ class TestRetryBackoff:
     """测试指数退避与重试逻辑"""
 
     def test_exponential_backoff_calculation(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         for attempt in range(10):
             delay = sm._calc_backoff_delay(attempt)
@@ -47,14 +48,14 @@ class TestRetryBackoff:
                 assert delay >= prev_delay, f"Attempt {attempt}: backoff should not decrease"
 
     def test_max_backoff_cap(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         delay_large = sm._calc_backoff_delay(100)
         delay_small = sm._calc_backoff_delay(1000)
         assert abs(delay_large - delay_small) < 0.01, "Backoff should hit max cap"
 
     def test_retry_queue_basic_operations(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         sm._retry_queue = deque(maxlen=100)
         sm._enqueue_for_retry({"instrument_id": "test_inst_01", "type": "subscribe"}, 0)
@@ -147,7 +148,7 @@ class TestThreadLifecycle:
     """测试后台线程启动/停止"""
 
     def test_start_stop_background_threads(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         sm._start_background_threads()
         time.sleep(0.2)
@@ -158,7 +159,7 @@ class TestThreadLifecycle:
         time.sleep(0.5)
 
     def test_double_stop_is_idempotent(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         sm._start_background_threads()
         time.sleep(0.1)
@@ -167,7 +168,7 @@ class TestThreadLifecycle:
         assert True
 
     def test_ensure_background_threads_rearm(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         sm._start_background_threads()
         time.sleep(0.1)
@@ -186,7 +187,7 @@ class TestBackpressure:
     """测试背压与队列容量保护"""
 
     def test_retry_queue_capacity_limit(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         sm._retry_queue = deque(maxlen=10)
         for i in range(15):
@@ -194,7 +195,7 @@ class TestBackpressure:
         assert len(sm._retry_queue) == 10, f"Queue should not exceed capacity, got {len(sm._retry_queue)}"
 
     def test_subscription_stats(self):
-        from ali2026v3_trading.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
         sm = SubscriptionManager(data_manager=MockStorage())
         stats = sm.get_subscription_stats()
         assert isinstance(stats, dict)
@@ -204,7 +205,7 @@ class TestInstrumentClassification:
     """测试合约分类工具"""
 
     def test_classify_registered_instruments(self):
-        from ali2026v3_trading.subscription_manager import classify_registered_instruments
+        from ali2026v3_trading.infra.subscription_manager import classify_registered_instruments
         storage = MockStorage()
         storage.register_instrument("m2605")
         storage.register_instrument("al2605C18900")

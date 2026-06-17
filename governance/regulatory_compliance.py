@@ -1,3 +1,4 @@
+# MODULE_ID: M1-077
 """
 合规规则模块 — 从risk_circuit_breaker.py拆分
 职责: 监管合规检查规则（自成交、洗盘、算法交易标识）
@@ -110,7 +111,7 @@ class ComplianceEngine:
                 results.append(result)
                 if not result.compliant and result.severity == 'P0':
                     break
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[ComplianceEngine] Rule %s failed: %s", rule.rule_name, e)
         return results
 

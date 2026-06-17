@@ -1,3 +1,4 @@
+# MODULE_ID: M2-603
 """
 V7.1 task_scheduler 核心功能单元测试
 覆盖：常量完整性、Alpha CI、L-2冲突裁决、验证分级、参数分级、HFT保真度、
@@ -12,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.param_pool.task_scheduler import (
+from ali2026v3_trading.param_pool.backtest_config import (
     DEEP_VALIDATION_TIERS,
     PARAM_TIERS,
     HFT_TICK_PARAMS,
@@ -53,6 +54,11 @@ from ali2026v3_trading.param_pool.task_scheduler import (
     SCAN_TARGET_SORT_METRIC,
     validate_default_values_in_grids,
     _select_top_k_train,
+)
+from ali2026v3_trading.param_pool._param_defaults import (
+    PARAM_DEFAULTS_DIVERGENCE,
+    PARAM_DEFAULTS_DIVERGENCE_SHADOW_A,
+    PARAM_DEFAULTS_DIVERGENCE_SHADOW_B,
 )
 
 
@@ -532,6 +538,19 @@ class TestBacktestTryOpenRiskGate:
         base.update(overrides)
         return pd.Series(base)
 
+    def _make_pos(self, open_price=4000.0, volume=1, open_time=None):
+        if open_time is None:
+            open_time = pd.Timestamp("2026-05-10 09:30:00")
+        return _BacktestPosition(
+            instrument_id="IF2605",
+            volume=volume,
+            open_price=open_price,
+            open_time=open_time,
+            stop_profit_price=open_price * 1.015,
+            stop_loss_price=open_price * 0.995,
+            open_reason="CORRECT_RESONANCE",
+        )
+
     def test_try_open_fail_safe_blocks_when_risk_service_raises(self):
         bt = _BacktestState()
         params = {
@@ -544,7 +563,7 @@ class TestBacktestTryOpenRiskGate:
             'margin_ratio': 0.1,
         }
 
-        with patch('ali2026v3_trading.risk_service.get_risk_service', side_effect=RuntimeError('boom')):
+        with patch('ali2026v3_trading.risk.risk_service.get_risk_service', side_effect=RuntimeError('boom')):
             _try_open(bt, self._make_bar(), params)
 
         assert bt.positions == {}
@@ -567,7 +586,7 @@ class TestBacktestTryOpenRiskGate:
         risk_service.check_capital_sufficiency.return_value = {'sufficient': True}
         risk_service.check_exchange_status.return_value = {'status': 'OPEN'}
 
-        with patch('ali2026v3_trading.risk_service.get_risk_service', return_value=risk_service):
+        with patch('ali2026v3_trading.risk.risk_service.get_risk_service', return_value=risk_service):
             _try_open(bt, self._make_bar(), params)
 
         signal = risk_service.check_before_trade.call_args[0][0]
@@ -647,9 +666,9 @@ class TestShadowParamIndependence:
         for label, diff in results.items():
             assert diff >= 0.20, f"{label} 差异度 {diff:.4f} < 20%阈值"
 
-    def test_shadow_defaults_has_six_groups(self):
+    def test_shadow_defaults_has_seven_groups(self):
         assert set(STRATEGY_SHADOW_DEFAULTS.keys()) == {
-            'hft', 'main', 'box_extreme', 'box_spring', 'arbitrage', 'market_making'
+            'hft', 'main', 'box_extreme', 'box_spring', 'arbitrage', 'market_making', 'divergence'
         }
 
     def test_each_group_has_shadow_a_and_b(self):
@@ -678,7 +697,7 @@ class TestReasonMultipliersCompleteness:
 
 
 class TestParamDefaults:
-    """P1-4: PARAM_DEFAULTS默认值断言（6主策略+6影子A+6影子B=18实例）"""
+    """P1-4: PARAM_DEFAULTS默认值断言（7主策略+7影子A+7影子B=21实例）"""
 
     _ALL_MASTER_DEFAULTS = {
         'main': PARAM_DEFAULTS,
@@ -687,6 +706,7 @@ class TestParamDefaults:
         'box_spring': PARAM_DEFAULTS_BOX_SPRING,
         'arbitrage': PARAM_DEFAULTS_ARBITRAGE,
         'market_making': PARAM_DEFAULTS_MARKET_MAKING,
+        'divergence': PARAM_DEFAULTS_DIVERGENCE,
     }
 
     _ALL_SHADOW_A_DEFAULTS = {
@@ -696,6 +716,7 @@ class TestParamDefaults:
         'box_spring': PARAM_DEFAULTS_BOX_SPRING_SHADOW_A,
         'arbitrage': PARAM_DEFAULTS_ARBITRAGE_SHADOW_A,
         'market_making': PARAM_DEFAULTS_MARKET_MAKING_SHADOW_A,
+        'divergence': PARAM_DEFAULTS_DIVERGENCE_SHADOW_A,
     }
 
     _ALL_SHADOW_B_DEFAULTS = {
@@ -705,20 +726,21 @@ class TestParamDefaults:
         'box_spring': PARAM_DEFAULTS_BOX_SPRING_SHADOW_B,
         'arbitrage': PARAM_DEFAULTS_ARBITRAGE_SHADOW_B,
         'market_making': PARAM_DEFAULTS_MARKET_MAKING_SHADOW_B,
+        'divergence': PARAM_DEFAULTS_DIVERGENCE_SHADOW_B,
     }
 
-    def test_six_master_defaults_exist(self):
-        assert len(self._ALL_MASTER_DEFAULTS) == 6
+    def test_seven_master_defaults_exist(self):
+        assert len(self._ALL_MASTER_DEFAULTS) == 7
 
-    def test_six_shadow_a_defaults_exist(self):
-        assert len(self._ALL_SHADOW_A_DEFAULTS) == 6
+    def test_seven_shadow_a_defaults_exist(self):
+        assert len(self._ALL_SHADOW_A_DEFAULTS) == 7
 
-    def test_six_shadow_b_defaults_exist(self):
-        assert len(self._ALL_SHADOW_B_DEFAULTS) == 6
+    def test_seven_shadow_b_defaults_exist(self):
+        assert len(self._ALL_SHADOW_B_DEFAULTS) == 7
 
-    def test_total_eighteen_instances(self):
+    def test_total_twenty_one_instances(self):
         total = len(self._ALL_MASTER_DEFAULTS) + len(self._ALL_SHADOW_A_DEFAULTS) + len(self._ALL_SHADOW_B_DEFAULTS)
-        assert total == 18
+        assert total == 21
 
     def test_main_defaults_non_other_ratio(self):
         assert PARAM_DEFAULTS['non_other_ratio_threshold'] == 0.65
@@ -734,16 +756,20 @@ class TestParamDefaults:
     def test_shadow_a_degraded_tp(self):
         assert PARAM_DEFAULTS_SHADOW_A['close_take_profit_ratio'] < PARAM_DEFAULTS['close_take_profit_ratio']
         assert PARAM_DEFAULTS_HFT_SHADOW_A['close_take_profit_ratio'] < PARAM_DEFAULTS_HFT['close_take_profit_ratio']
+        assert PARAM_DEFAULTS_DIVERGENCE_SHADOW_A['divergence_take_profit_ratio'] < PARAM_DEFAULTS_DIVERGENCE['divergence_take_profit_ratio']
 
     def test_shadow_b_degraded_tp(self):
         assert PARAM_DEFAULTS_SHADOW_B['close_take_profit_ratio'] < PARAM_DEFAULTS['close_take_profit_ratio']
         assert PARAM_DEFAULTS_HFT_SHADOW_B['close_take_profit_ratio'] < PARAM_DEFAULTS_HFT['close_take_profit_ratio']
+        assert PARAM_DEFAULTS_DIVERGENCE_SHADOW_B['divergence_take_profit_ratio'] < PARAM_DEFAULTS_DIVERGENCE['divergence_take_profit_ratio']
 
     def test_shadow_a_lower_risk_than_master(self):
         assert PARAM_DEFAULTS_SHADOW_A['max_risk_ratio'] < PARAM_DEFAULTS['max_risk_ratio']
+        assert PARAM_DEFAULTS_DIVERGENCE_SHADOW_A['divergence_max_risk_ratio'] < PARAM_DEFAULTS_DIVERGENCE['divergence_max_risk_ratio']
 
     def test_shadow_b_lower_risk_than_master(self):
         assert PARAM_DEFAULTS_SHADOW_B['max_risk_ratio'] < PARAM_DEFAULTS['max_risk_ratio']
+        assert PARAM_DEFAULTS_DIVERGENCE_SHADOW_B['divergence_max_risk_ratio'] < PARAM_DEFAULTS_DIVERGENCE['divergence_max_risk_ratio']
 
     def test_arbitrage_has_specific_keys(self):
         assert 'arb_deviation_threshold_bps' in PARAM_DEFAULTS_ARBITRAGE
@@ -758,40 +784,40 @@ class TestParamDefaults:
         assert 'mm_rebalance_threshold' in PARAM_DEFAULTS_MARKET_MAKING
 
 
-class TestEighteenStrategyCoverage:
-    """P1-5: 18策略全覆盖断言 — 评判系统ALL_18_STRATEGY_IDS与参数池STRATEGY_SHADOW_DEFAULTS对齐"""
+class TestTwentyOneStrategyCoverage:
+    """P1-5: 21策略全覆盖断言 — 评判系统ALL_21_STRATEGY_IDS与参数池STRATEGY_SHADOW_DEFAULTS对齐"""
 
     @pytest.fixture(autouse=True)
     def _import_judgment(self):
         from ali2026v3_trading.strategy_judgment.market_snapshot_collector import (
-            ALL_18_STRATEGY_IDS,
-            SIX_STRATEGY_KEYS,
+            ALL_21_STRATEGY_IDS,
+            SEVEN_STRATEGY_KEYS,
             THREE_VARIANTS,
         )
-        self.all_18_ids = ALL_18_STRATEGY_IDS
-        self.six_keys = SIX_STRATEGY_KEYS
+        self.all_21_ids = ALL_21_STRATEGY_IDS
+        self.seven_keys = SEVEN_STRATEGY_KEYS
         self.three_variants = THREE_VARIANTS
 
-    def test_eighteen_ids_count(self):
-        assert len(self.all_18_ids) == 18
+    def test_twenty_one_ids_count(self):
+        assert len(self.all_21_ids) == 21
 
-    def test_six_strategy_keys(self):
-        assert len(self.six_keys) == 6
-        expected = {"high_freq", "resonance", "box", "spring", "arbitrage", "market_making"}
-        assert set(self.six_keys) == expected
+    def test_seven_strategy_keys(self):
+        assert len(self.seven_keys) == 7
+        expected = {"high_freq", "resonance", "box", "spring", "arbitrage", "market_making", "divergence"}
+        assert set(self.seven_keys) == expected
 
     def test_three_variants(self):
         assert set(self.three_variants) == {"master", "shadow_a", "shadow_b"}
 
     def test_each_strategy_has_master_and_shadows(self):
-        for sk in self.six_keys:
-            assert f"{sk}_master" in self.all_18_ids, f"{sk} 缺少 master"
-            assert f"{sk}_shadow_a" in self.all_18_ids, f"{sk} 缺少 shadow_a"
-            assert f"{sk}_shadow_b" in self.all_18_ids, f"{sk} 缺少 shadow_b"
+        for sk in self.seven_keys:
+            assert f"{sk}_master" in self.all_21_ids, f"{sk} 缺少 master"
+            assert f"{sk}_shadow_a" in self.all_21_ids, f"{sk} 缺少 shadow_a"
+            assert f"{sk}_shadow_b" in self.all_21_ids, f"{sk} 缺少 shadow_b"
 
-    def test_shadow_defaults_cover_all_six_groups(self):
+    def test_shadow_defaults_cover_all_seven_groups(self):
         assert set(STRATEGY_SHADOW_DEFAULTS.keys()) == {
-            'hft', 'main', 'box_extreme', 'box_spring', 'arbitrage', 'market_making'
+            'hft', 'main', 'box_extreme', 'box_spring', 'arbitrage', 'market_making', 'divergence'
         }
 
     def test_judgment_ids_align_with_param_pool_groups(self):
@@ -802,6 +828,7 @@ class TestEighteenStrategyCoverage:
             "spring": "box_spring",
             "arbitrage": "arbitrage",
             "market_making": "market_making",
+            "divergence": "divergence",
         }
         for jk, pk in judgment_to_param.items():
             assert pk in STRATEGY_SHADOW_DEFAULTS, f"评判键{jk}→参数池键{pk}不存在"
@@ -810,7 +837,7 @@ class TestEighteenStrategyCoverage:
             assert 'shadow_b' in shadow_map, f"{pk}缺少shadow_b"
 
     def test_no_duplicate_ids(self):
-        assert len(self.all_18_ids) == len(set(self.all_18_ids))
+        assert len(self.all_21_ids) == len(set(self.all_21_ids))
 
 
 class TestGridDefaultAndSortAlignment:

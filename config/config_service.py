@@ -1,3 +1,4 @@
+# [M1-80] 配置服务Facade
 """
 配置服务模块 - CQRS 架构 Configuration 层
 来源：分散的配置文件（quant_trading_system_T型图/config.py + 06_params.py 配置类）

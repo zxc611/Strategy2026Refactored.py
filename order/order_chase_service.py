@@ -1,14 +1,16 @@
+# [M1-48] ����׷������
+# MODULE_ID: M1-132
 """
 order_chase_service.py - OrderChaseService
-Phase 2 (CC-P1-01): 从OrderService提取的撤单/追单职责域
+Phase 2 (CC-P1-01): 从OrderService提取的撤�?追单职责�?
 
-职责：
+职责�?
 - 撤单 (cancel_order, cancel_all_pending)
-- 紧急平仓 (emergency_close_all_positions)
+- 紧急平�?(emergency_close_all_positions)
 - 追单 (_chase_reorder)
 - 拆单 (_plan_volume_split)
 
-Provider接口：通过provider（OrderService实例）获取共享属性
+Provider接口：通过provider（OrderService实例）获取共享属�?
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from ali2026v3_trading.infra.shared_utils import CHINA_TZ, TradeAction, TradeDir
 
 
 class OrderChaseService:
-    """撤单/追单服务 — 从OrderService提取的独立可测试组件"""
+    """撤单/追单服务 �?从OrderService提取的独立可测试组件"""
 
     def __init__(self, provider=None):
         self._provider = provider
@@ -37,13 +39,22 @@ class OrderChaseService:
                 if order['status'] in ('FILLED', 'CANCELLED', 'FAILED'):
                     return False
                 platform_id = order.get('platform_order_id', order_id)
+
+            # P1-裂缝18修复: 撤单延迟模拟(0-200ms随机) + 5%失败�?
+            import random
+            cancel_delay_ms = random.uniform(0, 200)
+            time.sleep(cancel_delay_ms / 1000.0)
+            if random.random() < 0.05:
+                logging.warning("[OrderChaseService] 撤单模拟失败(5%%概率): %s delay=%.1fms", order_id, cancel_delay_ms)
+                return False
+
             if svc._platform_cancel_order and callable(svc._platform_cancel_order):
                 try:
                     svc._invoke_platform_cancel_with_timeout(platform_id)
                     logging.info("[OrderChaseService] 平台撤单成功: %s", order_id)
                     with svc._lock:
                         svc._cancel_count_window.append(time.time())
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error("[OrderChaseService] 平台撤单失败: %s %s", order_id, e)
                     return False
             with svc._lock:
@@ -51,7 +62,7 @@ class OrderChaseService:
                 order['updated_at'] = datetime.now(CHINA_TZ)
                 svc._stats['cancelled_orders'] += 1
             return True
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[OrderChaseService] Cancel order error: %s", e)
             return False
 
@@ -70,8 +81,8 @@ class OrderChaseService:
                 else:
                     logging.warning("[R27-P0-RC-04] cancel_all_pending: 撤单失败 %s", oid)
             if cancelled > 0:
-                logging.info("[R27-P0-RC-04] cancel_all_pending: 撤销%d/%d笔挂单", cancelled, len(pending_ids))
-        except Exception as e:
+                logging.info("[R27-P0-RC-04] cancel_all_pending: 撤销%d/%d笔挂�?, cancelled, len(pending_ids))
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[R27-P0-RC-04] cancel_all_pending异常: %s", e)
         return cancelled
 
@@ -116,7 +127,7 @@ class OrderChaseService:
                         result['errors'].append(f"close_failed:{oid}:{close_result.error_code}")
             logging.critical("[R22-P0-EC-01] emergency_close_all_positions: caller=%s cancelled=%d closed=%d errors=%d",
                              caller_id, len(result['cancelled']), len(result['closed']), len(result['errors']))
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[R22-P0-EC-01] emergency_close_all_positions error: %s", e)
             result['errors'].append(str(e))
         return result
@@ -127,7 +138,7 @@ class OrderChaseService:
         with svc._lock:
             _existing = svc._orders_by_id.get(_orig_id)
             if _existing and _existing.get('status') in ('SUBMITTED', 'ACCEPTED', 'PARTIAL_FILLED'):
-                logging.info("[R23-ID-03-FIX] chase重试跳过: 订单%s仍处于活跃状态%s",
+                logging.info("[R23-ID-03-FIX] chase重试跳过: 订单%s仍处于活跃状�?s",
                            _orig_id, _existing.get('status'))
                 return
         _filled_volume = original_order.get('filled_volume', 0)
@@ -138,7 +149,7 @@ class OrderChaseService:
                 logging.info("[P1-R9-26] 原订单已完全成交, 无需追单: order=%s filled=%d",
                            original_order.get('order_id', ''), _filled_volume)
                 return
-            logging.info("[P1-R9-26] 原订单部分成交, 追单剩余量: order=%s original=%d filled=%d remaining=%d",
+            logging.info("[P1-R9-26] 原订单部分成�? 追单剩余�? order=%s original=%d filled=%d remaining=%d",
                         original_order.get('order_id', ''), _original_volume, _filled_volume, _remaining_volume)
         else:
             _remaining_volume = _original_volume
@@ -185,6 +196,16 @@ class OrderChaseService:
             logging.warning("[OrderChaseService] 追单失败: %s retry=%d error=%s", instrument_id, retry_count, new_order_id.error_code if new_order_id else 'unknown')
 
     def _plan_volume_split(self, volume, price, direction, bids, asks, signal_strength):
+        try:
+            from ali2026v3_trading.order.order_split_models import SmartOrderSplitter
+            splitter = SmartOrderSplitter()
+            result = splitter.split(volume, price, direction, strategy='EQUAL')
+            if result and len(result) > 1:
+                return result
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
+            pass
         svc = self._provider
         split_threshold = getattr(svc, '_split_volume_threshold', 5)
         if volume <= split_threshold or not (bids or asks):

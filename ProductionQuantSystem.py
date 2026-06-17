@@ -23,28 +23,30 @@ import argparse
 import sys
 from typing import Any, Dict, List, Optional
 
-from .serialization_utils import json_dumps, json_loads, json_default_serializer
+from .infra.serialization_utils import json_dumps, json_loads, json_default_serializer
 
 try:
-    from .quant_infra import NumpyRingBuffer
-    from .quant_platform import ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor
-    from .quant_core import (
-        MultiPeriodTrendScorer, IVSurfacePCA, AdaptiveHMM,
-        VolatilityRegimeFilter, CointegrationScanner, SurvivalAnalyzer,
+    from .data.quant_infra import NumpyRingBuffer
+    from .data.quant_platform import ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor
+    from .data.quant_trend_scorer import MultiPeriodTrendScorer
+    from .data.quant_volatility import IVSurfacePCA, VolatilityRegimeFilter
+    from .data.quant_hmm import AdaptiveHMM
+    from .data.quant_cointegration import CointegrationScanner, SurvivalAnalyzer
+    from .data.quant_services import (
+        LightweightPersistence, HotConfigManager, numba_helper, HAS_NUMBA,
     )
-    from .quant_services import (
-        LightweightPersistence, HotConfigManager, SingletonManager, numba_helper, HAS_NUMBA,
-    )
+    from .infra.singleton_registry import SingletonRegistry
 except ImportError:
-    from quant_infra import NumpyRingBuffer
-    from quant_platform import ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor
-    from quant_core import (
-        MultiPeriodTrendScorer, IVSurfacePCA, AdaptiveHMM,
-        VolatilityRegimeFilter, CointegrationScanner, SurvivalAnalyzer,
+    from data.quant_infra import NumpyRingBuffer
+    from data.quant_platform import ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor
+    from data.quant_trend_scorer import MultiPeriodTrendScorer
+    from data.quant_volatility import IVSurfacePCA, VolatilityRegimeFilter
+    from data.quant_hmm import AdaptiveHMM
+    from data.quant_cointegration import CointegrationScanner, SurvivalAnalyzer
+    from data.quant_services import (
+        LightweightPersistence, HotConfigManager, numba_helper, HAS_NUMBA,
     )
-    from quant_services import (
-        LightweightPersistence, HotConfigManager, SingletonManager, numba_helper, HAS_NUMBA,
-    )
+    from infra.singleton_registry import SingletonRegistry
 from collections import deque
 
 
@@ -56,16 +58,17 @@ class ProductionQuantSystem:
         # R13-P2-DEAD-04修复: 添加shutdown标志
         self._shutdown_requested: bool = False
 
-        # ✅ 集成健康检查API（L-P1-2）
+        # P1-01修复: 统一健康检查入口到HealthCheckAggregator
         try:
-            from ali2026v3_trading.health_check_api import HealthCheckAPI, StructuredJsonlLogger
+            from ali2026v3_trading.infra.health_monitor import HealthCheckAPI
+            from ali2026v3_trading.infra.health_monitor import HealthCheckAggregator
             self.health_check_api = HealthCheckAPI(config=cfg)
-            self.structured_logger = StructuredJsonlLogger(log_dir=cfg.get('log_dir', 'logs'))
-            logging.info("[ProductionQuantSystem] 健康检查API和结构化日志已集成")
-        except Exception as e:
-            logging.warning("[ProductionQuantSystem] 健康检查API集成失败: %s", e)
+            self.health_check_aggregator = HealthCheckAggregator
+            logging.info("[ProductionQuantSystem] 健康检查API和Aggregator已集成")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[ProductionQuantSystem] 健康检查集成失败: %s", e)
             self.health_check_api = None
-            self.structured_logger = None
+            self.health_check_aggregator = None
 
         # R24-P2-IV-08修复: 验证config中关键数值参数的合理性
         _adx_period = cfg.get('adx_period', 14)
@@ -144,7 +147,7 @@ class ProductionQuantSystem:
         self._initialized = False
         self._symbols: List[str] = []
         self._weak_self: Optional[weakref.ref] = None
-        self._singleton_mgr = SingletonManager.get_instance()
+        self._singleton_mgr = SingletonRegistry  # P1-19修复: 迁移到SingletonRegistry
         self._crm = None
         self._imbalance_window = cfg.get('imbalance_window', 20)
         self._signed_volume_history: deque = deque(maxlen=self._imbalance_window)
@@ -157,7 +160,7 @@ class ProductionQuantSystem:
                 self.coint_scanner.add_symbol(sym)
         self._initialized = True
         self._weak_self = weakref.ref(self)
-        self._singleton_mgr.register('quant_system', self, 'shutdown')
+        self._singleton_mgr.register_singleton('quant_system', self, self.shutdown)  # P1-19修复: SingletonRegistry
         if self.hot_config._config_path:
             self.hot_config.start_watching()
         numba_helper.warmup()
@@ -176,35 +179,35 @@ class ProductionQuantSystem:
         trend_result = {}
         try:
             trend_result = self.trend_scorer.update(high, low, close)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[R27-P0-DR-04] trend_scorer异常隔离: %s", e)
         vol_result = {}
         try:
             vol_result = self.vol_filter.update(return_value)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[R27-P0-DR-04] vol_filter异常隔离: %s", e)
         hmm_result = {}
         try:
             hmm_result = self.hmm.update(return_value)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[R27-P0-DR-04] hmm异常隔离: %s", e)
         iv_result = {}
         try:
             iv_result = self.iv_pca.update(iv_surface) if iv_surface else {}
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[R27-P0-DR-04] iv_pca异常隔离: %s", e)
         try:
             self.coint_scanner.update_price(symbol, close)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[R27-P0-DR-04] coint_scanner异常隔离: %s", e)
         try:
             completed_bar = self.tick_aggregator.update_tick(close, cum_volume, timestamp_ms)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             completed_bar = None
             logging.warning("[R27-P0-DR-04] tick_aggregator异常隔离: %s", e)
         try:
             self.hmm.run_em_if_needed()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[R27-P0-DR-04] hmm EM异常隔离: %s", e)
 
         if self._last_close is not None and cum_volume > 0:
@@ -243,7 +246,7 @@ class ProductionQuantSystem:
                     imbalance=imbalance,
                 )
                 break  # 成功则跳出重试循环
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 if _crm_attempt < _crm_max_retries - 1:
                     logging.warning("[R10-P1-10] CRM update失败(第%d次), 将重试: %s", _crm_attempt + 1, e)
                 else:
@@ -265,7 +268,7 @@ class ProductionQuantSystem:
                 self.health_check_api.update_component_status("data_feeds", "ok")
                 self.health_check_api.update_component_status("signal_generator", "ok")
                 self.health_check_api.update_last_signal_time()
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug("[ProductionQuantSystem] HealthCheckAPI update error: %s", e)
 
         # ✅ 集成结构化JSONL日志（L-P1-1）
@@ -282,7 +285,7 @@ class ProductionQuantSystem:
                     "filtered": False,
                     "filter_reason": "",
                 })
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug("[ProductionQuantSystem] StructuredLogger error: %s", e)
 
         return {
@@ -305,7 +308,7 @@ class ProductionQuantSystem:
             analysis_result: update_tick()返回的分析结果字典
         """
         try:
-            from ali2026v3_trading.event_bus import get_global_event_bus
+            from ali2026v3_trading.infra.event_bus import get_global_event_bus
             _bus = get_global_event_bus()
             if _bus is None or getattr(_bus, '_shutdown', False):
                 return
@@ -319,7 +322,7 @@ class ProductionQuantSystem:
             vol = analysis_result.get('volatility_regime', {})
             if isinstance(vol, dict) and vol.get('regime'):
                 _bus.publish('pqs.vol_regime_changed', vol)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[R30-ARCH-02] PQS EventBus发布失败: %s", e)
 
     def get_latest_analysis(self) -> Dict[str, Any]:
@@ -383,7 +386,7 @@ class ProductionQuantSystem:
                 'persistence': 'LightweightPersistence',
                 'hot_config': 'HotConfigManager',
                 'numba_jit': 'NumbaJITHelper',
-                'singleton_mgr': 'SingletonManager',
+                'singleton_mgr': 'SingletonManager/SingletonRegistry',
             },
         }
 
@@ -392,7 +395,7 @@ class ProductionQuantSystem:
             try:
                 health_status = self.health_check_api.get_health_status()
                 status['health_check_api'] = health_status
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 status['health_check_api'] = {'error': str(e)}
 
         return status
@@ -410,12 +413,12 @@ class ProductionQuantSystem:
             if _svc is not None and hasattr(_svc, 'stop'):
                 try:
                     _svc.stop()
-                except Exception as _stop_err:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _stop_err:
                     logging.warning("[R22-RES-04] %s.stop()失败: %s", _attr, _stop_err)
             elif _svc is not None and hasattr(_svc, 'close'):
                 try:
                     _svc.close()
-                except Exception as _close_err:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as _close_err:
                     logging.warning("[R22-RES-04] %s.close()失败: %s", _attr, _close_err)
         # R22-RES-04-残留修复: 清理health_check_api和structured_logger
         if hasattr(self, 'health_check_api') and self.health_check_api is not None:
@@ -423,23 +426,23 @@ class ProductionQuantSystem:
                 if hasattr(self.health_check_api, 'stop_push'):
                     self.health_check_api.stop_push()
                     logging.debug("[R22-RES-04-修复] health_check_api.stop_push()已调用")
-            except Exception as _hca_err:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _hca_err:
                 logging.warning("[R22-RES-04] health_check_api.stop_push()失败: %s", _hca_err)
         if hasattr(self, 'structured_logger') and self.structured_logger is not None:
             try:
                 if hasattr(self.structured_logger, 'close'):
                     self.structured_logger.close()
                     logging.debug("[R22-RES-04-修复] structured_logger.close()已调用")
-            except Exception as _sl_err:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as _sl_err:
                 logging.warning("[R22-RES-04] structured_logger.close()失败: %s", _sl_err)
         # R33-P0-03修复: EventBus线程池生命周期管理 — 在系统shutdown时主动关闭
         try:
-            from ali2026v3_trading.event_bus import get_global_event_bus
+            from ali2026v3_trading.infra.event_bus import get_global_event_bus
             _eb = get_global_event_bus()
             if hasattr(_eb, 'shutdown'):
                 _eb.shutdown(wait=False)
                 logging.debug("[R33-P0-03] event_bus.shutdown()已调用")
-        except Exception as _eb_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _eb_err:
             logging.warning("[R33-P0-03] event_bus.shutdown()失败: %s", _eb_err)
         logging.info("[ProductionQuantSystem] Shutdown complete")
 
@@ -470,7 +473,8 @@ def shutdown_quant_system() -> None:
             _quant_system.shutdown()
             _quant_system = None
             _quant_system_ref = None
-    SingletonManager.get_instance().shutdown_all()
+    SingletonRegistry.cleanup_all_singletons()  # P1-19修复: 迁移到SingletonRegistry
+    SingletonRegistry.reset_all()
     gc.collect()
 
 
@@ -480,9 +484,9 @@ def shutdown_quant_system() -> None:
 
 def _load_config_from_file(config_path: str) -> Dict[str, Any]:
     """从JSON文件加载配置"""
-    import json
+    from ali2026v3_trading.infra.serialization_utils import json_loads
     with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+        return json_loads(f.read())  # R5-1
 
 
 def _build_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
@@ -491,15 +495,15 @@ def _build_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
     # 1. 尝试从统一配置中心加载
     try:
-        from ali2026v3_trading.config_service import ConfigService
-        cs = ConfigService()
+        from ali2026v3_trading.config.config_service import get_config_service
+        cs = get_config_service()
         cfg['log_dir'] = cs.paths.log_dir
         cfg['exchange'] = cs.exchanges.exchanges[0] if cs.exchanges.exchanges else 'DCE'
         cfg['persistence_dir'] = cs.paths.db_path
         cfg['hot_config_path'] = str(cs.paths.config_dir / "hot_config.json")
         cfg['snapshot_interval_ms'] = cs.trading.tick_update_interval_ms
         cfg['bar_interval_sec'] = 300
-    except Exception as e:
+    except (ImportError, ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.debug("[ProductionQuantSystem] ConfigService加载失败: %s", e)
 
     # 2. 从配置文件覆盖
@@ -508,7 +512,7 @@ def _build_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
             file_cfg = _load_config_from_file(args.config)
             cfg.update(file_cfg)
             logging.info("[ProductionQuantSystem] 配置文件已加载: %s", args.config)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[ProductionQuantSystem] 配置文件加载失败: %s", e)
 
     # 3. 命令行参数直接覆盖
@@ -560,12 +564,16 @@ def main() -> int:
         os.environ.setdefault('PARAM_VERSION', args.param_version)
         logging.info("[ProductionQuantSystem] --param-version=%s 已设置到PARAM_VERSION环境变量", args.param_version)
 
-    # 初始化日志
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s - %(message)s',  # [R22-P2-TIME04]
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
+    # P2-05修复: 委托统一日志入口, 不再独立basicConfig
+    try:
+        from ali2026v3_trading.config.config_logging import setup_logging
+        setup_logging()
+    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s - %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
 
     # 构建配置
     cfg = _build_config_from_args(args)
@@ -627,7 +635,7 @@ def main() -> int:
 
     except KeyboardInterrupt:
         logging.info("[ProductionQuantSystem] 收到中断信号，正在优雅关闭...")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.error("[ProductionQuantSystem] 运行时错误: %s", e, exc_info=True)
         return 1
     finally:

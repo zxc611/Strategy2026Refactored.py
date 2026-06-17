@@ -1,6 +1,0 @@
-# archive目录：归档的审计脚本和基线数据，不作为可执行代码
-# 此目录下的脚本仅作为审计证据保留，不应被import或执行
-*
-!.gitignore
-!__init__.py
-!README.md

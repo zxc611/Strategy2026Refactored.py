@@ -1,10 +1,13 @@
+# [M1-46] ����ִ����
+# MODULE_ID: M1-134
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
-OrderExecutor — Phase1-Sprint1: send_order三阶段流水线拆解
-从order_service.py的OrderService.send_order(329行)拆分为:
-  1. _pre_send_checks: 前置校验(断路器+胖手指+TOCTOU+自成交+幂等去重)
-  2. _execute_platform_insert: 平台下单(构建参数+超时调用+结果归一化)
-  3. _post_send_persist: 后置持久化(WAL写入+幂等记录+状态更新)
-原OrderService.send_order改为编排器(≤30行)，委托到OrderExecutor
+OrderExecutor �?Phase1-Sprint1: send_order三阶段流水线拆解
+从order_service.py的OrderService.send_order(329�?拆分�?
+  1. _pre_send_checks: 前置校验(断路�?胖手�?TOCTOU+自成�?幂等去重)
+  2. _execute_platform_insert: 平台下单(构建参数+超时调用+结果归一�?
+  3. _post_send_persist: 后置持久�?WAL写入+幂等记录+状态更�?
+原OrderService.send_order改为编排�?�?0�?，委托到OrderExecutor
 """
 from __future__ import annotations
 
@@ -17,10 +20,11 @@ from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from ali2026v3_trading.order.order_base import OrderResult
 from ali2026v3_trading.infra.shared_utils import TradeAction, TradeDirection, VALID_TRADE_DIRECTIONS
 
 try:
-    from ali2026v3_trading.causal_chain_utils import CyclicDependencyGuard
+    from ali2026v3_trading.strategy_judgment.causal_chain_utils import CyclicDependencyGuard
     _HAS_CAUSAL_CHAIN = True
 except ImportError:
     _HAS_CAUSAL_CHAIN = False
@@ -54,38 +58,20 @@ class OrderContext:
     _cyclic_guard: Any = None
 
 
-@dataclass(slots=True)
-class OrderResult:
-    order_id: Optional[str]
-    success: bool
-    error_code: str = ''
-    error_message: str = ''
-
-    @staticmethod
-    def ok(order_id: str) -> 'OrderResult':
-        return OrderResult(order_id=order_id, success=True)
-
-    @staticmethod
-    def fail(error_code: str, error_message: str) -> 'OrderResult':
-        return OrderResult(order_id=None, success=False, error_code=error_code, error_message=error_message)
-
-    def __bool__(self) -> bool:
-        return self.success
-
 
 class OrderExecutor:
-    """send_order三阶段流水线执行器
+    """send_order三阶段流水线执行�?
 
-    阶段1 _pre_send_checks: 断路器+胖手指+TOCTOU+自成交+幂等去重 (~80行)
-    阶段2 _execute_platform_insert: 构建参数+超时调用+结果归一化 (~60行)
-    阶段3 _post_send_persist: WAL写入+幂等记录+状态更新 (~50行)
+    阶段1 _pre_send_checks: 断路�?胖手�?TOCTOU+自成�?幂等去重 (~80�?
+    阶段2 _execute_platform_insert: 构建参数+超时调用+结果归一�?(~60�?
+    阶段3 _post_send_persist: WAL写入+幂等记录+状态更�?(~50�?
     """
 
     def __init__(self, order_service: Any):
         self._svc = order_service
 
     def execute(self, ctx: OrderContext) -> OrderResult:
-        """编排器: 三阶段流水线，≤30行，圈复杂度≤5"""
+        """编排�? 三阶段流水线，≤30行，圈复杂度�?"""
         ctx = self._pre_send_checks(ctx)
         if ctx.rejected:
             return OrderResult.fail(ctx.reject_code, ctx.reject_message)
@@ -95,7 +81,7 @@ class OrderExecutor:
         return self._post_send_persist(ctx)
 
     def _pre_send_checks(self, ctx: OrderContext) -> OrderContext:
-        """阶段1: 前置校验 — 断路器+胖手指+TOCTOU+自成交+幂等去重"""
+        """阶段1: 前置校验 �?断路�?胖手�?TOCTOU+自成�?幂等去重"""
         svc = self._svc
         _op_type = 'close' if ctx.action in ('CLOSE', 'close', 'SELL', 'sell') else 'open'
         _timeout = svc._operation_timeouts.get(_op_type, svc._operation_timeouts['default'])
@@ -104,21 +90,21 @@ class OrderExecutor:
             _elapsed = time.time() - svc._circuit_breaker_opened_at if svc._circuit_breaker_opened_at > 0 else 0
             if _elapsed >= svc._circuit_breaker_auto_recovery_sec:
                 svc._circuit_breaker_half_open = True
-                logging.info("[R22-P0-CB-02] 断路器超时自动恢复(半开): 已过%.0f秒>=%.0f秒", _elapsed, svc._circuit_breaker_auto_recovery_sec)
+                logging.info("[R22-P0-CB-02] 断路器超时自动恢�?半开): 已过%.0f�?=%.0f�?, _elapsed, svc._circuit_breaker_auto_recovery_sec)
             elif svc._circuit_breaker_half_open:
-                logging.info("[R22-P0-CB-02] 断路器半开状态, 允许探测订单: %s %s", ctx.instrument_id, ctx.direction)
+                logging.info("[R22-P0-CB-02] 断路器半开状�? 允许探测订单: %s %s", ctx.instrument_id, ctx.direction)
             else:
-                logging.critical("[OrderService] 断路器已触发，拒绝下单: consecutive_failures=%d", svc._consecutive_failures)
+                logging.critical("[OrderService] 断路器已触发，拒绝下�? consecutive_failures=%d", svc._consecutive_failures)
                 ctx.rejected = True
                 ctx.reject_code = 'circuit_breaker'
-                ctx.reject_message = f'断路器触发，连续{svc._consecutive_failures}次失败'
+                ctx.reject_message = f'断路器触发，连续{svc._consecutive_failures}次失�?
                 return ctx
 
         if _HAS_CAUSAL_CHAIN:
             ctx._cyclic_guard = CyclicDependencyGuard.get_instance()
             if ctx._cyclic_guard and not ctx._cyclic_guard.enter("order_send_order"):
                 logging.warning("[CC-04/CC-11] Cyclic call detected in send_order: %s", ctx.instrument_id)
-                ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'cyclic_call', '循环依赖检测'
+                ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'cyclic_call', '循环依赖检�?
                 return ctx
 
         if ctx.direction not in VALID_TRADE_DIRECTIONS:
@@ -133,7 +119,7 @@ class OrderExecutor:
         if _ref_price is not None and _ref_price > 0:
             _price_deviation = abs(ctx.price - _ref_price) / _ref_price
             if _price_deviation > 0.03:
-                logging.critical("[R14-P0-BIZ-09] 胖手指防护触发: %s deviation=%.2f%%", ctx.instrument_id, _price_deviation * 100)
+                logging.critical("[R14-P0-BIZ-09] 胖手指防护触�? %s deviation=%.2f%%", ctx.instrument_id, _price_deviation * 100)
                 ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'fat_finger', f'价格偏离{_price_deviation:.2%}>涨跌停板3.00%'
                 return ctx
 
@@ -176,14 +162,16 @@ class OrderExecutor:
                         and _o.get('action') == TradeAction.OPEN
                         and _o.get('status') in ('SUBMITTED', 'PARTIAL')):
                     svc._self_trade_bans[_opp_key] = _now + svc._self_trade_ban_minutes * 60.0
-                    logging.warning("[OrderService] 自成交风险检测: key=%s %.1f分钟", _opp_key, svc._self_trade_ban_minutes)
+                    logging.warning("[OrderService] 自成交风险检�? key=%s %.1f分钟", _opp_key, svc._self_trade_ban_minutes)
                     try:
                         from ali2026v3_trading.infra.event_bus import EventBus
                         EventBus.get_instance().publish("self_trade_detected", {
                             "instrument_id": ctx.instrument_id, "direction": ctx.direction,
                             "opposite_order_id": _oid, "ban_minutes": svc._self_trade_ban_minutes,
                         })
-                    except Exception:
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                        logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                        pass
                         pass
                     break
 
@@ -201,7 +189,7 @@ class OrderExecutor:
             if _epc == -2:
                 try:
                     _epc = svc._get_position_count(ctx.instrument_id)
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                     _epc = -1
             if _epc >= 0:
                 try:
@@ -210,14 +198,14 @@ class OrderExecutor:
                         logging.warning("[R26-P0-TO-04] TOCTOU阻断: %s expected=%d actual=%d", ctx.instrument_id, _epc, _current)
                         ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'toctou_position_changed', f'仓位变化: expected={_epc} actual={_current}'
                         return ctx
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, AttributeError) as e:
                     ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'position_query_error', f'仓位查询异常: {e}'
                     return ctx
 
         return ctx
 
     def _execute_platform_insert(self, ctx: OrderContext) -> OrderContext:
-        """阶段2: 平台下单 — 构建参数+超时调用+结果归一化"""
+        """阶段2: 平台下单 �?构建参数+超时调用+结果归一�?""
         svc = self._svc
         try:
             ctx.order_id = svc._generate_order_id()
@@ -317,7 +305,7 @@ class OrderExecutor:
                     svc._append_order_state(ctx.order_id, 'TIMEOUT', ctx.order)
                     ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'platform_timeout', f'平台下单超时: {e}'
                     return ctx
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error("[OrderService] 平台下单失败: %s %s", ctx.instrument_id, e)
                     svc._wal_write(ctx.order_id, 'FAILED', ctx.order)
                     svc._append_order_state(ctx.order_id, 'FAILED', ctx.order)
@@ -334,13 +322,15 @@ class OrderExecutor:
             else:
                 logging.info("[OrderService] 模拟下单: %s %s %s %d@%.2f", ctx.order_id, ctx.instrument_id[:3] + '***', ctx.direction[:1], int(ctx.volume), ctx.price)
 
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[OrderService] Send order error: %s", e)
             with svc._lock:
                 try:
                     if ctx.order_id and ctx.order_id in svc._orders_by_id:
                         svc._remove_order_and_idempotent_key(ctx.order_id, svc._orders_by_id.get(ctx.order_id, {}))
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                    pass
                     pass
                 svc._stats['failed_orders'] += 1
                 svc._consecutive_failures += 1
@@ -350,7 +340,9 @@ class OrderExecutor:
                 if ctx.order_id:
                     svc._wal_write(ctx.order_id, 'FAILED', {'order_id': ctx.order_id, 'instrument_id': ctx.instrument_id, 'direction': ctx.direction, 'volume': ctx.volume, 'price': ctx.price})
                     svc._append_order_state(ctx.order_id, 'FAILED', {'order_id': ctx.order_id, 'status': 'FAILED'})
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
             ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'send_error', f'下单异常: {e}'
             return ctx
@@ -358,7 +350,7 @@ class OrderExecutor:
         return ctx
 
     def _post_send_persist(self, ctx: OrderContext) -> OrderResult:
-        """阶段3: 后置持久化 — EventBus通知+延迟打点+返回结果"""
+        """阶段3: 后置持久�?�?EventBus通知+延迟打点+返回结果"""
         svc = self._svc
         try:
             from ali2026v3_trading.infra.event_bus import get_global_event_bus
@@ -369,7 +361,9 @@ class OrderExecutor:
                     'direction': ctx.direction, 'action': ctx.action,
                     'volume': ctx.volume, 'price': ctx.price,
                 }, async_mode=True)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
 
         _delay_ms = (time.perf_counter() - ctx._order_submit_start_ts) * 1000.0
@@ -402,14 +396,14 @@ class OrderExecutor:
             logging.error("[OrderService] R24-P0-IV-05: send_order_split direction必须是BUY/SELL, 实际=%s, 订单被拒: %s", direction, instrument_id)
             return []
         if not signal_id:
-            logging.warning("[OrderService] R24-P1-TR-08: send_order_split signal_id为空, 订单无法追溯到信号: %s %s", instrument_id, direction)
+            logging.warning("[OrderService] R24-P1-TR-08: send_order_split signal_id为空, 订单无法追溯到信�? %s %s", instrument_id, direction)
         split_threshold = getattr(svc, '_split_volume_threshold', 5)
         if volume > split_threshold and (bids or asks):
             split_orders = self._plan_volume_split(volume, price, direction, bids, asks, signal_strength)
             if split_orders:
                 violations = check_self_trade_across_splits(split_orders)
                 if violations:
-                    logging.warning("[OrderService] SOS-FAKE-01修复: 拆单自成交检测发现%d个违规, 降级为单笔下单", len(violations))
+                    logging.warning("[OrderService] SOS-FAKE-01修复: 拆单自成交检测发�?d个违�? 降级为单笔下�?, len(violations))
                 else:
                     executed_ids = []
                     for i, sub in enumerate(split_orders):
@@ -426,12 +420,12 @@ class OrderExecutor:
                         if result and result.order_id:
                             executed_ids.append(result.order_id)
                         else:
-                            logging.warning("[OrderService] SOS-FAKE-01修复: 拆单第%d笔失败, 已执行%d笔", i + 1, len(executed_ids))
+                            logging.warning("[OrderService] SOS-FAKE-01修复: 拆单�?d笔失�? 已执�?d�?, i + 1, len(executed_ids))
                             break
                     if executed_ids:
-                        logging.info("[OrderService] SOS-FAKE-01修复: 拆单执行完成 %d笔/%d笔 instrument=%s", len(executed_ids), len(split_orders), instrument_id)
+                        logging.info("[OrderService] SOS-FAKE-01修复: 拆单执行完成 %d�?%d�?instrument=%s", len(executed_ids), len(split_orders), instrument_id)
                         return executed_ids
-                    logging.warning("[OrderService] SOS-FAKE-01修复: 拆单全部失败, 降级为单笔下单")
+                    logging.warning("[OrderService] SOS-FAKE-01修复: 拆单全部失败, 降级为单笔下�?)
         order_id = svc.send_order(
             instrument_id=instrument_id,
             volume=volume,
@@ -455,30 +449,34 @@ class OrderExecutor:
         asks: Optional[List],
         signal_strength: float = 1.0,
     ) -> List[Dict[str, Any]]:
-        from ali2026v3_trading.infra.shared_utils import TradeDirection
+        # P2-04修复: 委托 SmartOrderSplitter 统一拆单逻辑
+        from ali2026v3_trading.order.order_split_models import SmartOrderSplitter, OrderSplitStrategy
         try:
-            lob = asks if direction == TradeDirection.BUY else bids
-            if not lob or len(lob) == 0:
+            splitter = SmartOrderSplitter(split_threshold=1, strategy=OrderSplitStrategy.AGGRESSIVE)
+            result = splitter.plan_order_split(
+                instrument_id='', volume=volume, direction=direction,
+                signal_strength=signal_strength, bids=bids, asks=asks,
+                strategy=OrderSplitStrategy.AGGRESSIVE,
+            )
+            # 转换 PlanOrderSplitResult -> List[Dict]
+            if not result or not result.child_orders:
                 return []
-            remaining = volume
             splits = []
-            for level in lob:
-                level_price = level[0] if isinstance(level, (list, tuple)) and len(level) >= 2 else price
-                level_vol = level[1] if isinstance(level, (list, tuple)) and len(level) >= 2 else 0
-                if not isinstance(level_price, (int, float)) or not isinstance(level_vol, (int, float)):
-                    continue
-                if remaining <= 0:
-                    break
-                take_vol = min(remaining, level_vol * signal_strength)
-                if take_vol >= 1:
-                    splits.append({'price': level_price, 'volume': int(take_vol), 'direction': direction})
-                    remaining -= int(take_vol)
-            if remaining > 0 and splits:
-                splits[-1]['volume'] += int(remaining)
-            elif remaining > 0:
-                splits.append({'price': price, 'volume': int(remaining), 'direction': direction})
+            for child in result.child_orders:
+                if isinstance(child, dict):
+                    splits.append({
+                        'price': child.get('price', price),
+                        'volume': int(child.get('volume', 0)),
+                        'direction': direction,
+                    })
+                else:
+                    splits.append({
+                        'price': getattr(child, 'price', price),
+                        'volume': int(getattr(child, 'volume', 0)),
+                        'direction': direction,
+                    })
             return splits if len(splits) > 1 else []
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[OrderService] SOS-FAKE-01修复: 拆单规划异常: %s", e)
             return []
 
@@ -537,13 +535,13 @@ class OrderExecutor:
                 )
                 if has_var_keyword:
                     svc._platform_insert_order_params = set()
-                    logging.info("[OrderService] 平台下单API含*args/**kwargs，跳过参数过滤: %s", list(sig.parameters.keys()))
+                    logging.info("[OrderService] 平台下单API�?args/**kwargs，跳过参数过�? %s", list(sig.parameters.keys()))
                 else:
                     svc._platform_insert_order_params = set(sig.parameters.keys())
                     logging.info("[OrderService] 平台下单API参数签名: %s", list(sig.parameters.keys()))
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[OrderService] 无法检测平台API签名: %s", e)
-        logging.info("[OrderService] 平台下单/撤单API已绑定")
+        logging.info("[OrderService] 平台下单/撤单API已绑�?)
 
     def _build_platform_insert_params(
         self,

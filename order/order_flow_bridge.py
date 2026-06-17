@@ -1,3 +1,5 @@
+# [M1-43] ������ʵʱ�Žӷ���
+# MODULE_ID: M1-136
 import time
 import logging
 import math
@@ -17,13 +19,13 @@ from ali2026v3_trading.order.order_flow_analyzer import (
 
 
 class OrderFlowBridge:
-    """订单流实时桥接服务
+    """订单流实时桥接服�?
 
-    将 MicrostructureAnalyzer 封装为策略可用的实时服务：
-    1. 从tick热路径接收成交数据（on_tick_feed）
-    2. 从tick热路径接收订单簿快照（on_depth_feed）
-    3. 提供实时订单流方向一致性查询（get_flow_consistency）
-    4. 提供综合评估查询（get_composite_assessment）
+    �?MicrostructureAnalyzer 封装为策略可用的实时服务�?
+    1. 从tick热路径接收成交数据（on_tick_feed�?
+    2. 从tick热路径接收订单簿快照（on_depth_feed�?
+    3. 提供实时订单流方向一致性查询（get_flow_consistency�?
+    4. 提供综合评估查询（get_composite_assessment�?
     5. 缓存计算结果，避免热路径重复计算
     """
 
@@ -47,8 +49,8 @@ class OrderFlowBridge:
         try:
             self._hft_volume_flow = VolumeWeightedOrderFlow()
             self._hft_arbitrage = MicrostructureArbitrageDetector()
-            logging.info("[OrderFlowBridge] HFT增强已集成(成交量加权+微观套利)")
-        except Exception as e:
+            logging.info("[OrderFlowBridge] HFT增强已集�?成交量加�?微观套利)")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[OrderFlowBridge] HFT增强集成失败: %s", e)
 
         self._stats = {
@@ -60,7 +62,7 @@ class OrderFlowBridge:
             'cache_misses': 0,
         }
 
-        # MS-02: 深度质量统计（REAL vs INFERRED）
+        # MS-02: 深度质量统计（REAL vs INFERRED�?
         self._depth_quality = {'real': 0, 'inferred': 0}
         self._last_inferred_warning = 0.0
 
@@ -112,13 +114,13 @@ class OrderFlowBridge:
             if self._hft_volume_flow:
                 try:
                     self._hft_volume_flow.on_trade(product, price, delta_vol, direction)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.debug("[OrderFlowBridge] HFT on_trade error: %s", e)
 
             if self._hft_arbitrage:
                 try:
                     self._hft_arbitrage.update_price(instrument_id, price, product)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.debug("[OrderFlowBridge] HFT update_price error: %s", e)
 
         with self._lock:
@@ -252,7 +254,7 @@ class OrderFlowBridge:
     def _feed_depth_from_tick(self, product: str, bid_price: float,
                                ask_price: float, timestamp: float,
                                delta_vol: int = 0, direction: str = '') -> None:
-        # MS-02: 标记INFERRED深度（从tick推断，非真实L2数据）
+        # MS-02: 标记INFERRED深度（从tick推断，非真实L2数据�?
         depth_vol = max(delta_vol, self.DEFAULT_DEPTH_VOLUME) if delta_vol > 0 else self.DEFAULT_DEPTH_VOLUME
         if direction == 'buy':
             ask_vol = depth_vol
@@ -271,10 +273,10 @@ class OrderFlowBridge:
         )
         self._depth_quality['inferred'] += 1
 
-        # MS-02: 每60秒输出一次INFERRED深度使用告警
+        # MS-02: �?0秒输出一次INFERRED深度使用告警
         if timestamp - self._last_inferred_warning >= 60.0:
             logging.warning(
-                "[MS-02] 使用伪造深度(INFERRED) - 非真实L2数据: real=%d inferred=%d",
+                "[MS-02] 使用伪造深�?INFERRED) - 非真实L2数据: real=%d inferred=%d",
                 self._depth_quality['real'], self._depth_quality['inferred'],
             )
             self._last_inferred_warning = timestamp
@@ -286,7 +288,7 @@ class OrderFlowBridge:
         try:
             from ali2026v3_trading.infra.shared_utils import extract_product_code
             product = extract_product_code(instrument_id)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             product = ''
 
         if product:
@@ -305,7 +307,7 @@ class OrderFlowBridge:
         if self._hft_volume_flow:
             try:
                 return self._hft_volume_flow.calc_volume_weighted_imbalance(product)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug("[OrderFlowBridge] calc_volume_weighted_imbalance error: %s", e)
         return 0.0
 
@@ -313,7 +315,7 @@ class OrderFlowBridge:
         if self._hft_volume_flow:
             try:
                 return self._hft_volume_flow.calc_smart_money_flow(product)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug("[OrderFlowBridge] calc_smart_money_flow error: %s", e)
         return {'smart_buy': 0.0, 'smart_sell': 0.0, 'net_flow': 0.0, 'signal': 'neutral'}
 
@@ -331,20 +333,20 @@ class OrderFlowBridge:
                         'entry_price': opp.entry_price,
                         'fair_value': opp.fair_value,
                     }
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug("[OrderFlowBridge] detect_arbitrage error: %s", e)
         return None
 
     def get_liquidity_consumption(self) -> Dict[str, Any]:
-        """R33-P2-6: 获取流动性消耗统计"""
+        """R33-P2-6: 获取流动性消耗统�?""
         return self._liquidity_tracker.get_stats()
 
     def check_call_spread(self, calls: Dict[str, float]) -> List[Dict[str, Any]]:
-        """R33-P2-6: 检查看涨期权价差单调性"""
+        """R33-P2-6: 检查看涨期权价差单调�?""
         return self._arbitrage_detector.check_call_spread_monotonicity(calls)
 
     def get_arbitrage_stats(self) -> Dict[str, Any]:
-        """R33-P2-6: 获取套利检测统计"""
+        """R33-P2-6: 获取套利检测统�?""
         return self._arbitrage_detector.get_stats()
 
     def on_fill_event(self, direction: str, price_level: int, timestamp_ms: float = 0.0) -> Dict[str, Any]:
@@ -352,7 +354,7 @@ class OrderFlowBridge:
         return self._sweep_detector.on_fill(direction, price_level, timestamp_ms)
 
     def get_sweep_stats(self) -> Dict[str, Any]:
-        """R33-P2-6: 获取扫单检测统计"""
+        """R33-P2-6: 获取扫单检测统�?""
         return self._sweep_detector.get_stats()
 
 
@@ -499,10 +501,10 @@ class MicrostructureArbitrageDetector:
 
 
 class CrossContractArbitrageDetector:
-    """跨合约套利检测：同标的不同行权价/到期日期权间的相对偏离
+    """跨合约套利检测：同标的不同行权价/到期日期权间的相对偏�?
 
-    原理：同标的期权应满足无套利约束（如call spread单调性）。
-    违反时即存在套利机会。订单簿失衡可辅助确认方向。
+    原理：同标的期权应满足无套利约束（如call spread单调性）�?
+    违反时即存在套利机会。订单簿失衡可辅助确认方向�?
     """
 
     def __init__(self, max_deviation_bps: float = 30.0):
@@ -547,14 +549,14 @@ class OrderDefenseType(Enum):
 
 
 # R35-P2-6标注: SweepDetector已实例化(OrderFlowBridge.__init__),
-# on_fill()通过OrderFlowBridge.on_fill_event()间接调用。
-# 待集成到风控检查链路(目前无主动定时调用)。
+# on_fill()通过OrderFlowBridge.on_fill_event()间接调用�?
+# 待集成到风控检查链�?目前无主动定时调�?�?
 class SweepDetector:
     """扫单行为识别器：检测做市商短时间内多档扫单
 
     原理：如果在detect_window_ms内，同一方向连续成交
     超过sweep_depth_levels个档位，判定为扫单行为，
-    触发防御（暂停该方向挂单、切换IOC模式）。
+    触发防御（暂停该方向挂单、切换IOC模式）�?
     """
 
     def __init__(self, detect_window_ms: float = 500.0,

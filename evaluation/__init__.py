@@ -1,11 +1,8 @@
 from .cascade_judge import CascadeJudge, CascadeReport, GateReport, GateResult, BacktestMetrics, adapt_backtest_result
 
 # NEW-P1-06修复: 引入模块加载状态管理
-try:
-    from ali2026v3_trading.module_load_status import mark_module_loaded, mark_module_failed
-except ImportError:
-    def mark_module_loaded(module_key: str) -> None: pass
-    def mark_module_failed(module_key: str, error: Exception) -> None: pass
+# P1-22: 删除fallback定义，直接从module_load_status导入
+from ali2026v3_trading.infra.module_load_status import mark_module_loaded, mark_module_failed
 
 # CORE-DEPENDENCY: parameter_drift_detector是评判系统的核心组件
 try:

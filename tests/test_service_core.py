@@ -1,3 +1,4 @@
+# MODULE_ID: M2-572
 """
 R17-P0-TEST-05/06/07/08: SignalService/CapitalFlow/OrderService/PositionService核心覆盖
 替换所有hasattr伪测试为真实功能测试，修正方法名
@@ -10,10 +11,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.signal_service import SignalService
-from ali2026v3_trading.order_service import OrderService
-from ali2026v3_trading.position_service import PositionService
-from ali2026v3_trading.config_params import DEFAULT_PARAM_TABLE
+from ali2026v3_trading.signal.signal_service import SignalService
+from ali2026v3_trading.order.order_service import OrderService
+from ali2026v3_trading.position.position_service import PositionService
+from ali2026v3_trading.config.config_params import DEFAULT_PARAM_TABLE
 
 
 class TestSignalService:
@@ -39,6 +40,9 @@ class TestSignalService:
         svc._mode_engine = None
         svc._hft_filter = None
         svc._adaptive_threshold = None
+        svc._stats = {'total_signals': 0, 'filtered_signals': 0, 'plr_filtered': 0, 'mode_filtered': 0, 'cooldown_filtered': 0, 'decision_filtered': 0, 'emitted_signals': 0, 'dedup_filtered': 0, 'last_signal_time': None}
+        from ali2026v3_trading.signal.cooldown_manager import CooldownManager
+        svc._cooldown_mgr = CooldownManager()
         result = svc.generate_signal('', 'BUY', 100.0, 1)
         assert result is None
 
@@ -46,12 +50,17 @@ class TestSignalService:
         svc = SignalService.__new__(SignalService)
         svc._cooldown_times = {}
         svc._cooldown_durations = {}
+        from ali2026v3_trading.signal.cooldown_manager import CooldownManager
+        svc._cooldown_mgr = CooldownManager()
         assert svc._is_in_cooldown('test_key', 60.0) is False
 
     def test_is_in_cooldown_returns_true_after_signal(self):
         svc = SignalService.__new__(SignalService)
         svc._cooldown_times = {'test_key': time.time()}
         svc._cooldown_durations = {}
+        from ali2026v3_trading.signal.cooldown_manager import CooldownManager
+        svc._cooldown_mgr = CooldownManager()
+        svc._cooldown_mgr._cooldown_times = svc._cooldown_times
         assert svc._is_in_cooldown('test_key', 60.0) is True
 
 
@@ -75,7 +84,7 @@ class TestPositionService:
         assert PositionService is not None
 
     def test_tp_sl_ratio_from_state_param(self):
-        from ali2026v3_trading.config_params import get_default_state_param_sets
+        from ali2026v3_trading.config.config_params import get_default_state_param_sets
         states = get_default_state_param_sets()
         assert states['correct_trending']['close_take_profit_ratio'] == 2.5
         assert states['incorrect_reversal']['close_take_profit_ratio'] == 1.3

@@ -1,3 +1,5 @@
+# MODULE_ID: M1-076
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
 Phase3-Sprint8: ParamTableProvider — DEFAULT_PARAM_TABLE解耦
 引入Protocol接口+依赖注入，消除14文件129次全局字典直接引用
@@ -6,7 +8,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import functools
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads
 
 
 @runtime_checkable
@@ -46,52 +50,56 @@ class DefaultParamTableProvider:
     def get_params(self, strategy_name: str) -> Dict[str, Any]:
         with self._lock:
             if self._is_nested:
-                return dict(self._table.get(strategy_name, {}))
+                return dict(dict.get(self._table, strategy_name, {}))
             return dict(self._table)
 
     def get_default(self, key: str) -> Any:
         with self._lock:
             if self._is_nested:
-                for _strategy_params in self._table.values():
-                    if isinstance(_strategy_params, dict) and key in _strategy_params:
-                        return _strategy_params[key]
+                for _strategy_params in dict.values(self._table):
+                    if isinstance(_strategy_params, dict) and dict.__contains__(_strategy_params, key):
+                        return dict.__getitem__(_strategy_params, key)
             else:
-                if key in self._table:
-                    return self._table[key]
+                if dict.__contains__(self._table, key):
+                    return dict.__getitem__(self._table, key)
         return None
 
     def list_strategies(self) -> List[str]:
         with self._lock:
             if self._is_nested:
-                return list(self._table.keys())
+                return list(dict.keys(self._table))
             return [self._DEFAULT_STRATEGY]
 
     def update_param(self, strategy_name: str, key: str, value: Any) -> None:
         with self._lock:
-            if strategy_name not in self._table:
-                self._table[strategy_name] = {}
-            self._table[strategy_name][key] = value
+            if not dict.__contains__(self._table, strategy_name):
+                dict.__setitem__(self._table, strategy_name, {})
+            dict.__getitem__(self._table, strategy_name)[key] = value
 
 
 class CachedParamTableProvider:
-    """带LRU缓存的参数表提供者 — 减少字典查找开销"""
+    """带LRU缓存的参数表提供者 — P1-41修复: 委托到functools.lru_cache统一缓存策略"""
 
     def __init__(self, provider: ParamTableProvider, cache_size: int = 128):
         self._provider = provider
-        self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_size = cache_size
         self._lock = threading.RLock()
+        # P1-41修复: 使用functools.lru_cache替代手动LRU实现
+        @functools.lru_cache(maxsize=cache_size)
+        def _cached_get_params(strategy_name: str) -> str:
+            """lru_cache要求参数可hash，返回JSON字符串以支持不可序列化对象"""
+            result = self._provider.get_params(strategy_name)
+            return json_dumps(result, sort_keys=True)
+        self._cached_get_params = _cached_get_params
 
     def get_params(self, strategy_name: str) -> Dict[str, Any]:
-        with self._lock:
-            if strategy_name in self._cache:
-                return dict(self._cache[strategy_name])
-            result = self._provider.get_params(strategy_name)
-            if len(self._cache) >= self._cache_size:
-                _oldest = next(iter(self._cache))
-                del self._cache[_oldest]
-            self._cache[strategy_name] = result
-            return dict(result)
+        # P1-41修复: 委托到lru_cache统一缓存
+        try:
+            cached_json = self._cached_get_params(strategy_name)
+            return json_loads(cached_json)
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            # fallback到直接查询
+            return dict(self._provider.get_params(strategy_name))
 
     def get_default(self, key: str) -> Any:
         return self._provider.get_default(key)
@@ -100,11 +108,11 @@ class CachedParamTableProvider:
         return self._provider.list_strategies()
 
     def invalidate_cache(self, strategy_name: Optional[str] = None) -> None:
-        with self._lock:
-            if strategy_name:
-                self._cache.pop(strategy_name, None)
-            else:
-                self._cache.clear()
+        # P1-41修复: 使用lru_cache的标准清除API
+        if strategy_name:
+            self._cached_get_params.cache_clear()
+        else:
+            self._cached_get_params.cache_clear()
 
 
 _provider_instance: Optional[ParamTableProvider] = None

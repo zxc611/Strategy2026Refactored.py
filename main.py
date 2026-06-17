@@ -52,7 +52,8 @@ import threading
 # By using __getattr__, we delay the import until the symbol is actually accessed,
 # which breaks the circular dependency chain.
 
-# Single source of truth for exports - used by both __getattr__ and __all__
+# Single source of truth for exports - used by both __getatr__ and __all__
+# P1-29[v6] Plan: change _LAZY_IMPORTS from hardcoded dict to dynamically generated from __init__.py __all__
 _LAZY_IMPORTS = {
     'Strategy2026': ('ali2026v3_trading.strategy_core_service', 'Strategy2026'),
     'ServiceContainer': ('ali2026v3_trading.config_service', 'ServiceContainer'),

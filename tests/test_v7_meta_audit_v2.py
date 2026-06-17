@@ -1,3 +1,4 @@
+# MODULE_ID: M2-604
 """
 test_v7_meta_audit_v2.py
 ========================
@@ -14,13 +15,16 @@ import inspect
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-from ali2026v3_trading.param_pool.l1_quantification.v7_meta_audit_v2 import (
+from ali2026v3_trading.param_pool.quantification.meta_audit_passport import (
     AuditPassport, MetaAuditEngine, SandboxExecutionAuditor,
-    AutoFieldLineageTracker, SmartSignificanceFilter,
-    HistoricalUniverseRestorer, SignalReadinessAligner,
-    AuditIssue, VulnerabilityType, Severity,
+    AutoFieldLineageTracker, AuditIssue, VulnerabilityType, Severity,
     FutureLeakException, _norm_cdf, DETERMINISTIC_PATTERNS,
     RestrictedExecLoader, CertifiedResult,
+)
+from ali2026v3_trading.param_pool.quantification.meta_audit_engine import (
+    SmartSignificanceFilter,
+    HistoricalUniverseRestorer,
+    SignalReadinessAligner,
 )
 
 

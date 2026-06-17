@@ -1,0 +1,53 @@
+# 升A路径T3.2: pre-commit hooks — 提交前自动检查
+repos:
+  - repo: https://github.com/psf/black
+    rev: 24.4.2
+    hooks:
+      - id: black
+        language_version: python3
+        args: ['--check', '--diff']
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.9
+    hooks:
+      - id: bandit
+        args: ['-r', 'ali2026v3_trading/', '-f', 'custom', '--skip', 'B101']
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+        args: ['--ignore-missing-imports', '--no-error-summary']
+        pass_filenames: false
+        always_run: true
+
+  - repo: https://github.com/PyCQA/pylint
+    rev: v3.2.3
+    hooks:
+      - id: pylint
+        args: ['--disable=all', '--enable=E,F', '--score=n']
+        pass_filenames: false
+
+  - repo: https://github.com/jendrikseipp/vulture
+    rev: v2.11
+    hooks:
+      - id: vulture
+        args: ['ali2026v3_trading/', '--min-confidence', '80']
+        pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: verify-internal-imports
+        name: verify-internal-imports
+        entry: python scripts/verify_internal_imports.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: no-except-exception-pass
+        name: no-except-exception-pass
+        entry: python -c "import sys; import subprocess; r=subprocess.run(['grep','-rn','except Exception: pass','ali2026v3_trading/','--include=*.py','--exclude-dir=_backup','--exclude-dir=tests'],capture_output=True,text=True); sys.exit(1 if r.stdout.strip() else 0)"
+        language: system
+        pass_filenames: false
+        always_run: true

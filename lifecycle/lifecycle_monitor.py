@@ -1,3 +1,4 @@
+# MODULE_ID: M1-124
 """lifecycle_monitor.py — 状态查询/性能监控/健康检查（从strategy_lifecycle_mixin.py拆分）
 职责: get_state, is_running, is_paused, is_trading, get_uptime, record_tick/trade/signal/error,
       get_stats, health_check, _should_probe_t_type_future, _log_t_type_future_probe
@@ -9,9 +10,11 @@ from datetime import datetime
 from typing import Any, Dict
 
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState
+from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
 
 
+# [P2-10-LM] 职责: 策略生命周期状态查询+性能统计+基础健康检查
+# 与strategy/strategy_monitoring_layer.py的StrategyMonitoringLayer分工: LM=状态查询, SML=风控层健康检查+紧急停止
 class LifecycleMonitor:
     def __init__(self, provider):
         self.p = provider
@@ -32,9 +35,10 @@ class LifecycleMonitor:
         return self.p._is_trading
 
     def get_uptime(self) -> float:
-        if not self.p._stats['start_time']:
+        start_time = self.p._stats.get('start_time')
+        if not start_time:
             return 0.0
-        elapsed = (datetime.now(CHINA_TZ) - self.p._stats['start_time']).total_seconds()
+        elapsed = (datetime.now(CHINA_TZ) - start_time).total_seconds()
         return elapsed
 
     def record_tick(self) -> None:
@@ -59,14 +63,16 @@ class LifecycleMonitor:
         with self.p._lock:
             uptime = self.get_uptime()
             ticks_per_second = self.p._stats['total_ticks'] / uptime if uptime > 0 else 0
+            state_val = getattr(self.p, '_state', None)
+            state_str = state_val.value if state_val is not None and hasattr(state_val, 'value') else 'UNKNOWN'
             return {
                 'service_name': 'StrategyCoreService',
                 **self.p._stats,
                 'uptime_seconds': uptime,
                 'ticks_per_second': ticks_per_second,
-                'state': self.p._state.value,
-                'is_running': self.p._is_running,
-                'is_paused': self.p._is_paused
+                'state': state_str,
+                'is_running': getattr(self.p, '_is_running', False),
+                'is_paused': getattr(self.p, '_is_paused', False)
             }
 
     def health_check(self) -> Dict[str, Any]:

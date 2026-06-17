@@ -1,20 +1,11 @@
+# MODULE_ID: M2-410
 """P3.6: market_risk领域单测"""
 from __future__ import annotations
 
 import pytest
 from unittest.mock import MagicMock
+from ali2026v3_trading.tests._stubs import RiskSnapshotStub
 
-
-class RiskSnapshotStub:
-    def __init__(self, action="OPEN", symbol="IF2606", signal=None):
-        self.action = action
-        self.symbol = symbol
-        self.instrument_id = symbol
-        self.amount = 1.0
-        self.price = 4000.0
-        self.signal = signal or {}
-        self.days_to_expiry = 30
-        self.bar_datetime = None
 
 
 def _make_risk_service():
@@ -56,7 +47,7 @@ class TestCheckMarketRisks:
 
     def test_exchange_not_tradeable_blocks(self):
         from ali2026v3_trading.risk_engine.market_risk import check_exchange_status
-        from ali2026v3_trading.risk_service import RiskLevel
+        from ali2026v3_trading.risk.risk_service import RiskLevel
         snap = RiskSnapshotStub()
         rs = _make_risk_service()
         rs.check_exchange_status.return_value = {"tradeable": False, "reason": "closed"}

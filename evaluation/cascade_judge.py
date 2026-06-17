@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
+# MODULE_ID: M1-061
 """
 三层瀑布式评判引擎 — 生产级实现
 
-架构：盈亏比(发动机) → 三角验证(安全壳) → 小资金约束(驾驶座)
+R2-2: 手册V7.5架构对齐命名
+  L1 规则引擎  ← 盈亏比门控(发动机)     → gate_l1_rule_engine()
+  L2 ML模型    ← 三角验证+统计检验(安全壳) → gate_l2_ml_model()
+  L3 影子隐形  ← 小资金约束+影子EV(驾驶座) → gate_l3_shadow_stealth()
 
 与参数池优化脚本的集成方式：
-  from evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
+  from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
   judge = CascadeJudge()
   adapted = adapt_backtest_result(train_result, test_result, params)
   report = judge.judge(adapted)
@@ -18,21 +22,23 @@
 
 from enum import Enum, auto
 from dataclasses import dataclass, field
+import logging
 
-from ali2026v3_trading.serialization_utils import yaml_safe_load
+from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
 from typing import List, Optional, Dict, Any
 import math
 import os
-from ali2026v3_trading.shared_utils import ANNUALIZE_FACTOR_DAILY, ANNUALIZE_FACTOR_MINUTE
-from datetime import timezone, timedelta
+from ali2026v3_trading.infra.shared_utils import ANNUALIZE_FACTOR_DAILY, ANNUALIZE_FACTOR_MINUTE, CHINA_TZ as _CHINA_TZ, get_annualize_factor as _get_annualize_factor  # P2-13: 统一CHINA_TZ
+
+__all__ = ['CascadeJudge', 'CascadeReport', 'GateReport', 'GateResult', 'BacktestMetrics', 'adapt_backtest_result', 'CascadeJudgeError']
 
 try:
-    from ali2026v3_trading.causal_chain_utils import ParamIsolationGuard
+    from ali2026v3_trading.strategy_judgment.causal_chain_utils import ParamIsolationGuard
     _HAS_CAUSAL_CHAIN = True
 except ImportError:
     _HAS_CAUSAL_CHAIN = False
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+
 
 # R16-P2-011修复: 评判阈值从config_params统一读取，与回测保持同步
 _CASCADE_THRESHOLDS = {
@@ -41,15 +47,6 @@ _CASCADE_THRESHOLDS = {
     'min_sharpe': float(os.environ.get('CASCADE_MIN_SHARPE', '1.2')),
 }
 
-
-def _get_annualize_factor(strategy_type: str, ticks_per_bar: int = 0) -> float:
-    """STAT-01-P0修复: 按策略时间框架及采样频率选择Sharpe年化因子"""
-    _daily_types = {'box_extreme', 'box_spring', 'arbitrage', 'market_making'}
-    if strategy_type in _daily_types:
-        return ANNUALIZE_FACTOR_DAILY
-    if ticks_per_bar > 0:
-        return ANNUALIZE_FACTOR_MINUTE * ticks_per_bar
-    return ANNUALIZE_FACTOR_MINUTE
 
 
 class GateResult(Enum):
@@ -61,7 +58,7 @@ class GateResult(Enum):
 def gate_result_to_risk_level(gate_result: GateResult):
     """GateResult→RiskLevel映射函数，确保评判结果可直接映射到生产风控等级"""
     try:
-        from ali2026v3_trading.risk_service import RiskLevel
+        from ali2026v3_trading.risk.risk_service import RiskLevel
         _MAPPING = {
             GateResult.PASS: RiskLevel.LOW,
             GateResult.WARN: RiskLevel.MEDIUM,
@@ -312,6 +309,15 @@ class CascadeJudge:
     三层瀑布式评判引擎
     盈亏比(发动机) → 三角验证(安全壳) → 小资金约束(驾驶座)
 
+    V7.5 三层命名映射表:
+    ┌───────────────────┬──────────────────┬──────────────────────┐
+    │ 代码命名          │ 手册V7.5命名     │ 等价性论证           │
+    ├───────────────────┼──────────────────┼──────────────────────┤
+    │ 盈亏比(发动机)    │ L1规则引擎       │ 均基于硬阈值规则过滤 │
+    │ 三角验证(安全壳)  │ L2 ML模型        │ 均进行多维度交叉验证 │
+    │ 小资金约束(驾驶座)│ L3影子策略隐形   │ 均在最后阶段施加现实约束│
+    └───────────────────┴──────────────────┴──────────────────────┘
+
     R14-P1-DOC-P1-12修复: 三层评判阈值手册交叉引用
     L1 盈亏比阈值(min_profit_ratio=1.8): V7.0手册§4.2 盈亏比门控线
     L2 三角验证阈值(min_sortino=1.5, min_calmar=0.8, min_sharpe=1.2): V7.0手册§4.3 三轴门控线
@@ -451,7 +457,7 @@ class CascadeJudge:
         self._report_history_maxlen: int = 1000
         # R32-P1-18修复: 通过ConfigService消费cascade_threshold_grid(原getter零消费)
         try:
-            from ali2026v3_trading.config_service import get_config_service
+            from ali2026v3_trading.config.config_service import get_config_service
             _cs = get_config_service()
             if _cs is not None:
                 _grid = _cs.get_cascade_threshold_grid()
@@ -459,7 +465,9 @@ class CascadeJudge:
                     for _k, _v in _grid.items():
                         if _k in self.thresholds and isinstance(_v, (int, float)):
                             self.thresholds[_k] = _v
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
 
     @classmethod
@@ -564,7 +572,7 @@ class CascadeJudge:
                 sigmoid_sharpe_center=cfg.get("sigmoid", {}).get("sharpe_tri_center", 1.2),
                 sigmoid_sharpe_scale=cfg.get("sigmoid", {}).get("sharpe_tri_scale", 0.8),
             )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             # R13-P2-DEAD-09修复: 配置加载失败时记录错误日志
             import logging
             logging.warning("[CascadeJudge.from_config] 配置加载失败，使用默认参数: %s", e)
@@ -583,7 +591,7 @@ class CascadeJudge:
         """
         try:
             if conn is None:
-                from ali2026v3_trading.db_adapter import get_db_adapter
+                from ali2026v3_trading.data.db_adapter import get_db_adapter
                 conn = get_db_adapter()
             result = conn.execute("""
                 SELECT
@@ -601,7 +609,7 @@ class CascadeJudge:
                                   sync_rate * 100, penalty)
                     return penalty
             return 1.0
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             import logging
             logging.debug("[P1-9] OTM同步率查询失败(非致命): %s", e)
             return 1.0
@@ -656,92 +664,26 @@ class CascadeJudge:
             )
 
         # ========== 第一关：盈亏比验证（发动机） ==========
-        # R16-P1-018修复: 盈亏比检查从硬阻塞改为软评分
-        gate1 = self._check_gate(
-            name="盈亏比验证",
-            value=metrics.profit_loss_ratio,
-            threshold=self.thresholds["profit_ratio"],
-            hard_block=False,
-            reason_template="盈亏比{value:.2f} < 阈值{threshold}，策略盈利核心逻辑偏弱",
-            details={"profit_loss_ratio": metrics.profit_loss_ratio},
-        )
-        gates.append(gate1)
-        if gate1.result == GateResult.WARN:
+        # R7-4: 通过_judge_l1/l2/l3委托，与gate_l1/l2/l3公共方法共享逻辑
+        gates.append(self.gate_l1_rule_engine(metrics))
+        if gates[-1].result == GateResult.WARN:
             logging.info("[R16-P1-018] 盈亏比%.2f低于阈值%.2f，评分降至30%%", metrics.profit_loss_ratio, self.thresholds["profit_ratio"])
 
         # ========== 第二关：三角验证（安全壳） ==========
-        gate2a = self._check_gate(
-            name="索提诺验证",
-            value=metrics.sortino_ratio,
-            threshold=self.thresholds["sortino"],
-            hard_block=True,
-            reason_template="索提诺{value:.2f} < 阈值{threshold}，下行风险失控",
-            details={"sortino": metrics.sortino_ratio},
-        )
-        gates.append(gate2a)
-        if gate2a.result == GateResult.BLOCK:
-            return self._record_report(CascadeReport(passed=False, final_score=0.0, gates=gates, fatal_reason=gate2a.reason, metrics=metrics))
-
-        gate2b = self._check_gate(
-            name="卡玛验证",
-            value=metrics.calmar_ratio,
-            threshold=self.thresholds["calmar"],
-            hard_block=True,
-            reason_template="卡玛{value:.2f} < 阈值{threshold}，回撤路径不可承受",
-            details={"calmar": metrics.calmar_ratio},
-        )
-        gates.append(gate2b)
-        if gate2b.result == GateResult.BLOCK:
-            return self._record_report(CascadeReport(passed=False, final_score=0.0, gates=gates, fatal_reason=gate2b.reason, metrics=metrics))
-
-        gate2c = self._check_gate(
-            name="夏普验证",
-            value=metrics.sharpe_ratio,
-            threshold=self.thresholds["sharpe"],
-            hard_block=False,
-            reason_template="夏普{value:.2f} < 阈值{threshold}，整体风险收益比偏低",
-            details={"sharpe": metrics.sharpe_ratio},
-        )
-        gates.append(gate2c)
-        if gate2c.result == GateResult.WARN:
+        l2_gates = self.gate_l2_ml_model(metrics)
+        for g in l2_gates:
+            gates.append(g)
+            if g.result == GateResult.BLOCK:
+                return self._record_report(CascadeReport(passed=False, final_score=0.0, gates=gates, fatal_reason=g.reason, metrics=metrics))
+        if l2_gates[-1].result == GateResult.WARN:
             warnings.append(f"夏普比率偏低({metrics.sharpe_ratio:.2f})，建议关注策略稳定性")
 
         # ========== 第三关：小资金约束（驾驶座） ==========
-        gate3a = self._check_constraint(
-            name="连续亏损约束",
-            value=metrics.max_consecutive_losses,
-            threshold=self.constraints["consecutive_losses"],
-            direction="max",
-            reason_template="连续亏损{value}次 > 阈值{threshold}次，心理承受线突破",
-            details={"max_consecutive_losses": metrics.max_consecutive_losses},
-        )
-        gates.append(gate3a)
-        if gate3a.result == GateResult.BLOCK:
-            return self._record_report(CascadeReport(passed=False, final_score=0.0, gates=gates, fatal_reason=gate3a.reason, metrics=metrics))
-
-        gate3b = self._check_constraint(
-            name="横盘天数约束",
-            value=metrics.max_flat_period_days,
-            threshold=self.constraints["flat_days"],
-            direction="max",
-            reason_template="横盘{value}天 > 阈值{threshold}天，机会成本过高",
-            details={"max_flat_period_days": metrics.max_flat_period_days, "nav_based": metrics.max_flat_period_days != 999},
-        )
-        gates.append(gate3b)
-        if gate3b.result == GateResult.BLOCK:
-            return self._record_report(CascadeReport(passed=False, final_score=0.0, gates=gates, fatal_reason=gate3b.reason, metrics=metrics))
-
-        gate3c = self._check_constraint(
-            name="保证金约束",
-            value=metrics.peak_margin_used,
-            threshold=self.constraints["margin_ratio"],
-            direction="max",
-            reason_template="保证金峰值{value:.1%} > 阈值{threshold:.1%}，强平风险",
-            details={"peak_margin_used": metrics.peak_margin_used},
-        )
-        gates.append(gate3c)
-        if gate3c.result == GateResult.BLOCK:
-            return self._record_report(CascadeReport(passed=False, final_score=0.0, gates=gates, fatal_reason=gate3c.reason, metrics=metrics))
+        l3_gates = self.gate_l3_shadow_stealth(metrics)
+        for g in l3_gates:
+            gates.append(g)
+            if g.result == GateResult.BLOCK:
+                return self._record_report(CascadeReport(passed=False, final_score=0.0, gates=gates, fatal_reason=g.reason, metrics=metrics))
 
         # ========== L2关：ML模型置信度验证（E-01修复） ==========
         gate_l2 = self._check_gate(
@@ -762,7 +704,7 @@ class CascadeJudge:
         if l3_invisibility <= 0:
             # 当隐形度未计算时，尝试从ShadowStrategyEngine获取实际验证结果
             try:
-                from ali2026v3_trading.shadow_strategy_engine import get_shadow_strategy_engine
+                from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
                 _shadow_engine = get_shadow_strategy_engine()
                 if _shadow_engine is not None:
                     shadow_orders = getattr(_shadow_engine, '_shadow_order_log', None)
@@ -841,6 +783,75 @@ class CascadeJudge:
             timestamp=_dt.now(_CHINA_TZ).isoformat(),
         ))
 
+    # R2-2: 手册V7.5架构对齐方法 — R6-2: 与judge()逻辑同步
+    def gate_l1_rule_engine(self, metrics: BacktestMetrics) -> GateReport:
+        """L1规则引擎 ← 盈亏比门控(发动机)"""
+        return self._check_gate(
+            name="L1规则引擎(盈亏比)",
+            value=metrics.profit_loss_ratio,
+            threshold=self.thresholds["profit_ratio"],
+            hard_block=False,
+            reason_template="盈亏比{value:.2f} < 阈值{threshold}，策略盈利核心逻辑偏弱",
+        )
+
+    def gate_l2_ml_model(self, metrics: BacktestMetrics) -> List[GateReport]:
+        """L2 ML模型 ← 三角验证+统计检验(安全壳) — 与judge()第二关逻辑同步"""
+        gates = []
+        gates.append(self._check_gate(
+            name="L2-索提诺验证",
+            value=metrics.sortino_ratio,
+            threshold=self.thresholds["sortino"],
+            hard_block=True,
+            reason_template="索提诺{value:.2f} < 阈值{threshold}，下行风险失控",
+            details={"sortino": metrics.sortino_ratio},
+        ))
+        gates.append(self._check_gate(
+            name="L2-卡玛验证",
+            value=metrics.calmar_ratio,
+            threshold=self.thresholds["calmar"],
+            hard_block=True,
+            reason_template="卡玛{value:.2f} < 阈值{threshold}，回撤路径不可承受",
+            details={"calmar": metrics.calmar_ratio},
+        ))
+        gates.append(self._check_gate(
+            name="L2-夏普验证",
+            value=metrics.sharpe_ratio,
+            threshold=self.thresholds["sharpe"],
+            hard_block=False,
+            reason_template="夏普{value:.2f} < 阈值{threshold}，整体风险收益比偏低",
+            details={"sharpe": metrics.sharpe_ratio},
+        ))
+        return gates
+
+    def gate_l3_shadow_stealth(self, metrics: BacktestMetrics) -> List[GateReport]:
+        """L3影子隐形 ← 小资金约束+影子EV(驾驶座) — 与judge()第三关逻辑同步"""
+        gates = []
+        gates.append(self._check_constraint(
+            name="L3-连续亏损约束",
+            value=metrics.max_consecutive_losses,
+            threshold=self.constraints["consecutive_losses"],
+            direction="max",
+            reason_template="连续亏损{value}次 > 阈值{threshold}次",
+            details={"max_consecutive_losses": metrics.max_consecutive_losses},
+        ))
+        gates.append(self._check_constraint(
+            name="L3-横盘天数约束",
+            value=metrics.max_flat_period_days,
+            threshold=self.constraints["flat_days"],
+            direction="max",
+            reason_template="横盘{value}天 > 阈值{threshold}天",
+            details={"max_flat_period_days": metrics.max_flat_period_days},
+        ))
+        gates.append(self._check_constraint(
+            name="L3-保证金约束",
+            value=metrics.peak_margin_used,
+            threshold=self.constraints["margin_ratio"],
+            direction="max",
+            reason_template="保证金峰值{value:.1%} > 阈值{threshold:.1%}",
+            details={"peak_margin_used": metrics.peak_margin_used},
+        ))
+        return gates
+
     def _check_gate(self, name: str, value: float, threshold: float,
                     hard_block: bool, reason_template: str,
                     details: Optional[Dict] = None) -> GateReport:
@@ -879,10 +890,10 @@ class CascadeJudge:
         """
         # R7-M-13修复: 从config_params读取全局sigmoid归一化参数
         try:
-            from ali2026v3_trading.config_params import get_param
+            from ali2026v3_trading.config.config_params import get_param
             _alpha = get_param('sigmoid_alpha', 1.0)
             _beta = get_param('sigmoid_beta', 0.0)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             _alpha, _beta = 1.0, 0.0
         if abs(scale) < 1e-10:
             # R4-J-04: scale为零时退化为阶跃函数，避免除零NaN

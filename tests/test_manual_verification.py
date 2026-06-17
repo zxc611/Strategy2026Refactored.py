@@ -1,3 +1,4 @@
+# MODULE_ID: M2-409
 """
 手动验证脚本 v2 - 第二轮深度隐患排查
 
@@ -53,7 +54,7 @@ def section(title):
 def test_round1_spring_integration():
     section("R1. Spring策略集成完整性")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem, StrategySlot
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem, StrategySlot
 
     eco = StrategyEcosystem()
 
@@ -89,7 +90,7 @@ def test_round1_spring_integration():
 def test_round1_gamma_check():
     section("R1. CrossStrategyRiskGuard Gamma检查")
 
-    from ali2026v3_trading.position_service import CrossStrategyRiskGuard, GreeksExposure
+    from ali2026v3_trading.position.position_service import CrossStrategyRiskGuard, GreeksExposure
 
     guard = CrossStrategyRiskGuard(delta_limit=3.0, vega_limit=1.5, gamma_limit=0.5)
 
@@ -110,19 +111,19 @@ def test_round1_gamma_check():
 def test_round1_fail_safe():
     section("R1. Fail-safe一致性")
 
-    from ali2026v3_trading.position_service import PositionService
+    from ali2026v3_trading.position.position_service import PositionService
 
     svc = PositionService(risk_service=None)
     result = svc.check_position_limit('test_account', 1000.0)
     check(result is False, "check_position_limit RiskService不可用时返回False")
 
-    from ali2026v3_trading.order_service import OrderService
+    from ali2026v3_trading.order.order_service import OrderService
     osvc = OrderService()
     risk_level = osvc._check_cross_strategy_risk()
     check(risk_level in ('PASS', 'BLOCK', 'CIRCUIT_BREAK'),
           "OrderService._check_cross_strategy_risk 返回有效级别")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
     eco = StrategyEcosystem()
     risk_level = eco._check_cross_strategy_risk('IF2606', 'BUY')
     check(risk_level in ('PASS', 'BLOCK', 'CIRCUIT_BREAK'),
@@ -132,7 +133,7 @@ def test_round1_fail_safe():
 def test_round1_mutual_exclusion():
     section("R1. 互斥规则覆盖Spring策略")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
 
     eco = StrategyEcosystem()
 
@@ -154,7 +155,7 @@ def test_round1_mutual_exclusion():
 def test_round1_greeks_aggregation():
     section("R1. Greeks聚合Spring映射")
 
-    from ali2026v3_trading.position_service import (
+    from ali2026v3_trading.position.position_service import (
         aggregate_greeks_exposure, PositionRecord, _REASON_STRATEGY_MAP,
     )
 
@@ -175,7 +176,7 @@ def test_round1_greeks_aggregation():
 def test_round1_risk_guard_tiers():
     section("R1. CrossStrategyRiskGuard分层响应")
 
-    from ali2026v3_trading.position_service import CrossStrategyRiskGuard, GreeksExposure
+    from ali2026v3_trading.position.position_service import CrossStrategyRiskGuard, GreeksExposure
 
     guard = CrossStrategyRiskGuard(delta_limit=3.0, vega_limit=1.5, gamma_limit=0.5)
 
@@ -200,7 +201,7 @@ def test_round1_risk_guard_tiers():
 def test_round1_order_service():
     section("R1. OrderService跨策略风控集成")
 
-    from ali2026v3_trading.order_service import OrderService, _OPEN_REASON_CODES
+    from ali2026v3_trading.order.order_service import OrderService, _OPEN_REASON_CODES
 
     osvc = OrderService()
     check(hasattr(osvc, '_check_cross_strategy_risk'),
@@ -214,7 +215,7 @@ def test_round1_order_service():
 def test_r2_route_capital_static():
     section("R2. route_capital 动态禁用时含spring")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem, CapitalRoute
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem, CapitalRoute
 
     cr = CapitalRoute(dynamic_enabled=False)
     eco = StrategyEcosystem(capital_route=cr)
@@ -226,7 +227,7 @@ def test_r2_route_capital_static():
 def test_r2_switch_active_strategy_spring_state():
     section("R2. switch_active_strategy 更新spring state")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
 
     eco = StrategyEcosystem()
 
@@ -249,7 +250,7 @@ def test_r2_switch_active_strategy_spring_state():
 def test_r2_get_stats_spring():
     section("R2. get_stats 包含spring pnl/ev")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
 
     eco = StrategyEcosystem()
     stats = eco.get_stats()
@@ -262,7 +263,7 @@ def test_r2_get_stats_spring():
 def test_r2_stats_spring_trades():
     section("R2. _stats 包含spring_trades计数")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
 
     eco = StrategyEcosystem()
     check('spring_trades' in eco._stats, "_stats 包含 spring_trades 键",
@@ -272,7 +273,7 @@ def test_r2_stats_spring_trades():
 def test_r2_risk_service_attribute():
     section("R2. PositionService._risk_service 属性存在性")
 
-    from ali2026v3_trading.position_service import PositionService
+    from ali2026v3_trading.position.position_service import PositionService
 
     svc_with = PositionService(risk_service='mock')
     check(hasattr(svc_with, '_risk_service'), "有risk_service时 _risk_service 属性存在")
@@ -288,7 +289,7 @@ def test_r2_risk_service_attribute():
 def test_r2_gamma_reduce_tier():
     section("R2. CrossStrategyRiskGuard Gamma REDUCE级别")
 
-    from ali2026v3_trading.position_service import CrossStrategyRiskGuard, GreeksExposure
+    from ali2026v3_trading.position.position_service import CrossStrategyRiskGuard, GreeksExposure
 
     guard = CrossStrategyRiskGuard(delta_limit=3.0, vega_limit=1.5, gamma_limit=0.5)
 
@@ -301,7 +302,7 @@ def test_r2_gamma_reduce_tier():
 def test_r2_record_spring_trade_stats():
     section("R2. record_spring_trade 统计完整性")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
 
     eco = StrategyEcosystem()
     initial_total = eco._stats['total_trades']
@@ -321,7 +322,7 @@ def test_r2_record_spring_trade_stats():
 def test_r2_switch_return_spring_alloc():
     section("R2. switch_active_strategy 返回含spring分配")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
 
     eco = StrategyEcosystem()
     result = eco.switch_active_strategy('incorrect_reversal')
@@ -333,7 +334,7 @@ def test_r2_switch_return_spring_alloc():
 def test_r2_is_same_delta_direction_spring():
     section("R2. _is_same_delta_direction 支持spring策略")
 
-    from ali2026v3_trading.strategy_ecosystem import StrategyEcosystem
+    from ali2026v3_trading.strategy.strategy_ecosystem import StrategyEcosystem
 
     eco = StrategyEcosystem()
     eco._master.last_direction = 'BUY'
@@ -352,7 +353,7 @@ def test_r2_is_same_delta_direction_spring():
 def test_r2_position_service_no_comment_code():
     section("R2. PositionService 无注释行代码陷阱")
 
-    from ali2026v3_trading.position_service import PositionService
+    from ali2026v3_trading.position.position_service import PositionService
     import inspect
 
     source = inspect.getsource(PositionService.__init__)
@@ -395,7 +396,7 @@ if __name__ == '__main__':
     for test_fn in tests:
         try:
             test_fn()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             FAIL_COUNT += 1
             tb = traceback.format_exc()
             ISSUES.append((test_fn.__name__, str(e)))

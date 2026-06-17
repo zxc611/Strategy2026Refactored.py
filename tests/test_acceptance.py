@@ -1,3 +1,4 @@
+# MODULE_ID: M2-299
 """
 方案3 Arrow零拷贝路径 - 功能实证验收脚本
 验收标准：原则11（实证验证）+ 原则12（确定性交付）
@@ -30,7 +31,7 @@ def verify_code_syntax():
         print("[PASS] storage.py 和 data_service.py 编译通过")
         print()
         return True
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"[FAIL] 编译失败: {e}")
         return False
 
@@ -135,7 +136,7 @@ def verify_arrow_build():
                 'bid_price': row.get('bid_price1'),
                 'ask_price': row.get('ask_price1'),
             })
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             continue
     
     arrow_table = pa.Table.from_pylist(normalized_ticks)

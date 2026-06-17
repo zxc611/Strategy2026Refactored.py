@@ -1,3 +1,5 @@
+# MODULE_ID: M1-129
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
 lifecycle_transition.py - LifecycleTransition
 Phase 2 (CC-P1-04+CC-P1-05): 从strategy_lifecycle_mixin.py提取的状态转换逻辑
@@ -13,7 +15,7 @@ import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
+from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
 
 
 class LifecycleTransition:
@@ -45,7 +47,7 @@ class LifecycleTransition:
         for cb in self._transition_callbacks:
             try:
                 cb(old_state, new_state)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug("[LifecycleTransition] callback error: %s", e)
 
         if self._event_bus is not None:
@@ -54,7 +56,9 @@ class LifecycleTransition:
                     'old_state': _state_key(old_state),
                     'new_state': _state_key(new_state),
                 })
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
 
         return (True, old_state, new_state)

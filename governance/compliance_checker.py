@@ -1,3 +1,4 @@
+# MODULE_ID: M1-068
 """R27-SML-FIX: 合规检查子模块 — 从SafetyMetaLayer提取的监管合规检查职责"""
 from __future__ import annotations
 
@@ -31,7 +32,9 @@ class ComplianceChecker:
         if _HAS_COMPLIANCE_ENGINE:
             try:
                 self._compliance_engine = create_default_compliance_engine()
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
 
     def check_compliance_via_engine(self, position_data: Dict[str, Any],
@@ -45,13 +48,25 @@ class ComplianceChecker:
                 equity=equity,
                 total_position_value=total_position_value)
             return self._compliance_engine.run_checks(ctx)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[ComplianceChecker] ComplianceEngine委托失败: %s", e)
             return []
 
     def check_regulatory_compliance(self, position_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         checks: List[Dict[str, Any]] = []
         violations: List[str] = []
+
+        if self._compliance_engine is not None and position_data is not None:
+            try:
+                equity = position_data.get('equity', 0.0)
+                total_position_value = position_data.get('total_position_value', 0.0)
+                engine_results = self.check_compliance_via_engine(position_data, equity, total_position_value)
+                for r in engine_results:
+                    checks.append({"check_item": r.rule_name, "passed": r.compliant, "detail": r.reason})
+                    if not r.compliant:
+                        violations.append(f"{r.rule_name}: {r.reason}")
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                logging.warning("[ComplianceChecker] ComplianceEngine委托异常: %s", e)
 
         try:
             limit_passed = True
@@ -66,7 +81,7 @@ class ComplianceChecker:
             checks.append({"check_item": "position_limit", "passed": limit_passed, "detail": limit_detail})
             if not limit_passed:
                 violations.append(f"position_limit: {limit_detail}")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "position_limit", "passed": False, "detail": f"检查异常: {e}"})
             violations.append(f"position_limit: error={e}")
 
@@ -87,7 +102,7 @@ class ComplianceChecker:
                     violations.append(f"cancel_rate: {cancel_detail}")
             else:
                 checks.append({"check_item": "cancel_rate", "passed": True, "detail": "order_service不可用"})
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "cancel_rate", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
@@ -104,7 +119,7 @@ class ComplianceChecker:
                     violations.append(f"self_trade: {st_detail}")
             else:
                 checks.append({"check_item": "self_trade_prevention", "passed": True, "detail": "order_service不可用"})
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "self_trade_prevention", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
@@ -115,7 +130,7 @@ class ComplianceChecker:
                 price = position_data.get('price', 0)
                 direction = position_data.get('direction', 'BUY')
                 if instrument_id and price > 0:
-                    from ali2026v3_trading.params_service import get_params_service
+                    from ali2026v3_trading.config.params_service import get_params_service
                     ps = get_params_service()
                     meta = ps.get_instrument_meta_by_id(instrument_id)
                     if meta:
@@ -133,7 +148,7 @@ class ComplianceChecker:
             checks.append({"check_item": "price_limit", "passed": price_limit_passed, "detail": price_limit_detail})
             if not price_limit_passed:
                 violations.append(f"price_limit: {price_limit_detail}")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "price_limit", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
@@ -144,7 +159,7 @@ class ComplianceChecker:
             checks.append({"check_item": "trading_time", "passed": tm_passed, "detail": tm_detail})
             if not tm_passed:
                 violations.append(f"trading_time: {tm_detail}")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "trading_time", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
@@ -169,7 +184,7 @@ class ComplianceChecker:
             checks.append({"check_item": "record_retention", "passed": retention_passed, "detail": retention_detail})
             if not retention_passed:
                 violations.append(f"record_retention: {retention_detail}")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "record_retention", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
@@ -187,19 +202,19 @@ class ComplianceChecker:
                     violations.append(f"large_trade: {large_detail}")
             else:
                 checks.append({"check_item": "large_trade", "passed": True, "detail": "无订单数据"})
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "large_trade", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
             algo_passed = True
             algo_detail = "算法交易报备正常"
             try:
-                from ali2026v3_trading.hft_enhancements import HFTEnhancementEngine
+                from ali2026v3_trading.strategy.hft_enhancements import HFTEnhancementEngine
                 algo_detail = "HFT增强引擎已注册"
             except ImportError:
                 algo_detail = "HFT增强引擎未加载(可接受)"
             checks.append({"check_item": "algo_registration", "passed": algo_passed, "detail": algo_detail})
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             checks.append({"check_item": "algo_registration", "passed": True, "detail": f"检查跳过: {e}"})
 
         compliant = len(violations) == 0

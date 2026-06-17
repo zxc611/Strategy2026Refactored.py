@@ -1,3 +1,4 @@
+# MODULE_ID: M2-303
 """
 方案3验证脚本：Arrow零拷贝路径性能测试
 简化版：直接测试核心逻辑，无需完整数据库初始化
@@ -196,7 +197,7 @@ if __name__ == '__main__':
         print("=" * 60)
         print("[SUCCESS] 所有测试通过！方案3验证成功")
         print("=" * 60)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
         print(f"\n[FAIL] 测试失败: {e}")
         import traceback
         traceback.print_exc()

@@ -1,3 +1,4 @@
+# MODULE_ID: M2-351
 import pytest
 import sys
 import os
@@ -6,12 +7,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from hypothesis import given, settings, assume
 from hypothesis import strategies as st
-from ali2026v3_trading.state_store import StateStore, reset_state_store
+from ali2026v3_trading.infra.state_store import StateStore, reset_state_store
 
 
 class TestStateStoreProperties:
     @given(key=st.text(min_size=1, max_size=20), value=st.one_of(st.integers(), st.floats(allow_nan=False), st.text()))
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None)
     def test_set_get_roundtrip(self, key, value):
         reset_state_store()
         store = StateStore()

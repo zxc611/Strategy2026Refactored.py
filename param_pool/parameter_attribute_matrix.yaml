@@ -2344,3 +2344,201 @@ intuition_quantification_plan:
       count: 7
       method: "回测网格 + 金发姑娘测试"
       deadline: "2026-06-30"
+
+# =============================================================================
+# 次系统7 背离反转策略参数 (divergence_reversal.py)
+# =============================================================================
+
+divergence_lookback:
+  type: int
+  default: 20
+  range: [5, 50]
+  grid: [10, 15, 20, 25, 30]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略新高/新低回看窗口
+  source: backtest_grid
+  evidence: "Round1: lookback=20在训练集背离检测夏普最优"
+  last_validated: "2026-06-16"
+
+divergence_atm_threshold:
+  type: float
+  default: 0.03
+  range: [0.01, 0.10]
+  grid: [0.02, 0.03, 0.04, 0.05]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略期权平值阈值
+  source: backtest_grid
+  evidence: "3%平值阈值=标的价格3%以内视为平值，与ATM_THRESHOLD_DEFAULT对齐"
+  last_validated: "2026-06-16"
+
+divergence_w_future:
+  type: float
+  default: 0.35
+  range: [0.10, 0.60]
+  grid: [0.25, 0.30, 0.35, 0.40, 0.45]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略L1跨期期货背离权重
+  source: backtest_grid
+  evidence: "Round1: w_future=0.35在训练集综合信号夏普最优"
+  last_validated: "2026-06-16"
+  constraint: "w_future + w_option_coll + w_option_itm = 1.0"
+
+divergence_w_option_coll:
+  type: float
+  default: 0.35
+  range: [0.10, 0.60]
+  grid: [0.25, 0.30, 0.35, 0.40, 0.45]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略L2远月期权权利金集体背离权重
+  source: backtest_grid
+  evidence: "Round1: w_option_coll=0.35在训练集综合信号夏普最优"
+  last_validated: "2026-06-16"
+  constraint: "w_future + w_option_coll + w_option_itm = 1.0"
+
+divergence_consistency_boost:
+  type: float
+  default: 1.5
+  range: [1.0, 3.0]
+  grid: [1.2, 1.3, 1.5, 1.7, 2.0]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略三层同向加成因子
+  source: backtest_grid
+  evidence: "Round1: consistency_boost=1.5在三层同向背离时信号增强最优"
+  last_validated: "2026-06-16"
+
+divergence_min_ratio:
+  type: float
+  default: 0.6
+  range: [0.3, 0.9]
+  grid: [0.4, 0.5, 0.6, 0.7, 0.8]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略远月期权集体背离比例阈值
+  source: backtest_grid
+  evidence: "Round1: min_ratio=0.6在训练集集体背离检测F1最优"
+  last_validated: "2026-06-16"
+
+divergence_trend_significance:
+  type: float
+  default: 1.0e-6
+  range: [1.0e-8, 1.0e-4]
+  grid: [1.0e-7, 1.0e-6, 1.0e-5]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略趋势斜率显著性阈值(归一化斜率绝对值大于此值才视为有趋势)
+  source: backtest_grid
+  evidence: "1e-6过滤噪声斜率，保留统计显著趋势方向"
+  last_validated: "2026-06-16"
+
+divergence_div_strength_clip:
+  type: float
+  default: 1.0
+  range: [0.5, 1.5]
+  grid: [0.8, 0.9, 1.0]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略背离强度裁剪上限
+  source: backtest_grid
+  evidence: "Round1: clip=1.0在训练集信号分布最均匀"
+  last_validated: "2026-06-16"
+
+divergence_signal_threshold:
+  type: float
+  default: 0.15
+  range: [0.05, 0.50]
+  grid: [0.10, 0.15, 0.20, 0.25, 0.30]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略信号触发阈值, 综合信号绝对值需超过此值才触发
+  source: backtest_grid
+  evidence: "Round1: signal_threshold=0.15在训练集信号质量F1最优"
+  last_validated: "2026-06-16"
+
+divergence_take_profit_ratio:
+  type: float
+  default: 1.8
+  range: [0.5, 5.0]
+  grid: [1.0, 1.2, 1.5, 1.8, 2.0, 2.5, 3.0]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略止盈比率
+  source: backtest_grid
+  evidence: "Round1: take_profit_ratio=1.8在训练集盈亏比最优"
+  last_validated: "2026-06-16"
+
+divergence_stop_loss_ratio:
+  type: float
+  default: 0.3
+  range: [0.1, 1.0]
+  grid: [0.2, 0.3, 0.4, 0.5, 0.6]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略止损比率
+  source: backtest_grid
+  evidence: "Round1: stop_loss_ratio=0.3在训练集回撤控制最优"
+  last_validated: "2026-06-16"
+
+divergence_max_risk_ratio:
+  type: float
+  default: 0.5
+  range: [0.05, 1.0]
+  grid: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略最大风险比率
+  source: backtest_grid
+  evidence: "Round1: max_risk_ratio=0.5在训练集风险收益平衡最优"
+  last_validated: "2026-06-16"
+
+divergence_hard_time_stop_min:
+  type: float
+  default: 60.0
+  range: [5.0, 180.0]
+  grid: [30, 45, 60, 90, 120]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略硬止损时间(分钟)
+  source: backtest_grid
+  evidence: "Round1: hard_time_stop_min=60在训练集持仓时长最优"
+  last_validated: "2026-06-16"
+
+divergence_cooldown_bars:
+  type: int
+  default: 10
+  range: [1, 60]
+  grid: [5, 8, 10, 15, 20, 30]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略冷却期(bar数)
+  source: backtest_grid
+  evidence: "Round1: cooldown_bars=10在训练集信号频率最优"
+  last_validated: "2026-06-16"
+
+divergence_position_scale:
+  type: float
+  default: 0.3
+  range: [0.05, 1.0]
+  grid: [0.1, 0.2, 0.3, 0.4, 0.5]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略仓位缩放系数
+  source: backtest_grid
+  evidence: "Round1: position_scale=0.3在训练集仓位风险平衡最优"
+  last_validated: "2026-06-16"
+
+divergence_moneyness_depth:
+  type: float
+  default: 0.06
+  range: [0.02, 0.20]
+  grid: [0.04, 0.05, 0.06, 0.08, 0.10]
+  layer: subsystem_divergence
+  editable: runtime
+  description: 背离反转策略五级分类深度实/虚值阈值(=2*atm_threshold by default)
+  source: backtest_grid
+  evidence: "Round1: moneyness_depth=0.06(=2*0.03)在训练集期权分类准确率最优"
+  last_validated: "2026-06-16"

@@ -1,3 +1,4 @@
+# MODULE_ID: M2-350
 """
 test_hft_order.py - 高频策略(HFT)下单测试脚本
 
@@ -28,46 +29,46 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.hft_enhancements import (
+from ali2026v3_trading.strategy.hft_enhancements import (
     HFTEnhancementEngine,
     get_hft_engine,
 )
-from ali2026v3_trading.signal_service import (
+from ali2026v3_trading.signal.signal_service import (
     KalmanFilter1D,
     EMASignalFilter,
     SignalTimingFilter,
     SignalService,
 )
-from ali2026v3_trading.order_service import (
+from ali2026v3_trading.order.order_service import (
     OrderService,
     SmartOrderSplitter,
     OrderSplitStrategy,
     get_order_service,
 )
-from ali2026v3_trading.strategy_tick_handler import DynamicPursuitEngine
-from ali2026v3_trading.order_flow_bridge import (
+from ali2026v3_trading.strategy.strategy_tick_handler import DynamicPursuitEngine
+from ali2026v3_trading.order.order_flow_bridge import (
     MicrostructureArbitrageDetector,
     MarketMakerDefenseEngine,
 )
 
 
 def _reset_order_service_singleton():
-    import ali2026v3_trading.order_service as mod
-    mod._order_service_instance = None
+    from ali2026v3_trading.order.order_base import reset_order_service
+    reset_order_service()
 
 
 def _reset_hft_singleton():
-    import ali2026v3_trading.hft_enhancements as mod
+    import ali2026v3_trading.strategy.hft_enhancements as mod
     mod._hft_engine = None
 
 
 def _reset_global_singletons():
     _reset_order_service_singleton()
     _reset_hft_singleton()
-    import ali2026v3_trading.position_service as ps_mod
+    import ali2026v3_trading.position.position_service as ps_mod
     ps_mod._cross_strategy_risk_guard = None
     ps_mod._position_service_instance = None
-    from ali2026v3_trading.mode_engine import ModeEngine
+    from ali2026v3_trading.governance.mode_engine import ModeEngine
     ModeEngine.reset_instance()
 
 
@@ -407,11 +408,17 @@ class TestHFTOrderPlacement(unittest.TestCase):
 
 class TestHFTPursuitRiskGate(unittest.TestCase):
     def setUp(self):
-        from ali2026v3_trading.strategy_tick_handler import TickHandlerMixin
+        from ali2026v3_trading.strategy.strategy_tick_handler import TickHandlerMixin
 
         self.mixin = TickHandlerMixin.__new__(TickHandlerMixin)
         self.mixin._order_service = MagicMock()
         self.mixin._ensure_order_service = MagicMock()
+        self.mixin._ensure_order_service_fn = MagicMock()
+        self.mixin._state_store = MagicMock()
+        self.mixin._state_store.get_ref.return_value = self.mixin._order_service
+        self.mixin._state_store.get.return_value = None
+        self.mixin._check_hft_open_risk = MagicMock(return_value=True)
+        self.mixin._get_tick_field = MagicMock(return_value=0.0)
 
     def test_pursuit_entry_blocked_by_risk_service(self):
         hft = MagicMock()
@@ -421,7 +428,7 @@ class TestHFTPursuitRiskGate(unittest.TestCase):
         blocked.is_block = True
         blocked.reason = 'circuit_breaker_open'
 
-        with patch('ali2026v3_trading.risk_service.get_risk_service') as get_rs:
+        with patch('ali2026v3_trading.risk.risk_service.get_risk_service') as get_rs:
             get_rs.return_value.check_before_trade.return_value = blocked
             self.mixin._execute_pursuit_entry(
                 hft,
@@ -446,7 +453,7 @@ class TestHFTPursuitRiskGate(unittest.TestCase):
         allowed.reason = ''
         self.mixin._order_service.send_order_split.return_value = ['OID-1']
 
-        with patch('ali2026v3_trading.risk_service.get_risk_service') as get_rs:
+        with patch('ali2026v3_trading.risk.risk_service.get_risk_service') as get_rs:
             get_rs.return_value.check_before_trade.return_value = allowed
             self.mixin._execute_pursuit_add(
                 hft,
@@ -559,13 +566,15 @@ class TestHFTSignalServiceIntegration(unittest.TestCase):
         _reset_global_singletons()
 
     def test_hft_signal_generates_and_orders(self):
-        signal = self.signal_svc.generate_signal(
-            instrument_id='IF2606',
-            signal_type='BUY',
-            price=4000.0,
-            volume=1,
-            reason='HFT_CORRECT_RESONANCE',
-        )
+        with patch('ali2026v3_trading.signal.signal_service.ModeEngine') as mock_me:
+            mock_me.get_instance.return_value.filter_signal_by_mode.return_value = (True, '')
+            signal = self.signal_svc.generate_signal(
+                instrument_id='IF2606',
+                signal_type='BUY',
+                price=4000.0,
+                volume=1,
+                reason='HFT_CORRECT_RESONANCE',
+            )
         self.assertIsNotNone(signal)
         self.assertEqual(signal['signal_type'], 'BUY')
         order_id = self.order_svc.send_order(
@@ -579,13 +588,15 @@ class TestHFTSignalServiceIntegration(unittest.TestCase):
         self.assertIsNotNone(order_id)
 
     def test_hft_sell_signal_and_order(self):
-        signal = self.signal_svc.generate_signal(
-            instrument_id='IF2606',
-            signal_type='SELL',
-            price=3998.0,
-            volume=1,
-            reason='HFT_CORRECT_DIVERGENCE',
-        )
+        with patch('ali2026v3_trading.signal.signal_service.ModeEngine') as mock_me:
+            mock_me.get_instance.return_value.filter_signal_by_mode.return_value = (True, '')
+            signal = self.signal_svc.generate_signal(
+                instrument_id='IF2606',
+                signal_type='SELL',
+                price=3998.0,
+                volume=1,
+                reason='HFT_CORRECT_DIVERGENCE',
+            )
         self.assertIsNotNone(signal)
         order_id = self.order_svc.send_order(
             instrument_id='IF2606',

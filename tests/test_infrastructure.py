@@ -1,3 +1,4 @@
+# MODULE_ID: M2-354
 """
 R14-P0-TEST-12/13/14/15: CI/CD配置 + 集成测试 + 回归套件 + E2E增强
 """
@@ -27,28 +28,28 @@ class TestCrossServiceIntegration:
     """TEST-13: 跨服务集成测试(信号→风控→下单→持仓)"""
 
     def test_signal_to_risk_chain(self):
-        from ali2026v3_trading.signal_service import SignalService
-        from ali2026v3_trading.risk_service import RiskService
+        from ali2026v3_trading.signal.signal_service import SignalService
+        from ali2026v3_trading.risk.risk_service import RiskService
         assert SignalService is not None
         assert RiskService is not None
 
     def test_risk_to_order_chain(self):
-        from ali2026v3_trading.risk_service import RiskService
-        from ali2026v3_trading.order_service import OrderService
+        from ali2026v3_trading.risk.risk_service import RiskService
+        from ali2026v3_trading.order.order_service import OrderService
         assert RiskService is not None
         assert OrderService is not None
 
     def test_order_to_position_chain(self):
-        from ali2026v3_trading.order_service import OrderService
-        from ali2026v3_trading.position_service import PositionService
+        from ali2026v3_trading.order.order_service import OrderService
+        from ali2026v3_trading.position.position_service import PositionService
         assert OrderService is not None
         assert PositionService is not None
 
     def test_signal_risk_order_position_importable(self):
-        from ali2026v3_trading.signal_service import SignalService
-        from ali2026v3_trading.risk_service import RiskService
-        from ali2026v3_trading.order_service import OrderService
-        from ali2026v3_trading.position_service import PositionService
+        from ali2026v3_trading.signal.signal_service import SignalService
+        from ali2026v3_trading.risk.risk_service import RiskService
+        from ali2026v3_trading.order.order_service import OrderService
+        from ali2026v3_trading.position.position_service import PositionService
         for cls in [SignalService, RiskService, OrderService, PositionService]:
             assert cls is not None
 
@@ -57,7 +58,7 @@ class TestE2EPipelineEnhanced:
     """TEST-15: 增强端到端测试"""
 
     def test_config_params_table_complete(self):
-        from ali2026v3_trading.config_params import DEFAULT_PARAM_TABLE
+        from ali2026v3_trading.config.config_params import DEFAULT_PARAM_TABLE
         required_keys = [
             'close_take_profit_ratio', 'close_stop_loss_ratio', 'max_risk_ratio',
             'signal_cooldown_sec', 'circuit_breaker_pause_sec',
@@ -68,7 +69,7 @@ class TestE2EPipelineEnhanced:
             assert key in DEFAULT_PARAM_TABLE, f"DEFAULT_PARAM_TABLE缺少{key}"
 
     def test_state_param_sets_complete(self):
-        from ali2026v3_trading.config_params import get_default_state_param_sets
+        from ali2026v3_trading.config.config_params import get_default_state_param_sets
         states = get_default_state_param_sets()
         required_states = ['correct_trending', 'incorrect_reversal', 'other']
         for state in required_states:
@@ -77,14 +78,18 @@ class TestE2EPipelineEnhanced:
             assert 'close_stop_loss_ratio' in states[state]
 
     def test_sensitive_fields_no_hardcoded_secrets(self):
-        from ali2026v3_trading.config_params import DEFAULT_PARAM_TABLE
+        from ali2026v3_trading.config.config_params import DEFAULT_PARAM_TABLE
+        from ali2026v3_trading.infra.security import _SecureCredential, reveal_credential
         sensitive = DEFAULT_PARAM_TABLE.get('_sensitive_fields', [])
         for field in sensitive:
             val = DEFAULT_PARAM_TABLE.get(field, '')
-            assert val == '' or not val, f"敏感字段{field}不应有硬编码非空值"
+            if isinstance(val, _SecureCredential):
+                assert reveal_credential(val) == '', f"敏感字段{field}不应有硬编码非空值"
+            else:
+                assert val == '' or not val, f"敏感字段{field}不应有硬编码非空值"
 
     def test_mode_config_respects_yaml_tfv_disable(self):
-        from ali2026v3_trading.mode_engine import (
+        from ali2026v3_trading.governance.mode_engine import (
             _make_mode_config, CapitalMode, TakeProfitMethod,
             StopLossMethod, PyramidingRule, DrawdownAction,
         )
@@ -92,7 +97,7 @@ class TestE2EPipelineEnhanced:
         fake_loader = MagicMock()
         fake_loader.get_params.return_value = {'tvf_enabled': False}
 
-        with patch('ali2026v3_trading.tvf_param_loader.get_tvf_param_loader', return_value=fake_loader):
+        with patch('ali2026v3_trading.config.tvf_param_loader.get_tvf_param_loader', return_value=fake_loader):
             config = _make_mode_config(
                 mode=CapitalMode.BALANCED,
                 max_positions=3,
@@ -134,15 +139,15 @@ class TestModeEngineLockFix:
     def test_mode_engine_uses_rlock(self):
         """验证ModeEngine单例锁使用RLock而非Lock，防止重入死锁"""
         import threading
-        from ali2026v3_trading.mode_engine import ModeEngine
-        assert isinstance(ModeEngine._lock, threading.RLock), \
+        from ali2026v3_trading.governance.mode_engine import ModeEngine
+        assert type(ModeEngine._lock).__name__ == 'RLock', \
             "ModeEngine._lock应为RLock(R21-CC01修复: Lock→RLock防重入死锁)"
 
     def test_predictive_state_engine_uses_rlock(self):
         """验证PredictiveStateEngine单例锁使用RLock而非Lock"""
         import threading
-        from ali2026v3_trading.mode_engine import PredictiveStateEngine
-        assert isinstance(PredictiveStateEngine._lock, threading.RLock), \
+        from ali2026v3_trading.governance.mode_engine import PredictiveStateEngine
+        assert type(PredictiveStateEngine._lock).__name__ == 'RLock', \
             "PredictiveStateEngine._lock应为RLock(R21-CC01修复: Lock→RLock防重入死锁)"
 
 
@@ -151,7 +156,7 @@ class TestStrategyCoreServiceNetworkFix:
 
     def test_heartbeat_interval_configurable(self):
         """验证心跳间隔可从环境变量配置(R21-NET-P2-01修复)"""
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService.__new__(StrategyCoreService)
         # 默认值应为30.0秒
         assert hasattr(StrategyCoreService, '__init__')
@@ -163,7 +168,7 @@ class TestStrategyCoreServiceNetworkFix:
 
     def test_heartbeat_max_failures_defined(self):
         """验证心跳最大失败次数已定义(R21-NET-P1-03修复)"""
-        from ali2026v3_trading.strategy_core_service import StrategyCoreService
+        from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         import inspect
         source = inspect.getsource(StrategyCoreService.__init__)
         assert '_heartbeat_max_failures' in source, \

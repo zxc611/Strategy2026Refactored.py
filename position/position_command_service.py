@@ -1,3 +1,4 @@
+# MODULE_ID: M1-203
 """Position Command Service - 命令处理(写操作)
 
 从position_service.py拆分(CC-09 Step2):
@@ -14,11 +15,11 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Optional, Any, Tuple
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
 try:
     import numpy as np
@@ -30,7 +31,7 @@ if _HAS_NUMPY and np is None:
     _HAS_NUMPY = False
 
 from ali2026v3_trading.infra.performance_monitor import count_call
-from ali2026v3_trading.risk.risk_service import api_version
+from ali2026v3_trading.infra.shared_utils import api_version  # P1-21: 统一从shared_utils导入
 
 
 class PositionCommandService:
@@ -44,6 +45,24 @@ class PositionCommandService:
     def __init__(self, position_service: Any):
         self._ps = position_service
         self._close_retry_executor = None
+
+    @staticmethod
+    def _compute_profit_slope(history: list) -> float | None:
+        """P2-32修复: 提取线性回归斜率计算，消除2x重复代码块"""
+        if len(history) < 5:
+            return None
+        if _HAS_NUMPY:
+            try:
+                return float(np.polyfit(range(len(history)), history, 1)[0])
+            except (ValueError, np.linalg.LinAlgError):
+                pass
+        # 纯Python fallback: OLS斜率
+        n = len(history)
+        x_mean = (n - 1) / 2.0
+        y_mean = sum(history) / n
+        num = sum((i - x_mean) * (history[i] - y_mean) for i in range(n))
+        den = sum((i - x_mean) ** 2 for i in range(n))
+        return num / den if den > 0 else 0.0
 
     def on_trade(self, trade: Any) -> None:
         from ali2026v3_trading.infra.shared_utils import require_precondition
@@ -84,7 +103,7 @@ class PositionCommandService:
                             if self._ps.self_trade_detector is not None:
                                 self._ps.self_trade_detector.remove_order(oid)
                         self._ps.partial_fill_handler.check_and_cancel_remaining(order_id, cancel_func=_cancel_order)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.debug(f"[PositionService.on_trade] PartialFillHandler error: {e}")
 
             if is_open:
@@ -96,7 +115,7 @@ class PositionCommandService:
                 if self._ps.self_trade_detector is not None and order_id:
                     self._ps.self_trade_detector.remove_order(order_id)
             logging.debug(f"[PositionService.on_trade] Updated: {inst_id} vol={volume}")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[PositionService.on_trade] Error: {e}")
 
     def on_tick(self, tick: Any) -> None:
@@ -137,23 +156,7 @@ class PositionCommandService:
             for pid, history_snapshot in _slope_updates.items():
                 _computed_slope = None
                 if len(history_snapshot) >= 5:
-                    if _HAS_NUMPY:
-                        try:
-                            _computed_slope = float(np.polyfit(range(len(history_snapshot)), history_snapshot, 1)[0])
-                        except (ValueError, np.linalg.LinAlgError):
-                            n = len(history_snapshot)
-                            x_mean = (n - 1) / 2.0
-                            y_mean = sum(history_snapshot) / n
-                            num = sum((i - x_mean) * (history_snapshot[i] - y_mean) for i in range(n))
-                            den = sum((i - x_mean) ** 2 for i in range(n))
-                            _computed_slope = num / den if den > 0 else 0.0
-                    else:
-                        n = len(history_snapshot)
-                        x_mean = (n - 1) / 2.0
-                        y_mean = sum(history_snapshot) / n
-                        num = sum((i - x_mean) * (history_snapshot[i] - y_mean) for i in range(n))
-                        den = sum((i - x_mean) ** 2 for i in range(n))
-                        _computed_slope = num / den if den > 0 else 0.0
+                    _computed_slope = self._compute_profit_slope(history_snapshot)
                     if _computed_slope is not None:
                         _computed_slopes[pid] = _computed_slope
 
@@ -170,9 +173,11 @@ class PositionCommandService:
                 _eb = get_global_event_bus()
                 if _eb and not getattr(_eb, '_shutdown', True):
                     _eb.publish(TickEvent(instrument_id=inst_id, tick_data=tick), async_mode=True)
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
                 pass
-        except Exception as e:
+                pass
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[PositionService.on_tick] Error: {e}")
 
     @count_call()
@@ -190,7 +195,9 @@ class PositionCommandService:
                             if rec.volume != 0 and rec.open_price > 0:
                                 _m_ratio = rs._get_margin_ratio(_inst_id) if hasattr(rs, '_get_margin_ratio') else 0.1
                                 existing_margin += abs(rec.volume) * rec.open_price * _m_ratio
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                    pass
                     pass
                 _new_m_ratio = rs._get_margin_ratio(instrument_id) if hasattr(rs, '_get_margin_ratio') else 0.1  # R27-P0-FIX: symbol→instrument_id
                 new_margin = abs(volume) * price * _new_m_ratio
@@ -201,14 +208,16 @@ class PositionCommandService:
                     safety = get_safety_meta_layer(params=self._ps._params if hasattr(self._ps, '_params') else None, strategy_id=_sid)
                     if safety and safety._equity_series:
                         equity = safety._equity_series[-1]
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                    pass
                     pass
                 if equity > 0:
                     result = rs.check_capital_sufficiency(equity=equity, required_margin=new_margin, existing_margin_used=existing_margin)
                     if not result.get('sufficient', True):
                         logging.critical("[PositionService] R13-V4-001: 保证金不足防御性阻断! equity=%.2f existing_margin=%.2f new_margin=%.2f", equity, existing_margin, new_margin)
                         return
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[PositionService] R13-V4-001 margin check failed: %s", e)
 
         if self._ps.self_trade_detector is not None:
@@ -225,14 +234,13 @@ class PositionCommandService:
                         logging.error(f"[PositionService._add_position] 自成交检测阻断: {alert_msg}")
                         return
                     self._ps.self_trade_detector.add_order(new_order)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning(f"[PositionService._add_position] 自成交检测异常: {e}")
 
         with self._ps._get_instrument_lock(instrument_id):
             if instrument_id not in self._ps.positions:
                 self._ps.positions[instrument_id] = {}
-            import uuid as _uuid
-            pos_id = f"{instrument_id}_{int(datetime.now(_CHINA_TZ).timestamp()*1000)}_{_uuid.uuid4().hex[:6]}"
+            pos_id = f"{instrument_id}_{int(datetime.now(_CHINA_TZ).timestamp()*1000)}_{generate_prefixed_id('', 6)}"  # R9-3
             direction_str = "long" if volume > 0 else "short"
             p_type = "long" if volume > 0 else "short"
             sp_price = 0.0
@@ -241,23 +249,59 @@ class PositionCommandService:
                 tp_ratio, sl_ratio = self._ps._get_tp_sl_ratios_by_reason(open_reason)
                 sl_ratio = self._ps._apply_crm_stop_loss_adjustment(sl_ratio, open_reason)
                 self._ps._verify_tp_sl_alignment_with_backtest(open_reason, tp_ratio, sl_ratio)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning(f"[PositionService._add_position] Failed to get TP/SL ratio: {e}")
                 tp_ratio = self._ps.DEFAULT_TP_RATIO
                 sl_ratio = self._ps.DEFAULT_SL_RATIO
-            if price > 0 and tp_ratio > 0:
-                if volume > 0:
-                    sp_price = price * tp_ratio
-                    sl_price = price * (1 - sl_ratio)
-                else:
-                    sp_price = price / tp_ratio
-                    sl_price = price * (1 + sl_ratio)
-            elif price > 0 and tp_ratio <= 0:
-                raise ValueError(f"[R26-P0-BV-03] tp_ratio={tp_ratio:.4f}<=0, instrument={instrument_id}")
-            elif price <= 0:
+            # [R28-C009修复] NaN/Inf检查: P2-20修复提取为_validate_finite辅助
+            import math as _math
+            def _validate_finite(value, name):
+                if not _math.isfinite(value):
+                    raise ValueError(f"[R28-C009] {name} is not finite (NaN/Inf): {value}, instrument={instrument_id}")
+            _validate_finite(price, 'open_price')
+            if price <= 0:
                 raise ValueError(f"[R26-P0-FI-09] open_price={price:.2f}<=0, instrument={instrument_id}")
+            _validate_finite(tp_ratio, 'tp_ratio')
+            _validate_finite(sl_ratio, 'sl_ratio')
+            if tp_ratio <= 0:
+                raise ValueError(f"[R26-P0-BV-03] tp_ratio={tp_ratio:.4f}<=0, instrument={instrument_id}")
+            if volume == 0:
+                raise ValueError(f"[R28-C009] volume=0, instrument={instrument_id}")
+            if not _math.isfinite(volume):
+                raise ValueError(f"[R28-C009] volume is not finite: {volume}, instrument={instrument_id}")
+
+            # 计算止盈止损价格（所有参数已通过有效性校验）
+            if volume > 0:
+                sp_price = price * tp_ratio
+                sl_price = price * (1 - sl_ratio)
+            else:
+                sp_price = price / tp_ratio
+                sl_price = price * (1 + sl_ratio)
 
             from ali2026v3_trading.position.position_service import PositionRecord
+
+            # [R28-C023修复] 交易前捕获快照，用于错误交易回滚
+            _prev_pos = self._ps.positions[instrument_id].get(pos_id)
+            try:
+                from ali2026v3_trading.strategy_judgment.causal_chain_utils import TradeRollbackManager
+                _rbm = TradeRollbackManager.get_instance()
+                _rbm.capture_pre_trade_snapshot(
+                    position_id=pos_id,
+                    instrument_id=instrument_id,
+                    correlation_id=signal_id or pos_id,
+                    position_existed=_prev_pos is not None,
+                    prev_volume=_prev_pos.volume if _prev_pos else 0,
+                    prev_direction=_prev_pos.direction if _prev_pos else "",
+                    prev_open_price=_prev_pos.open_price if _prev_pos else 0.0,
+                    prev_stop_profit_price=_prev_pos.stop_profit_price if _prev_pos else 0.0,
+                    prev_stop_loss_price=_prev_pos.stop_loss_price if _prev_pos else 0.0,
+                    prev_current_plr=_prev_pos.current_plr if _prev_pos else 0.0,
+                    prev_max_profit_pct=_prev_pos._max_profit_pct if _prev_pos else 0.0,
+                    prev_chase_count=_prev_pos.chase_count if _prev_pos else 0,
+                )
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _rb_e:
+                logging.debug("[R28-C023] 快照捕获跳过: %s", _rb_e)
+
             record = PositionRecord(
                 position_id=pos_id, instrument_id=instrument_id, exchange=exchange,
                 volume=volume, direction=direction_str, open_price=price,
@@ -277,14 +321,18 @@ class PositionCommandService:
                         "volume": abs(volume), "order_type": "OPEN", "status": "filled",
                         "filled_volume": abs(volume), "remaining_volume": 0,
                     })
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                    pass
                     pass
             try:
                 from ali2026v3_trading.infra.event_bus import get_global_event_bus, PositionEvent
                 _eb = get_global_event_bus()
                 if _eb and not getattr(_eb, '_shutdown', True):
                     _eb.publish(PositionEvent(instrument_id=instrument_id, position=float(volume), avg_price=price, action='OPENED'), async_mode=True)
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
 
     def _reduce_position(self, exchange: str, instrument_id: str, volume: int, is_buy: bool, price: float) -> None:
@@ -334,7 +382,9 @@ class PositionCommandService:
                                 _greeks = _gc.get_greeks(rec.instrument_id)
                                 if _greeks:
                                     _greeks_snapshot = {k: _greeks.get(k, 0.0) for k in ('delta', 'gamma', 'vega', 'theta')}
-                    except Exception:
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                        logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                        pass
                         pass
                 del self._ps.positions[instrument_id][k]
                 _close_detail = {'close_price': price}
@@ -347,7 +397,9 @@ class PositionCommandService:
                 _eb = get_global_event_bus()
                 if _eb and not getattr(_eb, '_shutdown', True):
                     _eb.publish(PositionEvent(instrument_id=instrument_id, position=0.0, avg_price=price, action='CLOSED'), async_mode=True)
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
 
     def _trigger_close_position(self, record, reason: str, current_price: float = 0.0) -> None:
@@ -369,7 +421,9 @@ class PositionCommandService:
                             price = tick.get('bid_price' if direction == 'SELL' else 'ask_price', 0.0)
                             if price <= 0:
                                 price = tick.get('price', 0.0)
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                    pass
                     pass
                 if price <= 0:
                     base = current_price or 0.0
@@ -379,13 +433,15 @@ class PositionCommandService:
                             ds = get_data_service()
                             if ds and ds.realtime_cache:
                                 base = ds.realtime_cache.get_latest_price(record.instrument_id) or 0.0
-                        except Exception:
+                        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                            pass
                             pass
                     if base > 0:
                         try:
-                            from ali2026v3_trading.params_service import get_params_service
+                            from ali2026v3_trading.config.params_service import get_params_service
                             tick_size = get_params_service().get_float('tick_size', 1.0)
-                        except Exception:
+                        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                             tick_size = 1.0
                         price = base - tick_size if direction == 'SELL' else base + tick_size
                     else:
@@ -409,7 +465,7 @@ class PositionCommandService:
                 else:
                     logging.warning("[PositionService._trigger_close_position] 平仓下单失败: %s, 将重试", record.instrument_id)
                     need_retry = True
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error("[PositionService._trigger_close_position] Error: %s", e)
                 return
         if need_retry:
@@ -427,36 +483,48 @@ class PositionCommandService:
                 max_workers=self.CLOSE_RETRY_MAX_THREADS, thread_name_prefix='pos_retry')
             import atexit as _atexit
             _atexit.register(self._cleanup_close_retry_executor)
+            # P2-14修复: 注册到lifecycle_resource统一管理
+            try:
+                from ali2026v3_trading.lifecycle.lifecycle_resource import register_thread_pool
+                register_thread_pool('position_close_retry', self._close_retry_executor)
+            except (ImportError, AttributeError) as _err:
+                logging.debug("[position_command_service] 属性访问降级: %s", _err)
             try:
                 _dummy_future = self._close_retry_executor.submit(lambda: None)
                 _dummy_future.result(timeout=2.0)
                 for _t in getattr(self._close_retry_executor, '_threads', set()):
                     _t.daemon = True
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
 
         def _retry_worker():
-            import time as _time
-            retry_success = False
-            for _retry in range(1, self.CLOSE_RETRY_MAX_ATTEMPTS + 1):
-                _time.sleep(self.CLOSE_RETRY_BASE_DELAY_SEC * (2 ** (_retry - 1)))
-                try:
-                    from ali2026v3_trading.order.order_service import get_order_service
-                    order_svc = get_order_service()
-                    direction = 'SELL' if record.volume > 0 else 'BUY'
-                    order_id = order_svc.send_order(
-                        instrument_id=record.instrument_id, volume=abs(record.volume), price=price,
-                        direction=direction, action='CLOSE', exchange=record.exchange or '',
-                        signal_id=getattr(record, 'signal_id', '') or f"RETRY_CLOSE_{record.instrument_id}")
-                    if order_id:
-                        with self._ps._get_instrument_lock(record.instrument_id):
-                            record._closing = True
-                        logging.info("[PositionService] retry %d succeeded: %s", _retry, record.instrument_id)
-                        retry_success = True
-                        break
-                except Exception as retry_e:
-                    logging.warning("[PositionService] retry %d failed: %s", _retry, retry_e)
-            if not retry_success:
+            from ali2026v3_trading.infra.resilience import BoundedRetry as _BoundedRetry
+            from ali2026v3_trading.order.order_service import get_order_service
+
+            def _attempt_close():
+                order_svc = get_order_service()
+                direction = 'SELL' if record.volume > 0 else 'BUY'
+                order_id = order_svc.send_order(
+                    instrument_id=record.instrument_id, volume=abs(record.volume), price=price,
+                    direction=direction, action='CLOSE', exchange=record.exchange or '',
+                    signal_id=getattr(record, 'signal_id', '') or f"RETRY_CLOSE_{record.instrument_id}")
+                if order_id:
+                    with self._ps._get_instrument_lock(record.instrument_id):
+                        record._closing = True
+                    logging.info("[PositionService] retry succeeded: %s", record.instrument_id)
+                    return order_id
+                return None
+
+            br = _BoundedRetry(
+                max_retries=self.CLOSE_RETRY_MAX_ATTEMPTS,
+                base_delay=self.CLOSE_RETRY_BASE_DELAY_SEC,
+                max_delay=self.CLOSE_RETRY_BASE_DELAY_SEC * (2 ** self.CLOSE_RETRY_MAX_ATTEMPTS),
+                on_exhausted="warn",
+            )
+            result = br.execute(_attempt_close)
+            if result is None:
                 with self._ps._get_instrument_lock(record.instrument_id):
                     record._closing = False
                 logging.error("[PositionService] all retries failed, reset _closing: %s", record.instrument_id)

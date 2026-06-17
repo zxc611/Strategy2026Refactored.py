@@ -1,21 +1,11 @@
+# MODULE_ID: M2-316
 """P3.6: counterparty_risk领域单测"""
 from __future__ import annotations
 
 import pytest
 from unittest.mock import MagicMock, patch
+from ali2026v3_trading.tests._stubs import RiskSnapshotStub
 
-
-class RiskSnapshotStub:
-    def __init__(self, action="OPEN", symbol="IF2606"):
-        self.action = action
-        self.symbol = symbol
-        self.instrument_id = symbol
-        self.amount = 1.0
-        self.price = 4000.0
-        self.equity = 1000000.0
-        self.account_id = "test"
-        self.hedge_type = "none"
-        self.signal = {}
 
 
 def _make_risk_service():
@@ -29,7 +19,7 @@ class TestCheckCounterpartyRisks:
         from ali2026v3_trading.risk_engine.counterparty_risk import check_counterparty_risks
         snap = RiskSnapshotStub()
         rs = _make_risk_service()
-        with patch("ali2026v3_trading.risk_engine.shared_checks.check_position_limit", return_value=None), \
+        with patch("ali2026v3_trading.risk_engine.counterparty_risk.check_position_limit", return_value=None), \
              patch("ali2026v3_trading.risk_engine.counterparty_risk.check_e13_collusion", return_value=None), \
              patch("ali2026v3_trading.risk_engine.counterparty_risk.check_strategy_health", return_value=None):
             result = check_counterparty_risks(snap, rs)
@@ -40,7 +30,7 @@ class TestCheckCounterpartyRisks:
         snap = RiskSnapshotStub()
         rs = _make_risk_service()
         block = MagicMock(is_block=True)
-        with patch("ali2026v3_trading.risk_engine.shared_checks.check_position_limit", return_value=block):
+        with patch("ali2026v3_trading.risk_engine.counterparty_risk.check_position_limit", return_value=block):
             result = check_counterparty_risks(snap, rs)
         assert result is not None and result.is_block
 
@@ -55,8 +45,8 @@ class TestCheckCounterpartyRisks:
         from ali2026v3_trading.risk_engine.counterparty_risk import check_strategy_health
         snap = RiskSnapshotStub()
         rs = _make_risk_service()
-        with patch("ali2026v3_trading.strategy_ecosystem.get_strategy_ecosystem") as mock_eco, \
-             patch("ali2026v3_trading.event_bus.get_global_event_bus", return_value=None):
+        with patch("ali2026v3_trading.strategy.strategy_ecosystem.get_strategy_ecosystem") as mock_eco, \
+             patch("ali2026v3_trading.infra.event_bus.get_global_event_bus", return_value=None):
             eco = MagicMock()
             eco.get_health_status.return_value = {"status": "DEGRADED"}
             mock_eco.return_value = eco

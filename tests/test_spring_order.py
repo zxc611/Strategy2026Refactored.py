@@ -1,3 +1,4 @@
+# MODULE_ID: M2-581
 """
 test_spring_order.py - 弹簧策略下单测试脚本
 
@@ -44,7 +45,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.box_spring_strategy import (
+from ali2026v3_trading.strategy.box_spring_strategy_impl import (
     BoxSpringStrategy,
     BoxRange,
     SpringSignal,
@@ -52,26 +53,28 @@ from ali2026v3_trading.box_spring_strategy import (
     SpringState,
     get_box_spring_strategy,
 )
-from ali2026v3_trading.order_service import OrderService, get_order_service
+from ali2026v3_trading.order.order_service import OrderService, get_order_service
 
 
 def _reset_order_service_singleton():
-    import ali2026v3_trading.order_service as mod
-    mod._order_service_instance = None
+    from ali2026v3_trading.order.order_base import reset_order_service
+    reset_order_service()
 
 
 def _reset_box_spring_singleton():
-    import ali2026v3_trading.box_spring_strategy as mod
+    import ali2026v3_trading.strategy.box_spring_strategy_impl as mod
     mod._box_spring_instance = None
 
 
 def _reset_global_singletons():
     _reset_order_service_singleton()
     _reset_box_spring_singleton()
-    import ali2026v3_trading.position_service as ps_mod
-    ps_mod._cross_strategy_risk_guard = None
-    ps_mod._position_service_instance = None
-    from ali2026v3_trading.mode_engine import ModeEngine
+    from ali2026v3_trading.position.position_service import reset_position_service
+    reset_position_service()
+    from ali2026v3_trading.position.position_greeks import get_cross_strategy_risk_guard
+    import ali2026v3_trading.position.position_greeks as pg_mod
+    pg_mod._cross_strategy_risk_guard = None
+    from ali2026v3_trading.governance.mode_engine import ModeEngine
     ModeEngine.reset_instance()
 
 

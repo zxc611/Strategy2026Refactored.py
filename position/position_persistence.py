@@ -1,3 +1,4 @@
+# MODULE_ID: M1-205
 """Position Persistence Service - 持仓持久化+快照
 
 从position_service.py拆分(CC-09):
@@ -13,15 +14,16 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
-from ali2026v3_trading.serialization_utils import json_dumps, safe_jsonl_append_line
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, safe_jsonl_append_line
+from ali2026v3_trading.infra.shared_utils import atomic_replace_file  # R8-5
 
 try:
-    from ali2026v3_trading.audit_log_utils import structured_audit_log as _structured_audit_log  # R27-CP-05-FIX
+    from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log as _structured_audit_log  # R1-4修复
 except ImportError:
     _structured_audit_log = None
 
@@ -35,22 +37,10 @@ class PositionPersistenceService:
     def __init__(self, position_service: Any):
         self._ps = position_service
 
+    # P2-01修复: 委托到infra/serialization_utils.py的公共函数
     def _rotate_jsonl_if_needed(self, filepath: str) -> None:
-        try:
-            if not os.path.exists(filepath):
-                return
-            if os.path.getsize(filepath) > self._POSITION_STATE_MAX_BYTES:
-                for i in range(self._POSITION_STATE_BACKUP_COUNT, 0, -1):
-                    src = f"{filepath}.{i}"
-                    dst = f"{filepath}.{i + 1}"
-                    if os.path.exists(src):
-                        if i == self._POSITION_STATE_BACKUP_COUNT:
-                            os.remove(src)
-                        else:
-                            os.rename(src, dst)
-                os.rename(filepath, f"{filepath}.1")
-        except Exception:
-            pass
+        from ali2026v3_trading.serialization_utils import rotate_jsonl_if_needed as _rotate
+        _rotate(filepath, self._POSITION_STATE_MAX_BYTES, self._POSITION_STATE_BACKUP_COUNT)
 
     def _append_position_state(self, instrument_id: str, position_id: str, action: str, detail: dict = None, signal_id: str = ''):
         try:
@@ -70,7 +60,7 @@ class PositionPersistenceService:
                     'instrument_id': instrument_id, 'position_id': position_id,
                     'signal_id': signal_id or '(empty)', 'detail': detail
                 })
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[PositionService] R15-P0-RES-06: _append_position_state failed: %s", e)
 
     def _recover_position_state(self):
@@ -83,15 +73,14 @@ class PositionPersistenceService:
                 for line in f:
                     total_records += 1
                     try:
-                        import json as _json
-                        record = _json.loads(line.strip())
+                        record = json_loads(line.strip())
                         inst_id = record.get('instrument_id')
                         pid = record.get('position_id')
                         act = record.get('action')
                         if inst_id and pid and act == 'OPEN':
                             self._ps.positions.setdefault(inst_id, {})
                             recovered += 1
-                    except Exception:
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                         continue
             if recovered > 0:
                 logging.info("[PositionService] R15-P0-RES-06: 从position_state.jsonl恢复%d条持仓", recovered)
@@ -101,7 +90,7 @@ class PositionPersistenceService:
                     "total_records=%d recovered=%d (差异=%d)",
                     total_records, recovered, total_records - recovered,
                 )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[PositionService] R15-P0-RES-06: _recover_position_state failed: %s", e)
 
     def _recover_positions(self):
@@ -117,7 +106,7 @@ class PositionPersistenceService:
                 if not os.path.exists(self._ps.config_file):
                     return
                 with open(self._ps.config_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    data = json_loads(f.read())  # R3-2修复
             elif not isinstance(data, dict):
                 return
 
@@ -130,7 +119,7 @@ class PositionPersistenceService:
                             config_data["effective_until"] = datetime.strptime(
                                 config_data["effective_until"], "%Y-%m-%d %H:%M:%S"
                             )
-                        except Exception as e:
+                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                             logging.error(f"[PositionService._load_position_configs] Error parsing date: {e}")
                             continue
                     if "created_at" in config_data and isinstance(config_data["created_at"], str):
@@ -138,12 +127,12 @@ class PositionPersistenceService:
                             config_data["created_at"] = datetime.strptime(
                                 config_data["created_at"], "%Y-%m-%d %H:%M:%S"
                             )
-                        except Exception as e:
+                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                             logging.error(f"[PositionService._load_position_configs] Error parsing date: {e}")
                             continue
                     try:
                         cfg = PositionLimitConfig(**config_data)
-                    except Exception as e:
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                         logging.error(f"[PositionService._load_position_configs] Error creating config: {e}")
                         continue
                     if cfg.effective_until and datetime.now(_CHINA_TZ) > cfg.effective_until:
@@ -153,7 +142,7 @@ class PositionPersistenceService:
 
             logging.info(f"[PositionService._load_position_configs] Loaded from {self._ps.config_file}")
 
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[PositionService._load_position_configs] Error: {e}")
             with self._ps.global_lock:
                 pass
@@ -182,10 +171,9 @@ class PositionPersistenceService:
                             if effective_until else None,
                     }
 
-            with open(self._ps.config_file, "w", encoding="utf-8") as f:
-                f.write(json_dumps(save_data, indent=2))
+            atomic_replace_file(self._ps.config_file, json_dumps(save_data, indent=2))  # R9-1
 
             logging.debug(f"[PositionService._save_position_configs] Saved to {self._ps.config_file}")
 
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[PositionService._save_position_configs] Error: {e}")

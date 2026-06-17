@@ -1,3 +1,5 @@
+﻿# [M3-12] 参数池适配器
+# MODULE_ID: M3-622
 """
 参数池适配器 (Parameter Pool Adapter) — 连接task_scheduler回测结果与策略评判引擎
 
@@ -16,9 +18,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from .strategy_judgment_engine import StrategyJudgmentEngine, JudgmentReport, ECOSYSTEM_TO_JUDGMENT_TYPE_MAP, CapitalScale
+from .strategy_judgment_facade import StrategyJudgmentEngine
+from .judgment_types import JudgmentReport, ECOSYSTEM_TO_JUDGMENT_TYPE_MAP, CapitalScale
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
 _MAX_RECOVERY_HOURS_FALLBACK = 72.0  # NP-P2-08: 替代999.0，使用72小时作为recovery_hours合理上限
 
@@ -107,9 +111,10 @@ def _extract_extreme_survival(result: Dict[str, Any],
     # E-08修复: 优先从SCORING_COEFFICIENTS读取extreme_dd_pass_limit，兜底20.0
     if max_dd_threshold is None:
         try:
-            from .strategy_judgment_engine import SCORING_COEFFICIENTS
+            from .judgment_types import SCORING_COEFFICIENTS
             max_dd_threshold = SCORING_COEFFICIENTS.get("extreme_dd_pass_limit", 20.0)
-        except Exception:
+        except (ImportError, ValueError, KeyError, AttributeError) as _e:
+            logging.debug("[parameter_pool_adapter] SCORING_COEFFICIENTS import fallback: %s", _e)
             max_dd_threshold = 20.0
     survived = max_dd < max_dd_threshold
     recovery_hours = result.get("recovery_hours", _MAX_RECOVERY_HOURS_FALLBACK)  # NP-P2-08: 使用72h常量替代999.0

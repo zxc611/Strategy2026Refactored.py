@@ -1,3 +1,4 @@
+# MODULE_ID: M2-401
 """
 测试历史K线修复：验证 _estimate_kline_count 返回负值 和 _try_calls 空列表判断
 无需导入完整的 Storage 类，直接测试核心逻辑。
@@ -34,7 +35,7 @@ def _try_calls_fixed(call_specs, allow_date_error=False):
         except (TypeError, AttributeError) as exc:
             last_exc = exc
             continue
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ZeroDivisionError) as exc:
             last_exc = exc
             continue
     return None
@@ -278,7 +279,7 @@ if __name__ == '__main__':
     except AssertionError as e:
         print(f"\n❌ 测试失败: {e}")
         sys.exit(1)
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
         print(f"\n❌ 测试异常: {e}")
         import traceback
         traceback.print_exc()

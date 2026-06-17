@@ -1,3 +1,4 @@
+# MODULE_ID: M1-121
 """lifecycle_callbacks.py — 生命周期回调逻辑（从strategy_lifecycle_mixin.py拆分）
 职责: on_start, on_stop, on_destroy, start/stop/pause/resume/destroy, save_state, _shutdown_runtime_services,
       _log_resource_ownership_table, _publish_event
@@ -11,8 +12,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.params_service import get_param_value
-from ali2026v3_trading.lifecycle.lifecycle_state import StrategyState, _state_is
+from ali2026v3_trading.config.params_service import get_param_value
+from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_is
 
 
 class LifecycleCallbacks:
@@ -31,7 +32,7 @@ class LifecycleCallbacks:
         )
         logging.info("[StrategyCoreService.on_start] ========== START ==========")
         try:
-            from ali2026v3_trading.state_param_manager import get_state_param_manager
+            from ali2026v3_trading.config.state_param import get_state_param_manager
             spm = get_state_param_manager()
             if hasattr(p, 't_type_service') and p.t_type_service:
                 wc = getattr(p.t_type_service, '_width_cache', None)
@@ -44,18 +45,18 @@ class LifecycleCallbacks:
                 eco = get_strategy_ecosystem()
                 spm.register_on_state_switch(eco.on_state_switched)
                 logging.info("[StrategyCoreService.on_start] SPM-Ecosystem联动已绑定")
-            except Exception as eco_e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as eco_e:
                 logging.warning("[StrategyCoreService.on_start] Ecosystem联动绑定失败: %s", eco_e)
-        except Exception as spm_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as spm_e:
             logging.warning("[StrategyCoreService.on_start] StateParamManager init failed: %s", spm_e)
         try:
             from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             ps = get_params_service()
             _sid = str(getattr(p, 'strategy_id', '') or 'global')
             p._safety_meta_layer = get_safety_meta_layer(params=ps, strategy_id=_sid)
             logging.info("[StrategyCoreService.on_start] SafetyMetaLayer initialized")
-        except Exception as safety_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as safety_e:
             logging.warning("[StrategyCoreService.on_start] SafetyMetaLayer init failed: %s", safety_e)
         try:
             params = getattr(p, 'params', None) or {}
@@ -63,7 +64,8 @@ class LifecycleCallbacks:
                 logging.getLogger().setLevel(logging.DEBUG)
                 logging.info("[P2-R8-06] debug_mode激活: 日志级别设为DEBUG")
                 if p._safety_meta_layer:
-                    p._safety_meta_layer._circuit_breaker_calm_until = float('inf')
+                    # [P0-29修复] 通过 _circuit_breaker_svc._calm_period_duration 设置无限冷静期
+                    p._safety_meta_layer._circuit_breaker_svc._calm_period_duration = float('inf')
                     logging.info("[P2-R8-06] debug_mode: 断路器冷却期设为无限")
             if params.get('stress_test_mode', False):
                 logging.critical("[P2-R8-06] stress_test_mode激活: 启用极端场景测试配置")
@@ -72,13 +74,13 @@ class LifecycleCallbacks:
                     _stress_sigma = float(getattr(p, '_params', {}).get("stress_test_anomaly_threshold", 1.5)) if hasattr(p, '_params') and p._params else 1.5
                     p._safety_meta_layer.ANOMALY_THRESHOLD_MULTIPLIER = _stress_sigma
                     logging.info("[P2-R8-06] stress_test_mode: 回撤阈值2%%/断路器%.1f sigma", _stress_sigma)
-        except Exception as mode_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as mode_e:
             logging.debug("[P2-R8-06] debug/stress mode处理异常: %s", mode_e)
         try:
             from ali2026v3_trading.data.data_service import get_data_service
             ds = get_data_service()
             logging.info(f"[StrategyCoreService.on_start] DataService预热完成: {ds is not None}")
-        except Exception as ds_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as ds_e:
             logging.warning(f"[StrategyCoreService.on_start] DataService预热失败: {ds_e}")
         with p._lock:
             if p._state not in (StrategyState.INITIALIZING, StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.DEGRADED):
@@ -112,15 +114,15 @@ class LifecycleCallbacks:
             )
             if selected_futures_list or selected_options_dict:
                 try:
-                    from ali2026v3_trading.infra.diagnosis_service import DiagnosisProbeManager
+                    from ali2026v3_trading.infra.diagnosis import DiagnosisProbeManager
                     DiagnosisProbeManager.start_contract_watch(p._subscribed_instruments)
-                except Exception as contract_watch_e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as contract_watch_e:
                     logging.warning("[ContractWatch] 启动失败: %s", contract_watch_e)
                 p._e2e_counters['configured_instruments'] = len(p._subscribed_instruments)
                 try:
                     _ = p.storage
                     logging.info(f"[Subscribe] storage 已就绪: {p.storage is not None}")
-                except Exception as storage_e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as storage_e:
                     logging.error(f"[Subscribe] storage 初始化失败: {storage_e}")
                 if p.storage and hasattr(p.storage, 'subscription_manager'):
                     db_count = p.storage.subscription_manager.subscribe_all_instruments(
@@ -154,7 +156,7 @@ class LifecycleCallbacks:
                                         try:
                                             _bind_fn(_host)
                                             logging.info("[Subscribe] 延迟重试bind_platform_apis成功（第%d次）", attempt)
-                                        except Exception as bind_e:
+                                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as bind_e:
                                             logging.warning("[Subscribe] 延迟重试bind_platform_apis失败: %s", bind_e)
                                 _subscribe_fn = getattr(_self, 'subscribe', None)
                                 if callable(_subscribe_fn):
@@ -236,17 +238,17 @@ class LifecycleCallbacks:
                         f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] "
                         f"Jobs not zero after 10s, entering DEGRADED_STOP"
                     )
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(
                 f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}]"
                 f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] Phase 2 error: {e}"
             )
             jobs_zero = False
         try:
-            from ali2026v3_trading.infra.diagnosis_service import DiagnosisProbeManager, reset_diagnosis_grace_period
+            from ali2026v3_trading.infra.diagnosis import DiagnosisProbeManager, reset_diagnosis_grace_period
             DiagnosisProbeManager.stop_contract_watch(reason='strategy_stop')
             reset_diagnosis_grace_period()
-        except Exception as contract_watch_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as contract_watch_e:
             logging.warning(
                 f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}]"
                 f"[run_id={run_id}] contract_watch stop error: {contract_watch_e}"
@@ -260,30 +262,30 @@ class LifecycleCallbacks:
                 _sub_thread.join(timeout=5.0)
                 p._platform_subscribe_thread = None
                 logging.debug("[R22-RES-03-修复] _platform_subscribe_thread已清理")
-        except Exception as _cancel_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _cancel_err:
             logging.warning("[R22-RES-03] _platform_subscribe_thread清理失败: %s", _cancel_err)
         try:
             if hasattr(p, '_cancel_all_timers'):
                 p._cancel_all_timers()
                 logging.debug("[R22-RES-03-修复] _cancel_all_timers()已调用")
-        except Exception as _timer_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _timer_err:
             logging.warning("[R22-RES-03] _cancel_all_timers()调用失败: %s", _timer_err)
         try:
             p._stop_scheduler()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}][run_id={run_id}] _stop_scheduler error: {e}")
         try:
             p._unsubscribe_all_instruments()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}][run_id={run_id}] _unsubscribe error: {e}")
         try:
             p._shutdown_runtime_services()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}][run_id={run_id}] _shutdown_runtime error: {e}")
         if hasattr(p, '_flush_tick_buffer'):
             try:
                 p._flush_tick_buffer()
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error(f"[on_stop][strategy_id={p.strategy_id}][run_id={run_id}] Failed to flush tick buffer: {e}")
         with p._lock:
             if jobs_zero:
@@ -300,25 +302,27 @@ class LifecycleCallbacks:
                 )
         try:
             p._publish_event('StrategyStopped', {'strategy_id': p.strategy_id, 'state': p._state.value})
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[on_stop][strategy_id={p.strategy_id}][run_id={run_id}] Failed to publish event: {e}")
         p._log_resource_ownership_table(phase='stop')
         try:
             p._lifecycle_platform.unsubscribe_all()
-        except Exception as _lp_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lp_err:
             logging.debug("[LifecyclePlatform] unsubscribe_all 委托失败: %s", _lp_err)
         try:
             p._lifecycle_resource.cleanup_all(level='normal')
-        except Exception as _lr_err:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lr_err:
             logging.debug("[LifecycleResource] cleanup_all 委托失败: %s", _lr_err)
         try:
             from ali2026v3_trading.risk.risk_service import generate_exchange_report
             generate_exchange_report([], output_path='logs/exchange_report.csv')
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
             p.save_state()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning(f"[on_stop] save_state failed: {e}")
         return True
 
@@ -326,7 +330,7 @@ class LifecycleCallbacks:
         p = self.p
         try:
             p.destroy()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[StrategyCoreService.on_destroy] Error: {e}", exc_info=True)
 
     def start(self) -> bool:
@@ -353,7 +357,7 @@ class LifecycleCallbacks:
             try:
                 tick_handler._flush_tick_buffer()
                 logging.info("[StrategyCoreService] pause: shard buffer已flush")
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[StrategyCoreService] pause: shard buffer flush失败: %s", e)
         storage = getattr(p, 'storage', None)
         if storage and hasattr(storage, 'drain_all_queues'):
@@ -362,7 +366,7 @@ class LifecycleCallbacks:
                 total_drained = sum(drain_result.values()) if drain_result else 0
                 if total_drained > 0:
                     logging.info("[StrategyCoreService] pause: drain完成 %s", drain_result)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[StrategyCoreService] pause: drain失败: %s", e)
         return True
 
@@ -401,7 +405,7 @@ class LifecycleCallbacks:
                 p.on_stop()
                 try:
                     p._shutdown_runtime_services()
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.warning(f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}][run_id={run_id}] _shutdown_runtime_services error: {e}")
                 p._scheduler = None
                 p._event_bus = None
@@ -409,11 +413,11 @@ class LifecycleCallbacks:
                 try:
                     if hasattr(p, '_lsm_instance') and p._lsm_instance is not None:
                         p._lsm_instance.transition_to("DESTROYED")
-                except Exception as _lsm_err:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lsm_err:
                     logging.debug("[LifecycleStateMachine] DESTROYED 委托失败: %s", _lsm_err)
                 try:
                     p._lifecycle_resource.cleanup_all(level='final')
-                except Exception as _lr_err:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lr_err:
                     logging.debug("[LifecycleResource] cleanup_all(destroy) 委托失败: %s", _lr_err)
                 p._stats = {
                     'start_time': None, 'total_ticks': 0, 'total_trades': 0, 'total_signals': 0,
@@ -427,7 +431,7 @@ class LifecycleCallbacks:
                 )
                 p._publish_event('StrategyDestroyed', {'strategy_id': p.strategy_id})
                 return True
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error(
                     f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] Failed: {e}"
@@ -459,7 +463,7 @@ class LifecycleCallbacks:
                 raise RuntimeError("Data verification failed: strategy_id mismatch")
             logging.info("[save_state] State saved and verified")
             return True
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[save_state] Failed: {e}", exc_info=True)
             return False
 
@@ -469,14 +473,14 @@ class LifecycleCallbacks:
         if p._storage is not None and hasattr(p._storage, '_stop_async_writer'):
             try:
                 p._storage._stop_async_writer()
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning(f"[StrategyCoreService] Storage async writer stop error: {e}")
         try:
             from ali2026v3_trading.risk.risk_service import get_risk_service
             _rs = get_risk_service()
             if _rs is not None and hasattr(_rs, 'stop'):
                 _rs.stop()
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[StrategyCoreService] R24-P1-CF-05: RiskService stop error: %s", e)
 
     def _log_resource_ownership_table(self, phase: str = 'unknown') -> None:
@@ -558,7 +562,7 @@ class LifecycleCallbacks:
                             f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
                             f"[run_id={run_id}][source_type=strategy-job] No strategy-instance scheduler jobs leaked"
                         )
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug(f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}] Scheduler diagnosis error: {e}")
         storage = getattr(p, '_storage', None)
         if storage and hasattr(storage, 'get_queue_stats'):
@@ -576,7 +580,7 @@ class LifecycleCallbacks:
                             f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
                             f"[run_id={run_id}][source_type=shared-queue-drain] Storage queue empty"
                         )
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug(f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}] Storage queue diagnosis error: {e}")
         event_bus = getattr(p, '_event_bus', None)
         if event_bus and hasattr(event_bus, '_pending_events'):
@@ -593,7 +597,7 @@ class LifecycleCallbacks:
                             f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
                             f"[run_id={run_id}][source_type=event-tail] EventBus pending callbacks empty"
                         )
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug(f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}] EventBus diagnosis error: {e}")
 
     def _publish_event(self, event_type: str, data: Dict[str, Any]) -> None:
@@ -609,7 +613,7 @@ class LifecycleCallbacks:
                     **data
                 })()
                 p._event_bus.publish(event, async_mode=True)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug(
                     f"[StrategyCoreService][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=event-tail] "

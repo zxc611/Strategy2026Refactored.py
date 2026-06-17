@@ -1,3 +1,5 @@
+# MODULE_ID: M1-127
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
 生命周期资源层 — 从strategy_lifecycle_mixin.py拆分
 职责: 资源所有权、线程池、调度器生命周期管理、清理回调注册与执行
@@ -30,7 +32,7 @@ class LifecycleResource:
                 if callable(cleanup):
                     try:
                         cleanup()
-                    except Exception as e:
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                         logging.warning("[LifecycleResource] 资源清理失败: %s err=%s", name, e)
             return resource
 
@@ -48,7 +50,7 @@ class LifecycleResource:
         for callback in reversed(self._cleanup_callbacks):
             try:
                 callback()
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 errors.append(str(e))
                 logging.warning("[LifecycleResource] 清理回调失败: %s", e)
 
@@ -61,7 +63,7 @@ class LifecycleResource:
                 if callable(cleanup):
                     try:
                         cleanup()
-                    except Exception as e:
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                         errors.append(str(e))
                         logging.warning("[LifecycleResource] 资源清理失败: %s err=%s", name, e)
 
@@ -88,7 +90,7 @@ class LifecycleResource:
             if callable(shutdown):
                 try:
                     shutdown(wait=wait, timeout=timeout if wait else None)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.warning("[LifecycleResource] 线程池%s关闭失败: %s", name, e)
         self._thread_pools.clear()
 
@@ -102,7 +104,7 @@ class LifecycleResource:
             if callable(stop):
                 try:
                     stop()
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.warning("[LifecycleResource] 调度器停止失败: %s", e)
             self._scheduler = None
 

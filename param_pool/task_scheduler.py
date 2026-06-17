@@ -1,50 +1,51 @@
-#!/usr/bin/env python3
-"""task_scheduler - Facade模块 (R27-CP-08-FIX: 拆分为3个子模块，本文件保留向后兼容re-export)
+# MODULE_ID: M1-190
+﻿# [M1-96] 任务调度器
+# DEPRECATED: merged into backtest_config (2026-06-12)
+# Lazy imports to avoid circular dependency
 
-原task_scheduler.py(2423行)已拆分为:
-  - ts_param_grids.py: 参数网格定义 (RISK_FREE_RATE, BACKTEST_THRESHOLDS, *_GRID等)
-  - ts_backtest_strategies.py: 6策略组回测函数 (_worker_task, run_cycle_resonance_backtest_sweep等)
-  - ts_result_writer.py: 结果写入与质量门 (_insert_results, _execute_round, main_scheduler等)
+__all__ = [
+    'run_backtest', '_load_data_for_period', 'SLIPPAGE_BPS',
+    'main_scheduler', 'MAX_WORKERS', 'PREPROCESSED_DB', 'RESULTS_DB',
+    'TRAIN_START', 'TEST_START',
+    # 补充: 原由task_scheduler间接导出的验证符号
+    'optimize_l2_params_step1', 'DEEP_VALIDATION_TIERS',
+]
 
-本文件仅做re-export，确保所有 from ali2026v3_trading.param_pool.task_scheduler import XXX 继续有效。
-"""
-from ali2026v3_trading.param_pool.ts_param_grids import (
-    P0_IRON_RULES,
-    REASON_MULTIPLIERS,
-    detect_rollover_gaps,
-    compute_rollover_cost,
-    RISK_FREE_RATE,
-    BACKTEST_THRESHOLDS,
-    MULTISCALE_BAR_LENGTHS,
-    BAR_INTERVAL_GRID,
-    KLINE_LENGTH_PARAM_GRID,
-    _SUBPROCESS_NEEDED_COLS,
-)
-from ali2026v3_trading.param_pool.ts_backtest_strategies import (
-    _prepare_df_for_subprocess,
-    _worker_init,
-    cleanup_global_data,
-    _worker_task,
-    run_cycle_resonance_backtest_sweep,
-    run_cr_params_sweep,
-)
-from ali2026v3_trading.param_pool.ts_result_writer import (
-    _validate_ddl_column_names,
-    _ensure_results_table,
-    _get_completed_task_ids,
-    _query_minute_table,
-    _load_data_for_period,
-    _load_multiscale_data,
-    _resample_bars_runtime,
-    _interpolate_ticks_in_bar,
-    _scale_params_with_bar_interval,
-    run_kline_length_sweep,
-    run_kline_length_deep_sweep,
-    run_kline_cr_cross_sweep,
-    validate_kline_length_quality_gates,
-    _insert_results,
-    _execute_round,
-    _validate_params_via_params_service,
-    build_and_save_life_dict,
-    main_scheduler,
-)
+# DEEP_VALIDATION_TIERS 常量内联（避免从validation_deep_orchestrator触发循环导入）
+DEEP_VALIDATION_TIERS = {
+    "must_run": {
+        "description": "每次参数重检必跑（P0级别，约10秒）",
+        "tests": ["doomed_tests", "market_friendliness", "hft_temporal_robustness",
+                  "cross_strategy_correlation", "liquidity_stress", "regime_robustness",
+                  "logic_transferability"],
+    },
+    "quarterly": {
+        "description": "季度大检（P1级别，约30秒）",
+        "tests": ["doomed_tests", "market_friendliness", "hft_temporal_robustness",
+                  "cross_strategy_correlation", "liquidity_stress", "regime_robustness",
+                  "logic_transferability"],
+    },
+    "annual": {
+        "description": "年度全面审计（P0+P1全量，约2分钟）",
+        "tests": ["hft_temporal_robustness", "cross_strategy_correlation",
+                  "market_friendliness", "regime_robustness", "liquidity_stress",
+                  "logic_transferability", "doomed_tests"],
+    },
+}
+
+
+def __getattr__(name):
+    if name == 'optimize_l2_params_step1':
+        from ali2026v3_trading.param_pool.validation_l2_hyperparams import optimize_l2_params_step1
+        return optimize_l2_params_step1
+    if name == 'run_backtest':
+        from ali2026v3_trading.param_pool.backtest_runner_base import run_backtest
+        return run_backtest
+    if name == '_load_data_for_period':
+        from ali2026v3_trading.param_pool.ts_result_writer import _load_data_for_period
+        return _load_data_for_period
+    if name in __all__:
+        import importlib
+        _mod = importlib.import_module('ali2026v3_trading.param_pool.backtest_config')
+        return getattr(_mod, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

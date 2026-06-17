@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# MODULE_ID: M2-339
 """
 DuckDB问题修复验证脚本
 验证标准：原则11（实证验证）+ 原则12（确定性交付）
@@ -45,7 +46,7 @@ def verify_code_syntax():
         print("[PASS] data_service.py 编译通过")
         print()
         return True
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"[FAIL] 编译失败: {e}")
         return False
 
@@ -159,7 +160,7 @@ def verify_duckdb_functionality():
             print()
             return False
             
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"[FAIL] DuckDB功能测试失败: {e}")
         print()
         return False

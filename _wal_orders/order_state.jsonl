@@ -1,6 +1,0 @@
-{"direction": "SELL", "instrument_id": "IF2606", "order_id": "ORD_1780225911031_1e66bdee", "price": 4020.0, "state": "SUBMITTED", "ts": 1780225911.0371692, "volume": 1}
-{"direction": "SELL", "instrument_id": "IF2606", "order_id": "ORD_1780225911031_1e66bdee", "price": 4020.0, "state": "CONFIRMED", "ts": 1780225911.0481687, "volume": 1}
-{"direction": "BUY", "instrument_id": "IF2606", "order_id": "ORD_1780225911077_35489ee8", "price": 3980.0, "state": "SUBMITTED", "ts": 1780225911.0801752, "volume": 1}
-{"direction": "BUY", "instrument_id": "IF2606", "order_id": "ORD_1780225911077_35489ee8", "price": 3980.0, "state": "CONFIRMED", "ts": 1780225911.1021729, "volume": 1}
-{"direction": "BUY", "instrument_id": "IF2606", "order_id": "ORD_1780225915962_6fb4f5cb", "price": 4000.0, "state": "SUBMITTED", "ts": 1780225915.9641182, "volume": 1}
-{"direction": "BUY", "instrument_id": "IF2606", "order_id": "ORD_1780225915962_6fb4f5cb", "price": 4000.0, "state": "CONFIRMED", "ts": 1780225916.0022626, "volume": 1}

@@ -1,3 +1,4 @@
+# MODULE_ID: M1-241
 """信号服务 - Facade层 + SignalGenerator反向合并(P0-S2)
 SignalGenerator仅1消费者(SignalService)，反向合并消除间接调用开销。
 signal_generator.py保留为重导出模块，维持外部API兼容。
@@ -7,14 +8,19 @@ from __future__ import annotations
 import threading
 import logging
 import time
-import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.infra.shared_utils import SignalType, VALID_SIGNAL_TYPES, OPEN_SIGNAL_TYPES
+from ali2026v3_trading.infra.shared_utils import generate_prefixed_id  # R9-3
 from ali2026v3_trading.signal.signal_timing_filter import KalmanFilter1D, EMASignalFilter, SignalTimingFilter, AdaptiveSignalThreshold
+from ali2026v3_trading.signal.signal_history_service import SignalHistoryService
+try:
+    from ali2026v3_trading.governance.mode_engine import ModeEngine
+except ImportError:
+    ModeEngine = None
 try:
     from ali2026v3_trading.infra.event_bus import EventBus, get_global_event_bus
     _HAS_EVENT_BUS = True
@@ -120,7 +126,14 @@ class SignalGenerator:
         return ctx
 
     def _filter_by_strength(self, ctx: SignalContext) -> SignalContext:
-        if ctx.signal_type in OPEN_SIGNAL_TYPES and ctx.signal_strength <= 0.0:
+        if not ctx.instrument_id or not ctx.instrument_id.strip():
+            self._svc._stats['filtered_signals'] += 1
+            logging.debug("[SignalService] Signal filtered (empty_instrument_id): %s %s", ctx.instrument_id, ctx.signal_type)
+            ctx.rejected = True
+            ctx.reject_reason = 'empty_instrument_id'
+            ctx.filter_name = 'strength'
+            return ctx
+        if ctx.signal_type in OPEN_SIGNAL_TYPES and ctx.signal_strength < 0.0:
             self._svc._stats['filtered_signals'] += 1
             self._svc._stats['strength_filtered'] = self._svc._stats.get('strength_filtered', 0) + 1
             logging.debug("[SignalService] Signal filtered (zero_strength): %s %s", ctx.instrument_id, ctx.signal_type)
@@ -130,7 +143,7 @@ class SignalGenerator:
         return ctx
 
     def _filter_by_plr(self, ctx: SignalContext) -> SignalContext:
-        if self._svc._plr_filter_enabled and self._svc._min_estimated_plr > 0:
+        if getattr(self._svc, '_plr_filter_enabled', False) and getattr(self._svc, '_min_estimated_plr', 0) > 0:
             if ctx.signal_type in OPEN_SIGNAL_TYPES and ctx.estimated_plr < self._svc._min_estimated_plr:
                 self._svc._stats['filtered_signals'] += 1
                 self._svc._stats['plr_filtered'] += 1
@@ -143,7 +156,7 @@ class SignalGenerator:
 
     def _filter_by_mode_engine(self, ctx: SignalContext) -> SignalContext:
         try:
-            from ali2026v3_trading.mode_engine import ModeEngine
+            from ali2026v3_trading.governance.mode_engine import ModeEngine
             _me = ModeEngine.get_instance()
             _passed, _reason = _me.filter_signal_by_mode(
                 ctx.signal_type, estimated_plr=ctx.estimated_plr,
@@ -156,7 +169,7 @@ class SignalGenerator:
                 ctx.rejected = True
                 ctx.reject_reason = _reason
                 ctx.filter_name = 'mode_engine'
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[R22-EP-P1] ModeEngine过滤异常, fail-safe阻断: %s", e)
             ctx.rejected = True
             ctx.reject_reason = 'mode_engine_exception'
@@ -164,7 +177,7 @@ class SignalGenerator:
         return ctx
 
     def _filter_by_cooldown(self, ctx: SignalContext) -> SignalContext:
-        _effective = ctx.cooldown_seconds if ctx.cooldown_seconds is not None else self._svc._default_cooldown_seconds
+        _effective = ctx.cooldown_seconds if ctx.cooldown_seconds is not None else getattr(self._svc, '_default_cooldown_seconds', 60.0)
         _cooldown_key = self._svc._make_cooldown_key(ctx.instrument_id, ctx.signal_type)
         if self._svc._is_in_cooldown(_cooldown_key, _effective):
             self._svc._stats['filtered_signals'] += 1
@@ -177,7 +190,7 @@ class SignalGenerator:
 
     def _filter_by_decision_score(self, ctx: SignalContext) -> SignalContext:
         _dim_kwargs = self._svc._collect_decision_dimensions(ctx.instrument_id)
-        if self._svc._decision_score_filter_enabled:
+        if getattr(self._svc, '_decision_score_filter_enabled', True):
             try:
                 _tmp_signal = {
                     'signal_id': '', 'instrument_id': ctx.instrument_id, 'signal_type': ctx.signal_type,
@@ -196,7 +209,7 @@ class SignalGenerator:
                     ctx.rejected = True
                     ctx.reject_reason = ctx.decision_result.get('filter_reason', '')
                     ctx.filter_name = 'decision_score'
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[R22-EP-P1] decision_score_filter异常, fail-safe阻断: %s", e)
                 ctx.rejected = True
                 ctx.reject_name = 'decision_score_exception'
@@ -208,12 +221,14 @@ class SignalGenerator:
                 ctx.decision_result = rs.compute_decision_score(
                     ctx.signal_strength, self._svc._default_order_flow_consistency, **_dim_kwargs,
                 )
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
         return ctx
 
     def _filter_by_hft(self, ctx: SignalContext) -> SignalContext:
-        if self._svc._hft_filter_enabled and self._svc._hft_signal_filter is not None:
+        if getattr(self._svc, '_hft_filter_enabled', False) and getattr(self._svc, '_hft_signal_filter', None) is not None:
             try:
                 hft_result = self._svc.filter_with_hft(ctx.instrument_id, ctx.signal_strength)
                 if hft_result is not None and not hft_result.get('signal_passed', True):
@@ -222,7 +237,7 @@ class SignalGenerator:
                     ctx.rejected = True
                     ctx.reject_reason = hft_result.get('reason', '')
                     ctx.filter_name = 'hft'
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[R22-EP-P1] HFT过滤异常, fail-safe阻断: %s", e)
                 ctx.rejected = True
                 ctx.reject_reason = 'hft_exception'
@@ -243,7 +258,7 @@ class SignalGenerator:
                     ctx.filter_name = 'adaptive'
                 else:
                     self._svc._adaptive_threshold.record_signal(passed=True, pnl=0.0)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[R22-EP-P1] AdaptiveThreshold异常, fail-safe阻断: %s", e)
                 ctx.rejected = True
                 ctx.reject_reason = 'adaptive_exception'
@@ -253,7 +268,7 @@ class SignalGenerator:
     def _create_signal_record(self, ctx: SignalContext) -> SignalContext:
         _dr = ctx.decision_result
         ctx.signal = {
-            'signal_id': f"SIG_{uuid.uuid4().hex[:12]}",
+            'signal_id': generate_prefixed_id("SIG", 12),  # R9-3
             'instrument_id': ctx.instrument_id,
             'signal_type': ctx.signal_type,
             'price': ctx.price,
@@ -299,37 +314,49 @@ class SignalGenerator:
                     gd = rs.get_greeks_dashboard(instrument_id)
                     if isinstance(gd, dict):
                         kwargs['greeks_dashboard'] = gd
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                    pass
                     pass
             if hasattr(rs, 'params') and isinstance(rs.params, dict):
                 try:
                     kwargs['consecutive_losses'] = int(rs.params.get('_consecutive_losses', 0))
                     kwargs['current_pnl'] = float(rs.params.get('_current_pnl', 0.0))
                     kwargs['drawdown_pct'] = float(rs.params.get('_drawdown_pct', 0.0))
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
                     pass
-        except Exception:
+                    pass
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
-            from ali2026v3_trading.shadow_strategy_engine import get_shadow_strategy_engine
+            from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
             _sse = get_shadow_strategy_engine()
             if _sse and hasattr(_sse, 'alpha_ratio'):
                 kwargs['alpha_ratio'] = _sse.alpha_ratio
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
-            from ali2026v3_trading.state_param_manager import get_state_param_manager
+            from ali2026v3_trading.config.state_param import get_state_param_manager
             spm = get_state_param_manager()
             if spm and hasattr(spm, 'current_state'):
                 kwargs['hmm_state'] = str(spm.current_state)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
             from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
             se = get_strategy_ecosystem()
             if se and hasattr(se, 'cross_correlation'):
                 kwargs['cross_correlation'] = se.cross_correlation
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         return kwargs
 
@@ -368,7 +395,7 @@ class SignalGenerator:
             signal["decision_action"] = result["action"]
             signal["dimension_scores"] = result.get("dimension_scores", {})
             signal["dimension_weights"] = result.get("dimension_weights", {})
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[SignalService] apply_decision_score_filter error: %s", e)
         return signal
 
@@ -395,12 +422,13 @@ class SignalGenerator:
         svc._hft_signal_filter = None
         svc._hft_filter_enabled = False
         from ali2026v3_trading.signal.signal_filter_chain import SignalFilterChain
-        from ali2026v3_trading.cooldown_manager import CooldownManager
+        from ali2026v3_trading.signal.cooldown_manager import CooldownManager
         svc._filter_chain = SignalFilterChain(svc)
         svc._cooldown_mgr = CooldownManager()
         svc._decision_score_filter_enabled = True
         svc._adaptive_threshold = None
-        svc._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+        from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR
+        svc._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_LOG_DIR)
         svc._history_service.set_log_dir(svc._log_dir)
         svc._daily_report_generated = {}
         svc._structured_logger = None
@@ -408,46 +436,52 @@ class SignalGenerator:
     @staticmethod
     def init_from_config(svc: Any) -> None:
         try:
-            from ali2026v3_trading.config.config_params import get_cached_params
+            from ali2026v3_trading.config.config_service import get_cached_params
             _params = get_cached_params()
             if isinstance(_params, dict):
                 if 'signal_max_age_sec' in _params:
                     svc._signal_max_age_sec = float(_params['signal_max_age_sec'])
                 if 'default_order_flow_consistency' in _params:
                     svc._default_order_flow_consistency = _params['default_order_flow_consistency']
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
-            from ali2026v3_trading.config.config_service import ConfigService
-            _cfg = ConfigService()
+            from ali2026v3_trading.config.config_service import get_config_service
+            _cfg = get_config_service()
             _cooldown_cfg = _cfg.get(svc._CONFIG_COOLDOWN_KEY, None) if hasattr(_cfg, 'get') else None
             _cleanup_cfg = _cfg.get(svc._CONFIG_CLEANUP_KEY, None) if hasattr(_cfg, 'get') else None
             if _cooldown_cfg is not None:
                 svc._default_cooldown_seconds = float(_cooldown_cfg)
             if _cleanup_cfg is not None:
                 svc._cleanup_interval = float(_cleanup_cfg)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
-            from ali2026v3_trading.config.config_service import ConfigService
-            _cfg = ConfigService()
+            from ali2026v3_trading.config.config_service import get_config_service
+            _cfg = get_config_service()
             if getattr(_cfg, 'trading', None) and getattr(_cfg.trading, 'enable_hft_filter', None):
                 svc.enable_hft_filter()
             else:
                 _strategy_type = getattr(_cfg, 'strategy_type', 'normal') if hasattr(_cfg, 'strategy_type') else 'normal'
                 if _strategy_type in ('hft', 'high_frequency'):
                     svc.enable_hft_filter()
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         try:
             from ali2026v3_trading.signal.signal_service import AdaptiveSignalThreshold
             svc._adaptive_threshold = AdaptiveSignalThreshold()
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             svc._adaptive_threshold = None
         try:
-            from ali2026v3_trading.infra.health_check_api import StructuredJsonlLogger
+            from ali2026v3_trading.infra.health_monitor import StructuredJsonlLogger
             svc._structured_logger = StructuredJsonlLogger(log_dir=svc._log_dir)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             svc._structured_logger = None
 
     @staticmethod
@@ -508,7 +542,16 @@ class SignalService:
     def disable_plr_filter(self): self._filter_chain.disable_plr_filter();self._plr_filter_enabled=False
     def filter_with_hft(self, instrument_id, resonance_strength): return self._filter_chain.filter_with_hft(instrument_id,resonance_strength)
     def transition_signal_state(self, signal_id, new_state): return self._filter_chain.transition_signal_state(signal_id,new_state,self._signal_states,SIGNAL_STATE_TRANSITIONS)
-    def expire_stale_signals(self): return self._filter_chain.expire_stale_signals(self._history_service.get_recent(n=len(self._signal_history)),self._signal_states,self._signal_max_age_sec,self._lock)
+    def expire_stale_signals(self):
+        # P2-08/P2-13修复: 委托 SignalExpiryManager 统一过期管理
+        from ali2026v3_trading.infra.resilience import SignalExpiryManager
+        if not hasattr(self, '_expiry_mgr'):
+            self._expiry_mgr = SignalExpiryManager(default_ttl_sec=self._signal_max_age_sec)
+        # 1) SignalExpiryManager 清理过期缓存
+        expired_count = self._expiry_mgr.cleanup()
+        # 2) filter_chain 负责状态转换
+        result = self._filter_chain.expire_stale_signals(self._history_service.get_recent(n=len(self._signal_history)),self._signal_states,self._signal_max_age_sec,self._lock)
+        return result
     def _make_cooldown_key(self, instrument_id, signal_type=''): return self._cooldown_mgr.make_cooldown_key(instrument_id,signal_type)
     def _is_in_cooldown(self, cooldown_key, cooldown_seconds): return self._cooldown_mgr.is_in_cooldown(cooldown_key,cooldown_seconds)
     def set_cooldown(self, instrument_id, cooldown_seconds, signal_type=''): self._cooldown_mgr.set_cooldown(instrument_id,cooldown_seconds,signal_type);self._cooldown_times=self._cooldown_mgr.cooldown_times;self._cooldown_durations=self._cooldown_mgr.cooldown_durations

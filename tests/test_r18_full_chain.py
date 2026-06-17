@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# MODULE_ID: M2-501
 """
 R18全链路通畅验证脚本
 验证第十八轮审计报告发现的139个问题(P0=52, P1=58, P2=29)修复情况
@@ -107,7 +108,7 @@ def _read_file(rel_path):
     try:
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             return f.read()
-    except Exception:
+    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
         return ""
 
 
@@ -128,7 +129,9 @@ def _grep_project(pattern, subdir=None):
                     for lineno, line in enumerate(f, 1):
                         if re.search(pattern, line):
                             results.append((fpath, lineno, line.rstrip()))
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
     return results
 
@@ -149,7 +152,9 @@ def _grep_yaml(pattern, subdir=None):
                     for lineno, line in enumerate(f, 1):
                         if re.search(pattern, line):
                             results.append((fpath, lineno, line.rstrip()))
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
     return results
 
@@ -291,7 +296,7 @@ def verify_inv_p0():
         if not found:
             found = _has_marker("risk_service.py", r"INV-01/INV-POS-03")
         vr.add("INV_P0", "INV-01", found, "calculate_position_risk()使用multiplier" if found else "未找到INV-01修复标记")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-01", False, str(e)[:120])
 
     # INV-02: ShadowStrategyEngine降级信号被check_before_trade消费
@@ -302,14 +307,14 @@ def verify_inv_p0():
         found3 = _has_any_marker(r"shadow.*strategy.*engine.*signal|影子策略.*信号")
         passed = found1 and (found2 or found3)
         vr.add("INV_P0", "INV-02", passed, "ShadowStrategyEngine降级信号被消费" if passed else "降级信号消费链不完整")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-02", False, str(e)[:120])
 
     # INV-03: equity>=0守卫存在
     try:
         found = _has_marker("risk_service.py", r"INV-03|equity.*>=.*0|equity.*非负|负权益")
         vr.add("INV_P0", "INV-03", found, "equity>=0守卫" if found else "未找到equity>=0守卫")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-03", False, str(e)[:120])
 
     # INV-04: available_capital>=0守卫存在
@@ -318,28 +323,28 @@ def verify_inv_p0():
         found2 = _has_marker("risk_service.py", r"check_capital_sufficiency|资金充足性")
         passed = found1 or found2
         vr.add("INV_P0", "INV-04", passed, "available_capital>=0守卫" if passed else "未找到available_capital>=0守卫")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-04", False, str(e)[:120])
 
     # INV-05: margin_used<=equity守卫存在
     try:
         found = _has_marker("risk_service.py", r"INV-05|margin_used.*<=.*equity|保证金.*权益|INV-CAP-03")
         vr.add("INV_P0", "INV-05", found, "margin_used<=equity守卫" if found else "未找到margin_used<=equity守卫")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-05", False, str(e)[:120])
 
     # INV-06: 订单状态合法转换集合存在
     try:
         found = _has_marker("order_service.py", r"INV-06|INV-STA-01|合法.*状态.*转换|VALID_ORDER_TRANSITIONS")
         vr.add("INV_P0", "INV-06", found, "订单状态合法转换集合" if found else "未找到订单状态合法转换集合")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-06", False, str(e)[:120])
 
     # INV-07: 策略状态合法转换集合存在
     try:
         found = _has_marker("strategy_ecosystem.py", r"INV-07|INV-STA-02|合法.*策略.*状态.*转换|VALID_STRATEGY_TRANSITIONS")
         vr.add("INV_P0", "INV-07", found, "策略状态合法转换集合" if found else "未找到策略状态合法转换集合")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-07", False, str(e)[:120])
 
     # INV-08: bid<ask校验存在
@@ -348,49 +353,49 @@ def verify_inv_p0():
         found2 = _has_marker("storage_query.py", r"bid.*ask|bid>=ask")
         passed = found1 or found2
         vr.add("INV_P0", "INV-08", passed, "bid<ask校验" if passed else "未找到bid<ask校验")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-08", False, str(e)[:120])
 
     # INV-09: OHLC一致性校验存在
     try:
         found = _has_marker("ds_realtime_cache.py", r"INV-09|OHLC.*一致|OHLC.*验证|validate_ohlcv")
         vr.add("INV_P0", "INV-09", found, "OHLC一致性校验" if found else "未找到OHLC一致性校验")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-09", False, str(e)[:120])
 
     # INV-10: 策略持仓之和=总持仓校验存在
     try:
         found = _has_marker("strategy_ecosystem.py", r"INV-10|INV-CON-01|持仓.*之和|持仓一致性")
         vr.add("INV_P0", "INV-10", found, "策略持仓之和=总持仓校验" if found else "未找到持仓一致性校验")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-10", False, str(e)[:120])
 
     # INV-11: 策略资金之和=总资金校验存在
     try:
         found = _has_marker("strategy_ecosystem.py", r"INV-11|INV-CON-02|资金.*归一化|资金分配.*1\.0")
         vr.add("INV_P0", "INV-11", found, "策略资金之和=总资金校验" if found else "未找到资金一致性校验")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-11", False, str(e)[:120])
 
     # INV-12: 日亏损<=max_daily_loss守卫存在
     try:
         found = _has_marker("risk_service.py", r"INV-12|INV-RSK-01|日.*亏损.*max_daily_loss|恢复.*验证.*市场安全")
         vr.add("INV_P0", "INV-12", found, "日亏损<=max_daily_loss守卫" if found else "未找到日亏损守卫")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-12", False, str(e)[:120])
 
     # INV-13: 单笔风险<=max_single_risk守卫存在
     try:
         found = _has_marker("risk_service.py", r"INV-13|INV-RSK-02|单笔.*风险.*限制|check_single_risk")
         vr.add("INV_P0", "INV-13", found, "单笔风险<=max_single_risk守卫" if found else "未找到单笔风险守卫")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-13", False, str(e)[:120])
 
     # INV-14: P0铁律门控守卫存在(Sharpe>=0.5)
     try:
         found = _has_marker("risk_service.py", r"INV-14|INV-IRN-01|Sharpe.*0\.5|铁律.*守卫")
         vr.add("INV_P0", "INV-14", found, "P0铁律门控守卫" if found else "未找到P0铁律门控守卫")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("INV_P0", "INV-14", False, str(e)[:120])
 
 
@@ -405,21 +410,21 @@ def verify_dfg_p0():
     try:
         found = _has_marker("position_service.py", r"DFG-01|current_price.*更新")
         vr.add("DFG_P0", "DFG-01", found, "current_price更新逻辑" if found else "未找到current_price更新逻辑")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("DFG_P0", "DFG-01", False, str(e)[:120])
 
     # DFG-02: signal_id传递到订单
     try:
         found = _has_marker("order_service.py", r"DFG-02|signal_id.*传递")
         vr.add("DFG_P0", "DFG-02", found, "signal_id传递到订单" if found else "未找到signal_id传递")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("DFG_P0", "DFG-02", False, str(e)[:120])
 
     # DFG-03: get_health_status()无未定义变量引用
     try:
         found = _has_marker("strategy_core_service.py", r"DFG-03|risk_dashboard_status")
         vr.add("DFG_P0", "DFG-03", found, "get_health_status()修复" if found else "未找到DFG-03修复")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("DFG_P0", "DFG-03", False, str(e)[:120])
 
     # DFG-04: EventBus事件类被发布/订阅
@@ -428,21 +433,21 @@ def verify_dfg_p0():
         found2 = _has_marker("order_service.py", r"DFG-04|publish.*Event|发布.*Event")
         passed = found1 or found2
         vr.add("DFG_P0", "DFG-04", passed, "EventBus事件类被发布/订阅" if passed else "未找到EventBus事件发布/订阅")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("DFG_P0", "DFG-04", False, str(e)[:120])
 
     # DFG-05: EventBus背压处理存在
     try:
         found = _has_marker("event_bus.py", r"DFG-05|backpressure|背压")
         vr.add("DFG_P0", "DFG-05", found, "EventBus背压处理" if found else "未找到EventBus背压处理")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("DFG_P0", "DFG-05", False, str(e)[:120])
 
     # DFG-06: _send_nack()递归深度限制存在
     try:
         found = _has_marker("event_bus.py", r"DFG-06|递归.*深度|nack.*depth|_nack_depth")
         vr.add("DFG_P0", "DFG-06", found, "_send_nack()递归深度限制" if found else "未找到递归深度限制")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("DFG_P0", "DFG-06", False, str(e)[:120])
 
 
@@ -457,14 +462,14 @@ def verify_upg_p0():
     try:
         found = _has_marker("ds_schema_manager.py", r"UPG-01|SCHEMA_VERSION|schema_version")
         vr.add("UPG_P0", "UPG-01", found, "schema版本号" if found else "未找到schema版本号")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-01", False, str(e)[:120])
 
     # UPG-02: 迁移脚本(归档替代DROP)
     try:
         found = _has_marker("ds_schema_manager.py", r"UPG-02|_archive_legacy|归档.*替代.*DROP")
         vr.add("UPG_P0", "UPG-02", found, "迁移脚本(归档替代DROP)" if found else "未找到归档迁移脚本")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-02", False, str(e)[:120])
 
     # UPG-03: 参数三源一致性
@@ -473,7 +478,7 @@ def verify_upg_p0():
         found2 = _has_any_marker(r"UPG-03.*修复|UPG-03.*对齐", "参数池")
         passed = found1 or found2
         vr.add("UPG_P0", "UPG-03", passed, "参数三源一致性" if passed else "未找到参数三源一致性修复")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-03", False, str(e)[:120])
 
     # UPG-04: 灰度发布能力
@@ -482,21 +487,21 @@ def verify_upg_p0():
         if not found:
             found = _has_marker("strategy_lifecycle_mixin.py", r"UPG-P1-03|并行运行")
         vr.add("UPG_P0", "UPG-04", found, "灰度发布能力" if found else "未找到灰度发布能力")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-04", False, str(e)[:120])
 
     # UPG-05: 热更新原子性(双缓冲)
     try:
         found = _has_marker("state_param_manager.py", r"UPG-05|双缓冲|原子.*交换|atomic.*swap")
         vr.add("UPG_P0", "UPG-05", found, "热更新原子性(双缓冲)" if found else "未找到热更新原子性修复")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-05", False, str(e)[:120])
 
     # UPG-06: 热更新失败回退到当前有效值
     try:
         found = _has_marker("state_param_manager.py", r"UPG-06|回退.*当前.*有效|fallback.*current")
         vr.add("UPG_P0", "UPG-06", found, "热更新失败回退" if found else "未找到热更新失败回退修复")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-06", False, str(e)[:120])
 
     # UPG-07: YAML配置文件format_version字段
@@ -509,35 +514,35 @@ def verify_upg_p0():
             yaml_results = _grep_yaml(r"format_version")
             found = len(yaml_results) > 0
         vr.add("UPG_P0", "UPG-07", found, "YAML配置format_version" if found else "未找到YAML format_version")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-07", False, str(e)[:120])
 
     # UPG-08: 数据格式版本号
     try:
         found = _has_marker("ds_schema_manager.py", r"UPG-08|DATA_FORMAT_VERSION|data_format_version")
         vr.add("UPG_P0", "UPG-08", found, "数据格式版本号" if found else "未找到数据格式版本号")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-08", False, str(e)[:120])
 
     # UPG-09: JSONL日志格式版本号
     try:
         found = _has_marker("shadow_strategy_engine.py", r"UPG-09|JSONL_FORMAT_VERSION|format_version")
         vr.add("UPG_P0", "UPG-09", found, "JSONL日志格式版本号" if found else "未找到JSONL格式版本号")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-09", False, str(e)[:120])
 
     # UPG-10: config.json schema校验
     try:
         found = _has_marker("config_service.py", r"UPG-10|schema.*校验|validate.*schema")
         vr.add("UPG_P0", "UPG-10", found, "config.json schema校验" if found else "未找到config schema校验")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-10", False, str(e)[:120])
 
     # UPG-11: 手册与代码版本对齐
     try:
         found = _has_marker("__init__.py", r"UPG-11|CODE_VERSION|版本.*对齐")
         vr.add("UPG_P0", "UPG-11", found, "手册与代码版本对齐" if found else "未找到版本对齐检查")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         vr.add("UPG_P0", "UPG-11", False, str(e)[:120])
 
 
@@ -576,7 +581,7 @@ def verify_ops_p0():
         try:
             found = _has_any_marker(pattern)
             vr.add("OPS_P0", item_id, found, desc if found else f"未找到{desc}修复")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             vr.add("OPS_P0", item_id, False, str(e)[:120])
 
 
@@ -605,7 +610,7 @@ def verify_inv_p1():
         try:
             found = _has_marker(rel_path, pattern)
             vr.add("INV_P1", item_id, found, desc if found else f"未找到{desc}修复")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             vr.add("INV_P1", item_id, False, str(e)[:120])
 
 
@@ -637,7 +642,7 @@ def verify_dfg_p1():
         try:
             found = _has_any_marker(pattern)
             vr.add("DFG_P1", item_id, found, desc if found else f"未找到{desc}修复")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             vr.add("DFG_P1", item_id, False, str(e)[:120])
 
 
@@ -669,7 +674,7 @@ def verify_upg_p1():
         try:
             found = _has_any_marker(pattern)
             vr.add("UPG_P1", item_id, found, desc if found else f"未找到{desc}修复")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             vr.add("UPG_P1", item_id, False, str(e)[:120])
 
 
@@ -706,7 +711,7 @@ def verify_ops_p1():
         try:
             found = _has_any_marker(pattern)
             vr.add("OPS_P1", item_id, found, desc if found else f"未找到{desc}修复")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             vr.add("OPS_P1", item_id, False, str(e)[:120])
 
 
@@ -753,7 +758,7 @@ def verify_p2():
         try:
             found = _has_any_marker(pattern)
             vr.add("P2", item_id, found, desc if found else f"未找到{desc}修复")
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             vr.add("P2", item_id, False, str(e)[:120])
 
 
@@ -770,70 +775,70 @@ def main():
     print("[1/10] 编译验证...")
     try:
         verify_compile()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  编译验证异常: {e}")
 
     # 2. P0不变量守卫
     print("[2/10] P0不变量守卫(INV-01~14)...")
     try:
         verify_inv_p0()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  INV-P0验证异常: {e}")
 
     # 3. P0数据流图
     print("[3/10] P0数据流图(DFG-01~06)...")
     try:
         verify_dfg_p0()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  DFG-P0验证异常: {e}")
 
     # 4. P0升级迁移
     print("[4/10] P0升级迁移(UPG-01~11)...")
     try:
         verify_upg_p0()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  UPG-P0验证异常: {e}")
 
     # 5. P0运维就绪度
     print("[5/10] P0运维就绪度(OPS-01~21)...")
     try:
         verify_ops_p0()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  OPS-P0验证异常: {e}")
 
     # 6. P1不变量守卫
     print("[6/10] P1不变量守卫(INV-P1-01~11)...")
     try:
         verify_inv_p1()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  INV-P1验证异常: {e}")
 
     # 7. P1数据流图
     print("[7/10] P1数据流图(DFG-P1-01~14)...")
     try:
         verify_dfg_p1()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  DFG-P1验证异常: {e}")
 
     # 8. P1升级迁移
     print("[8/10] P1升级迁移(UPG-P1-01~14)...")
     try:
         verify_upg_p1()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  UPG-P1验证异常: {e}")
 
     # 9. P1运维就绪度
     print("[9/10] P1运维就绪度(OPS-P1-01~19)...")
     try:
         verify_ops_p1()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  OPS-P1验证异常: {e}")
 
     # 10. P2修复验证
     print("[10/10] P2修复验证(29项)...")
     try:
         verify_p2()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"  P2验证异常: {e}")
 
     # 输出报告
@@ -847,7 +852,7 @@ def main():
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(report)
         print(f"\n报告已保存到: {report_path}")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         print(f"\n报告保存失败: {e}")
 
 

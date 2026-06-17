@@ -1,21 +1,11 @@
+# MODULE_ID: M2-579
 """P3.6: shared_checks 5个共享函数完整单测"""
 from __future__ import annotations
 
 import pytest
 from unittest.mock import MagicMock
+from ali2026v3_trading.tests._stubs import RiskSnapshotStub
 
-
-class RiskSnapshotStub:
-    def __init__(self, action="OPEN", symbol="IF2606", amount=1.0, price=4000.0, equity=1000000.0):
-        self.action = action
-        self.symbol = symbol
-        self.instrument_id = symbol
-        self.amount = amount
-        self.price = price
-        self.equity = equity
-        self.account_id = "test"
-        self.hedge_type = "none"
-        self.signal = {}
 
 
 def _make_risk_service():
@@ -97,7 +87,7 @@ class TestCheckRegulatoryRisks:
 
     def test_position_limit_blocks_first(self):
         from ali2026v3_trading.risk_engine.shared_checks import check_regulatory_risks
-        from ali2026v3_trading.risk_service import RiskCheckResponse, RiskLevel
+        from ali2026v3_trading.risk.risk_service import RiskCheckResponse, RiskLevel
         snap = RiskSnapshotStub()
         rs = _make_risk_service()
         rs._check_position_limit.return_value = RiskCheckResponse.block_result(

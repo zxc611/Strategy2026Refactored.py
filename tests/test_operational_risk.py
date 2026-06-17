@@ -1,21 +1,11 @@
+# MODULE_ID: M2-423
 """P3.6: operational_risk领域单测"""
 from __future__ import annotations
 
 import pytest
 from unittest.mock import MagicMock, patch
+from ali2026v3_trading.tests._stubs import RiskSnapshotStub
 
-
-class RiskSnapshotStub:
-    def __init__(self, action="OPEN", symbol="IF2606", is_valid=True, signal=None):
-        self.action = action
-        self.symbol = symbol
-        self.instrument_id = symbol
-        self.amount = 1.0
-        self.price = 4000.0
-        self.is_valid = is_valid
-        self.signal = signal or {}
-        self.account_id = "test"
-        self.hedge_type = "none"
 
 
 def _make_risk_service():
@@ -76,10 +66,10 @@ class TestCheckOperationalRisks:
 
     def test_shadow_ev_critical_blocks(self):
         from ali2026v3_trading.risk_engine.operational_risk import check_shadow_ev
-        from ali2026v3_trading.risk_service import RiskLevel
+        from ali2026v3_trading.risk.risk_service import RiskLevel
         snap = RiskSnapshotStub()
         rs = _make_risk_service()
-        with patch("ali2026v3_trading.shadow_strategy_engine.get_shadow_strategy_engine") as mock_sse:
+        with patch("ali2026v3_trading.strategy.shadow_strategy_facade.get_shadow_strategy_engine") as mock_sse:
             sse = MagicMock()
             sse.is_absolute_ev_paused.return_value = True
             mock_sse.return_value = sse

@@ -1,12 +1,14 @@
+# [M1-42] ��������Facade
+# MODULE_ID: M1-141
 """
-订单服务模块 - Facade (CQRS Command层)
-瘦身后: 仅保留初始化+委托壳+re-export
+订单服务模块 - Facade (CQRS Command�?
+瘦身�? 仅保留初始化+委托�?re-export
 """
 from __future__ import annotations
 import logging, time, uuid
 from typing import Any, Callable, Dict, List, Optional
 from ali2026v3_trading.order.order_base import (
-    OrderResult, BaseService, OrderQueryMixin, _validate_order_status_transition, _mask_id,
+    OrderResult, BaseService, OrderQueryService, OrderQueryMixin, _validate_order_status_transition, _mask_id,
     _VALID_ORDER_TRANSITIONS, _HAS_CAUSAL_CHAIN, get_order_service, reset_order_service, init_order_service_attrs)
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ, TradeAction, TradeDirection, VALID_TRADE_ACTIONS, VALID_TRADE_DIRECTIONS
 
@@ -17,18 +19,34 @@ _RISK_NAME_MAP = {'_compute_pnl_correlation':'compute_pnl_correlation','_check_c
     '_correct_price':'correct_price','_get_tick_size':'get_tick_size','_release_margin_reservation':'release_margin_reservation',
     'check_risk_block':'check_risk_block','set_risk_block':'set_risk_block'}
 
-class OrderService(OrderQueryMixin, BaseService):
+class OrderService(BaseService):
     def __init__(self, event_bus=None, params=None):
         super().__init__(event_bus); init_order_service_attrs(self, params)
+        self._query_service = OrderQueryService(self)
     _PLATFORM_IDEMPOTENCY_FIELDS = ('client_order_id', 'request_id', 'order_ref', 'order_id')
 
     def __getattr__(self, name):
-        if name in _WAL_DELEGATES: return getattr(self.__dict__.get('_wal_state_service'), name)
-        mapped = _RISK_NAME_MAP.get(name)
-        if mapped: return getattr(self.__dict__.get('_risk_guard'), mapped)
-        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+        # 递归保护: 防止�?_query_service 双向委托导致无限递归
+        if '__getattr__recursing' in self.__dict__:
+            raise AttributeError(name)
+        self.__dict__['__getattr__recursing'] = True
+        try:
+            _qs = self.__dict__.get('_query_service')
+            if _qs is not None:
+                try:
+                    return getattr(_qs, name)
+                except AttributeError:
+                    pass
+            if name in _WAL_DELEGATES:
+                return getattr(self.__dict__.get('_wal_state_service'), name)
+            mapped = _RISK_NAME_MAP.get(name)
+            if mapped:
+                return getattr(self.__dict__.get('_risk_guard'), mapped)
+            raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+        finally:
+            self.__dict__.pop('__getattr__recursing', None)
 
-    # ── 委托到 OrderExecutor ──
+    # ── 委托�?OrderExecutor ──
     def send_order(self, instrument_id: str, volume: float, price: float, direction: str = 'BUY',
                    action: str = 'OPEN', exchange: str = '', priority: str = 'NORMAL', is_chase: bool = False,
                    signal_id: str = '', expected_position_count: int = -2, open_reason: str = '',
@@ -46,6 +64,30 @@ class OrderService(OrderQueryMixin, BaseService):
         from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self).send_order_split(instrument_id=instrument_id, volume=volume, price=price,
             direction=direction, action=action, exchange=exchange, signal_strength=signal_strength, bids=bids, asks=asks, open_reason=open_reason, signal_id=signal_id)
+    def enable_hft_enhancements(self):
+        """启用HFT增强功能（标记）"""
+        self._hft_enabled = True
+    def send_defensive_order(self, instrument_id, volume, price, direction='BUY', action='CLOSE',
+                             signal_strength=1.0, **kwargs):
+        """发送防御性订单（做市商防御）"""
+        from ali2026v3_trading.order.order_flow_bridge import MarketMakerDefenseEngine
+        defense = MarketMakerDefenseEngine()
+        orders = defense.create_defensive_order(
+            instrument_id=instrument_id, direction=direction, volume=volume,
+            price=price, signal_strength=signal_strength, tick_size=0.2,
+        )
+        order_ids = []
+        for o in orders:
+            oid = self.send_order(
+                instrument_id=o.instrument_id,
+                volume=o.volume,
+                price=o.price,
+                direction=o.direction,
+                action=action,
+            )
+            if oid:
+                order_ids.append(oid)
+        return order_ids
     def _plan_volume_split(self, volume, price, direction, bids, asks, signal_strength=1.0):
         from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self)._plan_volume_split(volume=volume, price=price, direction=direction, bids=bids, asks=asks, signal_strength=signal_strength)
@@ -64,7 +106,7 @@ class OrderService(OrderQueryMixin, BaseService):
     def _invoke_platform_cancel_with_timeout(self, platform_id):
         from ali2026v3_trading.order.order_executor import OrderExecutor
         return OrderExecutor(self)._invoke_platform_cancel_with_timeout(platform_id)
-    # ── 委托到 OrderStateManager ──
+    # ── 委托�?OrderStateManager ──
     def on_trade_update(self, trade_data): return self._state_manager.on_trade_update(self, trade_data)
     def scan_order_timeouts(self): return self._state_manager.scan_order_timeouts(self)
     def check_pending_orders(self): return self._state_manager.check_pending_orders_full(self)
@@ -75,7 +117,7 @@ class OrderService(OrderQueryMixin, BaseService):
     def _estimate_slippage(self, instrument_id, price, volume, bid_ask_spread=0.0, days_to_expiry=999, spread_quality=1):
         return self._risk_guard.estimate_slippage(instrument_id, price, volume, bid_ask_spread, days_to_expiry, spread_quality)
     def _remove_order_and_idempotent_key(self, order_id, order): return self._wal_state_service.remove_order_and_idempotent_key(self, order_id, order)
-    # ── 委托到 OrderChaseService ──
+    # ── 委托�?OrderChaseService ──
     def cancel_order(self, order_id): return self._chase_service.cancel_order(order_id)
     def cancel_all_pending(self): return self._chase_service.cancel_all_pending()
     def emergency_close_all_positions(self, caller_id="unknown"): return self._chase_service.emergency_close_all_positions(caller_id)
@@ -84,7 +126,7 @@ class OrderService(OrderQueryMixin, BaseService):
 from ali2026v3_trading.infra.event_bus import RateLimiter
 from ali2026v3_trading.order.order_platform_auth import PlatformAuthenticator
 from ali2026v3_trading.order.order_sync import sync_order_status_with_exchange
-from ali2026v3_trading.order.order_split_models import OrderSplitStrategy, SplitOrderResult, SmartOrderSplitter
+from ali2026v3_trading.order.order_split_models import OrderSplitStrategy, SplitOrderResult, SmartOrderSplitter, PlanOrderSplitResult
 from ali2026v3_trading.order.order_market_impact import almgren_chriss_impact, estimate_fill_probability
 from ali2026v3_trading.order.order_compliance import check_self_trade_across_splits, AlgoTradingCompliance, WashTradeDetector
 _OPEN_REASON_CODES = frozenset({'BOX_SPRING', 'CORRECT_RESONANCE', 'CORRECT_DIVERGENCE', 'SHADOW_A_REVERSAL', 'SHADOW_B_RANDOM', 'OTHER_SCALP', 'BOX_EXTREME', 'ARBITRAGE', 'HFT_TICK_CONFIRM'})
@@ -94,4 +136,4 @@ __all__ = ['OrderService', 'OrderResult', 'RateLimiter', 'PlatformAuthenticator'
            'sync_order_status_with_exchange', 'almgren_chriss_impact',
            'estimate_fill_probability', 'check_self_trade_across_splits',
            'AlgoTradingCompliance', 'WashTradeDetector',
-           'SmartOrderSplitter', 'OrderSplitStrategy', 'SplitOrderResult', '_OPEN_REASON_CODES']
+           'SmartOrderSplitter', 'OrderSplitStrategy', 'SplitOrderResult', 'PlanOrderSplitResult', '_OPEN_REASON_CODES']

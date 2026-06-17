@@ -1,12 +1,13 @@
+# MODULE_ID: M1-234
 from __future__ import annotations
 
 import logging
 from typing import Any, Optional
 from ali2026v3_trading.risk_engine.snapshot import RiskSnapshot
-from ali2026v3_trading.risk_service import RiskCheckResponse
+from ali2026v3_trading.risk.risk_service import RiskCheckResponse
 
 try:
-    from ali2026v3_trading.shared_utils import safe_int, safe_float
+    from ali2026v3_trading.infra.shared_utils import safe_int, safe_float
 except ImportError:
     safe_int = lambda x, d=0: d if x is None else int(x)
     safe_float = lambda x, d=0.0: d if x is None else float(x)
@@ -33,7 +34,7 @@ def check_margin_sufficiency(snapshot: RiskSnapshot, risk_service: Any) -> Optio
             )
             if margin_result.is_block:
                 return margin_result
-    except Exception:
+    except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
         logging.warning("[R22-EP-P1] RiskService exception swallowed")
     return None
 
@@ -47,14 +48,14 @@ def check_cross_instrument_limit(snapshot: RiskSnapshot, risk_service: Any) -> O
         )
         if cross_result.is_block:
             return cross_result
-    except Exception:
+    except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
         logging.warning("[R22-EP-P1] RiskService exception swallowed")
     return None
 
 
 def update_margin_ratio_override(snapshot: RiskSnapshot, risk_service: Any) -> None:
     try:
-        from ali2026v3_trading.config_service import get_config
+        from ali2026v3_trading.config.config_service import get_config
     except ImportError:
         logging.warning("[P1-1-FIX] config_service.get_config导入失败，margin_ratio覆盖跳过")
         return
@@ -64,7 +65,7 @@ def update_margin_ratio_override(snapshot: RiskSnapshot, risk_service: Any) -> N
         if _overrides:
             for _prod, _ratio in _overrides.items():
                 risk_service.update_margin_ratio(_prod, safe_float(_ratio))
-    except Exception:
+    except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
         logging.warning("[R22-EP-P1] RiskService exception swallowed")
 
 

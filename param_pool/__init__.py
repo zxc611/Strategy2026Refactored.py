@@ -1,49 +1,76 @@
-"""参数池 — 英文路径主目录
+# MODULE_ID: M1-146
+from __future__ import annotations
 
-此目录与 参数池/ (中文路径镜像) 保持同步。
-修改参数文件时，请确保两个目录保持一致。
+"""param_pool/ — 英文路径主目录"""
 
-R26-P0-CD-09: Linux环境下中文路径可能失败，__init__.py 中已注册双向映射。
-"""
-
-import os as _os
-import logging as _logging
-
-_pkg_dir = _os.path.dirname(_os.path.abspath(__file__))
-_en_pool_dir = _pkg_dir  # 本目录 (param_pool)
-_cn_pool_dir = _os.path.join(_os.path.dirname(_pkg_dir), 'param_pool')
+__all__ = ['run_backtest', 'validate_logic_reversal_no_future', 'CycleResonanceOutput', 'ParamTierManager', 'get_tier_config', 'STATES', 'backtest_position_manager']
 
 
-def _check_param_pool_consistency():
-    """检查 param_pool/ 与 参数池/ 目录一致性，不同步时发出WARNING"""
-    if not _os.path.isdir(_cn_pool_dir):
-        return
-
-    cn_files = set()
-    en_files = set()
-
-    for root, _dirs, files in _os.walk(_cn_pool_dir):
-        rel = _os.path.relpath(root, _cn_pool_dir)
-        for f in files:
-            cn_files.add(_os.path.join(rel, f) if rel != '.' else f)
-
-    for root, _dirs, files in _os.walk(_en_pool_dir):
-        rel = _os.path.relpath(root, _en_pool_dir)
-        for f in files:
-            en_files.add(_os.path.join(rel, f) if rel != '.' else f)
-
-    only_in_cn = cn_files - en_files
-    only_in_en = en_files - cn_files
-
-    if only_in_cn or only_in_en:
-        _logging.warning(
-            "P2-11: param_pool/ 与 参数池/ 目录不同步 — "
-            "仅参数池: %s, 仅param_pool: %s",
-            sorted(only_in_cn)[:5], sorted(only_in_en)[:5],
-        )
-
-
-try:
-    _check_param_pool_consistency()
-except Exception:
-    pass
+def __getattr__(name: str):
+    if name == "run_backtest":
+        from .backtest_runner_base import run_backtest
+        return run_backtest
+    if name == "validate_logic_reversal_no_future":
+        from .checks_orchestrator import validate_logic_reversal_no_future
+        return validate_logic_reversal_no_future
+    if name == "latin_hypercube_sample":
+        from .optuna_multiobjective_search import latin_hypercube_sample
+        return latin_hypercube_sample
+    if name == "get_cycle_resonance_module":
+        from .cycle_resonance_module import get_cycle_resonance_module
+        return get_cycle_resonance_module
+    if name == "CycleResonanceOutput":
+        from .cycle_resonance_module import CycleResonanceOutput
+        return CycleResonanceOutput
+    if name == "ParamTierManager":
+        from .adv_validation_misc import ParamTierManager
+        return ParamTierManager
+    if name == "evaluate_state_accuracy":
+        from .backtest_state import evaluate_state_accuracy
+        return evaluate_state_accuracy
+    if name == "MetaAuditEngine":
+        from .l1_quantification.meta_audit_engine import MetaAuditEngine
+        return MetaAuditEngine
+    if name == "audit_backtest_engine_integrity":
+        from .l1_quantification import audit_backtest_engine_integrity
+        return audit_backtest_engine_integrity
+    if name == "ExternalSourceConfig":
+        from .l1_quantification._data_validation import ExternalSourceConfig
+        return ExternalSourceConfig
+    if name == "TierConfig":
+        from .l1_quantification._quantification_core import TierConfig
+        return TierConfig
+    if name == "PerformanceTierManager":
+        from .l1_quantification._quantification_core import PerformanceTierManager
+        return PerformanceTierManager
+    if name == "get_tier_config":
+        from .l1_quantification import get_tier_config
+        return get_tier_config
+    if name == "STATES":
+        from .l1_quantification import STATES
+        return STATES
+    if name == "backtest_position_manager":
+        from . import backtest_state as backtest_position_manager
+        return backtest_position_manager
+    if name == "validation_deep_orchestrator":
+        from .validation import validation_deep_orchestrator as _mod
+        return _mod
+    if name == "backtest_runner_validation":
+        from .backtest import backtest_runner_validation as _mod
+        return _mod
+    _SHIM_REDIRECTS = {
+        "adv_validation_misc": ".validation.adv_validation_misc",
+        "backtest_config": ".backtest.backtest_config",
+        "backtest_runner_base": ".backtest.backtest_runner_base",
+        "backtest_state": ".backtest.backtest_state",
+        "checks_orchestrator": ".validation.checks_orchestrator",
+        "cycle_resonance_module": ".optimization.cycle_sharpe",
+        "optuna_multiobjective_search": ".optimization.optuna_multiobjective_search",
+        "sensitivity_analysis": ".optimization.sensitivity",
+        "ts_result_writer": ".ts.ts_result_writer",
+        "validation_l2_hyperparams": ".validation.validation_l2_hyperparams",
+    }
+    if name in _SHIM_REDIRECTS:
+        import importlib
+        return importlib.import_module(_SHIM_REDIRECTS[name], __name__)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

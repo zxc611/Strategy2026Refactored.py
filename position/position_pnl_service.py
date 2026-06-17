@@ -1,3 +1,4 @@
+# MODULE_ID: M1-206
 """Position PnL Service - PnL计算+盈亏统计
 
 从position_service.py拆分(CC-09):
@@ -13,10 +14,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional, Any
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+import numpy as np
+
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
+from ali2026v3_trading.infra.resilience import should_trigger_take_profit, should_trigger_stop_loss  # P0-03: 统一止盈止损判断
 
 
 def _is_option_instrument(instrument_id: str) -> bool:
@@ -53,13 +57,8 @@ class PositionPnlService:
         if record.volume == 0:
             return
         if record.stop_profit_price > 0:
-            triggered = False
             is_long = record.volume > 0
-            is_short = record.volume < 0
-            if is_long and current_price >= record.stop_profit_price:
-                triggered = True
-            elif is_short and current_price <= record.stop_profit_price:
-                triggered = True
+            triggered = should_trigger_take_profit(current_price, record.stop_profit_price, is_long=is_long)
             if triggered:
                 logging.info(
                     '[PositionService] R13-P0-LOG-02修复: 止盈触发, instrument=%s direction=%s price=%.2f tp_price=%.2f',
@@ -87,10 +86,7 @@ class PositionPnlService:
             return
         triggered = False
         is_long = record.volume > 0
-        is_short = record.volume < 0
-        if is_long and current_price <= record.stop_loss_price:
-            triggered = True
-        elif is_short and current_price >= record.stop_loss_price:
+        if should_trigger_stop_loss(current_price, record.stop_loss_price, is_long=is_long):
             triggered = True
         if triggered:
             logging.info(
@@ -126,7 +122,7 @@ class PositionPnlService:
                             instrument_id, days_to_expiry,
                         )
                         self._ps._trigger_close_position(record, f"OptionExpiry@{instrument_id}")
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.debug('[PositionService] _check_option_expiry error for %s: %s', instrument_id, e)
 
     @staticmethod
@@ -156,7 +152,7 @@ class PositionPnlService:
             third_friday = first_friday + timedelta(days=14)
             today = datetime.now(_CHINA_TZ).date()
             return (third_friday - today).days
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return None
 
     def _check_time_stop(self, record, now: datetime = None) -> None:
@@ -164,7 +160,7 @@ class PositionPnlService:
         open_reason = getattr(record, 'open_reason', '')
         max_hold_minutes = self.DEFAULT_MAX_HOLD_MINUTES
         try:
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             ps = get_params_service()
             max_hold_minutes = ps.get_int('max_hold_minutes', self.DEFAULT_MAX_HOLD_MINUTES)
         except (ImportError, AttributeError) as e:
@@ -247,7 +243,7 @@ class PositionPnlService:
                     )
                     if hard_stop_reason:
                         self._ps._trigger_close_position(record, hard_stop_reason)
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug(f"[PositionService._check_time_stop] SafetyMetaLayer check error: {e}")
 
     def _check_two_stage_stop(self, record, now: datetime = None) -> None:
@@ -277,7 +273,7 @@ class PositionPnlService:
             record._profit_history = record._profit_history[-1000:]
         # 读取参数
         try:
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             ps = get_params_service()
             stage1_min_minutes = ps.get_float('two_stage_stop_stage1_min_minutes', self.TWO_STAGE_STOP_CONFIG['stage1_min_minutes'])
             stage1_profit_threshold = ps.get_float('stage1_profit_threshold', 0.002)
@@ -323,7 +319,7 @@ class PositionPnlService:
         night_eod_close_hour = self.NIGHT_EOD_CLOSE_HOUR
         night_eod_close_minute = self.NIGHT_EOD_CLOSE_MINUTE
         try:
-            from ali2026v3_trading.params_service import get_params_service
+            from ali2026v3_trading.config.params_service import get_params_service
             ps = get_params_service()
             eod_close_hour = ps.get_int('eod_close_hour', self.EOD_CLOSE_HOUR)
             eod_close_minute = ps.get_int('eod_close_minute', self.EOD_CLOSE_MINUTE)

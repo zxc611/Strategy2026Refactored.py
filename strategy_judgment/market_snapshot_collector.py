@@ -1,7 +1,9 @@
+﻿# [M3-11] 市场快照采集器
+# MODULE_ID: M3-621
 """
 市场快照采集器 (Market Snapshot Collector) — 生产就绪版
 
-覆盖18策略(6主策略×3变体: master/shadow_a/shadow_b)的完整方法和状态，
+覆盖21策略(7主策略×3变体: master/shadow_a/shadow_b)的完整方法和状态，
 在以下关键时刻捕获完整市场状态快照：
   1. 所有信号发生点（开单策略触发信号时）
   2. 所有开仓、持仓检查、平仓时刻
@@ -14,10 +16,10 @@
 
 快照内容（策略池监测的所有信息）：
   - 增强Bar + 周期共振四变量 + 风险曲面调节
-  - 六策略各自状态(SignalService/BoxDetector/SpringState/Ecosystem/ArbitrageDetector/MarketMakerDefense)
-  - 18策略独立StrategyStateSnapshot(6主策略×master/shadow_a/shadow_b)
+  - 七策略各自状态(SignalService/BoxDetector/SpringState/Ecosystem/ArbitrageDetector/MarketMakerDefense/DivergenceReversal)
+  - 21策略独立StrategyStateSnapshot(7主策略×master/shadow_a/shadow_b)
   - 五态分布 + 订单流指标 + Greeks
-  - HMM状态/后验 + 影子策略Alpha指标(6组×3变体Sharpe)
+  - HMM状态/后验 + 影子策略Alpha指标(7组×3变体Sharpe)
   - 跨策略Greeks敞口聚合 + 安全元层状态
   - 组合级PnL/回撤/权益曲线
 
@@ -30,21 +32,24 @@ from collections import deque
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+from ali2026v3_trading.infra.shared_utils import ToDictMixin  # R3-4修复
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
-# ── 18策略标识体系：6主策略 × 3变体(master/shadow_a/shadow_b) ──
-SIX_STRATEGY_KEYS = ["high_freq", "resonance", "box", "spring", "arbitrage", "market_making"]
+# ── 21策略标识体系：7主策略 × 3变体(master/shadow_a/shadow_b) ──
+SEVEN_STRATEGY_KEYS = ["high_freq", "resonance", "box", "spring", "arbitrage", "market_making", "divergence"]
+SIX_STRATEGY_KEYS = SEVEN_STRATEGY_KEYS  # 向后兼容别名
 THREE_VARIANTS = ["master", "shadow_a", "shadow_b"]
 
-ALL_18_STRATEGY_IDS = [
-    f"{sk}_{variant}" for sk in SIX_STRATEGY_KEYS for variant in THREE_VARIANTS
+ALL_21_STRATEGY_IDS = [
+    f"{sk}_{variant}" for sk in SEVEN_STRATEGY_KEYS for variant in THREE_VARIANTS
 ]
+ALL_18_STRATEGY_IDS = ALL_21_STRATEGY_IDS  # 向后兼容别名
 
-STRATEGY_ID_TO_TYPE = {sid: sid.rsplit("_", 1)[0] if "_" in sid else sid for sid in ALL_18_STRATEGY_IDS}
-# 修正: high_freq_master → high_freq, box_spring_master → spring 等
+STRATEGY_ID_TO_TYPE = {sid: sid.rsplit("_", 1)[0] if "_" in sid else sid for sid in ALL_21_STRATEGY_IDS}
 _STRATEGY_KEY_MAP = {
     "high_freq": "high_freq",
     "resonance": "resonance",
@@ -52,6 +57,7 @@ _STRATEGY_KEY_MAP = {
     "spring": "spring",
     "arbitrage": "arbitrage",
     "market_making": "market_making",
+    "divergence": "divergence",
 }
 
 def _parse_strategy_id(strategy_id: str) -> Tuple[str, str]:
@@ -80,10 +86,11 @@ class SnapshotTrigger(Enum):
     SAFETY_META_TRIGGER = "安全元层触发"
     CIRCUIT_BREAKER = "熔断触发"
     EV_BOTTOMLINE_BREACH = "期望值底线突破"
+    DIVERGENCE_REVERSAL = "背离反转信号"
 
 
 @dataclass(slots=True)
-class StrategyStateSnapshot:
+class StrategyStateSnapshot(ToDictMixin):
     strategy_id: str
     strategy_type: str
     signal_strength: float = 0.0
@@ -111,24 +118,20 @@ class StrategyStateSnapshot:
     params_locked: bool = False
     last_direction: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class HFTSpecificState:
+class HFTSpecificState(ToDictMixin):
     signal_confirm_ticks: int = 0
     cooldown_remaining_ms: float = 0.0
     current_imbalance: float = 0.0
     microstructure_signal: str = ""
     tick_fidelity_score: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class ResonanceSpecificState:
+class ResonanceSpecificState(ToDictMixin):
     hmm_state: str = "NORMAL"
     hmm_posterior: Tuple[float, float, float] = (0.33, 0.34, 0.33)
     trend_scores: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -137,12 +140,10 @@ class ResonanceSpecificState:
     state_confirm_count: int = 0
     circuit_breaker_active: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class BoxSpecificState:
+class BoxSpecificState(ToDictMixin):
     box_top: float = 0.0
     box_bottom: float = 0.0
     box_width_pct: float = 0.0
@@ -155,12 +156,10 @@ class BoxSpecificState:
     flow_exhaustion: bool = False
     trade_direction: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class SpringSpecificState:
+class SpringSpecificState(ToDictMixin):
     spring_state: str = "DORMANT"
     iv_percentile: float = 0.0
     premium_cost_pct: float = 0.0
@@ -174,12 +173,10 @@ class SpringSpecificState:
     should_accept_loss: bool = False
     prevent_trend_conversion: bool = True
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class ArbitrageSpecificState:
+class ArbitrageSpecificState(ToDictMixin):
     deviation_bps: float = 0.0
     fair_value_shift_bps: float = 0.0
     confidence: float = 0.0
@@ -189,12 +186,10 @@ class ArbitrageSpecificState:
     total_opportunities: int = 0
     total_checks: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class MarketMakingSpecificState:
+class MarketMakingSpecificState(ToDictMixin):
     current_inventory: int = 0
     max_inventory: int = 5
     bid_price: float = 0.0
@@ -205,12 +200,36 @@ class MarketMakingSpecificState:
     hidden_count: int = 0
     rebalance_needed: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class EcosystemState:
+class DivergenceSpecificState(ToDictMixin):
+    """背离反转策略状态快照 — 三层背离检测 + 五级期权分类 + 综合信号"""
+    # 期权价值状态 (0=DITM, 1=ITM, 2=ATM, 3=OTM, 4=DOTM)
+    option_moneyness_state: int = 2
+    # L1: 跨期期货背离强度 [-1, 1]
+    div_future_cross_term: float = 0.0
+    # L2: 远月期权权利金集体背离 [-1, 1]
+    div_option_premium_coll: float = 0.0
+    # L3: 当月期权近实值权利金背离 [-1, 1]
+    div_option_near_itm: float = 0.0
+    # 综合背离反转信号 [-1, 1]
+    div_reversal_signal: float = 0.0
+    # 信号方向: "bearish" / "bullish" / ""
+    signal_direction: str = ""
+    # 信号强度: |div_reversal_signal|
+    signal_strength: float = 0.0
+    # 三层一致性: L1/L2/L3是否同向
+    three_layer_consistent: bool = False
+    # 当前lookback窗口内新高标记
+    current_month_new_high: bool = False
+    # 当前lookback窗口内新低标记
+    current_month_new_low: bool = False
+
+
+
+@dataclass(slots=True)
+class EcosystemState(ToDictMixin):
     active_strategy: str = ""
     master_state: str = "inactive"
     reverse_state: str = "inactive"
@@ -218,12 +237,14 @@ class EcosystemState:
     spring_state: str = "inactive"
     arbitrage_state: str = "inactive"
     market_making_state: str = "inactive"
+    divergence_state: str = "inactive"
     master_capital: float = 0.60
     reverse_capital: float = 0.25
     other_capital: float = 0.15
     spring_capital: float = 0.15
     arbitrage_capital: float = 0.10
     market_making_capital: float = 0.10
+    divergence_capital: float = 0.10
     mutual_exclusion_ok: bool = True
     absolute_ev_ok: bool = True
     master_ev: float = 0.0
@@ -232,14 +253,13 @@ class EcosystemState:
     spring_ev: float = 0.0
     arbitrage_ev: float = 0.0
     market_making_ev: float = 0.0
+    divergence_ev: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class ShadowAlphaState:
-    """影子策略Alpha指标 — 覆盖6策略组×3变体(master/shadow_a/shadow_b)"""
+class ShadowAlphaState(ToDictMixin):
+    """影子策略Alpha指标 — 覆盖7策略组×3变体(master/shadow_a/shadow_b)"""
     # S1 高频
     s1_master_sharpe: float = 0.0
     s1_shadow_a_sharpe: float = 0.0
@@ -264,6 +284,10 @@ class ShadowAlphaState:
     s6_master_sharpe: float = 0.0
     s6_shadow_a_sharpe: float = 0.0
     s6_shadow_b_sharpe: float = 0.0
+    # S7 背离反转
+    s7_master_sharpe: float = 0.0
+    s7_shadow_a_sharpe: float = 0.0
+    s7_shadow_b_sharpe: float = 0.0
     # 聚合指标（向后兼容）
     master_sharpe: float = 0.0
     shadow_a_sharpe: float = 0.0
@@ -273,12 +297,10 @@ class ShadowAlphaState:
     degradation_active: bool = False
     absolute_ev_breached: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class SafetyMetaState:
+class SafetyMetaState(ToDictMixin):
     circuit_breaker_active: bool = False
     hard_stop_triggered: bool = False
     new_open_blocked: bool = False
@@ -286,12 +308,10 @@ class SafetyMetaState:
     daily_drawdown_pct: float = 0.0
     max_drawdown_pct: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class CrossStrategyGreeks:
+class CrossStrategyGreeks(ToDictMixin):
     net_delta: float = 0.0
     gross_delta: float = 0.0
     net_vega: float = 0.0
@@ -302,12 +322,10 @@ class CrossStrategyGreeks:
     total_option_lots: int = 0
     risk_guard_level: str = "PASS"
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class LifeExpectancySnapshot:
+class LifeExpectancySnapshot(ToDictMixin):
     """行情寿命快照 — 捕获当前HMM状态的寿命期望"""
     hmm_state: str = ""
     duration_p25: float = 0.0       # 持续时间p25(分钟)
@@ -321,12 +339,10 @@ class LifeExpectancySnapshot:
     degradation_level: int = 0      # 降级等级(0-3)
     is_valid: bool = False          # 寿命数据是否有效
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class CyclePredictionSnapshot:
+class CyclePredictionSnapshot(ToDictMixin):
     """周期预测快照 — 捕获多周期趋势和HMM后验"""
     hmm_posterior: Tuple[float, float, float] = (0.33, 0.34, 0.33)  # HMM后验(LOW_VOL, NORMAL, HIGH_VOL)
     trend_scores_short: float = 0.0    # 短周期趋势评分[-1,1]
@@ -340,12 +356,10 @@ class CyclePredictionSnapshot:
     phase_quality: float = 0.5         # D5 相位质量评分[0,1]
     state_entropy: float = 0.5         # 状态熵[0,1]
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
-class RiskDimensionScores:
+class RiskDimensionScores(ToDictMixin):
     """11维度统一风险评分快照 — 三层架构"""
     # 核心信号层(0.45)
     d1_state_strength: float = 0.5      # 五态→三态路由状态强度
@@ -364,8 +378,6 @@ class RiskDimensionScores:
     # 综合
     composite_score: float = 0.5        # 11维度加权综合评分
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -394,6 +406,84 @@ class MarketSnapshot:
     cr_phase: str = ""
     cr_state_entropy: float = 0.0
     cr_hmm_state: str = ""
+
+    # V5预计算：KL-RPD四维向量
+    kl_rpd_k: float = 0.0
+    kl_rpd_l: float = 0.5
+    kl_rpd_r: float = 0.0
+    kl_rpd_d: float = 0.0
+
+    # V5预计算：信号向量
+    signal_s1: float = 0.0
+    signal_s2: float = 0.0
+    signal_s3: float = 0.0
+    signal_s4: float = 0.0
+    signal_s5: float = 0.0
+    signal_s6: float = 0.0
+
+    # V5预计算：衰减信号
+    signal_s1_decayed: float = 0.0
+    signal_s2_decayed: float = 0.0
+    signal_s3_decayed: float = 0.0
+    signal_s4_decayed: float = 0.0
+
+    # V5预计算：联动信号
+    linkage_s1: float = 0.0
+    linkage_s2: float = 0.0
+    linkage_s3: float = 0.0
+    linkage_s4: float = 0.0
+
+    # V5预计算：L0状态诊断
+    l0_raw_state: int = 2
+    l0_smoothed_state: int = 2
+    l0_state_entropy: float = 0.5
+
+    # V5预计算：HMM状态
+    hmm_state_v5: int = 1
+    hmm_posterior_low: float = 0.2
+    hmm_posterior_normal: float = 0.6
+    hmm_posterior_high: float = 0.2
+
+    # V5预计算：趋势评分
+    trend_score_short: float = 0.0
+    trend_score_medium: float = 0.0
+    trend_score_long: float = 0.0
+    trend_direction_short: int = 0
+    trend_direction_medium: int = 0
+    trend_direction_long: int = 0
+
+    # V5预计算：回撤指标
+    pullback_pct_peak: float = 0.0
+    pullback_pct_entry: float = 0.0
+    pullback_pct_ma: float = 0.0
+    pullback_pct_atr: float = 0.0
+
+    # V5预计算：超买超卖
+    obos_rsi: float = 50.0
+    obos_stoch_k: float = 50.0
+    obos_cci: float = 0.0
+    obos_williams_r: float = -50.0
+    obos_signal: float = 0.0
+
+    # V5预计算：TVF六维向量
+    tvf_trend: float = 0.0
+    tvf_volatility: float = 0.5
+    tvf_flow: float = 0.0
+    tvf_risk: float = 0.5
+    tvf_pullback: float = 0.5
+    tvf_entropy: float = 0.5
+
+    # V5预计算：仓位决策
+    kelly_fraction: float = 0.1
+    position_suggestion: float = 0.0
+
+    # V5预计算：背离反转
+    option_moneyness_state: int = 2
+    div_future_cross_term: float = 0.0
+    div_option_premium_coll: float = 0.0
+    div_option_near_itm: float = 0.0
+    div_reversal_signal: float = 0.0
+
     risk_surface_size_mult: float = 1.0
     risk_surface_sl_mult: float = 1.0
     risk_surface_max_hold: float = 300.0
@@ -416,6 +506,7 @@ class MarketSnapshot:
     spring_state: SpringSpecificState = field(default_factory=SpringSpecificState)
     arbitrage_state: ArbitrageSpecificState = field(default_factory=ArbitrageSpecificState)
     market_making_state: MarketMakingSpecificState = field(default_factory=MarketMakingSpecificState)
+    divergence_state: DivergenceSpecificState = field(default_factory=DivergenceSpecificState)
     ecosystem_state: EcosystemState = field(default_factory=EcosystemState)
     shadow_alpha: ShadowAlphaState = field(default_factory=ShadowAlphaState)
     safety_meta: SafetyMetaState = field(default_factory=SafetyMetaState)
@@ -451,7 +542,7 @@ class MarketSnapshot:
                     continue
                 d[f"{prefix}{k}"] = v
         for sub_key in ['hft_state', 'resonance_state', 'box_state', 'spring_state',
-                        'arbitrage_state', 'market_making_state',
+                        'arbitrage_state', 'market_making_state', 'divergence_state',
                         'ecosystem_state', 'shadow_alpha', 'safety_meta', 'cross_greeks',
                         'life_expectancy', 'cycle_prediction', 'risk_dimensions']:
             sub = d.pop(sub_key, {})
@@ -462,7 +553,7 @@ class MarketSnapshot:
 
 class MarketSnapshotCollector:
     """
-    市场快照采集器 — 覆盖六大策略完整状态
+    市场快照采集器 — 覆盖七大策略完整状态
     """
 
     def __init__(
@@ -523,6 +614,7 @@ class MarketSnapshotCollector:
         spring_state: Optional[SpringSpecificState] = None,
         arbitrage_state: Optional[ArbitrageSpecificState] = None,
         market_making_state: Optional[MarketMakingSpecificState] = None,
+        divergence_state: Optional[DivergenceSpecificState] = None,
         ecosystem_state: Optional[EcosystemState] = None,
         shadow_alpha: Optional[ShadowAlphaState] = None,
         safety_meta: Optional[SafetyMetaState] = None,
@@ -558,6 +650,7 @@ class MarketSnapshotCollector:
                 snap.price_vs_mas = getattr(bar, 'price_vs_mas', {})
                 snap.price_deviation_sigma = getattr(bar, 'price_ma_deviation_sigma', {})
                 snap.ma_curvatures = getattr(bar, 'ma_curvatures', {})
+                self._fill_v5_columns_from_obj(snap, bar)
             elif isinstance(bar, dict):
                 snap.bar_open = bar.get('open', 0)
                 snap.bar_high = bar.get('high', 0)
@@ -566,6 +659,7 @@ class MarketSnapshotCollector:
                 snap.bar_vwap = bar.get('vwap', bar.get('close', 0))
                 snap.bar_volume = bar.get('volume', 0)
                 snap.bar_atr14 = bar.get('atr14', 0)
+                self._fill_v5_columns_from_dict(snap, bar)
 
         if cr_output is not None:
             if hasattr(cr_output, 'directional_bias'):
@@ -597,6 +691,8 @@ class MarketSnapshotCollector:
             snap.arbitrage_state = arbitrage_state
         if market_making_state is not None:
             snap.market_making_state = market_making_state
+        if divergence_state is not None:
+            snap.divergence_state = divergence_state
         if ecosystem_state is not None:
             snap.ecosystem_state = ecosystem_state
         if shadow_alpha is not None:
@@ -649,6 +745,41 @@ class MarketSnapshotCollector:
         self._snapshots.append(snap)
         return snap
 
+    _V5_DICT_COLUMNS: List[str] = [
+        "kl_rpd_k", "kl_rpd_l", "kl_rpd_r", "kl_rpd_d",
+        "signal_s1", "signal_s2", "signal_s3", "signal_s4", "signal_s5", "signal_s6",
+        "signal_s1_decayed", "signal_s2_decayed", "signal_s3_decayed", "signal_s4_decayed",
+        "linkage_s1", "linkage_s2", "linkage_s3", "linkage_s4",
+        "l0_raw_state", "l0_smoothed_state", "l0_state_entropy",
+        "hmm_state", "hmm_posterior_low", "hmm_posterior_normal", "hmm_posterior_high",
+        "trend_score_short", "trend_score_medium", "trend_score_long",
+        "trend_direction_short", "trend_direction_medium", "trend_direction_long",
+        "pullback_pct_peak", "pullback_pct_entry", "pullback_pct_ma", "pullback_pct_atr",
+        "obos_rsi", "obos_stoch_k", "obos_cci", "obos_williams_r", "obos_signal",
+        "tvf_trend", "tvf_volatility", "tvf_flow", "tvf_risk", "tvf_pullback", "tvf_entropy",
+        "kelly_fraction", "position_suggestion",
+        "option_moneyness_state", "div_future_cross_term", "div_option_premium_coll",
+        "div_option_near_itm", "div_reversal_signal",
+    ]
+
+    def _fill_v5_columns_from_obj(self, snap: MarketSnapshot, bar: Any) -> None:
+        for col in self._V5_DICT_COLUMNS:
+            val = getattr(bar, col, None)
+            if val is not None:
+                if col == "hmm_state":
+                    snap.hmm_state_v5 = int(val)
+                else:
+                    setattr(snap, col, val)
+
+    def _fill_v5_columns_from_dict(self, snap: MarketSnapshot, bar: dict) -> None:
+        for col in self._V5_DICT_COLUMNS:
+            val = bar.get(col)
+            if val is not None:
+                if col == "hmm_state":
+                    snap.hmm_state_v5 = int(val)
+                else:
+                    setattr(snap, col, val)
+
     def _auto_fill_life_expectancy(self, snap: MarketSnapshot) -> None:
         """自动从寿命估计器填充行情寿命快照"""
         hmm_state = snap.cr_hmm_state
@@ -672,7 +803,7 @@ class MarketSnapshotCollector:
                     degradation_level=life.degradation_level,
                     is_valid=True,
                 )
-        except Exception as _life_err:  # [R27-AUDIT] P2修复: 添加日志
+        except (ValueError, KeyError, TypeError, AttributeError) as _life_err:  # [R27-AUDIT] P2修复: 添加日志
             logging.debug("[MarketSnapshotCollector] life snapshot auto-fill failed: %s", _life_err)
 
     def _auto_fill_cycle_prediction(self, snap: MarketSnapshot) -> None:
@@ -729,6 +860,12 @@ class MarketSnapshotCollector:
         # D11 跨策略相关性
         rd.d11_cross_correlation = 0.5
 
+        # 背离反转信号增强: 当三层背离一致时, 降低d1状态强度置信度(趋势可能反转)
+        if snap.divergence_state.three_layer_consistent:
+            div_signal = abs(snap.divergence_state.div_reversal_signal)
+            if div_signal > 0.3:
+                rd.d1_state_strength = max(0.2, rd.d1_state_strength - div_signal * 0.3)
+
     def set_life_estimator(self, estimator: Any) -> None:
         """注入行情寿命估计器（由task_scheduler或策略引擎在回测/实盘启动时调用）"""
         self._life_estimator = estimator
@@ -751,10 +888,14 @@ class MarketSnapshotCollector:
     def capture_phase_transition(self, timestamp, detail: str = "", **kwargs) -> MarketSnapshot:
         return self.capture(timestamp, SnapshotTrigger.PHASE_TRANSITION, trigger_detail=detail, **kwargs)
 
+    def capture_divergence_signal(self, timestamp, detail: str = "", **kwargs) -> MarketSnapshot:
+        """捕获背离反转信号时刻的快照"""
+        return self.capture(timestamp, SnapshotTrigger.DIVERGENCE_REVERSAL, trigger_detail=detail, **kwargs)
+
     def process_bar_for_weekly_monthly(self, bar, **kwargs) -> List[MarketSnapshot]:
-        ts = bar.timestamp if hasattr(bar, 'timestamp') else bar.get('timestamp')
-        high = bar.high if hasattr(bar, 'high') else bar.get('high', 0)
-        low = bar.low if hasattr(bar, 'low') else bar.get('low', 0)
+        ts = bar.timestamp if hasattr(bar, 'timestamp') else (bar.get('timestamp') if hasattr(bar, 'get') else None)
+        high = bar.high if hasattr(bar, 'high') else (bar.get('high', 0) if hasattr(bar, 'get') else 0)
+        low = bar.low if hasattr(bar, 'low') else (bar.get('low', 0) if hasattr(bar, 'get') else 0)
 
         self._bar_buffer.append(bar)
         self._current_bar = bar
@@ -771,7 +912,7 @@ class MarketSnapshotCollector:
         try:
             ts_py = ts_dt.astype(_dt)
             weekday = ts_py.weekday()
-        except Exception as e:
+        except (ValueError, TypeError, AttributeError) as e:
             logger.warning(f"周期计算异常(ts={ts_dt}): {e}, 回退weekday=0")
             weekday = 0
         week_key = ts_dt - np.timedelta64(weekday, 'D')
@@ -927,8 +1068,8 @@ class MarketSnapshotCollector:
 
     def export_to_duckdb(self, db_path: str, table_name: str = "market_snapshots") -> None:
         try:
-            from ali2026v3_trading.data_access import get_data_access
-            from ali2026v3_trading.db_adapter import connect
+            from ali2026v3_trading.data.data_access import get_data_access
+            from ali2026v3_trading.data.db_adapter import connect
         except ImportError:
             logger.error("导出DuckDB需要duckdb库，请执行: pip install duckdb")
             return
@@ -959,5 +1100,5 @@ class MarketSnapshotCollector:
             return
         flat_dicts = [snap.to_flat_dict() for snap in self._snapshots]
         df = pd.DataFrame(flat_dicts)
-        from ali2026v3_trading.serialization_utils import safe_dataframe_to_parquet
+        from ali2026v3_trading.infra.serialization_utils import safe_dataframe_to_parquet
         safe_dataframe_to_parquet(df, file_path, preserve_index=False)

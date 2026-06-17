@@ -1,3 +1,5 @@
+# MODULE_ID: M1-208
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """Position Utility Functions - 模块级辅助函数
 
 从position_service.py拆分(CC-09 Step4):
@@ -20,7 +22,7 @@ def _calc_max_volume_from_capital(capital: float, price: float, leverage: float 
         if margin_per_lot <= 0:
             return 0
         return int((capital / margin_per_lot) // 1)
-    except Exception:
+    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
         return 0
 
 
@@ -35,13 +37,15 @@ def _cancel_and_resend(order_id: str, new_params: Dict[str, Any]) -> bool:
             _ps = get_position_service()
             if _ps and _ps.self_trade_detector is not None:
                 _ps.self_trade_detector.remove_order(order_id)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         if 'signal_id' not in new_params:
             new_params['signal_id'] = f"RESUBMIT_{order_id}"
         new_order_id = order_svc.send_order(**new_params)
         return bool(new_order_id) and new_order_id.success
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.error("[position_service._cancel_and_resend] Failed: %s: %s", order_id, e)
         return False
 
@@ -51,7 +55,7 @@ def _check_available_amount(position_data: Dict[str, Any], amount: int) -> bool:
         if not position_data:
             return False
         return int(position_data.get('available', 0)) >= amount
-    except Exception:
+    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
         return False
 
 

@@ -1,10 +1,11 @@
+# MODULE_ID: M2-308
 import pytest
 import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.callback_registry import CallbackRegistry, CallbackGroup, get_callback_group, reset_callback_group, ON_TICK
+from ali2026v3_trading.infra.registry_service import CallbackRegistry, CallbackGroup, get_callback_group, reset_callback_group, ON_TICK
 
 
 class TestCallbackRegistry:

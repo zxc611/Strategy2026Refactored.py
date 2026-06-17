@@ -1,6 +1,9 @@
+# [M1-47] ����״̬������
+# MODULE_ID: M1-143
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
-订单状态管理器 — 从order_service.py拆分
-职责: 订单状态追踪、待处理订单扫描、超时检测
+订单状态管理器 �?从order_service.py拆分
+职责: 订单状态追踪、待处理订单扫描、超时检�?
 """
 from __future__ import annotations
 
@@ -9,6 +12,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 from collections import deque
+
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 
 
 class OrderStateManager:
@@ -35,7 +40,7 @@ class OrderStateManager:
             return self._pending_orders.get(order_id)
 
     def scan_timeouts(self, timeout_sec: Optional[float] = None) -> List[str]:
-        _timeout = timeout_sec or self._timeout_sec
+        _timeout = timeout_sec if timeout_sec is not None else self._timeout_sec
         _now = time.time()
         with self._lock:
             timed_out = [oid for oid, ts in self._order_timestamps.items() if _now - ts > _timeout]
@@ -51,11 +56,6 @@ class OrderStateManager:
 
     def on_trade_update(self, svc, trade_data: Any) -> None:
         from datetime import datetime
-        try:
-            from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-        except Exception:
-            from datetime import timezone, timedelta
-            CHINA_TZ = timezone(timedelta(hours=8))
         from ali2026v3_trading.order.order_service import _validate_order_status_transition
         try:
             normalized = svc._normalize_platform_result(trade_data)
@@ -77,7 +77,7 @@ class OrderStateManager:
                     old_sts = order.get('status', '')
                     if not _validate_order_status_transition(old_sts, sts):
                         logging.warning(
-                            "[R14-P0-BIZ-08] 非法订单状态转换: order_id=%s %s->%s, 拒绝更新",
+                            "[R14-P0-BIZ-08] 非法订单状态转�? order_id=%s %s->%s, 拒绝更新",
                             oid, old_sts, sts,
                         )
                         return
@@ -102,7 +102,9 @@ class OrderStateManager:
                             _bus = get_global_event_bus()
                             if _bus is not None:
                                 _bus.publish('order.partial_filled', {'order_id': oid, 'filled_volume': filled, 'total_volume': order.get('volume', 0), 'partial_ratio': _partial_ratio}, async_mode=True)
-                        except Exception:
+                        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                            pass
                             pass
                     if sts in ('FILLED', 'ALL_FILLED', '全成') or order['status'] == 'FILLED':
                         svc._stats['successful_orders'] += 1
@@ -118,8 +120,8 @@ class OrderStateManager:
                             logging.info("[P1-R9-27] 订单FAILED, 触发自动重试: order=%s retry=%d/%d", oid, _retry_count + 1, _max_retries)
                             svc._chase_reorder(order, _retry_count + 1)
                         else:
-                            logging.warning("[P1-R9-27] 订单FAILED且已达最大重试次数: order=%s retries=%d", oid, _retry_count)
-        except Exception as e:
+                            logging.warning("[P1-R9-27] 订单FAILED且已达最大重试次�? order=%s retries=%d", oid, _retry_count)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[R16-P2-8.5] on_trade_update异常: %s", e, exc_info=True)
 
     def scan_order_timeouts(self, svc) -> int:
@@ -128,16 +130,11 @@ class OrderStateManager:
         _after = self.pending_count
         _processed = _before - _after
         if _processed > 0:
-            logging.info("[R23-SM-04-FIX] scan_order_timeouts: 处理了%d个超时订单", _processed)
+            logging.info("[R23-SM-04-FIX] scan_order_timeouts: 处理�?d个超时订�?, _processed)
         return max(_processed, 0)
 
     def check_pending_orders_full(self, svc) -> None:
         from datetime import datetime
-        try:
-            from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-        except Exception:
-            from datetime import timezone, timedelta
-            CHINA_TZ = timezone(timedelta(hours=8))
         now = datetime.now(CHINA_TZ)
         timeout_orders = []
         with svc._lock:
@@ -186,11 +183,6 @@ class OrderStateManager:
 
     def _cleanup_orders(self, svc) -> None:
         from datetime import datetime
-        try:
-            from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-        except Exception:
-            from datetime import timezone, timedelta
-            CHINA_TZ = timezone(timedelta(hours=8))
         now = time.time()
         if now - svc._last_cleanup <= svc._cleanup_interval:
             return

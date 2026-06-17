@@ -1,12 +1,13 @@
+# MODULE_ID: M1-233
 from __future__ import annotations
 
 import time
 import logging
 from typing import Dict, Any, Optional
-from ali2026v3_trading.risk_service import RiskCheckResponse, RiskLevel
+from ali2026v3_trading.risk.risk_service import RiskCheckResponse, RiskLevel
 
 try:
-    from ali2026v3_trading.audit_log_utils import structured_audit_log  # R27-CP-05-FIX
+    from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log  # R1-4修复
 except ImportError:
     structured_audit_log = None
 

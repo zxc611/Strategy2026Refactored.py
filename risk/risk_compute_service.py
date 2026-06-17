@@ -1,3 +1,5 @@
+# [M1-31] ��ؼ������
+# MODULE_ID: M1-214
 from __future__ import annotations
 
 import logging
@@ -7,40 +9,19 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from ali2026v3_trading.infra.shared_utils import safe_int, safe_float
-from ali2026v3_trading.resilience_utils import (
+from ali2026v3_trading.infra.resilience import (
     stable_sum, stable_mean, stable_variance,
     safe_normalize_weights, FLOAT_COMPARE_TOLERANCE,
 )
-
-
-def _safe_get_float(obj: Any, attr: str, default: float = 0.0) -> float:
-    try:
-        val = getattr(obj, attr, default)
-        if val is None:
-            return default
-        return float(val)
-    except (ValueError, TypeError, AttributeError) as e:
-        logging.warning("[safe_get_float] Error getting %s: %s", attr, e)
-        return default
-
-
-def _safe_get_int(obj: Any, attr: str, default: int = 0) -> int:
-    try:
-        val = getattr(obj, attr, default)
-        if val is None:
-            return default
-        return int(val)
-    except (ValueError, TypeError, AttributeError) as e:
-        logging.warning("[safe_get_int] Error getting %s: %s", attr, e)
-        return default
+from ._utils import safe_get_float as _safe_get_float, safe_get_int as _safe_get_int
 
 
 class RiskComputeService:
     """CC-03/AP-02修复: 风控计算服务
 
     从RiskService提取的B类方法（风控计算/指标），
-    包含压力测试、PnL归因、风险指标计算、决策评分等。
-    构造函数接受risk_service引用（用于访问共享状态）。
+    包含压力测试、PnL归因、风险指标计算、决策评分等�?
+    构造函数接受risk_service引用（用于访问共享状态）�?
     """
 
     RISK_DIMENSION_DEFAULTS = {
@@ -61,7 +42,7 @@ class RiskComputeService:
         self._rs = risk_service
 
     def _compute_stress_test(self, calc, positions_dict, net_delta, net_gamma, net_vega, net_theta):
-        """R17-P1-DOC-P1-04修复: 计算压力测试。Args: calc: Greeks计算器; positions_dict: 持仓字典; net_delta/gamma/vega/theta: 净Greeks值。Returns: Dict含jump_1sigma_pnl/jump_2sigma_pnl/L1_trigger_prob"""
+        """R17-P1-DOC-P1-04修复: 计算压力测试。Args: calc: Greeks计算�? positions_dict: 持仓字典; net_delta/gamma/vega/theta: 净Greeks值。Returns: Dict含jump_1sigma_pnl/jump_2sigma_pnl/L1_trigger_prob"""
         L1_JUMP_PROB_HIGH = 0.05
         L1_JUMP_PROB_LOW = 0.01
 
@@ -118,12 +99,12 @@ class RiskComputeService:
                 "jump_2sigma_pnl": round(jump_2sigma_pnl, 2),
                 "L1_trigger_prob": l1_prob,
             }
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[GreekDashboard._compute_stress_test] Error: %s", e)
             return {"jump_1sigma_pnl": 0.0, "jump_2sigma_pnl": 0.0, "L1_trigger_prob": 0.0}
 
     def _compute_pnl_attribution(self, calc, positions_dict, net_delta, net_gamma, net_vega, net_theta):
-        """R17-P1-DOC-P1-04修复: 计算PnL归因。Args: calc: Greeks计算器; positions_dict: 持仓字典; net_delta/gamma/vega/theta: 净Greeks值。Returns: Dict含delta/gamma/vega/theta贡献"""
+        """R17-P1-DOC-P1-04修复: 计算PnL归因。Args: calc: Greeks计算�? positions_dict: 持仓字典; net_delta/gamma/vega/theta: 净Greeks值。Returns: Dict含delta/gamma/vega/theta贡献"""
         try:
             delta_contrib = 0.0
             gamma_contrib = 0.0
@@ -145,9 +126,18 @@ class RiskComputeService:
                     if iv <= 0:
                         iv = 0.2
 
+                    # P2-裂缝39: IV微笑修正
+                    info = calc._option_info_cache.get(inst_id, {})
+                    underlying_price = info.get('underlying_price', 0.0)
+                    strike = info.get('strike_price', 0.0)
+                    moneyness = 0.0
+                    if strike > 0 and underlying_price > 0:
+                        moneyness = abs(underlying_price - strike) / underlying_price
+                    iv_adjusted = iv * (1.0 + 0.5 * moneyness)
+
                     delta_contrib += greeks.get('delta', 0.0) * multiplier * size * 0.01
                     gamma_contrib += 0.5 * greeks.get('gamma', 0.0) * multiplier * size * 0.0001
-                    vega_contrib += greeks.get('vega', 0.0) * multiplier * size * (iv * 0.01)
+                    vega_contrib += greeks.get('vega', 0.0) * multiplier * size * (iv_adjusted * 0.01)
                     theta_contrib += greeks.get('theta', 0.0) * multiplier * size
 
             total_explained = delta_contrib + gamma_contrib + vega_contrib + theta_contrib
@@ -166,7 +156,9 @@ class RiskComputeService:
                         logging.debug("[R16-P1-006] PnL计算偏差: complex=%.2f simple=%.2f diff=%.2f",
                                       total_explained, _simple_pnl, abs(total_explained - _simple_pnl))
                     break
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                pass
                 pass
             total_pnl_base = abs(delta_contrib) + abs(gamma_contrib) + abs(vega_contrib) + abs(theta_contrib)
             denominator = total_explained if abs(total_explained) > 1e-10 else total_pnl_base
@@ -191,16 +183,16 @@ class RiskComputeService:
                     if statistically_significant:
                         logging.warning(
                             "[E7_PNL_RESIDUAL] P2-裂缝30: PnL归因残差统计显著! "
-                            "均值=%.1f%%, t=%.2f, n=%d, 触发E7告警",
+                            "均�?%.1f%%, t=%.2f, n=%d, 触发E7告警",
                             mean_res, t_stat if std_res > 0 else 0.0, n,
                         )
                     else:
                         logging.debug(
-                            "[E7_PNL_RESIDUAL] P2-裂缝30: 残差%.1f%%>15%%但统计不显著, 降级为观察",
+                            "[E7_PNL_RESIDUAL] P2-裂缝30: 残差%.1f%%>15%%但统计不显著, 降级为观�?,
                             unexplained_pct,
                         )
                 else:
-                    logging.warning("[E7_PNL_RESIDUAL] PnL归因残差%.1f%%>15%%阈值(样本不足,暂触发E7)", unexplained_pct)
+                    logging.warning("[E7_PNL_RESIDUAL] PnL归因残差%.1f%%>15%%阈�?样本不足,暂触发E7)", unexplained_pct)
 
             return {
                 "delta_contrib": round(delta_contrib, 2),
@@ -210,7 +202,7 @@ class RiskComputeService:
                 "unexplained": round(unexplained, 2),
                 "unexplained_pct": round(unexplained_pct, 2),
             }
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[GreekDashboard._compute_pnl_attribution] Error: %s", e)
             return {
                 "delta_contrib": 0.0, "gamma_contrib": 0.0,
@@ -220,12 +212,49 @@ class RiskComputeService:
 
     def compute_simplified_pnl(self, entry_price: float, exit_price: float,
                                volume: int, direction: str, multiplier: float = 1.0,
-                               commission_per_lot: float = 0.0) -> float:
+                               commission_per_lot: float = None) -> float:
+        if commission_per_lot is None:
+            try:
+                from ali2026v3_trading.infra.commission_utils import get_commission_per_lot
+                commission_per_lot = get_commission_per_lot('DEFAULT')
+            except ImportError:
+                commission_per_lot = 0.0
         if direction in ('BUY', 'buy', 'long'):
             raw_pnl = (exit_price - entry_price) * volume * multiplier
         else:
             raw_pnl = (entry_price - exit_price) * volume * multiplier
         return raw_pnl - commission_per_lot * abs(volume) * 2
+
+    def compute_composite_risk(
+        self,
+        state_strength: float,
+        order_flow_consistency: float,
+        hmm_state: Optional[str] = None,
+        cr_output: Optional[Any] = None,
+        greeks_dashboard: Optional[Dict[str, Any]] = None,
+        consecutive_losses: int = 0,
+        current_pnl: float = 0.0,
+        drawdown_pct: float = 0.0,
+        alpha_ratio: Optional[float] = None,
+        cross_correlation: Optional[float] = None,
+        tri_validation_score: Optional[float] = None,
+        slippage_source: str = 'LIVE',
+    ) -> Dict[str, Any]:
+        """P1-裂缝44: 综合评分计算，评�?0.25时返回no_open_wait+hold_to_original_stop"""
+        return self.compute_decision_score(
+            state_strength=state_strength,
+            order_flow_consistency=order_flow_consistency,
+            hmm_state=hmm_state,
+            cr_output=cr_output,
+            greeks_dashboard=greeks_dashboard,
+            consecutive_losses=consecutive_losses,
+            current_pnl=current_pnl,
+            drawdown_pct=drawdown_pct,
+            alpha_ratio=alpha_ratio,
+            cross_correlation=cross_correlation,
+            tri_validation_score=tri_validation_score,
+            slippage_source=slippage_source,
+        )
 
     def calculate_risk_metrics(self):
         from ali2026v3_trading.risk.risk_service import RiskMetrics
@@ -261,7 +290,7 @@ class RiskComputeService:
                 risk_ratio=risk_ratio
             )
 
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[RiskService.calculate_risk_metrics] Error: %s, position_count=%d", e, count if 'count' in dir() else -1)
             return RiskMetrics()
 
@@ -274,7 +303,7 @@ class RiskComputeService:
         prediction_correct: bool = True, price_direction: int = 1,
     ) -> float:
         try:
-            from ali2026v3_trading.mode_engine import ModeEngine, PredictiveStateEngine
+            from ali2026v3_trading.governance.mode_engine import ModeEngine, PredictiveStateEngine
             me = ModeEngine.get_instance()
 
             pse = PredictiveStateEngine.get_instance()
@@ -292,10 +321,10 @@ class RiskComputeService:
             _inst_type = signal.get('instrument_type', 'future') if isinstance(signal, dict) else 'future'
             _opt_discount = 0.6
             try:
-                from ali2026v3_trading.config.config_params import get_cached_params
+                from ali2026v3_trading.config.config_service import get_cached_params
                 _params = get_cached_params()
                 _opt_discount = _params.get('option_buyer_discount', 0.6)
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 logging.warning("[R22-EP-P1] RiskService exception swallowed")
                 pass
             _market_state = state if state else ""
@@ -360,7 +389,7 @@ class RiskComputeService:
         _total_sum = stable_sum([_signal_sum, _market_sum, _portfolio_sum])
         if abs(_total_sum - 1.0) > 0.01:
             logging.warning(
-                "[RiskService] P1-14: 三层权重偏差>0.01 (signal=%.3f market=%.3f portfolio=%.3f total=%.3f), 自动归一化",
+                "[RiskService] P1-14: 三层权重偏差>0.01 (signal=%.3f market=%.3f portfolio=%.3f total=%.3f), 自动归一�?,
                 _signal_sum, _market_sum, _portfolio_sum, _total_sum)
 
         if slippage_source == 'BACKTEST':
@@ -383,7 +412,9 @@ class RiskComputeService:
             if isinstance(_imbalance, (int, float)) and abs(_imbalance) > 0.01:
                 base_order_flow = base_order_flow * 0.7 + (1.0 - abs(_imbalance)) * 0.3
                 logging.debug("[P1-1修复] OrderFlowBridge imbalance接入: imbalance=%.4f", _imbalance)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
         scores['order_flow'] = base_order_flow * 0.5 + liquidity_score * 0.5
 
@@ -394,13 +425,13 @@ class RiskComputeService:
 
         _pse_state = None
         try:
-            from ali2026v3_trading.mode_engine import PredictiveStateEngine
+            from ali2026v3_trading.governance.mode_engine import PredictiveStateEngine
             _pse = PredictiveStateEngine.get_instance()
             if _pse is not None:
                 _pse_state = getattr(_pse, '_last_state', None)
                 if _pse_state is None and hasattr(_pse, 'classify_state'):
                     _pse_state = _pse.classify_state(True, 1)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[R22-EP-P1] RiskService exception swallowed")
             pass
 
@@ -415,26 +446,26 @@ class RiskComputeService:
         _alpha_ratio = alpha_ratio
         if _alpha_ratio is None:
             try:
-                from ali2026v3_trading.shadow_strategy_engine import get_shadow_strategy_engine
+                from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
                 _se = get_shadow_strategy_engine()
                 if _se is not None:
                     if hasattr(_se, 'get_alpha_ratio') and callable(_se.get_alpha_ratio):
                         _alpha_ratio = _se.get_alpha_ratio()
                     elif hasattr(_se, 'alpha_decay_rate'):
                         _alpha_ratio = _se.alpha_decay_rate
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[RiskService] R24-P0-TR-07: alpha_decay score computation failed: %s", e)
         scores['alpha_decay'] = self._compute_alpha_decay_score(_alpha_ratio)
 
         _cross_corr = cross_correlation
         if _cross_corr is None:
             _cross_corr = 0.5
-            logging.warning("[P0-R9-04] cross_correlation为None, 降级为0.5(中性), 避免数据缺失时鼓励开仓")
+            logging.warning("[P0-R9-04] cross_correlation为None, 降级�?.5(中�?, 避免数据缺失时鼓励开�?)
         scores['cross_correlation'] = self._compute_cross_correlation_score(_cross_corr)
 
         total_weight = stable_sum(list(w.values()))
         if abs(total_weight) < FLOAT_COMPARE_TOLERANCE:
-            logging.warning("[RiskService] 权重总和接近零, 使用等权重")
+            logging.warning("[RiskService] 权重总和接近�? 使用等权�?)
             n = len(w)
             uniform_w = {dim: 1.0 / n for dim in w}
             composite_score = stable_sum([scores[dim] * uniform_w[dim] for dim in w])
@@ -501,47 +532,47 @@ class RiskComputeService:
         return round(base_scale, 4)
 
     def _compute_life_score(self, hmm_state: Optional[str] = None) -> float:
-        """R17-P1-DOC-P1-04修复: 计算生命周期评分。Args: hmm_state: HMM状态字符串。Returns: float 0.0~1.0, 降级时返回0.5(跨策略Greeks聚合降级默认值)"""
+        """R17-P1-DOC-P1-04修复: 计算生命周期评分。Args: hmm_state: HMM状态字符串。Returns: float 0.0~1.0, 降级时返�?.5(跨策略Greeks聚合降级默认�?"""
         estimator = self._rs._get_life_estimator()
         if estimator is None or hmm_state is None:
             if estimator is None and hmm_state is not None:
-                logging.warning("[R5-E-08] _compute_life_score降级: estimator不可用，返回中性评分0.5")
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+                logging.warning("[R5-E-08] _compute_life_score降级: estimator不可用，返回中性评�?.5")
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
         try:
             life = estimator.get_life_expectancy(hmm_state)
             if life is None or not life.is_valid():
-                return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+                return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
             return {0: 1.0, 1: 0.7, 2: 0.4, 3: 0.2}.get(life.degradation_level, 0.5)
-        except Exception as _life_e:
-            logging.warning("[R5-E-08] _compute_life_score异常降级: %s，返回0.5", _life_e)
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _life_e:
+            logging.warning("[R5-E-08] _compute_life_score异常降级: %s，返�?.5", _life_e)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
 
     def _compute_cycle_resonance_score(self, cr_output: Optional[Any] = None) -> float:
-        """R17-P1-DOC-P1-04修复: 计算周期共振评分。Args: cr_output: 周期共振输出对象。Returns: float 0.0~1.0, 降级时返回0.5(跨策略Greeks聚合降级默认值)"""
+        """R17-P1-DOC-P1-04修复: 计算周期共振评分。Args: cr_output: 周期共振输出对象。Returns: float 0.0~1.0, 降级时返�?.5(跨策略Greeks聚合降级默认�?"""
         if cr_output is None:
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
         try:
             strength = getattr(cr_output, 'resonance_strength', None)
             if strength is not None:
                 return max(0.0, min(1.0, float(strength)))
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[R22-EP-P1] RiskService exception swallowed")
             pass
-        return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+        return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
 
     def _compute_phase_quality_score(self, cr_output: Optional[Any] = None) -> float:
         if cr_output is None:
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
         try:
             phase = getattr(cr_output, 'phase', None)
             if phase is not None:
                 phase_name = phase.name if hasattr(phase, 'name') else str(phase)
                 return {'RELEASE': 1.0, 'CHARGE': 0.7, 'EXHAUST': 0.4, 'CHAOS': 0.2}.get(
                     phase_name.upper(), 0.5)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[R22-EP-P1] RiskService exception swallowed")
             pass
-        return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+        return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
 
     def compute_otm_sync_exposure(self, conn=None) -> Dict[str, Any]:
         """P1-8修复: 消费ticks_raw.is_otm和future_sync_status，计算OTM期权同步风险敞口"""
@@ -571,16 +602,16 @@ class RiskComputeService:
                     'otm_count': otm_cnt,
                     'wrong_sync_rate': wrong_rate,
                 }
-            logging.debug("[P1-8] OTM同步风险敞口: %d个标的组合", len(exposure))
+            logging.debug("[P1-8] OTM同步风险敞口: %d个标的组�?, len(exposure))
             return {'otm_exposure': exposure, 'symbol_count': len(exposure)}
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[P1-8] OTM同步风险敞口计算失败: %s", e)
             return {'otm_exposure': {}, 'symbol_count': 0}
 
     def _compute_greeks_usage_score(self, dashboard: Optional[Dict[str, Any]] = None) -> float:
-        """R17-P1-DOC-P1-04修复: 计算Greeks使用率评分。Args: dashboard: Greeks仪表盘字典含portfolio子键。Returns: float 0.0~1.0, 降级时返回0.5(跨策略Greeks聚合降级默认值)"""
+        """R17-P1-DOC-P1-04修复: 计算Greeks使用率评分。Args: dashboard: Greeks仪表盘字典含portfolio子键。Returns: float 0.0~1.0, 降级时返�?.5(跨策略Greeks聚合降级默认�?"""
         if dashboard is None:
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
         try:
             portfolio = dashboard.get('portfolio', {})
             delta_pct = portfolio.get('delta_usage_pct', 50.0)
@@ -595,12 +626,12 @@ class RiskComputeService:
                 return 0.4
             else:
                 return 0.2
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[R22-EP-P1] RiskService exception swallowed")
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
 
     def _compute_consecutive_loss_score(self, consecutive_losses: int = 0) -> float:
-        """R17-P1-DOC-P1-04修复: 计算连续亏损评分。Args: consecutive_losses: 连续亏损次数。Returns: float 0.1~1.0, 0次=1.0/1-2次=0.8/3-4次=0.5/5-6次=0.3/7+次=0.1"""
+        """R17-P1-DOC-P1-04修复: 计算连续亏损评分。Args: consecutive_losses: 连续亏损次数。Returns: float 0.1~1.0, 0�?1.0/1-2�?0.8/3-4�?0.5/5-6�?0.3/7+�?0.1"""
         if consecutive_losses <= 0:
             return 1.0
         elif consecutive_losses <= 2:
@@ -632,14 +663,14 @@ class RiskComputeService:
 
     def _compute_tri_validation_score(self, tri_score: Optional[float] = None) -> float:
         if tri_score is None:
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
         return max(0.0, min(1.0, float(tri_score)))
 
     def _compute_alpha_decay_score(self, alpha_ratio: Optional[float] = None) -> float:
-        """R17-P1-DOC-P1-04修复: 计算Alpha衰减评分。Args: alpha_ratio: Alpha比率。Returns: float 0.1~1.0, >1.0=1.0/>0.5=0.7/>0.0=0.4/<=0=0.1, 降级时返回0.5"""
+        """R17-P1-DOC-P1-04修复: 计算Alpha衰减评分。Args: alpha_ratio: Alpha比率。Returns: float 0.1~1.0, >1.0=1.0/>0.5=0.7/>0.0=0.4/<=0=0.1, 降级时返�?.5"""
         if alpha_ratio is None:
-            logging.warning("[R25-P1-TR-07] alpha_ratio为None, 降级为0.5(中性评分), 避免数据缺失时鼓励开仓")
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+            logging.warning("[R25-P1-TR-07] alpha_ratio为None, 降级�?.5(中性评�?, 避免数据缺失时鼓励开�?)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
         if alpha_ratio > 1.0:
             return 1.0
         elif alpha_ratio > 0.5:
@@ -650,9 +681,9 @@ class RiskComputeService:
             return 0.1
 
     def _compute_cross_correlation_score(self, cross_corr: Optional[float] = None) -> float:
-        """R17-P1-DOC-P1-04修复: 计算跨策略相关性评分。Args: cross_corr: 跨策略相关系数。Returns: float 0.1~1.0, 低相关=1.0/高相关=0.1, 降级时返回0.5"""
+        """R17-P1-DOC-P1-04修复: 计算跨策略相关性评分。Args: cross_corr: 跨策略相关系数。Returns: float 0.1~1.0, 低相�?1.0/高相�?0.1, 降级时返�?.5"""
         if cross_corr is None:
-            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+            return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?
         abs_corr = abs(cross_corr)
         if abs_corr < 0.2:
             return 1.0
@@ -664,7 +695,7 @@ class RiskComputeService:
             return 0.2
 
     def _compute_liquidity_score(self) -> float:
-        """R17-P1-DOC-P1-04修复: 计算流动性评分。Returns: float 0.0~1.0, 基于买卖价差评估流动性, 降级时返回0.5"""
+        """R17-P1-DOC-P1-04修复: 计算流动性评分。Returns: float 0.0~1.0, 基于买卖价差评估流动�? 降级时返�?.5"""
         try:
             from ali2026v3_trading.order.order_flow_bridge import OrderFlowBridge
             bridge = OrderFlowBridge()
@@ -681,16 +712,18 @@ class RiskComputeService:
                     else:
                         t = (spread_ratio - 0.001) / (0.005 - 0.001)
                         _base = 1.0 - t * (1.0 - 0.3)
-                    # P1-8修复: OTM同步风险敞口影响流动性评分
+                    # P1-8修复: OTM同步风险敞口影响流动性评�?
                     try:
                         _otm_exp = self.compute_otm_sync_exposure()
                         _otm_count = sum(v.get('otm_count', 0) for v in _otm_exp.get('otm_exposure', {}).values())
-                        if _otm_count > 50:  # OTM期权过多时降低流动性评分
+                        if _otm_count > 50:  # OTM期权过多时降低流动性评�?
                             _base *= 0.85
-                    except Exception:
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                        logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                        pass
                         pass
                     return _base
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[R22-EP-P1] RiskService exception swallowed")
             pass
-        return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认值(中性评分)
+        return 0.5  # R17-P1-DOC-P1-07: 跨策略Greeks聚合降级默认�?中性评�?

@@ -1,35 +1,19 @@
+# [M1-28] ��ؼ�����
+# MODULE_ID: M1-212
 from __future__ import annotations
 import logging
 import time
 from typing import Any, Dict, Optional
 from ali2026v3_trading.infra.shared_utils import safe_int, safe_float
-from ali2026v3_trading.resilience_utils import stable_mean, stable_variance
-from ali2026v3_trading.audit_log_utils import structured_audit_log
+from ali2026v3_trading.infra.resilience import stable_mean, stable_variance
+from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log  # R1-4修复
 from ali2026v3_trading.risk.risk_check_engine import RiskCheckEngine
-
-
-def _safe_get_float(obj: Any, attr: str, default: float = 0.0) -> float:
-    try:
-        val = getattr(obj, attr, default)
-        if val is None: return default
-        return float(val)
-    except (ValueError, TypeError, AttributeError) as e:
-        logging.warning("[safe_get_float] Error getting %s: %s", attr, e)
-        return default
-
-
-def _safe_get_int(obj: Any, attr: str, default: int = 0) -> int:
-    try:
-        val = getattr(obj, attr, default)
-        if val is None: return default
-        return int(val)
-    except (ValueError, TypeError, AttributeError) as e:
-        logging.warning("[safe_get_int] Error getting %s: %s", attr, e)
-        return default
+from ali2026v3_trading.risk.risk_circuit_breaker import get_safety_meta_layer
+from ali2026v3_trading.risk._utils import safe_get_float as _safe_get_float, safe_get_int as _safe_get_int
 
 
 class RiskCheckService:
-    """风控检查服务 — LEGACY退役版，核心逻辑已委托给RiskCheckEngine"""
+    """风控检查服�?�?核心逻辑已委托给RiskCheckEngine，LEGACY方法已清�?""
 
     def __init__(self, risk_service: Any):
         self._rs = risk_service
@@ -49,8 +33,38 @@ class RiskCheckService:
     def _pass(self):
         R, _, _, _ = self._get_types(); return R.pass_result()
 
+    def _block(self, reason: str = "", message: str = ""):
+        R, _, L, _ = self._get_types(); return R.block_result(reason=reason, message=message, level=L.HIGH)
+
+    def check_regulatory_compliance(self, position_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """监管合规检查�?
+
+        fail-closed策略：SafetyMetaLayer缺席(None)时降级放�?回测/测试链路)�?
+        委托链异常时返回compliant=False(安全优先)�?
+        """
+        try:
+            safety = get_safety_meta_layer()
+            if safety is not None and hasattr(safety, 'check_regulatory_compliance'):
+                result = safety.check_regulatory_compliance(position_data)
+                if isinstance(result, dict):
+                    return result
+                logging.debug("[RiskCheckService] check_regulatory_compliance返回非dict，降级放�? %s", type(result).__name__)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[RiskCheckService] check_regulatory_compliance委托链异常，fail-closed: %s", e)
+            return {
+                'compliant': False,
+                'reason': f'风控委托链异�? {e}',
+                'details': {'degraded': True, 'source': 'RiskCheckService'},
+            }
+
+        return {
+            'compliant': True,
+            'reason': 'safety_meta_layer_unavailable',
+            'details': {'degraded': True, 'source': 'RiskCheckService'},
+        }
+
     def check_before_trade(self, signal: Dict[str, Any]):
-        """交易前风控检查 — 引擎优先，LEGACY回退"""
+        """交易前风控检�?�?引擎优先，安全回退"""
         from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
         if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
             try:
@@ -61,29 +75,23 @@ class RiskCheckService:
                     R, RC, _, _ = self._get_types()
                     return R(passed=False, results=[RC(rule_name=r.rule_name, passed=r.passed, reason=r.reason) for r in _report.results], blocking_rule=_report.blocking_result.rule_name)
                 if not _report.passed:
-                    logging.info("[RiskCheckService] RiskCheckEngine非阻断结果: %s",
+                    logging.info("[RiskCheckService] RiskCheckEngine非阻断结�? %s",
                                  [(r.rule_name, r.passed, r.reason) for r in _report.failed_rules])
-            except Exception as e:
-                logging.warning("[RiskCheckService] RiskCheckEngine委托异常,回退到原逻辑: %s", e)
-            logging.debug("[LEGACY-RETIRED] check_before_trade 已由RiskCheckEngine接管")
-            return self._pass()
-        return self._check_before_trade_legacy_impl(signal)
-
-    def _check_before_trade_legacy_impl(self, signal):
-        logging.warning("[LEGACY-FALLBACK] check_before_trade legacy impl retired, returning safe default")
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                logging.warning("[RiskCheckService] RiskCheckEngine委托异常,回退到安全默�? %s", e)
         return self._pass()
 
     def detect_abnormal_trading(self, instrument_id: str = '', direction: str = '',
                                 price: float = 0.0, volume: float = 0.0,
                                 market_price: float = 0.0, avg_volume: float = 0.0) -> Dict[str, Any]:
-        """P2-6修复: 异常交易检测 — 直接调用AbnormalTradeDetector"""
+        """异常交易检�?�?直接调用AbnormalTradeDetector"""
         try:
             from ali2026v3_trading.risk_engine.abnormal_trade_detector import AbnormalTradeDetector
             if not hasattr(self, '_abnormal_detector') or self._abnormal_detector is None:
                 self._abnormal_detector = AbnormalTradeDetector()
             detector = self._abnormal_detector
         except ImportError:
-            logging.warning("[P2-6] AbnormalTradeDetector不可用，跳过异常交易检测")
+            logging.warning("[P2-6] AbnormalTradeDetector不可用，跳过异常交易检�?)
             return {'action': 'none', 'anomaly_count': 0}
         results = [detector.detect_burst_trading(instrument_id)]
         if direction and price > 0: results.append(detector.detect_self_trade(instrument_id, direction, price))
@@ -96,259 +104,98 @@ class RiskCheckService:
         return {'action': 'none', 'anomaly_count': anomaly_count, 'anomalies': results}
 
     def _check_abnormal_trading(self, signal: Dict[str, Any]):
-        """P2-6修复: 异常交易行为检查 — 作为风控检查链的一环"""
+        """异常交易行为检�?�?作为风控检查链的一�?""
         try:
             _abnormal = self.detect_abnormal_trading(
                 instrument_id=signal.get('instrument_id', ''), direction=signal.get('direction', ''),
                 price=signal.get('price', 0.0), volume=signal.get('volume', 0.0),
                 market_price=signal.get('market_price', 0.0), avg_volume=signal.get('avg_volume', 0.0))
             if _abnormal.get('action') == 'block':
-                logging.warning("[P2-6] 异常交易行为检测: %d项异常，阻断交易 %s",
+                logging.warning("[P2-6] 异常交易行为检�? %d项异常，阻断交易 %s",
                               _abnormal.get('anomaly_count', 0), signal.get('instrument_id', ''))
                 return True
-        except Exception as e:
-            logging.warning("[P2-6] 异常交易检测异常(非阻断): %s", e)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[P2-6] 异常交易检测异�?非阻�?: %s", e)
         return None
 
     def _check_safety_meta_layer(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_safety_meta_layer 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_safety_meta_layer_legacy_impl(signal)
-
-    def _check_safety_meta_layer_legacy_impl(self, signal):
-        logging.warning("[LEGACY-FALLBACK] _check_safety_meta_layer legacy impl retired"); return self._pass()
+        """检查SafetyMetaLayer的hard_stop和new_open_blocked状�?""
+        try:
+            safety = get_safety_meta_layer()
+            if safety is None:
+                return self._pass()
+            action = signal.get('action', '').upper() if signal else ''
+            # P0-裂缝25修复: hard_stop期间允许平仓(CLOSE)保护性操作豁�?
+            if safety.is_hard_stop_triggered() and action != 'CLOSE':
+                return self._block(reason="hard_stop_triggered: 日回撤硬停止已触发，禁止新开�?)
+            if safety.is_new_open_blocked() and action == 'OPEN':
+                return self._block(reason="new_open_blocked: 新开仓被阻断")
+            return self._pass()
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[RiskCheckService] _check_safety_meta_layer异常: %s", e)
+            return self._pass()
 
     def _check_invariant_runtime(self) -> Dict[str, Any]:
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            return {'all_passed': True, 'violations': [], 'recoveries': []}
-        return self._check_invariant_runtime_legacy_impl()
-
-    def _check_invariant_runtime_legacy_impl(self) -> Dict[str, Any]:
-        logging.warning("[LEGACY-FALLBACK] _check_invariant_runtime legacy impl retired")
         return {'all_passed': True, 'violations': [], 'recoveries': []}
 
-    def _check_strategy_status(self):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_strategy_status 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_strategy_status_legacy_impl()
-
-    def _check_strategy_status_legacy_impl(self):
-        logging.warning("[LEGACY-FALLBACK] _check_strategy_status legacy impl retired"); return self._pass()
-
-    def _check_rate_limit(self, symbol: str):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_rate_limit 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_rate_limit_legacy_impl(symbol)
-
-    def _check_rate_limit_legacy_impl(self, symbol: str):
-        logging.warning("[LEGACY-FALLBACK] _check_rate_limit legacy impl retired"); return self._pass()
-
-    def _check_position_limit(self, account_id: str, required_amount: float, hedge_type: str = "speculation"):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_position_limit 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_position_limit_legacy_impl(account_id, required_amount, hedge_type)
-
-    def _check_position_limit_legacy_impl(self, account_id: str, required_amount: float, hedge_type: str = "speculation"):
-        logging.warning("[LEGACY-FALLBACK] _check_position_limit legacy impl retired"); return self._pass()
-
-    def _check_risk_ratio(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_risk_ratio 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_risk_ratio_legacy_impl(signal)
-
-    def _check_risk_ratio_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_risk_ratio legacy impl retired"); return self._pass()
-
-    def _check_risk_consistency(self):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_risk_consistency 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_risk_consistency_legacy_impl()
-
-    def _check_risk_consistency_legacy_impl(self):
-        logging.warning("[LEGACY-FALLBACK] _check_risk_consistency legacy impl retired"); return self._pass()
-
-    def _check_single_trade_risk(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_single_trade_risk 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_single_trade_risk_legacy_impl(signal)
-
-    def _check_single_trade_risk_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_single_trade_risk legacy impl retired"); return self._pass()
-
-    def _check_sharpe_iron_rule(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_sharpe_iron_rule 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_sharpe_iron_rule_legacy_impl(signal)
-
-    def _check_sharpe_iron_rule_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_sharpe_iron_rule legacy impl retired"); return self._pass()
-
-    def _check_e7_residual_block(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_e7_residual_block 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_e7_residual_block_legacy_impl(signal)
-
-    def _check_e7_residual_block_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_e7_residual_block legacy impl retired"); return self._pass()
-
-    def _check_capital_sufficiency_in_trade(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_capital_sufficiency_in_trade 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_capital_sufficiency_in_trade_legacy_impl(signal)
-
-    def _check_capital_sufficiency_in_trade_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_capital_sufficiency_in_trade legacy impl retired"); return self._pass()
-
-    def _check_spread_degradation(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_spread_degradation 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_spread_degradation_legacy_impl(signal)
-
-    def _check_spread_degradation_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_spread_degradation legacy impl retired"); return self._pass()
-
-    def _check_governance_violations(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_governance_violations 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_governance_violations_legacy_impl(signal)
-
-    def _check_governance_violations_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_governance_violations legacy impl retired"); return self._pass()
-
-    def _check_greeks_limits(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_greeks_limits 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_greeks_limits_legacy_impl(signal)
-
-    def _check_greeks_limits_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_greeks_limits legacy impl retired"); return self._pass()
-
-    def _compute_greeks_exposure(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'): return None, {}
-        return self._compute_greeks_exposure_legacy_impl(signal)
-
-    def _compute_greeks_exposure_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _compute_greeks_exposure legacy impl retired"); return None, {}
-
-    def _validate_greeks_thresholds(self, signal: Dict[str, Any], calc, positions_dict: Dict[str, int]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _validate_greeks_thresholds 已由RiskCheckEngine接管"); return self._pass()
-        return self._validate_greeks_thresholds_legacy_impl(signal, calc, positions_dict)
-
-    def _validate_greeks_thresholds_legacy_impl(self, signal, calc, positions_dict):
-        logging.warning("[LEGACY-FALLBACK] _validate_greeks_thresholds legacy impl retired"); return self._pass()
-
-    def _check_consecutive_loss_protection(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_consecutive_loss_protection 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_consecutive_loss_protection_legacy_impl(signal)
-
-    def _check_consecutive_loss_protection_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_consecutive_loss_protection legacy impl retired"); return self._pass()
-
-    def _check_life_expectancy(self, signal: Dict[str, Any]):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_life_expectancy 已由RiskCheckEngine接管"); return self._pass()
-        return self._check_life_expectancy_legacy_impl(signal)
-
-    def _check_life_expectancy_legacy_impl(self, signal: Dict[str, Any]):
-        logging.warning("[LEGACY-FALLBACK] _check_life_expectancy legacy impl retired"); return self._pass()
-
     def check_price_limit(self, instrument_id: str, price: float, direction: str):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] check_price_limit 已由RiskCheckEngine接管"); return self._pass()
-        return self.check_price_limit_legacy_impl(instrument_id, price, direction)
-
-    def check_price_limit_legacy_impl(self, instrument_id: str, price: float, direction: str):
-        logging.warning("[LEGACY-FALLBACK] check_price_limit legacy impl retired"); return self._pass()
+        return self._pass()
 
     def check_expiry_risk(self, instrument_id: str, days_to_expiry: int = None):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] check_expiry_risk 已由RiskCheckEngine接管"); return self._pass()
-        return self.check_expiry_risk_legacy_impl(instrument_id, days_to_expiry)
-
-    def check_expiry_risk_legacy_impl(self, instrument_id: str, days_to_expiry: int = None):
-        logging.warning("[LEGACY-FALLBACK] check_expiry_risk legacy impl retired"); return self._pass()
+        return self._pass()
 
     def auto_rollover_if_needed(self, instrument_id: str, days_to_expiry: int) -> Optional[Dict[str, Any]]:
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] auto_rollover_if_needed 已由RiskCheckEngine接管"); return None
-        return self.auto_rollover_if_needed_legacy_impl(instrument_id, days_to_expiry)
-
-    def auto_rollover_if_needed_legacy_impl(self, instrument_id: str, days_to_expiry: int) -> Optional[Dict[str, Any]]:
-        logging.warning("[LEGACY-FALLBACK] auto_rollover_if_needed legacy impl retired"); return None
-
-    def _check_operational_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_operational_risks 已由RiskCheckEngine接管"); return None
-        return self._check_operational_risks_legacy_impl(signal, action)
-
-    def _check_operational_risks_legacy_impl(self, signal, action):
-        logging.warning("[LEGACY-FALLBACK] _check_operational_risks legacy impl retired"); return None
-
-    def _check_market_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_market_risks 已由RiskCheckEngine接管"); return None
-        return self._check_market_risks_legacy_impl(signal, action)
-
-    def _check_market_risks_legacy_impl(self, signal, action):
-        logging.warning("[LEGACY-FALLBACK] _check_market_risks legacy impl retired"); return None
-
-    def _check_counterparty_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_counterparty_risks 已由RiskCheckEngine接管"); return None
-        return self._check_counterparty_risks_legacy_impl(signal, action)
-
-    def _check_counterparty_risks_legacy_impl(self, signal, action):
-        logging.warning("[LEGACY-FALLBACK] _check_counterparty_risks legacy impl retired"); return None
-
-    _industry_limits: Dict[str, float] = {}
+        return None
 
     def check_cross_instrument_limit(self, account_id: str, instrument_id: str, required_amount: float):
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] check_cross_instrument_limit 已由RiskCheckEngine接管"); return self._pass()
-        return self.check_cross_instrument_limit_legacy_impl(account_id, instrument_id, required_amount)
+        return self._pass()
 
-    def check_cross_instrument_limit_legacy_impl(self, account_id, instrument_id, required_amount):
-        logging.warning("[LEGACY-FALLBACK] check_cross_instrument_limit legacy impl retired"); return self._pass()
+    def validate_gamma_path_dependency(self, bar_data, positions_dict, n_simulations=1000, max_deviation_pct=20.0) -> Dict[str, Any]:
+        """P1-裂缝3修复: Gamma PnL路径依赖偏差验证
 
-    def _check_regulatory_risks(self, signal: Dict[str, Any], action: str) -> Optional[RiskCheckResponse]:
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
-        if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
-            logging.debug("[LEGACY-RETIRED] _check_regulatory_risks 已由RiskCheckEngine接管"); return None
-        return self._check_regulatory_risks_legacy_impl(signal, action)
-
-    def _check_regulatory_risks_legacy_impl(self, signal, action):
-        logging.warning("[LEGACY-FALLBACK] _check_regulatory_risks legacy impl retired"); return None
+        在OHLC范围内随机生成多条日内价格路径，对比固定路径的Gamma PnL�?
+        若偏�?max_deviation_pct，标记gamma_low_fidelity�?
+        """
+        try:
+            import numpy as np
+            import pandas as pd
+            from typing import List
+            if bar_data is None or bar_data.empty or not positions_dict:
+                return {'passed': True, 'deviation_pct': 0.0, 'reason': '无数据或持仓'}
+            ohlc = bar_data[['open', 'high', 'low', 'close']].dropna()
+            if len(ohlc) < 2:
+                return {'passed': True, 'deviation_pct': 0.0, 'reason': '数据不足'}
+            # 简化实现：对每条bar在[low, high]范围内随机抽样n_simulations条路�?
+            # 计算固定路径(close)与随机路径的pnl差异
+            fixed_returns = ohlc['close'].pct_change().dropna().values
+            deviations: List[float] = []
+            rng = np.random.RandomState(42)
+            for _ in range(min(n_simulations, 500)):
+                random_prices = ohlc['low'].values + rng.rand(len(ohlc)) * (ohlc['high'].values - ohlc['low'].values)
+                random_returns = np.diff(random_prices) / random_prices[:-1]
+                if len(random_returns) == len(fixed_returns):
+                    # 使用gamma近似: pnl差异 ~ gamma * (random_return^2 - fixed_return^2)
+                    # 这里用路径夏普差异作为proxy
+                    fixed_sharpe = np.mean(fixed_returns) / (np.std(fixed_returns) + 1e-10) * np.sqrt(252)
+                    random_sharpe = np.mean(random_returns) / (np.std(random_returns) + 1e-10) * np.sqrt(252)
+                    deviations.append(abs(random_sharpe - fixed_sharpe))
+            avg_deviation = float(np.mean(deviations)) if deviations else 0.0
+            deviation_pct = (avg_deviation / (abs(fixed_sharpe) + 1e-10)) * 100.0 if 'fixed_sharpe' in dir() else 0.0
+            passed = deviation_pct <= max_deviation_pct
+            return {
+                'passed': passed,
+                'deviation_pct': round(deviation_pct, 2),
+                'avg_deviation': round(avg_deviation, 4),
+                'n_simulations': len(deviations),
+                'gamma_low_fidelity': not passed,
+            }
+        except (ValueError, TypeError, KeyError, ArithmeticError, RuntimeError) as e:
+            logging.warning("[裂缝3] validate_gamma_path_dependency 计算异常: %s", e)
+            return {'passed': True, 'deviation_pct': 0.0, 'reason': f'计算异常: {e}'}
 
 
 def check_snapshot_freshness(snapshot_time: float, max_age_sec: float = 30.0) -> bool:
-    """R27-P0-DI-06修复: 风控快照新鲜度检查"""
+    """风控快照新鲜度检�?""
     if snapshot_time <= 0: return False
     _age = time.time() - snapshot_time
     if _age > max_age_sec:
@@ -358,7 +205,7 @@ def check_snapshot_freshness(snapshot_time: float, max_age_sec: float = 30.0) ->
 
 
 def is_risk_exempt(signal: Dict[str, Any]) -> bool:
-    """R27-P0-FI-05修复: 风控豁免显式字段检查"""
+    """风控豁免显式字段检�?""
     if signal.get('risk_exempt', False) is True: return True
     if signal.get('action', '') == 'CLOSE': return True
     return False
@@ -368,10 +215,10 @@ _ALLOWED_DIRECTIONS = frozenset({'BUY', 'SELL'})
 
 
 def validate_direction(direction: str) -> str:
-    """R27-P0-FI-06修复: direction白名单验证"""
+    """direction白名单验�?""
     if not isinstance(direction, str):
-        raise ValueError(f"R27-P0-FI-06: direction必须为字符串, 实际类型={type(direction).__name__}")
+        raise ValueError(f"direction必须为字符串, 实际类型={type(direction).__name__}")
     _dir = direction.strip().upper()
     if _dir not in _ALLOWED_DIRECTIONS:
-        raise ValueError(f"R27-P0-FI-06: direction={direction}不在白名单{_ALLOWED_DIRECTIONS}中")
+        raise ValueError(f"direction={direction}不在白名单{_ALLOWED_DIRECTIONS}�?)
     return _dir

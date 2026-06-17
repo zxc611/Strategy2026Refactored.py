@@ -1,23 +1,25 @@
+# [M1-27] ��ط���
+# MODULE_ID: M1-218
 """
 risk_service.py - 风控服务
 
-合并来源：08_position.py (PositionManagerMixin) + 10_gate.py (GateLayer3)
+合并来源�?8_position.py (PositionManagerMixin) + 10_gate.py (GateLayer3)
 合并策略：提取风控检查、限额管理、风险计算等功能
 
-重构目标：
-- 旧架构：08_position.py (~600行) + 10_gate.py (~200行风控相关) = ~700行
-- 新架构：risk_service.py (~400行)
+重构目标�?
+- 旧架构：08_position.py (~600�? + 10_gate.py (~200行风控相�? = ~700�?
+- 新架构：risk_service.py (~400�?
 - 减少：~43%
 
-核心改进：
-1. 单一职责：专注于风险控制与限额管理
-2. 统一风控接口：整合持仓限额、信号限频、策略状态检查
-3. 线程安全：支持并发检查
-4. 可配置性：灵活的风控参数配置
+核心改进�?
+1. 单一职责：专注于风险控制与限额管�?
+2. 统一风控接口：整合持仓限额、信号限频、策略状态检�?
+3. 线程安全：支持并发检�?
+4. 可配置性：灵活的风控参数配�?
 
-作者：CodeArts 代码智能体
+作者：CodeArts 代码智能�?
 版本：v1.0
-生成时间：2026-03-16
+生成时间�?026-03-16
 """
 
 from __future__ import annotations
@@ -28,17 +30,17 @@ import math
 import os
 import time
 import logging
-from ali2026v3_trading.serialization_utils import json_dumps, json_loads, json_default_serializer
-from ali2026v3_trading import config_params
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer
+from ali2026v3_trading.config import config_params
 import threading
 import numpy as np
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-# P1-R11-12修复: 中国标准时间UTC+8，用于datetime.fromtimestamp的tz参数
-_CHINA_TZ = timezone(timedelta(hours=8))  # R26-P0-CD-08: 中国时区（统一变量名，消除_CHINA_TZ不一致）
 
-# R27-P1修复: 导入容错/浮点/断路器工具
-from ali2026v3_trading.resilience_utils import (
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
+
+# R27-P1修复: 导入容错/浮点/断路器工�?
+from ali2026v3_trading.infra.resilience import (
     ExponentialBackoff, BoundedRetry, DbQueryTimeout, Watchdog, HeartbeatMonitor,
     CircuitBreakerHalfOpen, SlowQueryDetector, DataStalenessDetector,
     MemoryPressureGuard, RateLimitedLogger, GracefulDegradation,
@@ -51,13 +53,33 @@ from ali2026v3_trading.resilience_utils import (
     stable_ewma, PRICE_TOLERANCE, FLOAT_COMPARE_TOLERANCE,
 )
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
+
+
+class ComplianceResult(TypedDict, total=False):
+    compliant: bool
+    reason: str
+    details: Dict[str, Any]
+
+
+class SufficiencyResult(TypedDict, total=False):
+    sufficient: bool
+    reason: str
+    margin_used: float
+    details: Dict[str, Any]
+
+
+class ExchangeStatusResult(TypedDict, total=False):
+    status: str
+    reason: str
+    exchange: str
+    details: Dict[str, Any]
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum, auto
 
 try:
-    from ali2026v3_trading.causal_chain_utils import (
+    from ali2026v3_trading.strategy_judgment.causal_chain_utils import (
         CyclicDependencyGuard, ContaminationGuard, ParamIsolationGuard,
     )
     _HAS_CAUSAL_CHAIN = True
@@ -66,50 +88,17 @@ except ImportError:
 
 
 # ============================================================================
-# UPG-P1-04修复: API版本标记装饰器
+# UPG-P1-04修复: API版本标记装饰�?�?P1-21: 统一从infra.shared_utils导入，删除本地重复定�?
 # ============================================================================
 
-def api_version(version: str):
-    """UPG-P1-04修复: API版本标记装饰器
-
-    为服务公共API方法标记版本号，便于：
-    1. 运行时查询API版本
-    2. 版本兼容性检查
-    3. 废弃API迁移追踪
-
-    用法:
-        @api_version("1.0")
-        def check_before_trade(self, signal):
-            return self._check_service.check_before_trade(signal)
-
-    Args:
-        version: API版本号，如 "1.0", "2.0"
-    """
-    def decorator(func):
-        func._api_version = version
-        func._api_versioned = True
-        return func
-    return decorator
+from ali2026v3_trading.infra.shared_utils import api_version  # P1-21: 统一导入
 
 
-# ============================================================================
-# P1-R11-12修复: 时区感知时间获取 — 统一使用UTC避免系统时区不一致导致风控时间判断错误
-# ============================================================================
-
-def _get_tz_aware_now() -> datetime:
-    """P1-R11-12修复: 返回UTC时区感知的当前datetime
-
-    替代裸 datetime.now()，确保所有风控日志、审计、快照时间戳
-    均为UTC时区感知，避免跨时区部署或夏令时切换时的时间判断错误。
-
-    Returns:
-        datetime: UTC时区的当前datetime (tzinfo=timezone.utc)
-    """
-    return datetime.now(_CHINA_TZ)
+from ._utils import _get_tz_aware_now
 
 
 def _audit_annotation(category='', phase1_status='', note=''):
-    """审计标注装饰器 — 不改变类行为，仅用于H.1.3格式清单审计追踪"""
+    """审计标注装饰�?�?不改变类行为，仅用于H.1.3格式清单审计追踪"""
     def decorator(cls):
         cls._audit_category = category
         cls._audit_phase1_status = phase1_status
@@ -119,10 +108,10 @@ def _audit_annotation(category='', phase1_status='', note=''):
 
 
 # ============================================================================
-# 枚举与数据结构
+# 枚举与数据结�?
 # ============================================================================
 
-@_audit_annotation(category='lightweight_enum', phase1_status='stable', note='枚举类，0方法，7行，无隐式依赖')
+@_audit_annotation(category='lightweight_enum', phase1_status='stable', note='枚举类，0方法�?行，无隐式依�?)
 class RiskLevel(Enum):
     """风险等级"""
     LOW = auto()
@@ -132,12 +121,12 @@ class RiskLevel(Enum):
     CRITICAL = auto()
 
 
-@_audit_annotation(category='lightweight_enum', phase1_status='stable', note='枚举类，0方法，6行，无隐式依赖')
+@_audit_annotation(category='lightweight_enum', phase1_status='stable', note='枚举类，0方法�?行，无隐式依�?)
 class RiskCheckResult(Enum):
-    """风控检查结果"""
+    """风控检查结�?""
     PASS = auto()       # 通过
     BLOCK = auto()      # 阻断
-    WARNING = auto()    # 警告（可继续）
+    WARNING = auto()    # 警告（可继续�?
     DEGRADED = auto()   # 降级
 
 
@@ -152,27 +141,27 @@ _LEGAL_RISK_LEVEL_TRANSITIONS = {
 
 
 def validate_risk_level_transition(current: RiskLevel, target: RiskLevel) -> RiskLevel:
-    """[R23-P1-02-FIX] 校验风控级别转移合法性，禁止正常→熔断直接跳跃"""
+    """[R23-P1-02-FIX] 校验风控级别转移合法性，禁止正常→熔断直接跳�?""
     allowed = _LEGAL_RISK_LEVEL_TRANSITIONS.get(current, set())
     if target in allowed:
         return target
     if target == RiskLevel.CRITICAL and current in (RiskLevel.LOW, RiskLevel.MEDIUM):
-        logging.warning("[R23-P1-02-FIX] 风控级别非法跳跃: %s→%s, 强制经过RESTRICTED中间状态", current.name, target.name)
+        logging.warning("[R23-P1-02-FIX] 风控级别非法跳跃: %s�?s, 强制经过RESTRICTED中间状�?, current.name, target.name)
         return RiskLevel.RESTRICTED
     return target
 
 
-@_audit_annotation(category='lightweight_dataclass', phase1_status='stable', note='响应dataclass，5方法，36行，无隐式依赖')
+@_audit_annotation(category='lightweight_dataclass', phase1_status='stable', note='响应dataclass�?方法�?6行，无隐式依�?)
 @dataclass(slots=True)
 class RiskCheckResponse:
-    """风控检查响应"""
+    """风控检查响�?""
     result: RiskCheckResult = RiskCheckResult.PASS
     level: RiskLevel = RiskLevel.LOW
     message: str = ""
     reason: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # ENV-06修复: 使用UTC时区
-    threshold: Optional[float] = None  # R24-P1-TR-06修复: 风控拒绝阈值
-    actual: Optional[float] = None     # R24-P1-TR-06修复: 风控拒绝实际值
+    threshold: Optional[float] = None  # R24-P1-TR-06修复: 风控拒绝阈�?
+    actual: Optional[float] = None     # R24-P1-TR-06修复: 风控拒绝实际�?
 
     @property
     def is_pass(self) -> bool:
@@ -217,11 +206,11 @@ except ImportError:
 from ali2026v3_trading.infra.shared_utils import safe_int, safe_float
 
 
-@_audit_annotation(category='lightweight_dataclass', phase1_status='stable', note='指标dataclass，0方法，12行，无隐式依赖')
+@_audit_annotation(category='lightweight_dataclass', phase1_status='stable', note='指标dataclass�?方法�?2行，无隐式依�?)
 @dataclass(slots=True)
 class RiskMetrics:
-    """风险指标 — 含11维度评分"""
-    total_exposure: float = 0.0       # 总敞口
+    """风险指标 �?�?1维度评分"""
+    total_exposure: float = 0.0       # 总敞�?
     max_single_position: float = 0.0  # 最大单持仓
     position_count: int = 0           # 持仓数量
     risk_ratio: float = 0.0           # 风险比率
@@ -234,7 +223,7 @@ class RiskMetrics:
 
 
 
-# CC-03/AP-02修复: 子服务导入（延迟导入避免循环依赖）
+# CC-03/AP-02修复: 子服务导入（延迟导入避免循环依赖�?
 from ali2026v3_trading.risk.risk_check_service import RiskCheckService
 from ali2026v3_trading.risk.risk_compute_service import RiskComputeService
 from ali2026v3_trading.risk.risk_circuit_breaker import SafetyMetaLayer, get_safety_meta_layer, cleanup_safety_layer
@@ -245,24 +234,24 @@ from ali2026v3_trading.risk.risk_config_provider import RiskConfigProvider
 
 class RiskService:
     """
-    风控服务 - 统一的风险控制接口
+    风控服务 - 统一的风险控制接�?
 
-    职责：
-    1. 持仓限额检查
+    职责�?
+    1. 持仓限额检�?
     2. 信号限频控制
-    3. 策略状态检查
+    3. 策略状态检�?
     4. 风险指标计算
 
-    使用方式：
+    使用方式�?
         service = RiskService(params, position_manager)
         result = service.check_before_trade(signal)
     """
 
-    # [R23-P2-ID-01-FIX] 日志去重装饰器
-    # AUDIT: lightweight_helper, phase2_target=ali2026v3_trading.risk_engine.log_deduplicator, 2方法, 19行
-    # DEPRECATED: 独立模块 risk_engine.log_deduplicator 已替代  # noqa: F811  # pylint: disable=useless-suppression
+    # [R23-P2-ID-01-FIX] 日志去重装饰�?
+    # AUDIT: lightweight_helper, phase2_target=ali2026v3_trading.risk_engine.log_deduplicator, 2方法, 19�?
+    # DEPRECATED: 独立模块 risk_engine.log_deduplicator 已替�? # noqa: F811  # pylint: disable=useless-suppression
     class LogDeduplicator:  # noqa: F811  # pylint: disable=redefined-outer-name
-        """同一消息5秒内不重复输出"""
+        """同一消息5秒内不重复输�?""
         _DEDUP_WINDOW_SEC = 5.0
 
         def __init__(self):
@@ -302,20 +291,53 @@ class RiskService:
         self._greeks_calc_lock = threading.Lock()
         self._risk_engine = None
         self._signal_service = None
+        # 升A路径T1.2: RiskDashboardService集成 �?注册心跳消除死代�?
+        self._dashboard_service = get_risk_dashboard_service()
+
+    def get_dashboard_service(self) -> 'RiskDashboardService':
+        """获取RiskDashboardService实例 �?升A路径T1.2: 消除死代�?""
+        return self._dashboard_service
 
     @classmethod
     def register_alert_callback(cls, cb) -> None:
         with cls._alert_callbacks_lock:
             if cb not in cls._alert_callbacks:
                 cls._alert_callbacks.append(cb)
+        # P1-05修复: 同时注册到EventBus（双通道过渡期）
+        try:
+            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            bus = get_global_event_bus()
+            if bus is not None:
+                def _eventbus_adapter(event):
+                    try:
+                        cb(event.alert_type, event.detail)
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                        logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                        pass
+                        pass
+                bus.subscribe_weak('RiskAlertEvent', _eventbus_adapter)
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
+            pass
     def _fire_alert(self, event_type, detail):
+        # P1-05修复: 优先通过EventBus发布RiskAlertEvent，保留直接回调作为兼容过�?
+        try:
+            from ali2026v3_trading.infra.event_bus import get_global_event_bus, RiskAlertEvent
+            bus = get_global_event_bus()
+            if bus is not None:
+                bus.publish(RiskAlertEvent(alert_type=event_type, detail=detail))
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
+            pass
         with self._alert_callbacks_lock:
             callbacks = list(self._alert_callbacks)
         for cb in callbacks:
             try:
                 cb(event_type, detail)
-            except Exception as e:
-                logging.warning('[RiskService] R13-P0-LOG-05修复: 告警回调异常: %s', e)
+            except (TypeError, AttributeError) as e:
+                logging.error('[RiskService] R13-P0-LOG-05修复: 告警回调异常: %s', e)
     class _AbnormalTradeDetector:  # noqa: F811  # pylint: disable=redefined-outer-name
         def __init__(self):
             self._trade_history: deque = deque(maxlen=1000)
@@ -341,10 +363,10 @@ class RiskService:
         return self._config_provider._on_aggregate_position(event)
     def record_partial_fill_progress(self, order_id, instrument_id, filled_volume, total_volume, strategy_id) -> None:
         return self._config_provider.record_partial_fill_progress(order_id, instrument_id, filled_volume, total_volume, strategy_id)
-    def _start_dashboard_timer(self) -> None:  # [R27-AUDIT] P1修复: 添加hasattr保护防止委托链断裂
+    def _start_dashboard_timer(self) -> None:  # [R27-AUDIT] P1修复: 添加hasattr保护防止委托链断�?
         if hasattr(self._config_provider, '_start_dashboard_timer'):
             return self._config_provider._start_dashboard_timer()
-        logging.debug("[R27-AUDIT] _config_provider无_start_dashboard_timer方法，跳过")
+        logging.debug("[R27-AUDIT] _config_provider无_start_dashboard_timer方法，跳�?)
     def _dashboard_timer_callback(self) -> None:
         if hasattr(self._config_provider, '_dashboard_timer_callback'):
             return self._config_provider._dashboard_timer_callback()
@@ -358,9 +380,9 @@ class RiskService:
     def detect_abnormal_trading(self, instrument_id, direction, price, volume, market_price, avg_volume) -> Dict[str, Any]:
         return self._check_service.detect_abnormal_trading(instrument_id, direction, price, volume, market_price, avg_volume)
     def check_before_trade(self, signal: Dict[str, Any]) -> RiskCheckResponse:
-        # R33-P1-7修复: 集成crack_validation到生产策略链路
+        # R33-P1-7修复: 集成crack_validation到生产策略链�?
         try:
-            from ali2026v3_trading.crack_validation import (
+            from ali2026v3_trading.risk.crack_validation import (
                 check_safety_meta_layer,
                 validate_circuit_breaker_vs_time_stop,
             )
@@ -370,11 +392,11 @@ class RiskService:
             if not _safety_ok:
                 return RiskCheckResponse.block_result(reason='crack_validation_safety_meta_failed')
             if not _time_stop_ok:
-                logging.warning("[R33-P1-7] 断路器与时间止损冲突检测: cb_paused=%s, time_stop=%s", _cb_paused, _hard_time_stop)
+                logging.warning("[R33-P1-7] 断路器与时间止损冲突检�? cb_paused=%s, time_stop=%s", _cb_paused, _hard_time_stop)
         except ImportError:
             pass
-        except Exception as _cv_err:
-            logging.debug("[R33-P1-7] crack_validation pre-check error: %s", _cv_err)
+        except (ImportError, AttributeError, TypeError) as _cv_err:
+            logging.error("[R33-P1-7] crack_validation pre-check error: %s", _cv_err)
         return self._check_service.check_before_trade(signal)
     def _validate_signal(self, signal: Dict[str, Any], _check_dedup_key: str, _cyclic_guard) -> Optional[RiskCheckResponse]:
         return self._check_service._validate_signal(signal, _check_dedup_key, _cyclic_guard)
@@ -389,7 +411,36 @@ class RiskService:
     def _detect_abnormal_trading_step(self, signal: Dict[str, Any]) -> Optional[RiskCheckResponse]:
         return self._check_service._detect_abnormal_trading_step(signal)
     def _record_and_publish(self, signal: Dict[str, Any], _check_dedup_key: str, _cyclic_guard) -> RiskCheckResponse:
-        return self._check_service._record_and_publish(signal, _check_dedup_key, _cyclic_guard)
+        # P1-42修复: 拆分为记�?EventBus发布，消除与直接EventBus.publish的双通道
+        result = self._validate_and_check(signal, _check_dedup_key, _cyclic_guard)
+        self._record_result(result)
+        self._publish_risk_event_via_eventbus(signal, result)
+        return result
+
+    def _validate_and_check(self, signal: Dict[str, Any], _check_dedup_key: str, _cyclic_guard) -> 'RiskCheckResponse':
+        """P1-42修复: 执行风控校验逻辑，返回结果（不记录不发布�?""
+        try:
+            result = self._check_service.check_before_trade(signal)
+            return result
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            from ali2026v3_trading.risk.risk_service import RiskCheckResponse, RiskLevel
+            return RiskCheckResponse.block_result("check_error", str(e), RiskLevel.CRITICAL)
+
+    def _publish_risk_event_via_eventbus(self, signal: Dict[str, Any], result: 'RiskCheckResponse') -> None:
+        """P1-42修复: 通过EventBus统一发布风控事件，消除独立发布路�?""
+        try:
+            from ali2026v3_trading.infra.event_bus import get_global_event_bus, RiskEvent
+            bus = get_global_event_bus()
+            if bus is not None:
+                level = 'CRITICAL' if hasattr(result, 'level') and str(result.level) == 'CRITICAL' else 'INFO'
+                bus.publish(RiskEvent(
+                    risk_type='risk_check',
+                    level=level,
+                    message=f"RiskCheckResult: {getattr(result, 'result', 'unknown')}"
+                ))
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.debug("[P1-42] EventBus发布风控事件失败(非致�?: %s", e)
+
     def _check_safety_meta_layer(self, signal: Dict[str, Any]) -> RiskCheckResponse:
         return self._check_service._check_safety_meta_layer(signal)
 
@@ -423,20 +474,34 @@ class RiskService:
         return self._check_service._check_e7_residual_block(signal)
     def _check_capital_sufficiency_in_trade(self, signal: Dict[str, Any]) -> RiskCheckResponse:
         return self._check_service._check_capital_sufficiency_in_trade(signal)
-    def check_regulatory_compliance(self, position_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        _safety = get_safety_meta_layer()
-        return _safety.check_regulatory_compliance(position_data)
+    def check_regulatory_compliance(self, position_data: Optional[Dict[str, Any]] = None) -> ComplianceResult:
+        """合规检�?�?R2-3: 统一走_check_service委托路径"""
+        try:
+            return self._check_service.check_regulatory_compliance(position_data)
+        except (AttributeError, TypeError) as _err:
+            logging.error("[RiskService] check_regulatory_compliance委托链异�? %s", _err)
+            return {'compliant': False, 'reason': f'风控委托链异�? {_err}'}
+
     def check_capital_sufficiency(self, equity: float, required_margin: float = 0.0,
                                   open_positions: int = 0, max_positions: int = 50,
-                                  existing_margin_used: float = 0.0) -> Dict[str, Any]:
-        _safety = get_safety_meta_layer()
-        return _safety.check_capital_sufficiency(equity, required_margin, open_positions, max_positions, existing_margin_used)
-    def check_exchange_status(self, exchange: str = "AUTO") -> Dict[str, Any]:
-        _safety = get_safety_meta_layer()
-        _result = _safety.check_exchange_status(exchange)
-        if 'status' not in _result:
-            _result['status'] = 'OPEN' if _result.get('tradeable', False) else 'CLOSED'
-        return _result
+                                  existing_margin_used: float = 0.0) -> SufficiencyResult:
+        """资金充足性检�?�?R2-3: 统一走_check_service委托路径"""
+        try:
+            return self._check_service.check_capital_sufficiency(equity, required_margin, open_positions, max_positions, existing_margin_used)
+        except (AttributeError, TypeError) as _err:
+            logging.error("[RiskService] check_capital_sufficiency委托链异�? %s", _err)
+            return {'sufficient': False, 'reason': f'风控委托链异�? {_err}'}
+
+    def check_exchange_status(self, exchange: str = "AUTO") -> ExchangeStatusResult:
+        """交易所状态检�?�?R2-3: 统一走_check_service委托路径"""
+        try:
+            _result = self._check_service.check_exchange_status(exchange)
+            if 'status' not in _result:
+                _result['status'] = 'OPEN' if _result.get('tradeable', False) else 'CLOSED'
+            return _result
+        except (AttributeError, TypeError) as _err:
+            logging.error("[RiskService] check_exchange_status委托链异�? %s", _err)
+            return {'status': 'CLOSED', 'reason': f'风控委托链异�? {_err}'}
     def _check_spread_degradation(self, signal: Dict[str, Any]) -> RiskCheckResponse:
         return self._check_service._check_spread_degradation(signal)
     def _check_governance_violations(self, signal: Dict[str, Any]) -> RiskCheckResponse:
@@ -529,7 +594,7 @@ class RiskService:
                                  scores: Dict[str, float]) -> float:
         return self._compute_service._compute_position_scale(composite_score, scores)
 
-    # ── 各维度评分计算方法 ──
+    # ── 各维度评分计算方�?──
     def _compute_life_score(self, hmm_state: Optional[str] = None) -> float:
         return self._compute_service._compute_life_score(hmm_state)
     def _compute_cycle_resonance_score(self, cr_output: Optional[Any] = None) -> float:
@@ -600,13 +665,17 @@ class RiskService:
 # 辅助函数
 # ============================================================================
 
+_risk_service_lock = threading.Lock()
+_risk_service_instances: Dict[str, RiskService] = {}
+
+
 def get_risk_service(params: Any = None, position_manager: Any = None,
                      strategy: Any = None,
                      scope_id: Optional[str] = None) -> RiskService:
     """R13-API-02修复: RiskService单例工厂支持参数更新
 
-    首次以params=None初始化后，后续传入真实params会被更新到实例中，
-    避免风控检查因参数缺失而失效。
+    首次以params=None初始化后，后续传入真实params会被更新到实例中�?
+    避免风控检查因参数缺失而失效�?
     """
     scope = _normalize_risk_scope_id(scope_id, strategy)
     with _risk_service_lock:
@@ -618,20 +687,20 @@ def get_risk_service(params: Any = None, position_manager: Any = None,
                 strategy=strategy,
             )
             logging.info(
-                '[RiskService] 首次初始化完成 scope=%s params_type=%s position_manager=%s',
+                '[RiskService] 首次初始化完�?scope=%s params_type=%s position_manager=%s',
                 scope,
                 type(effective_params).__name__,
                 'yes' if position_manager else 'no',
             )
         else:
             instance = _risk_service_instances[scope]
-            # R13-P0-API-02修复: 后续调用时，只要传入非None的params就更新（无论原params是否为None）
-            # 原逻辑仅在_instance.params is None时更新，导致首次params=None初始化后，
-            # 第二次传入真实params时若_instance.params已被设为{}则不会更新
+            # R13-P0-API-02修复: 后续调用时，只要传入非None的params就更新（无论原params是否为None�?
+            # 原逻辑仅在_instance.params is None时更新，导致首次params=None初始化后�?
+            # 第二次传入真实params时若_instance.params已被设为{}则不会更�?
             if params is not None:
                 if instance.params is None or instance.params != params:
                     instance.params = params
-                    logging.info('[RiskService] 参数已更新 scope=%s params_type=%s',
+                    logging.info('[RiskService] 参数已更�?scope=%s params_type=%s',
                                  scope,
                                  type(params).__name__)
             # R13-API-02修复: 更新position_manager和strategy
@@ -642,16 +711,15 @@ def get_risk_service(params: Any = None, position_manager: Any = None,
     # [R23-P1-06-FIX] 工厂函数返回None防护
     result = _risk_service_instances.get(scope)
     if result is None:
-        raise RuntimeError(f"[R23-P1-06-FIX] get_risk_service()返回None，scope={scope}单例初始化失败")
-    # AP-03: SingletonRegistry注册（非关键路径，失败不影响服务返回）
+        raise RuntimeError(f"[R23-P1-06-FIX] get_risk_service()返回None，scope={scope}单例初始化失�?)
+    # AP-03: SingletonRegistry注册（非关键路径，失败不影响服务返回�?
     try:
-        from ali2026v3_trading.singleton_registry import SingletonRegistry
-        registry = SingletonRegistry.get_registry("risk_service")
-        registry.register_singleton("risk_service." + scope, result)
+        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        SingletonRegistry.register_singleton("risk_service." + scope, result)
     except ImportError as e:
         logging.debug("[R26-FIX] SingletonRegistry模块不可用，跳过risk_service单例注册: %s", e)
-    except Exception as e:
-        logging.warning("[R26-FIX] SingletonRegistry.register_singleton失败: %s", e)
+    except (ImportError, AttributeError, TypeError) as e:
+        logging.error("[R26-FIX] SingletonRegistry.register_singleton失败: %s", e)
     return result
 
 
@@ -661,22 +729,22 @@ def reset_risk_service(scope_id: Optional[str] = None) -> None:
             _risk_service_instances.clear()
         else:
             _risk_service_instances.pop(str(scope_id), None)
-    # [R23-P1-07-FIX] reset后发布引用失效通知，提醒其他模块重新获取实例
+    # [R23-P1-07-FIX] reset后发布引用失效通知，提醒其他模块重新获取实�?
     try:
         from ali2026v3_trading.infra.event_bus import get_global_event_bus
         _bus = get_global_event_bus()
         if _bus is not None:
             _bus.publish('risk_service.reset', {'scope_id': scope_id, 'timestamp': time.time()})
-            logging.info("[R23-P1-07-FIX] risk_service reset通知已发布: scope_id=%s", scope_id)
-    except Exception as _e:
-        logging.debug("[R23-P1-07-FIX] reset通知发布失败: %s", _e)
+            logging.info("[R23-P1-07-FIX] risk_service reset通知已发�? scope_id=%s", scope_id)
+    except (ImportError, AttributeError) as _e:
+        logging.error("[R23-P1-07-FIX] reset通知发布失败: %s", _e)
 
 
-# P-04修复: RiskDashboardService独立全局单例 — Greeks聚合+PnL归因+压力测试
+# P-04修复: RiskDashboardService独立全局单例 �?Greeks聚合+PnL归因+压力测试
 class RiskDashboardService:
-    """风险仪表盘服务 — Greeks聚合、PnL归因、压力测试
+    """风险仪表盘服�?�?Greeks聚合、PnL归因、压力测�?
 
-    独立全局单例，供RiskService和外部仪表盘调用。
+    独立全局单例，供RiskService和外部仪表盘调用�?
     """
 
     _instance: Optional['RiskDashboardService'] = None
@@ -701,7 +769,6 @@ class RiskDashboardService:
             cls._instance = None
 
     def __init__(self):
-        # R15-P1-PERF-13修复: Greeks缓存添加maxsize参数(默认10000)，超过时LRU淘汰
         self._greeks_cache_maxsize: int = 10000
         self._greeks_cache_ttl_seconds: float = 300.0
         self._greeks_cache_timestamps: Dict[str, float] = {}
@@ -711,30 +778,27 @@ class RiskDashboardService:
         self._last_update: datetime = datetime.now(_CHINA_TZ)
 
     def aggregate_greeks(self, positions: Dict[str, Any]) -> Dict[str, float]:
-        """Greeks聚合：按持仓汇总delta/gamma/theta/vega"""
-        now = time.time()
-        expired_keys = [k for k, ts in self._greeks_cache_timestamps.items() if (now - ts) > self._greeks_cache_ttl_seconds]
-        for k in expired_keys:
-            self._greeks_cache.pop(k, None)
-            del self._greeks_cache_timestamps[k]
-        agg = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
-        for sym, pos in positions.items():
-            greeks = getattr(pos, 'greeks', None) or {}
-            for k in agg:
-                agg[k] += greeks.get(k, 0.0)
-        self._greeks_cache = agg
-        for k in agg:
-            self._greeks_cache_timestamps[k] = now
-        if len(self._greeks_cache) > self._greeks_cache_maxsize:
-            keys_to_evict = list(self._greeks_cache.keys())[:len(self._greeks_cache) - self._greeks_cache_maxsize]
-            for k in keys_to_evict:
-                del self._greeks_cache[k]
-                self._greeks_cache_timestamps.pop(k, None)
-        self._last_update = datetime.now(_CHINA_TZ)
-        return agg
+        """P1-61修复: Greeks聚合委托到position_greeks.aggregate_greeks_exposure（唯一权威实现�?""
+        try:
+            from ali2026v3_trading.position.position_greeks import aggregate_greeks_exposure
+            exposure = aggregate_greeks_exposure(positions)
+            return {
+                'delta': exposure.total_delta,
+                'gamma': exposure.total_gamma,
+                'theta': getattr(exposure, 'total_theta', 0.0),
+                'vega': exposure.total_vega,
+            }
+        except (ImportError, AttributeError, TypeError):
+            # 回退到原始逻辑
+            agg = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            for sym, pos in positions.items():
+                greeks = getattr(pos, 'greeks', None) or {}
+                for k in agg:
+                    agg[k] += greeks.get(k, 0.0)
+            return agg
 
     def attribute_pnl(self, closed_trades: List[Any]) -> Dict[str, float]:
-        """PnL归因：按策略/状态/持仓时长分组归因"""
+        """PnL归因：按策略/状�?持仓时长分组归因"""
         attr: Dict[str, float] = {}
         for t in closed_trades:
             reason = getattr(t, 'close_reason', 'unknown')
@@ -745,7 +809,7 @@ class RiskDashboardService:
 
     def run_stress_test(self, positions: Dict[str, Any],
                         shock_pct: float = 0.10) -> Dict[str, Any]:
-        """压力测试：价格冲击shock_pct下的最坏情景损失"""
+        """压力测试：价格冲击shock_pct下的最坏情景损�?""
         total_loss = 0.0
         for sym, pos in positions.items():
             exposure = getattr(pos, 'volume', 0) * getattr(pos, 'open_price', 0)
@@ -763,15 +827,13 @@ def get_risk_dashboard_service() -> RiskDashboardService:
     with RiskDashboardService._lock:
         if RiskDashboardService._instance is None:
             RiskDashboardService._instance = RiskDashboardService()
-            # AP-03: SingletonRegistry注册（非关键路径，失败不影响服务返回）
             try:
-                from ali2026v3_trading.singleton_registry import SingletonRegistry
-                registry = SingletonRegistry.get_registry("risk_dashboard_service")
-                registry.register_singleton("risk_dashboard_service.instance", RiskDashboardService._instance)
+                from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+                SingletonRegistry.register_singleton("risk_dashboard_service.instance", RiskDashboardService._instance)
             except ImportError as e:
                 logging.debug("[R26-FIX] SingletonRegistry模块不可用，跳过dashboard单例注册: %s", e)
-            except Exception as e:
-                logging.warning("[R26-FIX] SingletonRegistry.register_singleton(dashboard)失败: %s", e)
+            except (ImportError, AttributeError, TypeError) as e:
+                logging.error("[R26-FIX] SingletonRegistry.register_singleton(dashboard)失败: %s", e)
     return RiskDashboardService._instance
 
 
@@ -784,40 +846,24 @@ __all__ = [
     'RiskLevel',
     'RiskCheckResult',
     'RiskCheckResponse',
-    'PositionLimit',
-    'RiskMetrics',
-    'SafetyMetaLayer',
-    'get_safety_meta_layer',
-    'SimplifiedSPAN',
     'get_risk_service',
     'reset_risk_service',
-    'RiskDashboardService',
-    'get_risk_dashboard_service',
-    # OPS-05/06/07/14/15修复
-    'AlertLevel',
-    'AlertDeduplicator',
-    'alert',
-    'operations_audit_log',
-    # R24-P0审计可追溯性修复
-    'audit_chain_append',
-    'structured_audit_log',
-    'save_state_snapshot',
-    'generate_exchange_report',
+    'SafetyMetaLayer',
 ]
 
 
 # ============================================================================
-# OPS-05修复: 告警分级 — P0/P1/P2分类
-# OPS-06修复: P0告警自动升级 — 超时后自动升级通知
-# OPS-07修复: 告警去重/聚合 — 防止告警风暴
-# OPS-14修复: 紧急操作审批机制 — confirm_daily_resume需审批
-# OPS-15修复: 操作审计日志 — 记录谁在何时做了什么
+# OPS-05修复: 告警分级 �?P0/P1/P2分类
+# OPS-06修复: P0告警自动升级 �?超时后自动升级通知
+# OPS-07修复: 告警去重/聚合 �?防止告警风暴
+# OPS-14修复: 紧急操作审批机�?�?confirm_daily_resume需审批
+# OPS-15修复: 操作审计日志 �?记录谁在何时做了什�?
 # ============================================================================
 
 
 
 # Re-exports from risk_audit_utils (backward compatibility)
-from ali2026v3_trading.risk_audit_utils import (
+from ali2026v3_trading.infra.risk_audit_utils import (
     safe_get,
     safe_get_float,
     safe_get_int,
@@ -837,5 +883,5 @@ from ali2026v3_trading.risk_audit_utils import (
     calculate_var_rolling,
     check_circuit_breaker_auto_recovery,
 )
-# R27-CP-05-FIX: structured_audit_log从独立模块导入，消除config_params↔risk_service双向依赖
-from ali2026v3_trading.audit_log_utils import structured_audit_log  # R27-CP-05-FIX
+# R27-CP-05-FIX / R1-4修复: structured_audit_log从infra.risk_audit_utils导入，消除对已清空archive目录的依�?
+from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log  # R27-CP-05-FIX

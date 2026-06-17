@@ -1,8 +1,11 @@
+# [M1-52] �г����ģ��
+# MODULE_ID: M1-137
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
-order_market_impact.py - 市场冲击模型与成交概率
-R27: 从order_service.py提取的市场冲击/成交概率计算函数
+order_market_impact.py - 市场冲击模型与成交概�?
+R27: 从order_service.py提取的市场冲�?成交概率计算函数
 
-职责：
+职责�?
 - Almgren-Chriss市场冲击成本模型 (almgren_chriss_impact)
 - 成交概率建模 (estimate_fill_probability)
 """
@@ -25,13 +28,13 @@ def almgren_chriss_impact(
     """R18-04修复: Almgren-Chriss市场冲击成本模型
 
     计算最优执行轨迹下的临时冲击和永久冲击成本
-    参考: Almgren & Chriss (2001), "Optimal Execution of Portfolio Transactions"
+    参�? Almgren & Chriss (2001), "Optimal Execution of Portfolio Transactions"
 
     Args:
-        volume: 待执行订单量(手)
-        avg_daily_volume: 日均成交量(手)
+        volume: 待执行订单量(�?
+        avg_daily_volume: 日均成交�?�?
         daily_volatility: 日波动率
-        participation_rate: 参与率 volume/avg_daily_volume
+        participation_rate: 参与�?volume/avg_daily_volume
         permanent_impact_factor: 永久冲击系数(sigma)
         temporary_impact_factor: 临时冲击系数(alpha)
         risk_aversion: 风险厌恶系数(lambda)
@@ -66,7 +69,7 @@ def almgren_chriss_impact(
             'optimal_horizon_sec': round(optimal_horizon_sec, 2),
             'half_life_sec': round(half_life_sec, 2),
         }
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.error("[R18-04] Almgren-Chriss计算异常: %s", e)
         return {'total_impact_bps': 0.0, 'permanent_impact_bps': 0.0,
                 'temporary_impact_bps': 0.0, 'optimal_horizon_sec': 0.0,
@@ -90,9 +93,9 @@ def estimate_fill_probability(
         order_price: 挂单价格
         best_opposite_price: 对盘最优价(买入用ask, 卖出用bid)
         spread_bps: 价差基点
-        volume: 挂单量
-        avg_daily_volume: 日均成交量
-        time_horizon_sec: 时间窗口(秒)
+        volume: 挂单�?
+        avg_daily_volume: 日均成交�?
+        time_horizon_sec: 时间窗口(�?
         queue_position: 队列位置(0=队首)
 
     Returns:
@@ -117,6 +120,6 @@ def estimate_fill_probability(
         participation_penalty = 1.0 / (1.0 + participation_rate * 10.0)
         fill_prob = price_factor * queue_factor * time_factor * participation_penalty
         return max(0.0, min(1.0, fill_prob))
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.error("[R18-05] 成交概率计算异常: %s", e)
         return 0.5

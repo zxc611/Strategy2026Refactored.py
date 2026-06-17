@@ -1,3 +1,4 @@
+# MODULE_ID: M2-605
 """P3.5降级版：单线程Version Vector单调递增验证"""
 from __future__ import annotations
 
@@ -6,7 +7,7 @@ import pytest
 
 def _get_state_store_class():
     try:
-        from ali2026v3_trading.state_store import StateStore
+        from ali2026v3_trading.infra.state_store import StateStore
         return StateStore
     except ImportError:
         return None

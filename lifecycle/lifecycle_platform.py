@@ -1,3 +1,5 @@
+# MODULE_ID: M1-126
+# _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
 生命周期平台层 — 从strategy_lifecycle_mixin.py拆分
 职责: 平台API绑定、订阅管理、行情推送、API就绪检查、降级处理
@@ -36,7 +38,7 @@ class LifecyclePlatform:
             if callable(subscribe_fn):
                 try:
                     subscribe_fn(instrument_id)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.warning("[LifecyclePlatform] subscribe失败: %s err=%s", instrument_id, e)
 
     def unsubscribe_instrument(self, instrument_id: str) -> None:
@@ -46,7 +48,7 @@ class LifecyclePlatform:
             if callable(unsubscribe_fn):
                 try:
                     unsubscribe_fn(instrument_id)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.warning("[LifecyclePlatform] unsubscribe失败: %s err=%s", instrument_id, e)
 
     def unsubscribe_all(self) -> None:
@@ -55,7 +57,9 @@ class LifecyclePlatform:
             if callable(unsubscribe_fn):
                 try:
                     unsubscribe_fn(instrument_id)
-                except Exception:
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                    pass
                     pass
         self._subscribed_instruments.clear()
 

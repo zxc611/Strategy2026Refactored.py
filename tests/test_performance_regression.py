@@ -1,3 +1,4 @@
+# MODULE_ID: M2-462
 """P3.2: 性能回归CI测试"""
 from __future__ import annotations
 

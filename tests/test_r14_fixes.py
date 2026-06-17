@@ -1,3 +1,4 @@
+# MODULE_ID: M2-497
 import os
 import sys
 import unittest
@@ -6,7 +7,7 @@ import importlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.order_service import (
+from ali2026v3_trading.order.order_service import (
     _validate_order_status_transition,
     _VALID_ORDER_TRANSITIONS,
 )
@@ -65,17 +66,17 @@ class TestOrderStatusTransition(unittest.TestCase):
 
 class TestFatFingerProtection(unittest.TestCase):
     def setUp(self):
-        import ali2026v3_trading.order_service as mod
+        import ali2026v3_trading.order.order_service as mod
         mod._order_service_instance = None
-        from ali2026v3_trading.order_service import get_order_service
+        from ali2026v3_trading.order.order_service import get_order_service
         self.order_svc = get_order_service()
 
     def tearDown(self):
-        import ali2026v3_trading.order_service as mod
+        import ali2026v3_trading.order.order_service as mod
         mod._order_service_instance = None
 
     @patch.object(
-        importlib.import_module('ali2026v3_trading.order_service').OrderService,
+        importlib.import_module('ali2026v3_trading.order.order_service').OrderService,
         '_get_last_market_price',
         return_value=100.0,
     )
@@ -91,7 +92,7 @@ class TestFatFingerProtection(unittest.TestCase):
         self.assertEqual(result.error_code, 'fat_finger')
 
     @patch.object(
-        importlib.import_module('ali2026v3_trading.order_service').OrderService,
+        importlib.import_module('ali2026v3_trading.order.order_service').OrderService,
         '_get_last_market_price',
         return_value=100.0,
     )
@@ -109,13 +110,13 @@ class TestFatFingerProtection(unittest.TestCase):
 
 class TestMarginReleaseIntegration(unittest.TestCase):
     def test_release_margin_reservation_calls_risk_service(self):
-        import ali2026v3_trading.order_service as mod
+        import ali2026v3_trading.order.order_service as mod
         mod._order_service_instance = None
-        from ali2026v3_trading.order_service import get_order_service
+        from ali2026v3_trading.order.order_service import get_order_service
         order_svc = get_order_service()
 
         with patch(
-            'ali2026v3_trading.order_service.get_risk_service'
+            'ali2026v3_trading.order.order_risk_guard.get_risk_service'
         ) as mock_get_rs:
             mock_rs = MagicMock()
             mock_rs.release_margin.return_value = True

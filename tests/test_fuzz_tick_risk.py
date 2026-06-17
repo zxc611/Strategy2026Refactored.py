@@ -1,3 +1,4 @@
+# MODULE_ID: M2-344
 """P3.3: 输入模糊测试 - TickHandlerMixin和RiskEngine异常输入鲁棒性"""
 from __future__ import annotations
 
@@ -36,14 +37,14 @@ class TestTickFuzz:
     @pytest.mark.parametrize("fuzz_name,tick_data", list(_FUZZ_INPUTS.items()))
     def test_fuzz_tick_does_not_crash(self, fuzz_name, tick_data):
         try:
-            from ali2026v3_trading.data_access import get_data_access
+            from ali2026v3_trading.data.data_access import get_data_access
             da = get_data_access()
             if "symbol" in tick_data and isinstance(tick_data.get("last_price"), (int, float)):
                 result = da.get_market_data(tick_data.get("symbol", ""))
                 assert hasattr(result, "success")
         except (TypeError, ValueError, AttributeError) as e:
             pass
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             if "duckdb" not in str(e).lower() and "import" not in str(e).lower():
                 pytest.fail(f"Unexpected exception for {fuzz_name}: {e}")
 

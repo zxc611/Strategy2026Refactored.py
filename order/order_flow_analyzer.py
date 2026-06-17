@@ -1,3 +1,5 @@
+# [M1-44] ΢�ṹ������
+# MODULE_ID: M1-135
 import time
 import threading
 import logging
@@ -6,19 +8,21 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, field
 
 from ali2026v3_trading.infra.shared_utils import RingBuffer
+from ali2026v3_trading.infra.resilience import safe_divide  # R4-2: 统一安全除法
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
 __all__ = ['MicrostructureAnalyzer', 'MicrostructureConfig', 'VolumeWeightedOrderFlow',
            'ProductMicroData', 'FootprintBar']
 
-# R35-P1-6标注: 原analyze()方法已在重构中拆分删除，不再存在。
+# R35-P1-6标注: 原analyze()方法已在重构中拆分删除，不再存在�?
 # 旧接口analyze()已废弃，新接口为:
 #   - MicrostructureAnalyzer.get_composite_assessment() (综合评估)
-#   - VolumeWeightedOrderFlow.calc_volume_weighted_imbalance() (成交量加权失衡)
-#   - VolumeWeightedOrderFlow.calc_smart_money_flow() (聪明钱流向)
-# 调用链: OrderFlowBridge -> MicrostructureAnalyzer.get_composite_assessment()
+#   - VolumeWeightedOrderFlow.calc_volume_weighted_imbalance() (成交量加权失�?
+#   - VolumeWeightedOrderFlow.calc_smart_money_flow() (聪明钱流�?
+# 调用�? OrderFlowBridge -> MicrostructureAnalyzer.get_composite_assessment()
 #         OrderFlowBridge -> VolumeWeightedOrderFlow (通过_hft_volume_flow成员)
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
 
 @dataclass(slots=True)
@@ -47,34 +51,34 @@ class MicrostructureConfig:
     SMART_MONEY_WEIGHT = 3.0
     LARGE_ORDER_WEIGHT = 2.0
 
-# 延迟导入 data_service，避免循环依赖
+# 延迟导入 data_service，避免循环依�?
 def _get_data_service():
     """获取DataService单例（延迟加载）"""
     try:
         from ali2026v3_trading.data.data_service import get_data_service
         return get_data_service()
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logger.warning(f"DataService not available: {e}")
         return None
 
 
 @dataclass(slots=True)
 class FootprintBar:
-    """Footprint K线数据结构"""
+    """Footprint K线数据结�?""
     timestamp: float
     open: float
     high: float
     low: float
     close: float
     volume: float
-    buy_volume: float          # 主动买入量
-    sell_volume: float         # 主动卖出量
-    price_volume: Dict[int, float]   # 价格->成交量映射（用于分布）
+    buy_volume: float          # 主动买入�?
+    sell_volume: float         # 主动卖出�?
+    price_volume: Dict[int, float]   # 价格->成交量映射（用于分布�?
     tick_count: int
 
 
 class ProductMicroData:
-    """单个品种的微观数据维护"""
+    """单个品种的微观数据维�?""
     
     def __init__(self, product: str, config: MicrostructureConfig):
         self.product = product
@@ -83,12 +87,12 @@ class ProductMicroData:
         self.max_history_size = config.max_history_size
         self.price_precision = config.price_precision
 
-        # 线程锁
+        # 线程�?
         self._lock = threading.RLock()
 
         # 成交记录 (timestamp, price, volume, direction)
         self._trades = RingBuffer(maxlen=self.max_history_size)
-        # 订单簿快照
+        # 订单簿快�?
         self._bids: List[Tuple[float, int]] = []
         self._asks: List[Tuple[float, int]] = []
         self._depth_timestamp = 0.0
@@ -98,7 +102,7 @@ class ProductMicroData:
         self._price_history = RingBuffer(maxlen=self.max_history_size)   # (timestamp, price)
         self._cvd_history = RingBuffer(maxlen=self.max_history_size)     # (timestamp, cvd)
 
-        # Footprint数据: 时间窗口 -> 当前K线对象
+        # Footprint数据: 时间窗口 -> 当前K线对�?
         self._footprint_windows = {
             '1min': 60,
             '5min': 300,
@@ -130,7 +134,7 @@ class ProductMicroData:
             self._price_history.append((timestamp, price))
             self._cvd_history.append((timestamp, self.cvd))
 
-            # 更新Footprint K线
+            # 更新Footprint K�?
             self._update_footprint(timestamp, price, volume, direction)
 
             # 更新锚定VWAP（所有锚定点都需要累加）
@@ -145,7 +149,7 @@ class ProductMicroData:
             self._depth_timestamp = timestamp
 
     # ========================================================================
-    # Footprint K线
+    # Footprint K�?
     # ========================================================================
     def _update_footprint(self, ts: float, price: float, volume: float, direction: str):
         for win_name, win_sec in self._footprint_windows.items():
@@ -156,7 +160,7 @@ class ProductMicroData:
                 # 完成上一个K线，保存
                 if current is not None:
                     self._footprint_bars[win_name].append(current)
-                # 创建新K线
+                # 创建新K�?
                 current = FootprintBar(
                     timestamp=bar_start,
                     open=price,
@@ -171,7 +175,7 @@ class ProductMicroData:
                 )
                 self._current_footprint[win_name] = current
 
-            # 更新当前K线
+            # 更新当前K�?
             current.high = max(current.high, price)
             current.low = min(current.low, price)
             current.close = price
@@ -202,14 +206,14 @@ class ProductMicroData:
     @staticmethod
     def _linear_trend_slope(points: List[Tuple[float, float]]) -> float:
         """
-        计算一组点 (x, y) 的线性回归斜率
-        使用归一化时间戳 + 批量均值法，O(n)复杂度
+        计算一组点 (x, y) 的线性回归斜�?
+        使用归一化时间戳 + 批量均值法，O(n)复杂�?
         """
         n = len(points)
         if n < 2:
             return 0.0
         
-        # 归一化时间戳，避免大数运算
+        # 归一化时间戳，避免大数运�?
         x_base = points[0][0]
         x = [p[0] - x_base for p in points]
         y = [p[1] for p in points]
@@ -219,10 +223,8 @@ class ProductMicroData:
         
         numerator = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
         denominator = sum((x[i] - mean_x) ** 2 for i in range(n))
-        
-        if denominator == 0:
-            return 0.0
-        return numerator / denominator
+
+        return safe_divide(numerator, denominator, default=0.0)  # R4-2: 使用统一safe_divide
 
     # ========================================================================
     # CVD背离检测（使用线性回归趋势）
@@ -245,7 +247,7 @@ class ProductMicroData:
                 return None
 
             try:
-                # 使用线性回归计算趋势斜率
+                # 使用线性回归计算趋势斜�?
                 price_slope = self._linear_trend_slope(prices)
                 cvd_slope = self._linear_trend_slope(cvd_vals)
                 
@@ -264,27 +266,27 @@ class ProductMicroData:
                         'cvd_trend': cvd_slope,
                         'timestamp': now
                     }
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logger.warning(f"CVD divergence calculation error: {e}")
                 
             return None
 
     # ========================================================================
-    # 即时订单流不平衡（订单簿加权）
+    # 即时订单流不平衡（订单簿加权�?
     # ========================================================================
     def calc_instant_imbalance(self, depth_levels: int = None) -> float:
         if depth_levels is None:
             depth_levels = self.config.imbalance_depth_levels
             
         with self._lock:
-            # MS-P2修复: 深度快照过期检测——若深度数据超过60秒未更新，
-            # 说明订单簿数据已失效，返回指数衰减后的值
+            # MS-P2修复: 深度快照过期检测——若深度数据超过60秒未更新�?
+            # 说明订单簿数据已失效，返回指数衰减后的�?
             now = time.time()
             depth_age = now - self._depth_timestamp
             if depth_age > 60.0:
-                decay = math.exp(-depth_age / 60.0)  # 每60秒衰减到1/e≈37%
+                decay = math.exp(-depth_age / 60.0)  # �?0秒衰减到1/e�?7%
                 logger.warning(f"Depth snapshot stale ({depth_age:.0f}s old), returning decayed imbalance")
-                # 如果深度数据存在，计算实际值后衰减；否则返回0
+                # 如果深度数据存在，计算实际值后衰减；否则返�?
                 if not self._bids or not self._asks:
                     return 0.0
                 raw_imb = self._calc_raw_imbalance(bid_levels=min(len(self._bids), depth_levels or self.config.imbalance_depth_levels),
@@ -303,7 +305,7 @@ class ProductMicroData:
             return self._calc_raw_imbalance(bid_levels, ask_levels)
 
     def _calc_raw_imbalance(self, bid_levels: int, ask_levels: int) -> float:
-        """MS-P2: 提取为独立方法，供calc_instant_imbalance正常路径和过期衰减路径共用"""
+        """MS-P2: 提取为独立方法，供calc_instant_imbalance正常路径和过期衰减路径共�?""
         bid_weighted = 0.0
         ask_weighted = 0.0
         
@@ -321,7 +323,7 @@ class ProductMicroData:
         return (bid_weighted - ask_weighted) / total
 
     # ========================================================================
-    # 订单流失衡指数 (OFI - Order Flow Imbalance)
+    # 订单流失衡指�?(OFI - Order Flow Imbalance)
     # ========================================================================
     def calc_ofi(self, lookback_seconds: int = 60) -> float:
         with self._lock:
@@ -348,12 +350,12 @@ class ProductMicroData:
         return {tf: self.calc_ofi(lookback_seconds=tf) for tf in timeframes}
 
     # ========================================================================
-    # 锚定VWAP（带LRU淘汰）
+    # 锚定VWAP（带LRU淘汰�?
     # ========================================================================
     def get_anchor_vwap(self, anchor_time: float, initial_price: float = None,
                         initial_volume: float = None) -> float:
         with self._lock:
-            # 如果锚点不存在，创建新锚点
+            # 如果锚点不存在，创建新锚�?
             if anchor_time not in self._anchor_vwap:
                 # LRU淘汰：如果超过最大数量，删除最旧的锚点
                 if len(self._anchor_vwap) >= self._anchor_vwap_maxsize:
@@ -372,7 +374,7 @@ class ProductMicroData:
             return cum_pv / cum_vol
 
     # ========================================================================
-    # 最优执行评估（增加除零保护）
+    # 最优执行评估（增加除零保护�?
     def evaluate_execution(self, order_price: float, order_volume: float, side: str) -> Dict:
         with self._lock:
             if not self._bids or not self._asks:
@@ -382,13 +384,13 @@ class ProductMicroData:
                 best_bid = self._bids[0][0] if self._bids else 0.0
                 best_ask = self._asks[0][0] if self._asks else float('inf')
                 
-                MIN_PRICE_THRESHOLD = 1e-6  # NP-P2-26: 极小值保护
+                MIN_PRICE_THRESHOLD = 1e-6  # NP-P2-26: 极小值保�?
                 if best_bid == 0.0 or best_ask == float('inf') or best_bid < MIN_PRICE_THRESHOLD or best_ask < MIN_PRICE_THRESHOLD:
                     return {'error': 'invalid_depth'}
                     
                 mid_price = (best_bid + best_ask) / 2
 
-                # 计算最近60秒的VWAP（作为基准）
+                # 计算最�?0秒的VWAP（作为基准）
                 now = time.time()
                 cutoff = now - self.config.vwap_lookback_seconds
                 cum_pv = 0.0
@@ -401,7 +403,7 @@ class ProductMicroData:
                         cum_vol += v
                         trades_count += 1
                         
-                # 修复：添加除零保护
+                # 修复：添加除零保�?
                 vwap_60 = cum_pv / cum_vol if cum_vol > 0 else mid_price
 
                 # 理想价格：买方用ask，卖方用bid
@@ -416,7 +418,7 @@ class ProductMicroData:
                 else:
                     slippage = ideal_price - order_price
                     
-                # 修复：添加除零保护
+                # 修复：添加除零保�?
                 slippage_bps = (slippage / ideal_price) * 10000 if ideal_price > 0 else 0
 
                 # 与VWAP比较（增加除零保护）
@@ -425,7 +427,7 @@ class ProductMicroData:
                 else:
                     vwap_slippage = vwap_60 - order_price
                     
-                # 修复：添加除零保护
+                # 修复：添加除零保�?
                 vwap_bps = (vwap_slippage / vwap_60) * 10000 if vwap_60 > 0 else 0
 
                 # 效率评级
@@ -449,7 +451,7 @@ class ProductMicroData:
                     'timestamp': now,
                     'recent_trades': trades_count
                 }
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logger.error(f"Execution evaluation error: {e}")
                 return {'error': f'calculation_error: {str(e)}'}
 
@@ -461,7 +463,7 @@ class ProductMicroData:
                                  price_func: Optional[Callable] = None) -> Dict:
         """
         综合评估订单流信号，输出交易建议
-        price_func: 可选，用于获取当前价格的函数（如果未提供则内部获取）
+        price_func: 可选，用于获取当前价格的函数（如果未提供则内部获取�?
         """
         with self._lock:
             score = 0.0
@@ -469,7 +471,7 @@ class ProductMicroData:
             details = {}
 
             try:
-                # 1. CVD 背离（±2分）
+                # 1. CVD 背离（�?分）
                 cvd_div = self.check_cvd_divergence(lookback_seconds)
                 if cvd_div:
                     details['cvd_divergence'] = cvd_div
@@ -480,14 +482,14 @@ class ProductMicroData:
                         score -= 2.0
                         reasons.append("CVD bearish divergence")
 
-                # 2. 即时订单流不平衡（-1~1，映射到 -1.5 ~ 1.5）
+                # 2. 即时订单流不平衡�?1~1，映射到 -1.5 ~ 1.5�?
                 imb = self.calc_instant_imbalance(depth_levels=5)
                 details['instant_imbalance'] = imb
                 imb_score = imb * MicrostructureConfig.IMBALANCE_SCORE_MULTIPLIER
                 score += imb_score
                 reasons.append(f"order_book imbalance={imb:.2f}")
 
-                # 3. 锚定VWAP偏离（锚定最近5分钟）
+                # 3. 锚定VWAP偏离（锚定最�?分钟�?
                 anchor_time = time.time() - 300
                 vwap = self.get_anchor_vwap(anchor_time)
                 
@@ -513,7 +515,7 @@ class ProductMicroData:
                     else:
                         reasons.append(f"price near VWAP ({deviation_pct:.2f}%)")
 
-                # 4. Footprint 支撑/阻力识别（最近5根K线内成交量密集区）
+                # 4. Footprint 支撑/阻力识别（最�?根K线内成交量密集区�?
                 footprint_bars = self.get_footprint_bars(footprint_period)
                 if footprint_bars and current_price > 0:
                     vol_profile = {}
@@ -537,14 +539,13 @@ class ProductMicroData:
                     if len(recent_data) >= 2:
                         start_cvd = recent_data[0][1]
                         end_cvd = recent_data[-1][1]
-                        # 使用 epsilon 避免除零
-                        denominator = abs(start_cvd) + 1e-6
-                        cvd_change = (end_cvd - start_cvd) / denominator
+                        # R5-5: 使用safe_divide替代手动epsilon除法保护
+                        cvd_change = safe_divide(end_cvd - start_cvd, abs(start_cvd), default=0.0, min_denominator=1e-6)
                         cvd_change = max(-1, min(1, cvd_change))
                         score += cvd_change * 1.0
                         reasons.append(f"CVD change rate={cvd_change:.2f}")
 
-                # 6. 订单流失衡指数 OFI（±1.5分，基于逐笔成交买方/卖方力量对比）
+                # 6. 订单流失衡指�?OFI（�?.5分，基于逐笔成交买方/卖方力量对比�?
                 ofi_10s = self.calc_ofi(lookback_seconds=10)
                 ofi_60s = self.calc_ofi(lookback_seconds=60)
                 details['ofi_10s'] = ofi_10s
@@ -583,7 +584,7 @@ class ProductMicroData:
                     'reason': '; '.join(reasons),
                     'timestamp': time.time()
                 }
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logger.error(f"Composite assessment error: {e}")
                 return {
                     'product': self.product,
@@ -613,7 +614,7 @@ class ProductMicroData:
 
 
 class MicrostructureAnalyzer:
-    """市场微观结构分析器 - 高阶订单流工具 (修复版)"""
+    """市场微观结构分析�?- 高阶订单流工�?(修复�?"""
 
     def __init__(self, config: MicrostructureConfig = None):
         self._config = config or MicrostructureConfig()
@@ -627,7 +628,7 @@ class MicrostructureAnalyzer:
     # ========================================================================
     # 辅助方法
     # ========================================================================
-    # ✅ 方法唯一：委托shared_utils.extract_product_code，不再独立实现
+    # �?方法唯一：委托shared_utils.extract_product_code，不再独立实�?
     @staticmethod
     def _extract_product(instrument_id: str) -> str:
         """提取品种代码"""
@@ -637,7 +638,7 @@ class MicrostructureAnalyzer:
     def _get_or_create(self, product: str) -> ProductMicroData:
         with self._lock:
             if product not in self._products:
-                # 统一价格精度为2位小数
+                # 统一价格精度�?位小�?
                 self._products[product] = ProductMicroData(
                     product, 
                     self._config
@@ -657,7 +658,7 @@ class MicrostructureAnalyzer:
         if volume <= 0:
             return
         
-        # ✅ 修复：强制要求显式传入product参数
+        # �?修复：强制要求显式传入product参数
         if product is None:
             logger.warning(f"on_trade requires explicit product parameter. instrument_id={instrument_id}")
             return
@@ -667,17 +668,17 @@ class MicrostructureAnalyzer:
         data = self._get_or_create(product)
         data.add_trade(price, volume, direction, timestamp)
 
-        # ✅ 修复：内存更新为唯一路径，持久化由定时批量完成（删除实时DuckDB写入）
+        # �?修复：内存更新为唯一路径，持久化由定时批量完成（删除实时DuckDB写入�?
         # 注意：OrderFlowAnalyzer仅负责内存分析，持久化由DataService定时批量完成
 
     def on_depth(self, instrument_id: str, bids: List[Tuple[float, int]],
                  asks: List[Tuple[float, int]], timestamp: Optional[float] = None, product: Optional[str] = None):
-        """订单簿快照 - 修复标准：统一为显式传入product参数
+        """订单簿快�?- 修复标准：统一为显式传入product参数
         
         Args:
             product: 必须显式传入品种代码，不再从instrument_id提取
         """
-        # ✅ 修复：强制要求显式传入product参数
+        # �?修复：强制要求显式传入product参数
         if product is None:
             logger.warning(f"on_depth requires explicit product parameter. instrument_id={instrument_id}")
             return
@@ -757,7 +758,7 @@ class MicrostructureAnalyzer:
 
     def _get_current_price(self, data: ProductMicroData) -> float:
         with data._lock:
-            # 修复：原来错误地使用了 self._asks，现在正确使用 data._asks
+            # 修复：原来错误地使用�?self._asks，现在正确使�?data._asks
             if data._bids and data._asks:  # 修复：应为data._bids和data._asks
                 return (data._bids[0][0] + data._asks[0][0]) / 2
             if len(data._trades) > 0:
@@ -794,9 +795,9 @@ class MicrostructureAnalyzer:
 if __name__ == "__main__":
     import random
     
-    print("=== 市场微观结构分析器 - 配置对象版 ===\n")
+    print("=== 市场微观结构分析�?- 配置对象�?===\n")
     
-    # 使用自定义配置
+    # 使用自定义配�?
     config = MicrostructureConfig(
         large_order_threshold=50,
         max_history_size=10000,
@@ -827,11 +828,11 @@ if __name__ == "__main__":
         volume = random.randint(1, 30)
         direction = 'buy' if random.random() > 0.45 else 'sell'
         ts = time.time() - 200 + i * 1.0
-        # 显式传递product参数来避免期权合约提取问题
+        # 显式传递product参数来避免期权合约提取问�?
         msa.on_trade('IF2605', price, volume, direction, ts, product='IF')
 
-    # 模拟订单簿
-    print("更新订单簿数据...")
+    # 模拟订单�?
+    print("更新订单簿数�?..")
     msa.on_depth('IF2605',
                  bids=[(4120, 150), (4119, 200), (4118, 100)],
                  asks=[(4121, 100), (4122, 80), (4123, 120)],
@@ -843,7 +844,7 @@ if __name__ == "__main__":
     print(f"产品: {assessment['product']}")
     print(f"评分: {assessment['score']}")
     print(f"信号: {assessment['signal']}")
-    print(f"置信度: {assessment['confidence']}")
+    print(f"置信�? {assessment['confidence']}")
     print(f"原因: {assessment['reason']}")
     print(f"详情: {assessment['details']}")
 
@@ -855,9 +856,9 @@ if __name__ == "__main__":
     if cvd_div:
         print(f"CVD背离: {cvd_div}")
     else:
-        print("CVD背离: 无明显背离")
+        print("CVD背离: 无明显背�?)
         
-    print(f"即时不平衡: {msa.get_instant_imbalance('IF'):.3f}")
+    print(f"即时不平�? {msa.get_instant_imbalance('IF'):.3f}")
     print(f"锚定VWAP(10秒前): {msa.anchor_vwap('IF', time.time() - 10):.2f}")
     
     exec_eval = msa.get_execution_efficiency('IF', 4121.5, 10, 'buy')
@@ -868,15 +869,15 @@ if __name__ == "__main__":
     snapshot = msa.export_snapshot()
     print(f"快照信息: {snapshot['IF']}")
     
-    print("\n=== 修复点验证 ===")
-    print("✓ 修复了期权合约产品代码提取错误，支持多种格式")
-    print("✓ on_trade 和 on_depth 支持显式传入 product 参数")
-    print("✓ 锚定VWAP字典已限制最大100个锚点，防止内存泄漏")
-    print("✓ CVD背离检测改用线性回归趋势，减少噪声影响")
-    print("✓ evaluate_execution增加除零保护")
-    print("✓ CVD变化率计算增加epsilon防除零")
-    print("✓ 修复了 _get_current_price 方法中的 data._asks 引用错误")
-    print("✓ 新增MicrostructureConfig配置对象，替代硬编码")
+    print("\n=== 修复点验�?===")
+    print("�?修复了期权合约产品代码提取错误，支持多种格式")
+    print("�?on_trade �?on_depth 支持显式传入 product 参数")
+    print("�?锚定VWAP字典已限制最�?00个锚点，防止内存泄漏")
+    print("�?CVD背离检测改用线性回归趋势，减少噪声影响")
+    print("�?evaluate_execution增加除零保护")
+    print("�?CVD变化率计算增加epsilon防除�?)
+    print("�?修复�?_get_current_price 方法中的 data._asks 引用错误")
+    print("�?新增MicrostructureConfig配置对象，替代硬编码")
 
 
 import math as _math
@@ -998,9 +999,9 @@ class VolumeWeightedOrderFlow:
 class LiquidityConsumptionTracker:
     """流动性消耗追踪：实时计算大单对订单簿的消耗速率
 
-    原理：追踪大单成交后订单簿深度的变化，
-    计算liquidity_consumption_rate（0-1），
-    以及trade_size_factor（单笔成交/平均成交的倍数）。
+    原理：追踪大单成交后订单簿深度的变化�?
+    计算liquidity_consumption_rate�?-1），
+    以及trade_size_factor（单笔成�?平均成交的倍数）�?
     """
 
     def __init__(self, large_order_threshold: int = 50,

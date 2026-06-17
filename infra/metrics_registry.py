@@ -1,3 +1,4 @@
+# [M1-72] 可观测性指标注册
 """
 Phase0增强: MetricsRegistry — 可观测性设计(Prometheus风格指标)
 SLI/SLO/SLA定义 + 结构化指标 + 告警规则

@@ -1,3 +1,0 @@
-"""data_service.py — 重导出模块(P2-S1目录重组后)"""
-from ali2026v3_trading.data.data_service import *
-from ali2026v3_trading.data.data_service import _HAS_REALTIME_CACHE, _INTRADAY_FULL_CAPTURE, _INTRADAY_MAX_TICKS_PER_SYMBOL, _INTRADAY_MAX_TOTAL_TICKS, _INTRADAY_MODE, _data_service_instance, _data_service_lock, _get_data_paths_config, _get_default_data_dir, _parse_flush_windows_str, _resolve_duckdb_file, _resolve_flush_windows, _resolve_parquet_path, Any, CHINA_TZ, DBConnectionMixin, DataWriterMixin, Dict, List, OptionSyncMixin, Optional, OrderedDict, QueryCacheMixin, RealTimeCache, SchemaManagerMixin, Tuple, date, datetime, deque, get_realtime_cache, logger, reset_data_service, timezone

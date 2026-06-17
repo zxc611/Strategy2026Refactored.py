@@ -1,3 +1,4 @@
+# MODULE_ID: M1-240
 """
 信号历史服务 — 从signal_service.py拆分
 职责: 信号历史记录、统计、查询、日报生成
@@ -120,7 +121,7 @@ class SignalHistoryService:
             }
             with open(json_file, 'w', encoding='utf-8') as f:
                 try:
-                    from ali2026v3_trading.serialization_utils import json_dumps
+                    from ali2026v3_trading.infra.serialization_utils import json_dumps
                     f.write(json_dumps(report_data, indent=2))
                 except ImportError:
                     def _fallback_default(obj):
@@ -137,10 +138,10 @@ class SignalHistoryService:
                         if isinstance(obj, _decimal.Decimal):
                             return {"__decimal__": str(obj)}
                         return str(obj)
-                    json.dump(report_data, f, indent=2, default=_fallback_default, ensure_ascii=False)
+                    f.write(json_dumps(report_data, indent=2, default=_fallback_default, ensure_ascii=False))  # R4-5: 统一json_dumps
             self._daily_report_generated[date] = True
             logging.info("[SignalService] 日信号报告已生成: %s", report_file)
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[SignalService] 生成日信号报告失败: %s", e)
         return report
 

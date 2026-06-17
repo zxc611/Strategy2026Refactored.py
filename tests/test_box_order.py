@@ -1,3 +1,4 @@
+# MODULE_ID: M2-307
 """
 test_box_order.py - 箱形策略下单测试脚本
 
@@ -34,36 +35,36 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.box_detector import (
+from ali2026v3_trading.strategy.box_detector import (
     BoxDetector,
     BoxProfile,
     ExtremeState,
     BoxStrategyParams,
     get_box_detector,
 )
-from ali2026v3_trading.strategy_ecosystem import (
+from ali2026v3_trading.strategy.strategy_ecosystem import (
     StrategyEcosystem,
     StrategySlot,
     CapitalRoute,
     EcosystemTradeRecord,
     get_strategy_ecosystem,
 )
-from ali2026v3_trading.signal_service import SignalService
-from ali2026v3_trading.order_service import OrderService, get_order_service
+from ali2026v3_trading.signal.signal_service import SignalService
+from ali2026v3_trading.order.order_service import OrderService, get_order_service
 
 
 def _reset_order_service_singleton():
-    import ali2026v3_trading.order_service as mod
-    mod._order_service_instance = None
+    from ali2026v3_trading.order.order_base import reset_order_service
+    reset_order_service()
 
 
 def _reset_ecosystem_singleton():
-    import ali2026v3_trading.strategy_ecosystem as mod
+    import ali2026v3_trading.strategy.strategy_ecosystem as mod
     mod._ecosystem = None
 
 
 def _reset_box_detector_singleton():
-    import ali2026v3_trading.box_detector as mod
+    import ali2026v3_trading.strategy.box_detector as mod
     mod._box_detector = None
 
 
@@ -71,10 +72,11 @@ def _reset_global_singletons():
     _reset_order_service_singleton()
     _reset_ecosystem_singleton()
     _reset_box_detector_singleton()
-    import ali2026v3_trading.position_service as ps_mod
-    ps_mod._cross_strategy_risk_guard = None
-    ps_mod._position_service_instance = None
-    from ali2026v3_trading.mode_engine import ModeEngine
+    from ali2026v3_trading.position.position_service import reset_position_service
+    reset_position_service()
+    import ali2026v3_trading.position.position_greeks as pg_mod
+    pg_mod._cross_strategy_risk_guard = None
+    from ali2026v3_trading.governance.mode_engine import ModeEngine
     ModeEngine.reset_instance()
 
 

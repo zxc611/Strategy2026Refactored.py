@@ -1,3 +1,4 @@
+# MODULE_ID: M2-553
 """P3.6: regulatory_risk re-export验证"""
 from __future__ import annotations
 

@@ -1,3 +1,4 @@
+# MODULE_ID: M2-554
 """
 test_resonance_order.py - 共振策略下单测试脚本
 
@@ -28,7 +29,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.param_pool.cycle_resonance_module import (
+from ali2026v3_trading.param_pool.optimization.cycle_sharpe import (
     CycleResonanceModule,
     CycleResonanceOutput,
     RiskSurfaceAdjustment,
@@ -36,22 +37,22 @@ from ali2026v3_trading.param_pool.cycle_resonance_module import (
     get_cycle_resonance_module,
     reset_cycle_resonance_module,
 )
-from ali2026v3_trading.signal_service import SignalService
-from ali2026v3_trading.order_service import OrderService, get_order_service
+from ali2026v3_trading.signal.signal_service import SignalService
+from ali2026v3_trading.order.order_service import OrderService, get_order_service
 
 
 def _reset_order_service_singleton():
-    import ali2026v3_trading.order_service as mod
+    import ali2026v3_trading.order.order_service as mod
     mod._order_service_instance = None
 
 
 def _reset_global_singletons():
     _reset_order_service_singleton()
     reset_cycle_resonance_module()
-    import ali2026v3_trading.position_service as ps_mod
+    import ali2026v3_trading.position.position_service as ps_mod
     ps_mod._cross_strategy_risk_guard = None
     ps_mod._position_service_instance = None
-    from ali2026v3_trading.mode_engine import ModeEngine
+    from ali2026v3_trading.governance.mode_engine import ModeEngine
     ModeEngine.reset_instance()
 
 
@@ -310,6 +311,7 @@ class TestResonanceOrderPlacement(unittest.TestCase):
         self.signal_svc._default_cooldown_seconds = 0.0
         self.signal_svc._adaptive_threshold = None
         self.order_svc = get_order_service()
+        self.order_svc._order_idempotent_set = set()
         self.placed_orders = []
         self.order_svc.bind_platform_apis(
             insert_order_func=self._mock_insert_order,
@@ -345,6 +347,7 @@ class TestResonanceOrderPlacement(unittest.TestCase):
             price=4000.0,
             volume=volume,
             reason='RESONANCE_RELEASE_BUY',
+            signal_strength=0.8,
         )
         self.assertIsNotNone(signal)
         order_id = self.order_svc.send_order(
@@ -375,6 +378,7 @@ class TestResonanceOrderPlacement(unittest.TestCase):
             price=3998.0,
             volume=volume,
             reason='RESONANCE_RELEASE_SELL',
+            signal_strength=0.8,
         )
         self.assertIsNotNone(signal)
         order_id = self.order_svc.send_order(

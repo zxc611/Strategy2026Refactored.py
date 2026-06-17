@@ -1,3 +1,4 @@
+# MODULE_ID: M1-069
 import logging
 import math
 import numpy as np
@@ -6,7 +7,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 # R27-P1修复: 导入共享状态注册表、浮点工具
-from ali2026v3_trading.resilience_utils import (
+from ali2026v3_trading.infra.resilience import (
     SharedStateRegistry, stable_sum, stable_mean, stable_variance,
     KahanSummation, safe_divide, compute_sharpe_stable,
     PRICE_TOLERANCE,
@@ -15,8 +16,9 @@ from ali2026v3_trading.config.config_params import (
     STRATEGY_MODE_CORRECT_TRENDING, STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE,
     STRATEGY_MODE_INCORRECT_REVERSAL, STRATEGY_MODE_OTHER,
 )
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
 
 class E12ReverseStrategyPseudoIndependenceDetector:
@@ -87,7 +89,7 @@ class E13ShadowStrategyCollusionDetector:
         for k in key_params:
             if k in main_params and k in shadow_params and main_params[k] != 0:
                 diffs.append(abs(shadow_params[k] - main_params[k]) / abs(main_params[k]))
-        avg_diff = sum(diffs) / len(diffs) if diffs else 0.0
+        avg_diff = stable_mean(diffs) if diffs else 0.0  # P2-32: 统一使用stable_mean
         param_diff_passed = avg_diff >= self._min_param_diff_pct
         
         sync_count = 0
@@ -103,7 +105,7 @@ class E13ShadowStrategyCollusionDetector:
         source_independent = True
         source_detail = {}
         try:
-            from ali2026v3_trading.param_pool.task_scheduler import PARAM_SOURCE_ANNOTATION
+            from ali2026v3_trading.param_pool.backtest.backtest_config import PARAM_SOURCE_ANNOTATION
             main_sources = set()
             shadow_sources = set()
             for k in key_params:
@@ -128,7 +130,7 @@ class E13ShadowStrategyCollusionDetector:
                 "shared_sources": sorted(shared_sources),
                 "shared_intuition": sorted(shared_intuition) if not source_independent else [],
             }
-        except Exception as _e12_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e12_e:
             logging.debug("[E13-P1-R8-12] PARAM_SOURCE_ANNOTATION不可用，跳过来源独立性检查: %s", _e12_e)
 
         source_independence_passed = source_independent
@@ -173,7 +175,7 @@ class MultiStateSwitchBacktestScenario:
                 result = {"scenario_step": i, "state": state, "strategy_loaded": True}
                 if bar_data is not None:
                     result["bar_count"] = len(bar_data) if hasattr(bar_data, '__len__') else 0
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 result = {"scenario_step": i, "state": state, "strategy_loaded": False, "error": str(e)}
             results.append(result)
         
@@ -272,8 +274,8 @@ class E8E9E10EliminationChecker:
         sorted_returns = sorted(returns)
         n = len(sorted_returns)
         tail_5pct = sorted_returns[:max(1, n // 20)]
-        tail_mean = sum(tail_5pct) / len(tail_5pct) if tail_5pct else 0.0
-        overall_mean = sum(returns) / len(returns)
+        tail_mean = stable_mean(tail_5pct) if tail_5pct else 0.0  # P2-32: 统一使用stable_mean
+        overall_mean = stable_mean(returns)  # P2-32: 统一使用stable_mean
         tail_ratio = abs(tail_mean / overall_mean) if abs(overall_mean) > 1e-10 else 0.0
         e8_triggered = tail_ratio > self._tail_risk_threshold
         if e8_triggered:
@@ -308,15 +310,15 @@ class E8E9E10EliminationChecker:
         rolling_vols = []
         for i in range(roll_window, n):
             window = leverage_history[i - roll_window:i]
-            mean_lev = sum(window) / len(window)
-            vol = (sum((x - mean_lev) ** 2 for x in window) / len(window)) ** 0.5
+            mean_lev = stable_mean(window)  # P2-32: 统一使用stable_mean
+            vol = stable_variance(window) ** 0.5  # P2-32: 统一使用stable_variance
             rolling_vols.append(vol)
         
         if len(rolling_vols) < 3:
             return {"e9_triggered": False, "leverage_trend": 0.0, "vol_spike_detected": False,
                     "reason": "滚动波动率样本不足"}
         
-        vol_mean = sum(rolling_vols) / len(rolling_vols)
+        vol_mean = stable_mean(rolling_vols)  # P2-32: 统一使用stable_mean
         if vol_mean < 1e-10:
             return {"e9_triggered": False, "leverage_trend": 0.0, "vol_spike_detected": False,
                     "reason": "波动率接近零，无法判断"}
@@ -363,11 +365,11 @@ class E8E9E10EliminationChecker:
             return {"e10_triggered": False, "state_variance_ratio": 0.0}
         state_means = {}
         for state, rets in state_returns.items():
-            state_means[state] = sum(rets) / len(rets) if rets else 0.0
-        overall_mean = sum(state_means.values()) / len(state_means)
-        between_var = sum((m - overall_mean) ** 2 for m in state_means.values()) / len(state_means)
+            state_means[state] = stable_mean(rets) if rets else 0.0  # P2-32: 统一使用stable_mean
+        overall_mean = stable_mean(list(state_means.values()))  # P2-32: 统一使用stable_mean
+        between_var = stable_variance(list(state_means.values()))  # P2-32: 统一使用stable_variance
         all_rets = [r for rets in state_returns.values() for r in rets]
-        within_var = sum((r - overall_mean) ** 2 for r in all_rets) / len(all_rets) if all_rets else 1.0
+        within_var = stable_variance(all_rets) if all_rets else 1.0  # P2-32: 统一使用stable_variance
         ratio = between_var / within_var if within_var > 0 else 0.0
         e10_triggered = ratio > self._state_dependency_threshold
         return {
@@ -412,7 +414,7 @@ class E7UnexplainedReturnChecker:
         residual = unexplained
         # R10-P0-23: 分母优先使用explained_pnl，避免total_pnl过大稀释残差占比
         denominator = explained_pnl if abs(explained_pnl) > 1e-10 else abs(unexplained)
-        residual_pct = abs(residual / denominator * 100) if abs(denominator) > 1e-10 else 0.0
+        residual_pct = abs(safe_divide(residual, denominator, default=0.0, min_denominator=1e-10)) * 100  # R5-5
         e7_triggered = residual_pct > self._residual_threshold_pct
         return {
             "e7_triggered": e7_triggered,
@@ -486,171 +488,19 @@ class E11QuantitativeSourceChecker:
         }
 
 
-# NEW-P1-06修复: 引入模块加载状态管理
-try:
-    from ali2026v3_trading.module_load_status import mark_module_loaded, mark_module_failed
-except ImportError:
-    def mark_module_loaded(module_key: str) -> None: pass
-    def mark_module_failed(module_key: str, error: Exception) -> None: pass
+# P1-22修复: mark_module_loaded/mark_module_failed直接导入(无fallback)
+from ali2026v3_trading.infra.module_load_status import mark_module_loaded, mark_module_failed
 
 # CORE-DEPENDENCY: evaluation模块是治理引擎的核心依赖
-try:
-    from ali2026v3_trading.evaluation.parameter_drift_detector import ParameterDriftDetector as _EvalParameterDriftDetector
-    from ali2026v3_trading.evaluation.violation_tracker import StrategyViolationTracker as _EvalStrategyViolationTracker
-    from ali2026v3_trading.evaluation.state_density_decay import StateEDensityDecayTracker as _EvalStateEDensityDecayTracker
-    StateEDensityDecayTracker = _EvalStateEDensityDecayTracker
-    _HAS_EVALUATION_CLASSES = True
-    mark_module_loaded('governance_engine_evaluation_classes')
-except ImportError as _e:
-    _HAS_EVALUATION_CLASSES = False
-    mark_module_failed('governance_engine_evaluation_classes', _e)
-
-    class StateEDensityDecayTracker:
-        def __init__(self, half_life_days: float = 30.0, min_density_threshold: float = 0.05):
-            self._half_life_days = half_life_days
-            self._min_density_threshold = min_density_threshold
-            self._density_history: List[Dict[str, Any]] = []
-
-        def track(self, strategy_id_or_count=0, diagnosis_report_or_total=None,
-                  day: int = 0, strategy_id: str = "", state_data: Any = None) -> Dict[str, Any]:
-            # P1-5修复: 双模式兼容 — 与evaluation/state_density_decay.py接口对齐
-            if isinstance(strategy_id_or_count, str):
-                # 2参数模式: track(strategy_id, diagnosis_report, day)
-                _sid = strategy_id_or_count
-                _sdata = diagnosis_report_or_total
-                state_e_count = 0
-                total_state_count = 0
-                if isinstance(_sdata, dict):
-                    state_e_count = _sdata.get('state_e_count', 0)
-                    total_state_count = _sdata.get('total_state_count', 0)
-            else:
-                # 3参数模式: track(state_e_count, total_state_count, day)
-                state_e_count = strategy_id_or_count
-                total_state_count = diagnosis_report_or_total if diagnosis_report_or_total is not None else 0
-            if total_state_count <= 0:
-                density = 0.0
-            else:
-                density = state_e_count / total_state_count
-            record = {"day": day, "state_e_count": state_e_count,
-                      "total_state_count": total_state_count, "density": density}
-            self._density_history.append(record)
-            decayed_density = density * (0.5 ** (day / self._half_life_days))
-            density_below_threshold = decayed_density < self._min_density_threshold
-            return {
-                "raw_density": density,
-                "decayed_density": decayed_density,
-                "half_life_days": self._half_life_days,
-                "below_threshold": density_below_threshold,
-                "day": day,
-            }
-
-        def get_decay_trend(self) -> Dict[str, Any]:
-            if len(self._density_history) < 2:
-                return {"trend": "insufficient_data", "decay_rate": 0.0}
-            densities = [r["density"] for r in self._density_history]
-            days = [r["day"] for r in self._density_history]
-            n = len(densities)
-            if n < 2:
-                return {"trend": "insufficient_data", "decay_rate": 0.0}
-            x_mean = sum(days) / n
-            y_mean = sum(densities) / n
-            num = sum((days[i] - x_mean) * (densities[i] - y_mean) for i in range(n))
-            den = sum((days[i] - x_mean) ** 2 for i in range(n))
-            slope = num / den if den != 0 else 0.0
-            trend = "decaying" if slope < -1e-6 else ("growing" if slope > 1e-6 else "stable")
-            return {"trend": trend, "decay_rate": slope, "n_observations": n}
-
-# E-05修复: 参数漂移检测器
-class ParameterDriftDetector:
-    """R14-P1-DOC-P1-06修复: 参数漂移检测器 — 检测参数历史中连续漂移超过阈值的参数，判定参数不稳定"""
-    def __init__(self, drift_threshold: float = 0.20,
-                 consecutive_window: int = 3):
-        if _HAS_EVALUATION_CLASSES:
-            self._impl = _EvalParameterDriftDetector()
-        else:
-            self._impl = None
-        self._drift_threshold = drift_threshold
-        self._consecutive_window = consecutive_window
-
-    def detect_drift(self, param_history: Optional[List[Dict[str, float]]] = None) -> Dict[str, Any]:
-        if param_history is None or len(param_history) == 0:
-            param_history = self._param_snapshot_history
-        if self._impl is not None and hasattr(self._impl, 'detect_drift'):
-            return self._impl.detect_drift(param_history)
-        if len(param_history) < 2:
-            return {"drift_detected": False, "drifted_params": [], "max_drift": 0.0}
-        drifted_params = []
-        max_drift = 0.0
-        for key in param_history[0].keys():
-            values = [h.get(key) for h in param_history if key in h and h[key] is not None]
-            if len(values) < 2:
-                continue
-            diffs = [abs(values[i] - values[i - 1]) / max(abs(values[i - 1]), 1e-10)
-                     for i in range(1, len(values))]
-            avg_drift = sum(diffs) / len(diffs)
-            max_drift = max(max_drift, avg_drift)
-            consecutive_count = 0
-            for d in diffs:
-                if d > self._drift_threshold:
-                    consecutive_count += 1
-                else:
-                    consecutive_count = 0
-                if consecutive_count >= self._consecutive_window:
-                    drifted_params.append(key)
-                    break
-        return {
-            "drift_detected": len(drifted_params) > 0,
-            "drifted_params": drifted_params,
-            "max_drift": max_drift,
-            "threshold": self._drift_threshold,
-            "n_snapshots": len(param_history),
-        }
-
-
-# E-11修复: 策略违反追踪器(CE_SHARPE/CE_WINDOW/CE_STOP/CE_HFT)
-class StrategyViolationTracker:
-    def __init__(self):
-        self._violations: Dict[str, List[Dict[str, Any]]] = {
-            "CE_SHARPE": [],
-            "CE_WINDOW": [],
-            "CE_STOP": [],
-            "CE_HFT": [],
-        }
-
-    def track_sharpe_violation(self, strategy_id: str, sharpe: float,
-                                min_sharpe: float = 1.2) -> Dict[str, Any]:
-        violated = sharpe < min_sharpe
-        record = {"strategy_id": strategy_id, "sharpe": sharpe, "min_sharpe": min_sharpe, "violated": violated}
-        if violated:
-            self._violations["CE_SHARPE"].append(record)
-        return record
-
-    def track_window_violation(self, strategy_id: str, window_sharpe: float,
-                                decay_threshold: float = -0.30) -> Dict[str, Any]:
-        violated = window_sharpe < decay_threshold
-        record = {"strategy_id": strategy_id, "window_sharpe": window_sharpe, "threshold": decay_threshold, "violated": violated}
-        if violated:
-            self._violations["CE_WINDOW"].append(record)
-        return record
-
-    def track_stop_violation(self, strategy_id: str, max_dd_pct: float,
-                              stop_limit: float = 20.0) -> Dict[str, Any]:
-        violated = max_dd_pct > stop_limit
-        record = {"strategy_id": strategy_id, "max_dd_pct": max_dd_pct, "stop_limit": stop_limit, "violated": violated}
-        if violated:
-            self._violations["CE_STOP"].append(record)
-        return record
-
-    def track_hft_violation(self, strategy_id: str, latency_ms: float,
-                             max_latency_ms: float = 5.0) -> Dict[str, Any]:
-        violated = latency_ms > max_latency_ms
-        record = {"strategy_id": strategy_id, "latency_ms": latency_ms, "max_latency_ms": max_latency_ms, "violated": violated}
-        if violated:
-            self._violations["CE_HFT"].append(record)
-        return record
-
-    def get_violation_summary(self) -> Dict[str, Any]:
-        return {k: {"count": len(v), "records": v} for k, v in self._violations.items()}
+# P1-16修复: 直接导入evaluation类(延迟导入已在parameter_drift_detector.py中打破循环)
+from ali2026v3_trading.evaluation.parameter_drift_detector import ParameterDriftDetector as _EvalParameterDriftDetector
+from ali2026v3_trading.evaluation.violation_tracker import StrategyViolationTracker as _EvalStrategyViolationTracker
+from ali2026v3_trading.evaluation.state_density_decay import StateEDensityDecayTracker as _EvalStateEDensityDecayTracker
+StateEDensityDecayTracker = _EvalStateEDensityDecayTracker
+ParameterDriftDetector = _EvalParameterDriftDetector
+StrategyViolationTracker = _EvalStrategyViolationTracker
+_HAS_EVALUATION_CLASSES = True
+mark_module_loaded('governance_engine_evaluation_classes')
 
 
 # E-06修复: governance反馈通道传递给评判
@@ -698,7 +548,7 @@ class GovernanceEngine:
     def capture_param_snapshot(self) -> Dict[str, float]:
         snapshot: Dict[str, float] = {}
         try:
-            from ali2026v3_trading.config.config_params import get_cached_params
+            from ali2026v3_trading.config.config_service import get_cached_params
             cached = get_cached_params()
             _float_keys = [
                 "close_take_profit_ratio", "close_stop_loss_ratio",
@@ -713,7 +563,7 @@ class GovernanceEngine:
                         snapshot[k] = float(v)
                     except (TypeError, ValueError):
                         pass
-        except Exception as _e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
             logger.debug("[P0-24] config_params不可用: %s", _e)
         try:
             from ali2026v3_trading.tvf_param_loader import TVF_DEFAULT_PARAMS
@@ -722,7 +572,7 @@ class GovernanceEngine:
                     snapshot[f"tvf_{k}"] = float(v)
                 except (TypeError, ValueError):
                     pass
-        except Exception as _e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
             logger.debug("[P0-24] tvf_param_loader不可用: %s", _e)
         if snapshot:
             self._param_snapshot_history.append(snapshot)
@@ -746,7 +596,7 @@ class GovernanceEngine:
                 if not result.get("passed", True):
                     all_passed = False
                     self._feedback_channel.append({"checker": checker_name, "result": result})
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 results[checker_name] = {"passed": False, "error": str(e)}
                 all_passed = False
         return {"passed": all_passed, "results": results, "n_checkers": len(self._checkers)}
@@ -808,9 +658,11 @@ def get_governance_engine(config: Optional[Dict[str, Any]] = None) -> Governance
         _governance_engine_instance.add_checker(MultiStateSwitchBacktestScenario())
         # AP-03: SingletonRegistry注册
         try:
-            from ali2026v3_trading.singleton_registry import SingletonRegistry
+            from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
             registry = SingletonRegistry.get_registry("governance_engine")
             registry.register_singleton("governance_engine.instance", _governance_engine_instance)
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            pass
             pass
     return _governance_engine_instance

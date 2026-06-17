@@ -1,9 +1,10 @@
+# MODULE_ID: M1-227
 from __future__ import annotations
 
 import time
 import logging
 from typing import Dict, Any, Optional
-from ali2026v3_trading.risk_service import RiskCheckResponse, RiskLevel
+from ali2026v3_trading.risk.risk_service import RiskCheckResponse, RiskLevel
 from ali2026v3_trading.risk_engine.snapshot import RiskSnapshot
 from ali2026v3_trading.risk_engine import input_builder, result_handler
 from ali2026v3_trading.risk_engine import market_risk, counterparty_risk, operational_risk, regulatory_risk
@@ -11,7 +12,7 @@ from ali2026v3_trading.risk_engine.log_deduplicator import LogDeduplicator
 from ali2026v3_trading.risk_engine.abnormal_trade_detector import AbnormalTradeDetector
 
 try:
-    from ali2026v3_trading.causal_chain_utils import CyclicDependencyGuard
+    from ali2026v3_trading.strategy_judgment.causal_chain_utils import CyclicDependencyGuard
     _HAS_CAUSAL_CHAIN = True
 except ImportError:
     _HAS_CAUSAL_CHAIN = False
@@ -47,7 +48,7 @@ class RiskEngine:
                 result = regulatory_risk.check_regulatory_risks(snapshot, self._risk_service)
                 if result is not None:
                     return self._risk_service._record_result(result)
-            except Exception as e:
+            except (KeyError, AttributeError, TypeError, ValueError, RuntimeError) as e:
                 _exc_type = type(e).__name__
                 if isinstance(e, (KeyError, AttributeError)):
                     _block_reason = f"check_config_error:{_exc_type}"

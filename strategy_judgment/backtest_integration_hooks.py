@@ -1,3 +1,5 @@
+﻿# [M3-13] 回测集成钩子
+# MODULE_ID: M3-611
 """
 回测集成钩子 (Backtest Integration Hooks) — v1.4
 
@@ -24,10 +26,11 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ali2026v3_trading.serialization_utils import json_dumps, json_loads, json_default_serializer
+from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer
 
-from .turning_point_microscope import TurningPointMicroscope, EnhancedBar, ExtremeRegion
-from .resonance_turning_point_marker import ResonanceTurningPointMarker, TurningPointRecord
+from .turning_point_analysis import TurningPointMicroscope, EnhancedBar, ExtremeRegion
+from .turning_point_analysis import ResonanceTurningPointMarker, TurningPointRecord
 from .market_snapshot_collector import (
     MarketSnapshotCollector, MarketSnapshot, SnapshotTrigger,
     StrategyStateSnapshot, HFTSpecificState, ResonanceSpecificState,
@@ -35,11 +38,13 @@ from .market_snapshot_collector import (
     MarketMakingSpecificState, EcosystemState,
     ShadowAlphaState, SafetyMetaState, CrossStrategyGreeks,
     SIX_STRATEGY_KEYS, THREE_VARIANTS, ALL_18_STRATEGY_IDS,
+    SEVEN_STRATEGY_KEYS, ALL_21_STRATEGY_IDS,
 )
 from .strategy_behavior_diagnosis import StrategyBehaviorDiagnosis, DiagnosisReport
-from .strategy_judgment_engine import StrategyJudgmentEngine, JudgmentReport, JudgmentVerdict, CapitalScale
+from .strategy_judgment_facade import StrategyJudgmentEngine
+from .judgment_types import JudgmentReport, JudgmentVerdict, CapitalScale
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)  # R9-5
 
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -310,15 +315,15 @@ class BacktestIntegrationHooks:
         if portfolio_info is not None: self._current_portfolio_info = portfolio_info
         if cr_output is not None: self._last_cr_output = cr_output
 
-    def build_18_strategy_states(self, **per_strategy_overrides) -> List[StrategyStateSnapshot]:
-        """构建18策略状态快照列表(6主策略×3变体)
+    def build_21_strategy_states(self, **per_strategy_overrides) -> List[StrategyStateSnapshot]:
+        """构建21策略状态快照列表(7主策略×3变体)
 
         Args:
             per_strategy_overrides: 可选的关键字参数，格式为 {strategy_id: {field: value}}
-                例如 build_18_strategy_states(high_freq_master={"signal_strength": 0.8})
+                例如 build_21_strategy_states(high_freq_master={"signal_strength": 0.8})
         """
         states = []
-        for sk in SIX_STRATEGY_KEYS:
+        for sk in SEVEN_STRATEGY_KEYS:
             for variant in THREE_VARIANTS:
                 sid = f"{sk}_{variant}"
                 overrides = per_strategy_overrides.get(sid, {})
@@ -328,6 +333,10 @@ class BacktestIntegrationHooks:
                     **overrides,
                 ))
         return states
+
+    def build_18_strategy_states(self, **per_strategy_overrides) -> List[StrategyStateSnapshot]:
+        """向后兼容: 委托至build_21_strategy_states"""
+        return self.build_21_strategy_states(**per_strategy_overrides)
 
     def on_backtest_finish(self, symbol="", backtest_period="",
                            profitability_metrics=None,
@@ -428,7 +437,7 @@ class BacktestIntegrationHooks:
                             if src in rd_dict and rd_dict[src] is not None:
                                 realtime_risk_scores[dst] = float(rd_dict[src])
                         break
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
                 logger.debug("[BacktestIntegrationHooks] 提取realtime_risk_scores失败: %s", e)
 
             judgment_report = self._judgment_engine.judge(
@@ -489,7 +498,7 @@ class BacktestIntegrationHooks:
         db_path = os.path.join(output_dir, f"{prefix}_snapshots.duckdb")
         try:
             self._snapshot_collector.export_to_duckdb(db_path)
-        except Exception as e:
+        except (IOError, ValueError, RuntimeError, AttributeError) as e:
             logger.warning(f"快照DuckDB导出失败: {e}")
 
     @property

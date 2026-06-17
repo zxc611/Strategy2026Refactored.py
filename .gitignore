@@ -39,6 +39,7 @@ env/
 htmlcov/
 .tox/
 .nox/
+.mypy_cache/
 
 # Logs and databases
 *.log
@@ -56,6 +57,9 @@ data/
 *.backup
 backup_*/
 backup_v*/
+_backup_*/
+
+# 升A路径T3.5: 备份目录不应存在于生产代码库
 
 # OS
 .DS_Store

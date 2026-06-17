@@ -1,3 +1,4 @@
+# [M1-75] 共享提供者
 """Shared Provider Interfaces — Phase 1 architectural refactoring.
 
 Defines explicit interfaces for the 6 cross-shared self._ attributes

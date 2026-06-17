@@ -1,0 +1,19 @@
+﻿........F.                                                               [100%]
+================================== FAILURES ===================================
+_______________ TestCausalChainUtils.test_causal_chain_tracker ________________
+
+self = <ali2026v3_trading.tests.test_strategy_judgment_coverage.TestCausalChainUtils object at 0x000001DAD01598B0>
+
+    def test_causal_chain_tracker(self):
+        from ali2026v3_trading.strategy_judgment.causal_chain_utils import CausalChainTracker
+        cct = CausalChainTracker.__new__(CausalChainTracker)
+        cct.__init__()
+        assert cct.new_correlation_id() != ""
+>       cct.record_event(CausalEvent.__new__(CausalEvent))
+                         ^^^^^^^^^^^
+E       NameError: name 'CausalEvent' is not defined
+
+ali2026v3_trading\tests\test_strategy_judgment_coverage.py:80: NameError
+=========================== short test summary info ===========================
+FAILED ali2026v3_trading\tests\test_strategy_judgment_coverage.py::TestCausalChainUtils::test_causal_chain_tracker
+1 failed, 9 passed in 1.56s
