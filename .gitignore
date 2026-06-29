@@ -72,3 +72,9 @@ Thumbs.db
 
 # P2-R8-01修复: 运行时参数状态文件(含环境特定数据，不应提交)
 **/state_param_sets.yaml
+
+# 运行时生成文件（WAL订单/熔断器状态等）
+**/_wal_orders/
+**/.circuit_breaker_state.json
+**/idempotent_state.jsonl
+**/order_state.jsonl
