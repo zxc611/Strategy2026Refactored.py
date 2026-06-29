@@ -78,3 +78,8 @@ Thumbs.db
 **/.circuit_breaker_state.json
 **/idempotent_state.jsonl
 **/order_state.jsonl
+
+# 数据库文件（运行时生成）
+*.duckdb
+*.duckdb.wal
+*.bak_before_*
