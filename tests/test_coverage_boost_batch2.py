@@ -22,13 +22,13 @@ from ali2026v3_trading.config.params_service import (
 )
 from ali2026v3_trading.config.config_version_tracker import (
     get_param_version, list_param_version_history, rollback_param_version,
-    compute_content_hash,
 )
-from ali2026v3_trading.infra._deprecated_reexports import (
-    compute_commission, classify_deviation, PhaseFeatureFlag, ServiceProtocol,
-    check_daily_drawdown_hard_stop, resolve_and_check_daily_drawdown,
-    Signal,
-)
+from ali2026v3_trading.infra.shared_utils import compute_content_hash
+from ali2026v3_trading.infra.commission_utils import compute_commission
+from ali2026v3_trading.infra.trading_utils import classify_deviation, Signal
+from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
+from ali2026v3_trading.infra.service_contracts import ServiceProtocol
+from ali2026v3_trading.infra.security_service import check_daily_drawdown_hard_stop, resolve_and_check_daily_drawdown
 from ali2026v3_trading.infra.security_service import (
     _SecureCredential, reveal_credential, _sanitize_for_return, SENSITIVE_KEYS,
 )

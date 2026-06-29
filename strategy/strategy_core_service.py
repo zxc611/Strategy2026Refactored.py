@@ -11,7 +11,7 @@ from ali2026v3_trading.strategy.kline_data_service import KlineDataService
 from ali2026v3_trading.infra.exceptions import FutureLeakException
 from ali2026v3_trading.strategy.tick_processing_service import TickProcessingService, MarketEvent, TickEvent, BarCompletedEvent
 from ali2026v3_trading.strategy.recovery_service import RecoveryService
-from ali2026v3_trading.strategy.checkpoint_service import CheckpointService
+from ali2026v3_trading.strategy.persistence_service import CheckpointService
 from ali2026v3_trading.strategy.lifecycle_service import LifecycleService
 from ali2026v3_trading.strategy.instrument_service import InstrumentService
 from ali2026v3_trading.strategy.strategy_config_layer import StrategyConfigLayer
@@ -277,6 +277,9 @@ class StrategyCoreService:
     def is_paused(self): return self._lifecycle_svc.is_paused()
     def is_trading(self): return self._lifecycle_svc.is_trading()
     def health_check(self): return self._lifecycle_svc.health_check()
+    @staticmethod
+    def _count_option_contracts(options_dict):
+        return sum(len(v) for v in (options_dict or {}).values())
     def get_stats(self): return self._lifecycle_svc.get_stats()
     def enter_parallel_running(self, ss=None, cc=None, dur=3600.0): return self._lifecycle_svc.enter_parallel_running(ss, cc, dur)
     def exit_parallel_running(self, prom=False): return self._lifecycle_svc.exit_parallel_running(prom)
@@ -290,7 +293,7 @@ class StrategyCoreService:
     def _init_logging(self, p=None): self._lifecycle_svc._init_logging(p); self._config_layer.init_logging(p)
     def _init_scheduler(self): self._lifecycle_svc._init_scheduler(); self._config_layer.init_scheduler()
     def _stop_scheduler(self): self._lifecycle_svc._stop_scheduler(); self._config_layer.stop_scheduler()
-    _LIFECYCLE_DELEGATE = frozenset({'_start_platform_subscribe_async','_platform_subscribe_worker','_do_bind_platform_apis','_inject_runtime_context','_get_fallback_market_center','_init_analytics_services','_build_instrument_groups','_resolve_option_underlying_id','_init_t_type_service_and_preload','_register_analytics_jobs','_start_analytics_warmup_async','_ensure_analytics_ready','_warm_storage_async','_start_historical_kline_load_async','_unsubscribe_all_instruments','_shutdown_runtime_services','_log_resource_ownership_table','_log_t_type_future_probe','_add_option_status_diagnosis_job','_add_tick_sync_job','_add_14_contracts_diagnosis_job','_add_trading_jobs','_ensure_check_pending_orders_job','_publish_event','compare_parallel_results','get_parallel_running_status','record_parallel_result','get_parallel_results','prepare_restart','record_tick','record_trade','record_signal','get_uptime'})
+    _LIFECYCLE_DELEGATE = frozenset({'_start_platform_subscribe_async','_platform_subscribe_worker','_do_bind_platform_apis','_inject_runtime_context','_get_fallback_market_center','_init_analytics_services','_build_instrument_groups','_resolve_option_underlying_id','_init_t_type_service_and_preload','_register_analytics_jobs','_start_analytics_warmup_async','_ensure_analytics_ready','_warm_storage_async','_start_historical_kline_load_async','_start_historical_kline_load','_shutdown_historical_services','_unsubscribe_all_instruments','_shutdown_runtime_services','_log_resource_ownership_table','_log_t_type_future_probe','_add_option_status_diagnosis_job','_add_tick_sync_job','_add_14_contracts_diagnosis_job','_add_trading_jobs','_ensure_check_pending_orders_job','_publish_event','compare_parallel_results','get_parallel_running_status','record_parallel_result','get_parallel_results','prepare_restart','record_tick','record_trade','record_signal','get_uptime','_init_lifecycle_submodules','_init_logging','_init_scheduler','_extract_contract_year_month','_reset_historical_state_for_restart'})
     def _auto_recovery_flow(self): return self._recovery_svc.auto_recovery_flow()
     def _watchdog_restart(self, mr=3, cs=60): return self._recovery_svc.watchdog_restart(mr, cs)
     def recover_from_checkpoint(self): return self._recovery_svc.recover_from_checkpoint()

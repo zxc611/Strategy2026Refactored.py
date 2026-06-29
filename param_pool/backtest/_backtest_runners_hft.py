@@ -363,7 +363,7 @@ def run_backtest_hft_tick_fidelity(
 ) -> Dict[str, Any]:
     """S1高频趋势共振回测（tick级保真版）
 
-    在每根分钟Bar内，使用_interpolate_ticks_in_bar()生成虚拟tick序列，
+    在每根分钟Bar内，使用例interpolate_ticks_in_bar()生成虚拟tick序列，
     使hft_signal_confirm_ticks恢复真实语义（连续N个tick方向一致才确认）。
 
     与run_backtest_hft的区别：
@@ -439,7 +439,7 @@ def run_backtest_hft_tick_fidelity(
         for tick_i, tick in enumerate(tick_sequence):
             imbalance = tick.get("imbalance", 0)
             strength = tick.get("strength", 0)
-            price = tick.get("price", bar.get("close", 0))
+            price = tick.get("last_price", bar.get("close", 0))
 
             should_open_hft = False
 
@@ -693,7 +693,7 @@ def run_backtest_with_cycle_resonance(
 
     V5集成：当bar_data包含预计算V5列(directional_bias, resonance_strength, cr_phase,
     state_entropy, hmm_state)时，直接读取预计算值构造CycleResonanceOutput，
-    跳过运行时CRM计算，大幅减少回测耗时。
+    跳过运行时CRM计算，大幅减少回测耗时。'
     """
     from ali2026v3_trading.param_pool.optimization.cycle_sharpe import CycleResonanceModule, CycleResonanceOutput, Phase  # noqa: F401
 

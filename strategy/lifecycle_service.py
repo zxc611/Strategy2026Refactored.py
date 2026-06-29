@@ -1,4 +1,3 @@
-# MODULE_ID: M1-256
 """lifecycle_service.py — LifecycleService 独立生命周期服务
 替代 _LifecycleMixin，以组合替代继承 (G2b Step 4)
 
@@ -19,6 +18,7 @@ from ali2026v3_trading.lifecycle.lifecycle_resource import LifecycleResource
 from ali2026v3_trading.lifecycle.lifecycle_parallel import LifecycleParallel
 from ali2026v3_trading.lifecycle.lifecycle_transition import LifecycleTransition
 from ali2026v3_trading.lifecycle.lifecycle_init import LifecycleInit
+from ali2026v3_trading.infra.shared_trading_constants import OPTION_TO_FUTURE_MAP  # 五唯一性修复
 from ali2026v3_trading.lifecycle.lifecycle_bind import LifecycleBind
 from ali2026v3_trading.lifecycle.lifecycle_callbacks import LifecycleCallbacks
 from ali2026v3_trading.lifecycle.lifecycle_monitor import LifecycleMonitor
@@ -26,9 +26,12 @@ from ali2026v3_trading.lifecycle.lifecycle_parallel import LifecycleParallelOps
 from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
 
 try:
-    from ali2026v3_trading import get_instrument_data_manager
+    from ali2026v3_trading.data.data_service import get_data_service as _get_data_service
 except ImportError:
-    get_instrument_data_manager = None
+    _get_data_service = None
+
+# Backward-compatible module symbol used by legacy callers and tests.
+get_instrument_data_manager = _get_data_service
 
 
 class LifecycleService:
@@ -47,7 +50,7 @@ class LifecycleService:
         )
         super().__init_subclass__(**kwargs)
 
-    OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
+    OPTION_TO_FUTURE_MAP = OPTION_TO_FUTURE_MAP  # 五唯一性修复：从 shared_trading_constants 导入
     VALID_STATE_TRANSITIONS = VALID_STATE_TRANSITIONS
 
     _STRATEGY_STATE_TO_LSM_MAP = {
@@ -154,13 +157,28 @@ class LifecycleService:
             with p._storage_lock:
                 if p._storage is None:
                     try:
-                        if get_instrument_data_manager is None:
-                            raise ImportError("not available")
-                        p._storage = get_instrument_data_manager()
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        if get_instrument_data_manager is not None:
+                            p._storage = get_instrument_data_manager()
+                        else:
+                            return None
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                         logging.warning("[Storage] Init failed: %s", e)
                         return None
         return p._storage
+
+    def _extract_contract_year_month(self, instrument_id):
+        try:
+            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
+            parsed = SubscriptionManager.parse_future(instrument_id)
+            return parsed.get('year_month', '')
+        except Exception:
+            return ''
+
+    def _reset_historical_state_for_restart(self):
+        p = self._provider
+        _hm = getattr(p, '_historical_mgr', None)
+        if _hm is not None and hasattr(_hm, 'reset_for_restart'):
+            _hm.reset_for_restart()
 
     # ========== Sub-module initialization ==========
 
@@ -181,7 +199,27 @@ class LifecycleService:
     # ========== Transition ==========
 
     def transition_to(self, new_state):
-        return self._lc_transition.transition_to(new_state)
+        p = self._provider
+        current_state = getattr(p, '_state', None)
+        try:
+            result = self._lc_transition.transition_to(current_state, new_state)
+        except TypeError:
+            result = self._lc_transition.transition_to(new_state)
+        success = result[0] if isinstance(result, tuple) else bool(result)
+        if success:
+            p._state = new_state
+            _lm = getattr(p, '_lifecycle_mgr', None)
+            if _lm is not None:
+                _lm.state = new_state
+            # FIX: 同步 _state 到 _state_store，否则状态报告(tick_processing_service.output_periodic_summary)
+            # 从 _state_store 读取 _state 时恒显示 initializing，导致"长期处于初始化状态"假象
+            _ss = getattr(p, '_state_store', None)
+            if _ss is not None:
+                try:
+                    _ss.set('_state', new_state)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
+        return result
 
     # ========== Bind ==========
 
@@ -212,6 +250,12 @@ class LifecycleService:
 
     def _start_historical_kline_load_async(self):
         return self._lc_bind._start_historical_kline_load_async()
+
+    def _start_historical_kline_load(self, blocking: bool = False):
+        return self._lc_bind._start_historical_kline_load(blocking=blocking)
+
+    def _shutdown_historical_services(self):
+        return self._lc_bind._shutdown_historical_services()
 
     # ========== Init ==========
 
@@ -377,5 +421,7 @@ class LifecycleService:
         return self._lc_parallel_ops.get_parallel_running_status()
 
 
-# 向后兼容别名 — 原名 StrategyLifecycleService，重构后改名为 LifecycleService
+# Backward-compatible export used by ecosystem bootstrap and legacy tests.
 StrategyLifecycleService = LifecycleService
+
+__all__ = ["LifecycleService", "StrategyLifecycleService", "get_instrument_data_manager"]

@@ -139,11 +139,11 @@ class TestOptionSyncMixin:
     """OptionSyncMixin: 结构验证"""
 
     def test_mixin_has_refresh_method(self):
-        """Mixin有_refresh_option_sync_stats方法"""
+        """Mixin有界refresh_option_sync_stats方法"""
         from ali2026v3_trading.data.ds_option_sync import OptionSyncMixin
         assert hasattr(OptionSyncMixin, '_refresh_option_sync_stats')
 
     def test_mixin_has_update_method(self):
-        """Mixin有_update_option_status_columns方法"""
+        """Mixin有界update_option_status_columns方法"""
         from ali2026v3_trading.data.ds_option_sync import OptionSyncMixin
         assert hasattr(OptionSyncMixin, '_update_option_status_columns')

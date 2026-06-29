@@ -1,4 +1,4 @@
-﻿# [M1-102] 回测配置
+# [M1-102] 回测配置
 #!/usr/bin/env python3
 # MODULE_ID: M1-155
 """
@@ -131,17 +131,8 @@ class BacktestStateEnum(Enum):
     STOPPED = auto()
     COMPLETED = auto()
 
-_STATE_REASON_MAP = {
-    "correct_trending": "CORRECT_RESONANCE",
-    "correct_trending_defensive": "CORRECT_DIVERGENCE",
-    "incorrect_reversal": "INCORRECT_REVERSAL",
-    "incorrect_reversal_defensive": "INCORRECT_DIVERGENCE",
-    "other": "OTHER_SCALP",
-    "correct_rise": "CORRECT_RESONANCE",
-    "correct_fall": "CORRECT_DIVERGENCE",
-    "wrong_rise": "INCORRECT_REVERSAL",
-    "wrong_fall": "INCORRECT_DIVERGENCE",
-}
+# 五唯一性修复：_STATE_REASON_MAP 已统一从 strategy_config_layer 导入（含13项完整映射）
+from ali2026v3_trading.strategy.strategy_config_layer import _STATE_REASON_MAP  # noqa: E402,F401  五唯一性修复
 
 # ── Metrics (merged from backtest_metrics.py on 2026-06-12) ──
 
@@ -576,8 +567,8 @@ def _compute_option_mtm_price(
 re-export from ts_result_scheduler:
   - main_scheduler: 四阶段参数扫描主流程(实现在ts_result_scheduler.py,通过ts_result_writer.py委托)
 
-本文件仅做re-export，确保所有 from ali2026v3_trading.param_pool.task_scheduler import XXX 继续有效。
-循环依赖的re-export已改为__getattr__延迟导入。
+本文件仅做re-export，确保所有 from ali2026v3_trading.param_pool.task_scheduler import XXX 继续有效。'
+循环依赖的re-export已改为期。getattr__延迟导入。
 """
 from ali2026v3_trading.infra.shared_trading_constants import (
     P0_IRON_RULES,

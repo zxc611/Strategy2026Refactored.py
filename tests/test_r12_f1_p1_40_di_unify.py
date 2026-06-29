@@ -18,7 +18,7 @@ if _project_root not in sys.path:
 
 def test_singleton_registry_syncs_to_service_container():
     """P1-40验证: SingletonRegistry.register_singleton同步注册到ServiceContainer"""
-    from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+    from ali2026v3_trading.infra.registry_service import SingletonRegistry
 
     # 验证register_singleton源码中包含ServiceContainer桥接
     import inspect
@@ -54,7 +54,7 @@ def test_service_factory_creates_services():
 def test_three_mechanisms_not_fully_independent():
     """P1-40验证: 三套机制不再完全独立——SingletonRegistry桥接到ServiceContainer"""
     import inspect
-    from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+    from ali2026v3_trading.infra.registry_service import SingletonRegistry
     src = inspect.getsource(SingletonRegistry.register_singleton)
     assert 'ServiceContainer' in src, \
         "SingletonRegistry.register_singleton应桥接到ServiceContainer"

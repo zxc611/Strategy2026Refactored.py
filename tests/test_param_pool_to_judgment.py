@@ -13,7 +13,7 @@ def test_parameter_pool_adapter_sweep():
     assert callable(judge_sweep_results)
 
 def test_result_key_map_exists():
-    """验证_RESULT_KEY_MAP映射表存在"""
+    """验证验RESULT_KEY_MAP映射表存在"""
     from ali2026v3_trading.strategy_judgment.parameter_pool_adapter import _RESULT_KEY_MAP
     assert isinstance(_RESULT_KEY_MAP, dict)
     assert len(_RESULT_KEY_MAP) > 0

@@ -96,7 +96,7 @@ class TestRevealCredential:
     """reveal_credential: 辅助函数"""
 
     def test_reveal_secure_credential(self):
-        """reveal_credential处理_SecureCredential"""
+        """reveal_credential处理器SecureCredential"""
         from ali2026v3_trading.infra.security_service import _SecureCredential, reveal_credential
         secret = "test_key"
         cred = _SecureCredential(secret)

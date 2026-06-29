@@ -1,4 +1,3 @@
-# MODULE_ID: M1-250
 """
 box_spring_strategy.py - 箱体波动率脉冲策略（弹簧策略）
 

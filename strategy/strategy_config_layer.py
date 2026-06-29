@@ -1,4 +1,3 @@
-# MODULE_ID: M1-266
 """
 StrategyCoreService 配置层 — 从strategy_core_service.py拆分
 职责: 配置初始化、参数解析、依赖检查、优雅关机协调
@@ -29,6 +28,7 @@ class StrategyConfigLayer:
         provider._destroyed = False
         provider._initialized = False
         provider._health_pause_new_open = False  # R13-P0-DEAD-03/04验证: 已在R10修复，标志在execute_option_trading_cycle中被消费检查
+        provider._health_pause_new_open_ts = 0.0
         provider._analytics_warmup_done = False
         provider._analytics_warmup_thread = None
         # R15-P1-RES-04修复: 策略降级后自动恢复检测
@@ -37,6 +37,7 @@ class StrategyConfigLayer:
         provider._last_recovery_check = 0.0
         provider.t_type_service = None
         provider._processed_trade_ids = collections.OrderedDict()
+        provider._trade_ids_lock = threading.Lock()
 
     def init_locks(self) -> None:
         """锁与Manager初始化 — 从StrategyCoreService._init_locks迁移"""
@@ -114,17 +115,26 @@ class StrategyConfigLayer:
         provider._init_tick_handler_mixin()
 
         # R13-P0-API-07修复: Service初始化依赖隐式属性设置，添加显式检查
+        # FIX: G2b Mixin消灭后，TickProcessingService属性在_tick_svc实例上，不在provider上
         _REQUIRED_ATTRS = {
             'LifecycleService': ['_state', '_state_lock', '_lock'],
             'KlineDataService': ['_historical_load_in_progress', '_historical_loader_lock'],
-            'TickProcessingService': ['_tick_count', '_shard_router'],
         }
         for _svc_name, _attrs in _REQUIRED_ATTRS.items():
             for _attr in _attrs:
                 if not hasattr(provider, _attr):
                     logging.warning(
-                        "[R13-P0-API-07] %s required attribute '%s' not initialized (G2b Mixin消灭后可能由Service持有)",
+                        "[R13-P0-API-07] %s required attribute '%s' not initialized",
                         _svc_name, _attr,
+                    )
+        # TickProcessingService属性检查：检查_tick_svc实例而非provider
+        _tick_svc = getattr(provider, '_tick_svc', None) or getattr(provider, '_tick_service', None)
+        if _tick_svc is not None:
+            for _attr in ['_tick_count', '_shard_router']:
+                if not hasattr(_tick_svc, _attr):
+                    logging.warning(
+                        "[R13-P0-API-07] TickProcessingService required attribute '%s' not initialized",
+                        _attr,
                     )
 
         # 将关键状态同步到StateStore，供HistoricalDataManager等Manager通过StateStore读取
@@ -137,19 +147,22 @@ class StrategyConfigLayer:
         state = 'unknown'
         try:
             spm = getattr(self._provider, '_state_param_manager', None)
+            if not spm:
+                try:
+                    from ali2026v3_trading.config.state_param import get_state_param_manager
+                    spm = get_state_param_manager()
+                except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                    pass
             if spm:
+                try:
+                    spm.update_state_from_width_cache()
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
                 state = spm.get_current_state()
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.warning("[R22-EP-P1] StrategyConfigLayer exception swallowed")
             pass
 
-        _STATE_REASON_MAP = {
-            STRATEGY_MODE_CORRECT_TRENDING: STRATEGY_MODE_CORRECT_RESONANCE,
-            STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE: STRATEGY_MODE_CORRECT_DIVERGENCE,
-            STRATEGY_MODE_INCORRECT_REVERSAL: 'INCORRECT_REVERSAL',
-            'incorrect_reversal_defensive': 'INCORRECT_DIVERGENCE',
-            STRATEGY_MODE_OTHER: 'OTHER_SCALP',
-        }
         reason = _STATE_REASON_MAP.get(state, '')
         if not reason:
             logging.warning("[StrategyConfigLayer] R14-P1-DEAD-02: _resolve_open_reason遇到未知状态'%s'，默认OTHER_SCALP", state)
@@ -404,7 +417,12 @@ class StrategyConfigLayer:
                 logging.error("[SHUTDOWN] %s shutdown failed: %s", name, e)
 
     def init_logging(self, params: Optional[Dict[str, Any]] = None) -> None:
-        logging.info("[StrategyConfigLayer] 日志初始化完成")
+        try:
+            from ali2026v3_trading.config.config_logging import setup_logging
+            setup_logging()
+            logging.info("[StrategyConfigLayer] 日志初始化完成（已调用setup_logging）")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.warning("[StrategyConfigLayer] setup_logging调用失败: %s", e)
 
     def init_scheduler(self) -> None:
         pass
@@ -463,12 +481,27 @@ ALL_MARKET_STATES = (
     STRATEGY_MODE_CORRECT_DIVERGENCE,
 )
 
+# 五唯一性修复：_STATE_REASON_MAP 权威定义（合并自3处重复定义）
+# 原 strategy_config_layer 模块级5项 + 函数级9项(含策略模式) + backtest_config 9项(含原始五态)
+# 键 = 状态字符串（5策略状态 + 5原始五态 + 4策略模式，'other'重复已合并）
+# 值 = 开仓理由标签
 _STATE_REASON_MAP = {
+    # 5种策略状态 → 5种基础理由
     STRATEGY_MODE_CORRECT_TRENDING: STRATEGY_MODE_CORRECT_RESONANCE,
     STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE: STRATEGY_MODE_CORRECT_DIVERGENCE,
     STRATEGY_MODE_INCORRECT_REVERSAL: 'INCORRECT_REVERSAL',
     'incorrect_reversal_defensive': 'INCORRECT_DIVERGENCE',
     STRATEGY_MODE_OTHER: 'OTHER_SCALP',
+    # 5种原始五态 → 5种基础理由（来自backtest_config，避免重复映射）
+    'correct_rise': 'CORRECT_RESONANCE',
+    'correct_fall': 'CORRECT_DIVERGENCE',
+    'wrong_rise': 'INCORRECT_REVERSAL',
+    'wrong_fall': 'INCORRECT_DIVERGENCE',
+    # 4种策略模式 → 策略理由（来自原函数级定义）
+    'spring': 'BOX_SPRING',
+    'box': 'BOX_SPRING',
+    'arbitrage': 'ARBITRAGE',
+    'market_making': 'MARKET_MAKING',
 }
 
 _strategy_param_caches: Dict[str, Dict[str, Any]] = {}

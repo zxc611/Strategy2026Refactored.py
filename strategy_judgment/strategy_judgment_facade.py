@@ -1,9 +1,9 @@
-﻿# [M3-01] 评判Facade核心
+# [M3-01] 评判Facade核心
 # MODULE_ID: M3-626
 """
 策略评判引擎 (Strategy Judgment Engine) — Facade层 v1.5
 
-Facade模式：仅保留judge()入口方法，将_judge_*方法委托给已提取的Judger类。
+Facade模式：仅保留judge()入口方法，将。judge_*方法委托给已提取的Judger类。
 子模块:
   - judgment_types: 数据类型与配置常量
   - judgment_profitability: ProfitabilityJudger
@@ -57,25 +57,27 @@ from .judgment_profitability import ProfitabilityJudger
 from .judgment_behavior import BehaviorJudger
 from .judgment_risk import RiskJudger
 from .judgment_calibration import CalibrationJudger
-from .judgment_deep_validation import run_deep_validations
+from .judgment_three_layer import SignalSourceABCJudger
+from ._judgment_services import run_deep_validations
 from ._judgment_services import chicory_eviction_score, activity_weighted_score, run_ecosystem_integrations
 
 if TYPE_CHECKING:
-    from ..param_pool.cycle_resonance_module import CycleResonanceOutput
+    from ..param_pool.optimization.cycle_sharpe import CycleResonanceOutput
 
 logger = get_logger(__name__)  # R9-5
 
 
 class StrategyJudgmentEngine:
     """
-    策略评判引擎 — Facade层 v1.5
+    策略评判引擎 — Facade层 v1.6
 
-    12维度 + 阻塞项 + 收紧阈值 + 消除默认通过 + 边际递减 + 权重归一化
+    13维度 + 阻塞项 + 收紧阈值 + 消除默认通过 + 边际递减 + 权重归一化
     委托架构:
       _profitability_judger -> ProfitabilityJudger
       _behavior_judger -> BehaviorJudger
       _risk_judger -> RiskJudger
       _calibration_judger -> CalibrationJudger
+      _three_layer_judger -> ThreeLayerDecisionSourceJudger  (v1.6新增)
     """
 
     SCORING_COEFFICIENTS = SCORING_COEFFICIENTS
@@ -149,6 +151,9 @@ class StrategyJudgmentEngine:
         self._calibration_judger = CalibrationJudger(
             scoring_coefficients=self.SCORING_COEFFICIENTS,
         )
+        self._three_layer_judger = SignalSourceABCJudger(
+            scoring_coefficients=self.SCORING_COEFFICIENTS,
+        )
 
     @classmethod
     def from_config(cls, config_path: Optional[str] = None,
@@ -194,6 +199,9 @@ class StrategyJudgmentEngine:
             extreme_max_recovery_hours=self._extreme_max_recovery_hours,
         )
         self._calibration_judger = CalibrationJudger(
+            scoring_coefficients=self.SCORING_COEFFICIENTS,
+        )
+        self._three_layer_judger = SignalSourceABCJudger(
             scoring_coefficients=self.SCORING_COEFFICIENTS,
         )
 
@@ -267,6 +275,7 @@ class StrategyJudgmentEngine:
         explanation_coverage_result: Optional[Dict[str, Any]] = None,
         cross_strategy_correlation_result: Optional[Dict[str, Any]] = None,
         realtime_risk_scores: Optional[Dict[str, float]] = None,
+        three_layer_decision_source_result: Optional[Dict[str, Any]] = None,
     ) -> JudgmentReport:
         if not strategy_id:
             logging.warning("[StrategyJudgmentEngine] judge()缺少strategy_id参数")
@@ -278,7 +287,7 @@ class StrategyJudgmentEngine:
             logging.warning("[StrategyJudgmentEngine] judge()缺少backtest_period参数")
         if diagnosis_report is not None:
             if not hasattr(diagnosis_report, '_per_trade_returns') or not hasattr(diagnosis_report, '_p_values'):
-                logging.warning("[P1-7] diagnosis_report缺少_per_trade_returns/_p_values属性，MCBV/BH将降级")
+                logging.warning("[P1-7] diagnosis_report缺少。per_trade_returns/_p_values属性，MCBV/BH将降级")
         effective_weights = dict(self._weights)
         type_overrides = STRATEGY_TYPE_WEIGHT_OVERRIDES.get(strategy_type, {})
         effective_weights.update(type_overrides)
@@ -327,6 +336,8 @@ class StrategyJudgmentEngine:
             dimensions.append(dim12)
             dim13 = self._judge_realtime_risk_score(realtime_risk_scores)
             dimensions.append(dim13)
+            dim14 = self._judge_three_layer_decision_source(three_layer_decision_source_result)
+            dimensions.append(dim14)
         finally:
             self._weights = original_weights
             self._thresholds = original_thresholds
@@ -361,7 +372,7 @@ class StrategyJudgmentEngine:
 
     # ========================================================================
 
-    # 委托方法：将_judge_*委托给已提取的Judger子模块
+    # 委托方法：将。judge_*委托给已提取的Judger子模块
     # ========================================================================
 
     def _judge_profitability(self, metrics):
@@ -403,6 +414,9 @@ class StrategyJudgmentEngine:
     def _judge_realtime_risk_score(self, result):
         return self._risk_judger.judge_realtime_risk_score(result, threshold=self._thresholds["realtime_risk_score"], weight=self._weights["realtime_risk_score"])
 
+    def _judge_three_layer_decision_source(self, result):
+        return self._three_layer_judger.judge_signal_source(result, threshold=self._thresholds.get("signal_source_abc", 0.60), weight=self._weights.get("signal_source_abc", 0.05))
+
     # ========================================================================
     # 深度验证委托
     # ========================================================================
@@ -431,7 +445,7 @@ class StrategyJudgmentEngine:
         return _w, _b, _c
 
     # ========================================================================
-    # 判定逻辑、推荐生成（保留在Facade中）
+    # 判定逻辑、推荐生成（保留在Facade中）'
     # ========================================================================
 
     def _determine_verdict(self, overall, dimensions, report):

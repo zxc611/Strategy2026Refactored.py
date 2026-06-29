@@ -1,4 +1,3 @@
-# MODULE_ID: M1-255
 """
 K线数据服务 - 独立组合式服务（替代 HistoricalKlineMixin）
 

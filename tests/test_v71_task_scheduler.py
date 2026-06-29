@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.param_pool.backtest_config import (
+from ali2026v3_trading.param_pool.backtest.backtest_config import (
     DEEP_VALIDATION_TIERS,
     PARAM_TIERS,
     HFT_TICK_PARAMS,

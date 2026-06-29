@@ -31,7 +31,7 @@ class DefaultParamTableProvider:
     """默认参数表提供者 — 包装原有DEFAULT_PARAM_TABLE，向后兼容
 
     DEFAULT_PARAM_TABLE是扁平字典(key→value)，不是嵌套字典(strategy→{key→value})。
-    将整个表视为单个策略'_default'的参数集。
+    将整个表视为单个策略'_default'的参数集。'
     """
 
     _DEFAULT_STRATEGY = '_default'

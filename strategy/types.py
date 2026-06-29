@@ -12,7 +12,7 @@ from typing import Any, Dict
 class StrategyParams:
     """策略参数容器 - 替代 type('Params', (), dict)() 匿名类
 
-    提供可调试的 __repr__ 和 __dir__，方便排查参数问题。
+    提供可调试的 __repr__ 和 __dir__，方便排查参数问题。'
     从 strategy_2026.py 迁移至此独立模块(2026-06-12)。
     """
 

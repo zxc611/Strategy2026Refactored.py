@@ -1,4 +1,4 @@
-﻿# [M3-03] 盈利性评判服务
+# [M3-03] 盈利性评判服务
 # MODULE_ID: M3-617
 """Profitability Judgment Service - extracted from strategy_judgment_engine.py"""
 from __future__ import annotations
@@ -70,7 +70,7 @@ class ProfitabilityJudger:
 
         score = self.SCORING_COEFFICIENTS["profit_sharpe_w"] * sharpe_score + self.SCORING_COEFFICIENTS["profit_calmar_w"] * calmar_score + self.SCORING_COEFFICIENTS["profit_win_w"] * win_score + self.SCORING_COEFFICIENTS["profit_pl_w"] * pl_score
 
-        # P2-R9-01修复: 消费_shadow_metrics的alpha_decay_rate作为评判维度输入
+        # P2-R9-01修复: 消费。shadow_metrics的alpha_decay_rate作为评判维度输入
         _alpha_decay_adj = 0.0
         try:
             if self._shadow_metrics:

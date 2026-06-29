@@ -1,6 +1,7 @@
 # MODULE_ID: M2-313
 """Tests for config.config_exchange module."""
 import sys
+from datetime import date
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -8,7 +9,7 @@ from unittest.mock import MagicMock, patch
 def _ensure_imports():
     for _mod_name in [
         'ali2026v3_trading.config.config_exchange',
-        'ali2026v3_trading.infra.subscription_manager',
+        'ali2026v3_trading.infra.subscription_service',
     ]:
         if _mod_name in sys.modules:
             del sys.modules[_mod_name]
@@ -20,6 +21,7 @@ def _ensure_imports():
         _get_option_underlying_product,
         ensure_products_with_retry,
         month_mapping,
+        get_runtime_scoring_months,
         delivery_month_rules,
         tick_size_by_product,
         exchange_trading_sessions,
@@ -33,6 +35,7 @@ def _ensure_imports():
         _get_option_underlying_product,
         ensure_products_with_retry,
         month_mapping,
+        get_runtime_scoring_months,
         delivery_month_rules,
         tick_size_by_product,
         exchange_trading_sessions,
@@ -185,6 +188,13 @@ class TestConstants:
         _, _, _, _, _, _, month_mapping, *_ = _ensure_imports()
         assert "IF" in month_mapping
         assert isinstance(month_mapping["IF"], list)
+
+    def test_runtime_scoring_months_uses_july_as_current_and_august_as_next(self):
+        _, _, _, _, _, _, _, get_runtime_scoring_months, *_ = _ensure_imports()
+
+        months = get_runtime_scoring_months(date(2026, 6, 26), count=5)
+
+        assert months[:5] == ['2607', '2608', '2609', '2612', '2703']
 
     def test_delivery_rules(self):
         _, _, _, _, _, _, _, delivery_month_rules, *_ = _ensure_imports()

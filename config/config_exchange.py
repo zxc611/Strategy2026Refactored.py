@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Any, Optional
+from datetime import datetime, date
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.infra.shared_utils import normalize_year_month
-from ali2026v3_trading.subscription_manager import SubscriptionManager
+from ali2026v3_trading.infra.shared_utils import normalize_year_month, CHINA_TZ
+from ali2026v3_trading.infra.subscription_service import SubscriptionManager
 import re
 
 
@@ -33,7 +34,7 @@ class ExchangeConfig:
         "IO": ("IF", "CFFEX"),
         "HO": ("IH", "CFFEX"),
         "MO": ("IM", "CFFEX"),
-        "EO": ("IM", "CFFEX"),
+
         "CU": ("CU", "SHFE"),
         "AL": ("AL", "SHFE"),
         "ZN": ("ZN", "SHFE"),
@@ -41,6 +42,23 @@ class ExchangeConfig:
         "AG": ("AG", "SHFE"),
         "RB": ("RB", "SHFE"),
         "RU": ("RU", "SHFE"),
+        "NI": ("NI", "SHFE"),
+        "SN": ("SN", "SHFE"),
+        "PB": ("PB", "SHFE"),
+        "SS": ("SS", "SHFE"),
+        "HC": ("HC", "SHFE"),
+        "BU": ("BU", "SHFE"),
+        "SP": ("SP", "SHFE"),
+        "FU": ("FU", "SHFE"),
+        "BR": ("BR", "SHFE"),
+        "AD": ("AD", "SHFE"),
+        "AO": ("AO", "SHFE"),
+        "OP": ("OP", "SHFE"),
+        "NR": ("NR", "INE"),
+        "BC": ("BC", "INE"),
+        "LU": ("LU", "INE"),
+        "SC": ("SC", "INE"),
+        "EC": ("EC", "INE"),
         "MA": ("MA", "CZCE"),
         "TA": ("TA", "CZCE"),
         "OI": ("OI", "CZCE"),
@@ -54,6 +72,19 @@ class ExchangeConfig:
         "SF": ("SF", "CZCE"),
         "SM": ("SM", "CZCE"),
         "UR": ("UR", "CZCE"),
+        "PF": ("PF", "CZCE"),
+        "PX": ("PX", "CZCE"),
+        "SH": ("SH", "CZCE"),
+        "PR": ("PR", "CZCE"),
+        "PK": ("PK", "CZCE"),
+        "CY": ("CY", "CZCE"),
+        "JR": ("JR", "CZCE"),
+        "PL": ("PL", "CZCE"),
+        "PM": ("PM", "CZCE"),
+        "RI": ("RI", "CZCE"),
+        "RS": ("RS", "CZCE"),
+        "WH": ("WH", "CZCE"),
+        "ZC": ("ZC", "CZCE"),
         "M": ("M", "DCE"),
         "Y": ("Y", "DCE"),
         "P": ("P", "DCE"),
@@ -66,24 +97,40 @@ class ExchangeConfig:
         "EG": ("EG", "DCE"),
         "C": ("C", "DCE"),
         "CS": ("CS", "DCE"),
-        "SC": ("SC", "INE"),
+        "JM": ("JM", "DCE"),
+        "J": ("J", "DCE"),
+        "JD": ("JD", "DCE"),
+        "PG": ("PG", "DCE"),
+        "BZ": ("BZ", "DCE"),
+        "BB": ("BB", "DCE"),
+        "FB": ("FB", "DCE"),
+        "LH": ("LH", "DCE"),
+        "LG": ("LG", "DCE"),
+        "RR": ("RR", "DCE"),
         "SI": ("SI", "GFEX"),
         "LC": ("LC", "GFEX"),
+        "PD": ("PD", "GFEX"),
+        "PS": ("PS", "GFEX"),
+        "PT": ("PT", "GFEX"),
     })
 
     product_exchanges: Dict[str, str] = field(default_factory=lambda: {
         "IF": "CFFEX", "IH": "CFFEX", "IC": "CFFEX", "IM": "CFFEX",
-        "IO": "CFFEX", "HO": "CFFEX", "MO": "CFFEX", "EO": "CFFEX",
+        "IO": "CFFEX", "HO": "CFFEX", "MO": "CFFEX",
+        "T": "CFFEX", "TF": "CFFEX", "TL": "CFFEX", "TS": "CFFEX",
         "CU": "SHFE", "AL": "SHFE", "ZN": "SHFE", "RB": "SHFE", "AU": "SHFE", "AG": "SHFE",
         "NI": "SHFE", "SN": "SHFE", "PB": "SHFE", "SS": "SHFE", "WR": "SHFE",
-        "RU": "SHFE", "NR": "SHFE", "HC": "SHFE", "BU": "SHFE", "SP": "SHFE", "FU": "SHFE", "BR": "SHFE",
+        "RU": "SHFE", "NR": "INE", "HC": "SHFE", "BU": "SHFE", "SP": "SHFE", "FU": "SHFE", "BR": "SHFE",
+        "AD": "SHFE", "AO": "SHFE", "OP": "SHFE",
         "BC": "INE", "LU": "INE", "SC": "INE", "EC": "INE",
         "M": "DCE", "Y": "DCE", "A": "DCE", "JM": "DCE", "I": "DCE",
         "C": "DCE", "CS": "DCE", "JD": "DCE", "L": "DCE", "V": "DCE", "PP": "DCE",
         "EG": "DCE", "PG": "DCE", "J": "DCE", "P": "DCE", "EB": "DCE", "B": "DCE", "RR": "DCE", "LH": "DCE",
+        "BB": "DCE", "BZ": "DCE", "FB": "DCE", "LG": "DCE",
         "CF": "CZCE", "SR": "CZCE", "MA": "CZCE", "TA": "CZCE", "RM": "CZCE", "OI": "CZCE",
         "SA": "CZCE", "PF": "CZCE", "FG": "CZCE", "SF": "CZCE", "SM": "CZCE", "AP": "CZCE", "CJ": "CZCE", "UR": "CZCE", "PX": "CZCE", "SH": "CZCE", "PR": "CZCE", "PK": "CZCE",
-        "LC": "GFEX", "SI": "GFEX",
+        "CY": "CZCE", "JR": "CZCE", "PL": "CZCE", "PM": "CZCE", "RI": "CZCE", "RS": "CZCE", "WH": "CZCE", "ZC": "CZCE",
+        "LC": "GFEX", "SI": "GFEX", "PD": "GFEX", "PS": "GFEX", "PT": "GFEX",
     })
 
     futures_switches: Dict[str, bool] = field(default_factory=lambda: {
@@ -174,11 +221,11 @@ def _get_option_underlying_product(option_product: str) -> str:
 
 def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, int]:
     try:
-        from ali2026v3_trading.product_initializer import ensure_products_with_retry as _impl
+        from ali2026v3_trading.lifecycle.product_initializer import ensure_products_with_retry as _impl
         return _impl(data_service, max_retries)
     except (ImportError, AttributeError) as e:
-        logging.warning(f"[config_exchange.ensure_products_with_retry] 导入失败: {e}")
-        return {}
+        logging.error("[config_exchange.ensure_products_with_retry] 导入失败: %s", e)
+        raise RuntimeError(f"config_exchange代理导入失败，策略无法继续初始化: {e}")
 
 
 def build_exchange_mapping(custom_mapping: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
@@ -223,3 +270,107 @@ def make_platform_future_id(product: str, year_month: str) -> str:
         return ''
     year_month = normalize_year_month(year_month)
     return f'{product}{year_month}'
+
+
+month_mapping = {
+    "IF": [1, 2, 3, 6, 9, 12],
+    "IH": [1, 2, 3, 6, 9, 12],
+    "IC": [1, 2, 3, 6, 9, 12],
+    "IM": [1, 2, 3, 6, 9, 12],
+    "T": [3, 6, 9, 12],
+    "TF": [3, 6, 9, 12],
+    "TS": [3, 6, 9, 12],
+    "TL": [3, 6, 9, 12],
+}
+
+
+def _add_calendar_months(year: int, month: int, offset: int) -> Tuple[int, int]:
+    total_months = year * 12 + (month - 1) + offset
+    next_year, month_index = divmod(total_months, 12)
+    return next_year, month_index + 1
+
+
+def get_runtime_scoring_months(reference_date: Optional[date] = None, count: int = 5) -> List[str]:
+    """Return the runtime scoring month sequence.
+
+    The trading desk currently defines:
+    - 7月为当月
+    - 8月为下月
+
+    More generally, once the current calendar month passes the configured
+    delivery day, the front scoring month rolls to the next calendar month.
+    The remaining slots are filled by the next available quarter months.
+    """
+    if count <= 0:
+        return []
+
+    if reference_date is None:
+        reference_date = datetime.now(CHINA_TZ).date()
+
+    front_year = reference_date.year
+    front_month = reference_date.month
+    delivery_day = delivery_month_rules.get("CZCE", {}).get("delivery_day", 15)
+    if reference_date.day > int(delivery_day):
+        front_year, front_month = _add_calendar_months(front_year, front_month, 1)
+
+    months: List[Tuple[int, int]] = []
+
+    def _append_unique(year: int, month: int) -> None:
+        item = (year, month)
+        if item not in months:
+            months.append(item)
+
+    _append_unique(front_year, front_month)
+    next_year, next_month = _add_calendar_months(front_year, front_month, 1)
+    _append_unique(next_year, next_month)
+
+    scan_year, scan_month = front_year, front_month
+    while len(months) < count:
+        scan_year, scan_month = _add_calendar_months(scan_year, scan_month, 1)
+        if scan_month in {3, 6, 9, 12}:
+            _append_unique(scan_year, scan_month)
+
+    return [f"{year % 100:02d}{month:02d}" for year, month in months[:count]]
+
+delivery_month_rules = {
+    "CFFEX": {"delivery_day": 15, "delivery_month_offset": 0},
+    "SHFE": {"delivery_day": 15, "delivery_month_offset": 0},
+    "DCE": {"delivery_day": 15, "delivery_month_offset": 0},
+    "CZCE": {"delivery_day": 15, "delivery_month_offset": 0},
+    "INE": {"delivery_day": 15, "delivery_month_offset": 0},
+    "GFEX": {"delivery_day": 15, "delivery_month_offset": 0},
+}
+
+tick_size_by_product = {
+    "IF": 0.2, "IH": 0.2, "IC": 0.2, "IM": 0.2,
+    "IO": 0.1, "HO": 0.1, "MO": 0.1,
+    "T": 0.005, "TF": 0.005, "TS": 0.005, "TL": 0.005,
+    "CU": 10, "AL": 5, "ZN": 5, "PB": 5, "NI": 10,
+    "AU": 0.02, "AG": 1, "RB": 1, "HC": 1, "SS": 5,
+    "RU": 5, "BU": 2, "SP": 2, "FU": 1, "LU": 1,
+    "MA": 1, "TA": 2, "PF": 2, "UR": 1, "OI": 1,
+    "CF": 5, "SR": 1, "AP": 1, "CJ": 5, "SA": 1,
+    "FG": 1, "SF": 2, "SM": 1, "M": 1, "Y": 2,
+    "P": 2, "A": 1, "B": 1, "L": 1, "V": 5,
+    "PP": 1, "EB": 1, "EG": 1, "PG": 1, "I": 0.5,
+    "J": 0.5, "JM": 0.5, "C": 1, "CS": 1, "JD": 0.5,
+    "SC": 0.1, "BC": 0.1, "SI": 5, "LC": 10,
+}
+
+exchange_trading_sessions = {
+    "CFFEX": {"day": [(9, 15), (11, 30)], "night": []},
+    "SHFE": {"day": [(9, 0), (11, 30)], "night": [(21, 0), (1, 0)]},
+    "DCE": {"day": [(9, 0), (11, 30)], "night": [(21, 0), (23, 0)]},
+    "CZCE": {"day": [(9, 0), (11, 30)], "night": [(21, 0), (23, 30)]},
+    "INE": {"day": [(9, 0), (11, 30)], "night": [(21, 0), (1, 0)]},
+    "GFEX": {"day": [(9, 0), (11, 30)], "night": []},
+}
+
+rollover_days = {
+    "CFFEX": 5,
+    "SHFE": 5,
+    "DCE": 5,
+    "CZCE": 5,
+    "INE": 5,
+    "GFEX": 5,
+}

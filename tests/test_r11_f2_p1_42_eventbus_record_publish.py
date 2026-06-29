@@ -1,10 +1,10 @@
 # MODULE_ID: M2-478
-"""R3-F2: P1-42 事件总线_record_and_publish重复发布 断言测试
+"""R3-F2: P1-42 事件总线程record_and_publish重复发布 断言测试
 
 验证运行时行为:
-1. _record_and_publish拆分为_validate_and_check + _record_result + _publish_risk_event_via_eventbus
+1. _record_and_publish拆分为期validate_and_check + _record_result + _publish_risk_event_via_eventbus
 2. _publish_risk_event_via_eventbus通过EventBus发布RiskEvent
-3. EventBus不可用时_record_and_publish仍能返回结果
+3. EventBus不可用时常record_and_publish仍能返回结果
 4. result_handler.record_and_publish调用路径正确
 """
 import os
@@ -20,9 +20,9 @@ def test_record_and_publish_decomposed():
     """P1-42验证: _record_and_publish拆分为3个独立步骤"""
     from ali2026v3_trading.risk.risk_service import RiskService
     assert hasattr(RiskService, '_validate_and_check'), \
-        "RiskService应拥有_validate_and_check方法"
+        "RiskService应拥有界validate_and_check方法"
     assert hasattr(RiskService, '_publish_risk_event_via_eventbus'), \
-        "RiskService应拥有_publish_risk_event_via_eventbus方法"
+        "RiskService应拥有界publish_risk_event_via_eventbus方法"
 
 
 def test_publish_risk_event_via_eventbus():
@@ -67,7 +67,7 @@ def test_publish_risk_event_via_eventbus():
 
 
 def test_record_and_publish_returns_result_without_eventbus():
-    """P1-42验证: EventBus不可用时_record_and_publish仍能返回结果"""
+    """P1-42验证: EventBus不可用时常record_and_publish仍能返回结果"""
     from ali2026v3_trading.risk.risk_service import RiskService
 
     rs = RiskService.__new__(RiskService)

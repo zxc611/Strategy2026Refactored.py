@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 from ali2026v3_trading.risk.risk_service import RiskCheckResponse, RiskLevel
 
 try:
-    from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log  # R1-4修复
+    from ali2026v3_trading.infra.security_service import structured_audit_log  # R1-4修复
 except ImportError:
     structured_audit_log = None
 

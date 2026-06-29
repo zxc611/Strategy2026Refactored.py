@@ -3,7 +3,7 @@
 
 验证项:
 1. safe_divide存在于resilience_numeric并可导入
-2. _factory.py的_precompute_division使用safe_divide
+2. _factory.py的指precompute_division使用safe_divide
 3. order_flow_analyzer.py使用safe_divide替代内联保护
 4. 两个文件不再有内联denominator==0检查
 """
@@ -33,7 +33,7 @@ class TestSafeDividePromotion:
         assert safe_divide(10.0, 0.0, default=-1.0) == -1.0
 
     def test_factory_uses_safe_divide(self):
-        """验证strategy_ecosystem/__init__.py的_precompute_division使用safe_divide"""
+        """验证strategy_ecosystem/__init__.py的指precompute_division使用safe_divide"""
         path = os.path.join(_project_root, "strategy", "strategy_ecosystem", "__init__.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()
@@ -41,7 +41,7 @@ class TestSafeDividePromotion:
         assert 'safe_divide(numerator, denominator' in source
 
     def test_factory_no_inline_denominator_check(self):
-        """验证strategy_ecosystem/__init__.py不再有内联denominator==0.0检查（在_precompute_division内）"""
+        """验证strategy_ecosystem/__init__.py不再有内联denominator==0.0检查（在。precompute_division内）"""
         path = os.path.join(_project_root, "strategy", "strategy_ecosystem", "__init__.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()

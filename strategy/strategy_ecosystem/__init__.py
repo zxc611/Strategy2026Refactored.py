@@ -2,7 +2,7 @@
 """strategy_ecosystem - 策略生态系统包（re-export门面 + 工厂函数）
 
 将拆分后的子模块统一导出，保持与原 strategy_ecosystem.py 完全相同的公开API。
-工厂函数和性能缓存（从_factory.py迁入）也在此定义。
+工厂函数和性能缓存（从。factory.py迁入）也在此定义。
 """
 from __future__ import annotations
 

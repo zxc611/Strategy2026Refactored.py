@@ -195,7 +195,7 @@ def verify_q9() -> AssertionResult:
     if "SurvivalBiasTest" not in content:
         return AssertionResult("Q9: 核心扫描器是否集成验证器", False, "无SurvivalBiasTest")
     if "_validate_parameter_set" not in content:
-        return AssertionResult("Q9: 核心扫描器是否集成验证器", False, "无_validate_parameter_set函数")
+        return AssertionResult("Q9: 核心扫描器是否集成验证器", False, "无界validate_parameter_set函数")
     return AssertionResult("Q9: 核心扫描器是否集成验证器", True, "验证器导入+_validate_parameter_set函数")
 
 
@@ -205,7 +205,7 @@ def verify_q10() -> AssertionResult:
     if "from ali2026v3_trading.risk.risk_service import get_risk_service" not in content:
         return AssertionResult("Q10: 风控检查是否直接耦合", False, "未导入get_risk_service")
     if "_pre_trade_risk_check" not in content:
-        return AssertionResult("Q10: 风控检查是否直接耦合", False, "无_pre_trade_risk_check函数")
+        return AssertionResult("Q10: 风控检查是否直接耦合", False, "无界pre_trade_risk_check函数")
     if "check_regulatory_compliance" not in content:
         return AssertionResult("Q10: 风控检查是否直接耦合", False, "未调用check_regulatory_compliance")
     return AssertionResult("Q10: 风控检查是否直接耦合", True, "直接导入+预检函数+合规检查调用")
@@ -221,7 +221,7 @@ def verify_q11() -> AssertionResult:
     if "class ShadowStrategyEngine(ShadowStrategyCoreService):" in content:
         return AssertionResult("Q11: Facade是否纯组合", False, "仍继承ShadowStrategyCoreService")
     if "self._core_service = ShadowStrategyCoreService" not in content:
-        return AssertionResult("Q11: Facade是否纯组合", False, "未使用组合持有_core_service")
+        return AssertionResult("Q11: Facade是否纯组合", False, "未使用组合持有界core_service")
     return AssertionResult("Q11: Facade是否纯组合", True, "纯组合模式")
 
 

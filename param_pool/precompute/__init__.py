@@ -1,4 +1,4 @@
-"""V5 precompute subpackage — moved to tests/precompute_fixtures/."""
+"""V5 precompute subpackage — delegates to ali2026v3_trading.precompute."""
 from __future__ import annotations
 
 __all__: list[str] = [
@@ -33,6 +33,6 @@ def __getattr__(name: str):
         "_trend_scores": "._trend_scores",
     }
     if name in _MOVED:
-        from ali2026v3_trading.tests import precompute_fixtures as _dst
+        from ali2026v3_trading import precompute as _dst
         return getattr(_dst, _MOVED[name].lstrip('.'))
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1,4 +1,4 @@
-﻿# [M3-13] 回测集成钩子
+# [M3-13] 回测集成钩子
 # MODULE_ID: M3-611
 """
 回测集成钩子 (Backtest Integration Hooks) — v1.4

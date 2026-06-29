@@ -1,4 +1,4 @@
-﻿# [M1-131] 结果写入与质量门
+# [M1-131] 结果写入与质量门
 # MODULE_ID: M1-192
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 #!/usr/bin/env python3
@@ -40,7 +40,7 @@ except ImportError:
 
 from ali2026v3_trading.infra.shared_utils import ANNUALIZE_FACTOR_DAILY, ANNUALIZE_FACTOR_MINUTE
 from ali2026v3_trading.infra.shared_utils import safe_price_check
-from ali2026v3_trading.infra.cross_system import CrossSystemExecutionKernel
+from ali2026v3_trading.infra.trading_utils import CrossSystemExecutionKernel
 from ali2026v3_trading.data.data_access import get_data_access
 from ali2026v3_trading.data.db_adapter import connect_duckdb
 
@@ -99,7 +99,7 @@ def _validate_ddl_column_names(column_names: List[str]) -> None:
 
 def _ensure_results_table(con: Any, param_keys: List[str]) -> None:
     _validate_ddl_column_names(param_keys)
-    # P0-12修复: 70+参数列标记deprecated，建表仍保留列定义以兼容已有DB，但_insert_results不再写入
+    # P0-12修复: 70+参数列标记deprecated，建表仍保留列定义以兼容已有DB，但。insert_results不再写入
     param_cols = ",\n            ".join(f'"{k}" DOUBLE  -- deprecated: P0-12参数列，所有读取方从params_json解析' for k in param_keys)
     con.execute(f"""
         CREATE TABLE IF NOT EXISTS backtest_results (
@@ -162,7 +162,7 @@ def _ensure_results_table(con: Any, param_keys: List[str]) -> None:
             market_making_shadow_b_sharpe DOUBLE,
             market_making_alpha DOUBLE,
             
-            -- P0-9修复: 6个关键计算字段列(原_worker_task计算但不入库)
+            -- P0-9修复: 6个关键计算字段列(原子worker_task计算但不入库)
             minute_trend_score DOUBLE,
             risk_adjusted_score DOUBLE,
             risk_score_error VARCHAR,
@@ -200,8 +200,7 @@ def _interpolate_ticks_in_bar(
     将1根分钟Bar拆解为n_ticks个虚拟tick：
       - 价格路径: 线性插值 open → high/low → close
       - 成交量: 均匀分配
-      - imbalance/strength: 逐tick线性过渡（允许信号翻转检测）
-
+      - imbalance/strength: 逐tick线性过渡（允许信号翻转检测）'
     Args:
         bar: 单根Bar（pandas Series或dict-like）
         n_ticks: 每根Bar内的虚拟tick数（默认5，≈12秒/tick在1分钟Bar内）
@@ -221,7 +220,7 @@ def _interpolate_ticks_in_bar(
 
     if n_ticks <= 1 or o == 0:
         return [{
-            "price": c,
+            "last_price": c,
             "volume": vol,
             "imbalance": imb_start,
             "strength": str_start,
@@ -261,7 +260,7 @@ def _interpolate_ticks_in_bar(
         frac = i / max(1, n_ticks - 1)
         jitter = rng.uniform(-imbalance_jitter, imbalance_jitter)
         tick = {
-            "price": prices[i],
+            "last_price": prices[i],
             "volume": vol_per_tick,
             "imbalance": imb_start + (imb_end - imb_start) * frac + jitter,
             "strength": str_start + (str_end - str_start) * frac,
@@ -604,7 +603,7 @@ def _load_multiscale_data(
 
     bar_length_minutes=1 → 直接读minute_data表
     bar_length_minutes∈{5,15,60} → 读minute_data_multiscale表对应bar_length_minutes行
-    bar_length_minutes∉{1,5,15,60} → 从1分钟数据在线聚合（运行时_resample）
+    bar_length_minutes∉{1,5,15,60} → 从1分钟数据在线聚合（运行时常resample）
     """
     con = connect_duckdb(db_path, read_only=True)
     try:
@@ -769,7 +768,7 @@ def _execute_round(
 ) -> Tuple[List[dict], int]:
     """执行一轮参数扫描，每个任务包含九策略回测
 
-    P1-裂缝51：增加checkpoint_db记录已完成组合，支持--resume断点续传。
+    P1-裂缝51：增加checkpoint_db记录已完成组合，支持--resume断点续传。'
     """
     _run_id = time.strftime("%Y%m%d_%H%M%S")
     all_keys = sorted(set(list(param_grid.keys()) + (list(fixed_params.keys()) if fixed_params else [])))

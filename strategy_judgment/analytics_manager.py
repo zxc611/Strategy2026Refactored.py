@@ -1,8 +1,8 @@
-﻿# [M3-17] 分析管理器
+# [M3-17] 分析管理器
 # MODULE_ID: M3-610
 """
 analytics_manager.py - AnalyticsManager
-Phase 2 (CC-02+CC-04): 从_LifecycleMixin提取的分析/预热/统计Manager
+Phase 2 (CC-02+CC-04): 从。LifecycleMixin提取的分析/预热/统计Manager
 
 职责：
 - Analytics初始化（_init_analytics_services, _build_instrument_groups）

@@ -18,7 +18,7 @@ from ali2026v3_trading.infra.subscription_service import (
     SubscriptionInstrumentService, _SubscriptionInstrumentMixin,
     SubscriptionWALService, _SubscriptionWALMixin,
 )
-from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+from ali2026v3_trading.infra.subscription_service import SubscriptionManager
 from ali2026v3_trading.governance.mode_engine_propagation import ModeEnginePropagationService, ModeEnginePropagationMixin
 from ali2026v3_trading.governance.mode_engine import ModeEngine
 from ali2026v3_trading.order.order_base import OrderQueryService, OrderQueryMixin

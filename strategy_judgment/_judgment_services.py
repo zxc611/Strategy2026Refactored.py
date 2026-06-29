@@ -1,4 +1,4 @@
-﻿# [M3-07] 内部服务(深度验证+评分)
+# [M3-07] 内部服务(深度验证+评分)
 # MODULE_ID: M3-609
 # _INTERNAL: internal module, not part of public API
 from __future__ import annotations
@@ -659,7 +659,7 @@ class ScoringHelper:
   - run_ecosystem_integrations: 生态集成(CascadeJudge/E-04~E-13/Alpha-CI/DeepValidation/Sensitivity)
 
 注意: STRICT_MODE, ComponentFailurePolicy, CRITICAL_COMPONENTS, _handle_component_failure,
-      run_ecosystem_integrations 等符号已迁移到 judgment_scoring_helpers.py，本模块通过 re-export 保持兼容。
+      run_ecosystem_integrations 等符号已迁移到 judgment_scoring_helpers.py，本模块通过 re-export 保持兼容。'
 """
 
 import logging

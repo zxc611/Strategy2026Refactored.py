@@ -1,4 +1,4 @@
-﻿# [M3-12] 参数池适配器
+# [M3-12] 参数池适配器
 # MODULE_ID: M3-622
 """
 参数池适配器 (Parameter Pool Adapter) — 连接task_scheduler回测结果与策略评判引擎
@@ -225,7 +225,7 @@ def judge_backtest_result(
     drawdown_recovery = _extract_drawdown_recovery(result)
     realtime_risk_scores = _extract_realtime_risk_scores(result)
     
-    # E-07修复: 自动调用4个维度提取函数（如果未显式传入）
+    # E-07修复: 自动调用4个维度提取函数（如果未显式传入）'
     if cross_instrument_results is None:
         cross_instrument_results = _extract_cross_instrument(result)
     if return_source_diversification is None:

@@ -49,7 +49,7 @@ from ali2026v3_trading.infra.shared_utils import api_version  # P1-21: 统一从
 from ali2026v3_trading.risk.risk_position_bridge import RiskBridgeAdapter, PositionBridgeAdapter, BridgeRiskLevel
 
 try:
-    from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log as _structured_audit_log  # R1-4修复
+    from ali2026v3_trading.infra.security_service import structured_audit_log as _structured_audit_log  # R1-4修复
 except ImportError:
     _structured_audit_log = None
 
@@ -100,10 +100,17 @@ class PositionRecord(object):
     chase_count: int = 0
     open_reason: str = ''
     order_id: str = ''
+    signal_id: str = ''  # CHAIN-BUG-5 fix: 贯通开仓signal_id至持仓，平仓订单可回溯开仓信号
+    strategy_group: str = ''  # 策略组归属，由open_reason自动映射
+    close_reason: str = ''    # 平仓原因，在_trigger_close_position时设置
+    realized_pnl: float = 0.0  # 已实现盈亏，在平仓时计算
     target_plr: float = 0.0
     current_plr: float = 0.0
     plr_status: str = ''
     _closing: bool = False
+    closing_order_id: str = ''
+    open_signal_snapshot: str = ''
+    close_method: str = ''
     _max_profit_pct: float = 0.0
     _profit_history: List[float] = None
     profit_slope: float = 0.0
@@ -112,6 +119,9 @@ class PositionRecord(object):
     option_premium: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
+        # FIX-R37-UNIQUE-UPDATE(B2): 序列化全部字段，确保重启后恢复完整持仓状态
+        # 原 to_dict 漏掉 _max_profit_pct/profit_slope/stage1_passed/option_premium/_closing/closing_order_id
+        # 导致重启后两阶段止损/利润斜率/期权权利金等状态丢失
         return {
             'position_id': self.position_id, 'instrument_id': self.instrument_id,
             'exchange': self.exchange, 'volume': self.volume, 'direction': self.direction,
@@ -119,13 +129,25 @@ class PositionRecord(object):
             'open_date': self.open_date.isoformat(), 'position_type': self.position_type,
             'stop_profit_price': self.stop_profit_price, 'stop_loss_price': self.stop_loss_price,
             'chase_count': self.chase_count, 'open_reason': self.open_reason,
-            'order_id': self.order_id, 'target_plr': self.target_plr,
+            'order_id': self.order_id, 'signal_id': self.signal_id, 'strategy_group': self.strategy_group,
+            'close_reason': self.close_reason, 'realized_pnl': self.realized_pnl,
+            'target_plr': self.target_plr,
             'current_plr': self.current_plr, 'plr_status': self.plr_status,
             'current_price': self.current_price,
+            'open_signal_snapshot': getattr(self, 'open_signal_snapshot', ''),
+            'close_method': getattr(self, 'close_method', ''),
+            # FIX-R37-UNIQUE-UPDATE(B2): 补充遗漏字段
+            '_max_profit_pct': getattr(self, '_max_profit_pct', 0.0),
+            'profit_slope': getattr(self, 'profit_slope', 0.0),
+            'stage1_passed': getattr(self, 'stage1_passed', False),
+            'option_premium': getattr(self, 'option_premium', 0.0),
+            '_closing': getattr(self, '_closing', False),
+            'closing_order_id': getattr(self, 'closing_order_id', ''),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> PositionRecord:
+        # FIX-R37-UNIQUE-UPDATE(B2): 恢复时读取全部字段
         return cls(
             position_id=data['position_id'], instrument_id=data['instrument_id'],
             exchange=data['exchange'], volume=data['volume'], direction=data['direction'],
@@ -133,9 +155,19 @@ class PositionRecord(object):
             open_date=datetime.fromisoformat(data['open_date']).date(), position_type=data['position_type'],
             stop_profit_price=data.get('stop_profit_price', 0.0), stop_loss_price=data.get('stop_loss_price', 0.0),
             chase_count=data.get('chase_count', 0), open_reason=data.get('open_reason', ''),
-            order_id=data.get('order_id', ''), target_plr=data.get('target_plr', 0.0),
+            order_id=data.get('order_id', ''), signal_id=data.get('signal_id', ''),
+            strategy_group=data.get('strategy_group', ''), close_reason=data.get('close_reason', ''),
+            realized_pnl=data.get('realized_pnl', 0.0), target_plr=data.get('target_plr', 0.0),
             current_plr=data.get('current_plr', 0.0), plr_status=data.get('plr_status', ''),
-            current_price=data.get('current_price', 0.0), _closing=data.get('_closing', False)
+            current_price=data.get('current_price', 0.0), _closing=data.get('_closing', False),
+            open_signal_snapshot=data.get('open_signal_snapshot', ''),
+            close_method=data.get('close_method', ''),
+            # FIX-R37-UNIQUE-UPDATE(B2): 恢复遗漏字段
+            _max_profit_pct=data.get('_max_profit_pct', 0.0),
+            profit_slope=data.get('profit_slope', 0.0),
+            stage1_passed=data.get('stage1_passed', False),
+            option_premium=data.get('option_premium', 0.0),
+            closing_order_id=data.get('closing_order_id', ''),
         )
 
 
@@ -211,6 +243,8 @@ class PositionService(object):
         """R17-P1-DOC-P1-03修复: PositionService初始化。Args: risk_service: 风控服务实例(可选)。初始化self_trade_detector(自成交检测器)/network_retry_manager(网络重试)/partial_fill_handler(部分成交处理器)/structured_logger(结构化日志)"""
         self._data_service_ready: bool = False
         self.positions: Dict[str, Dict[str, PositionRecord]] = {}
+        # FIX-R37-REALIZED-PNL: 服务级已实现盈亏累加器，持仓记录删除后仍可追踪
+        self._total_realized_pnl: float = 0.0
         self._position_snapshot_time: float = 0.0
         self._position_snapshot_ttl: float = 300.0
         self.config_file = "option_buy_limits.json"
@@ -264,6 +298,10 @@ class PositionService(object):
 
         self._persistence_svc._recover_position_state()
         self._load_position_configs()
+        self._snapshot_collector = None
+
+    def set_snapshot_collector(self, collector) -> None:
+        self._snapshot_collector = collector
 
         try:
             from ali2026v3_trading.config.config_params import register_param_change_callback
@@ -305,16 +343,23 @@ class PositionService(object):
         self._update_tp_sl_from_params()
 
     def _on_partial_fill_event(self, event: Any) -> None:
+        # FIX-R37-UNIQUE-UPDATE(B1): 原 _on_partial_fill_event 访问 _rec.traded_volume/status，
+        # 但 PositionRecord(slots=True) 没有这两个字段，导致整个方法成为死代码。
+        # 改为基于 _closing 标志和 closing_order_id 判断部分平仓状态。
         try:
-            _inst = event.get('instrument_id', '') if isinstance(event, dict) else getattr(event, 'instrument_id', '')
-            _filled = event.get('filled_volume', 0) if isinstance(event, dict) else getattr(event, 'filled_volume', 0)
+            _inst = getattr(event, 'instrument_id', '')
+            _filled = getattr(event, 'traded_volume', 0)
             if _inst and _filled > 0:
-                _pos_map = self.positions.get(_inst, {})
-                for _pid, _rec in _pos_map.items():
-                    if hasattr(_rec, 'filled_volume'):
-                        _remaining = abs(getattr(_rec, 'volume', 0)) - abs(getattr(_rec, 'filled_volume', 0))
-                        if _remaining > 0 and getattr(_rec, 'status', '') != 'PARTIAL_CLOSING':
-                            setattr(_rec, 'status', 'PARTIAL_CLOSING')
+                with self._get_instrument_lock(_inst):
+                    _pos_map = self.positions.get(_inst, {})
+                    for _pid, _rec in _pos_map.items():
+                        # FIX-R37-UNIQUE-UPDATE(B1): 使用 slots 中实际存在的字段
+                        # 部分平仓期间 _closing=True 且 closing_order_id 以 PENDING_ 开头
+                        _closing_oid = getattr(_rec, 'closing_order_id', '')
+                        if getattr(_rec, '_closing', False) and _closing_oid:
+                            # 标记为部分平仓中，便于下游识别
+                            if not _closing_oid.startswith('PARTIAL_'):
+                                _rec.closing_order_id = f"PARTIAL_{_closing_oid}"
                             break
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.debug("[R3-L2] suppressed exception", exc_info=True)
@@ -322,7 +367,7 @@ class PositionService(object):
             pass
 
     def _on_param_changed_event(self, event: Any) -> None:
-        """P2-26修复: 与_on_config_param_change功能完全相同，统一委托到_update_tp_sl_from_params"""
+        """P2-26修复: 与审on_config_param_change功能完全相同，统一委托到。update_tp_sl_from_params"""
         self._update_tp_sl_from_params()
 
     @staticmethod
@@ -468,19 +513,26 @@ class PositionService(object):
                         })
             return result
 
-    def _add_position(self, exchange: str, instrument_id: str, volume: int, price: float, open_reason: str = '', order_id: str = '') -> None:
-        return self._command_svc._add_position(exchange, instrument_id, volume, price, open_reason, order_id)
+    def _add_position(self, exchange: str, instrument_id: str, volume: int, price: float, open_reason: str = '', order_id: str = '', signal_id: str = '') -> None:
+        return self._command_svc._add_position(exchange, instrument_id, volume, price, open_reason, order_id, signal_id)
     def _reduce_position(self, exchange: str, instrument_id: str, volume: int, is_buy: bool, price: float) -> None:
         return self._command_svc._reduce_position(exchange, instrument_id, volume, is_buy, price)
     def _trigger_close_position(self, record, reason: str, current_price: float = 0.0) -> None:
         return self._command_svc._trigger_close_position(record, reason, current_price)
+    # FIX-R37-UNIQUE-CLOSE: 统一回滚入口，TradeRollbackManager必须通过此方法操作持仓
+    def _rollback_position(self, instrument_id: str, position_id: str, reason: str = 'rollback') -> bool:
+        return self._command_svc._rollback_position(instrument_id, position_id, reason)
+    def _restore_position_state(self, position_id: str, instrument_id: str, snapshot) -> None:
+        return self._command_svc._restore_position_state(position_id, instrument_id, snapshot)
     def _schedule_close_retry(self, record, price: float) -> None:
         return self._command_svc._schedule_close_retry(record, price)
 
     _HARDCODED_REASON_DEFAULTS = {  # R17-P1-DOC-P1-09修复: 来源 V7.0手册§9.1/9.2 硬编码回退值(优先从state_param_manager读取)
         'CORRECT_RESONANCE': (1.5, 0.50), 'CORRECT_DIVERGENCE': (1.2, 0.40),  # 来源: V7.0手册§9.1
-        'INCORRECT_REVERSAL': (1.3, 0.60), 'OTHER_SCALP': (1.1, 0.30),  # 来源: V7.0手册§9.2
+        'INCORRECT_REVERSAL': (1.3, 0.60), 'INCORRECT_DIVERGENCE': (1.2, 0.50),
+        'OTHER_SCALP': (1.1, 0.30),  # 来源: V7.0手册§9.2
         'BOX_SPRING': (5.0, 0.60),  # R27-P0-FIX: 来源V7.0手册§9.2，与TP_SL_REASON_DEFAULTS对齐
+        'ARBITRAGE': (1.2, 0.30), 'MARKET_MAKING': (1.1, 0.20),
         'MANUAL': (1.5, 0.50), '': (1.5, 0.50),  # 来源: V7.0手册§9.1 兜底默认值
     }
     _FALLBACK_TP_SL = (1.8, 0.30)
@@ -516,16 +568,12 @@ class PositionService(object):
         except (ImportError, AttributeError):
             pass
 
-    @staticmethod
-    def _map_reason_to_strategy(reason: str) -> str:
-        return _REASON_STRATEGY_MAP.get(reason, 'high_freq')
-
     def _apply_crm_stop_loss_adjustment(self, sl_ratio: float, open_reason: str) -> float:
         try:
             import importlib
-            crm_module = importlib.import_module('ali2026v3_trading.param_pool.cycle_resonance_module')
+            crm_module = importlib.import_module('ali2026v3_trading.param_pool.optimization.cycle_sharpe')
             crm = crm_module.get_cycle_resonance_module()
-            strategy = self._map_reason_to_strategy(open_reason)
+            strategy = _REASON_STRATEGY_MAP.get(open_reason, 'high_freq')  # 五唯一性修复：直接使用字典查找
             rs = crm.get_risk_surface(strategy)
             adjusted = sl_ratio * rs.stop_loss_multiplier
             return float(np.clip(adjusted, self.CRM_SL_CLIP_LOWER, self.CRM_SL_CLIP_UPPER)) if _HAS_NUMPY else max(self.CRM_SL_CLIP_LOWER, min(self.CRM_SL_CLIP_UPPER, adjusted))
@@ -533,6 +581,10 @@ class PositionService(object):
             return sl_ratio
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return sl_ratio
+
+    def _map_reason_to_strategy(self, open_reason: str) -> str:
+        """向后兼容包装：映射开仓理由到策略组。五唯一性修复：直接使用_REASON_STRATEGY_MAP字典。"""
+        return _REASON_STRATEGY_MAP.get(open_reason, 'high_freq')
 
     def _get_open_reason_from_order(self, instrument_id: str, order_id: str = '') -> str:
         try:
@@ -545,11 +597,30 @@ class PositionService(object):
                         return order.get('open_reason', '')
                 orders = osvc.get_orders_by_instrument(instrument_id)
                 for o in orders:
-                    if o.get('action') == 'OPEN' and o.get('status') in ('SUBMITTED', 'FILLED', 'ALL_FILLED', '全成'):
+                    if o.get('action') == 'OPEN' and o.get('status') in ('SUBMITTED', 'FILLED', 'ALL_FILLED', '全成', '全部成交', '部成部撤'):
                         return o.get('open_reason', '')
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.debug("[R3-L2] suppressed exception", exc_info=True)
             pass
+            pass
+        return ''
+
+    def _get_signal_id_from_order(self, instrument_id: str, order_id: str = '') -> str:
+        # CHAIN-BUG-5 fix: 通过order_id回查开仓signal_id，贯通至PositionRecord
+        try:
+            from ali2026v3_trading.order.order_service import get_order_service
+            osvc = get_order_service()
+            if osvc:
+                if order_id:
+                    order = osvc.get_order(order_id)
+                    if order:
+                        return order.get('signal_id', '')
+                orders = osvc.get_orders_by_instrument(instrument_id)
+                for o in orders:
+                    if o.get('action') == 'OPEN' and o.get('status') in ('SUBMITTED', 'FILLED', 'ALL_FILLED', '全成', '全部成交', '部成部撤'):
+                        return o.get('signal_id', '')
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] suppressed exception", exc_info=True)
             pass
         return ''
 
@@ -587,7 +658,7 @@ class PositionService(object):
 
     @classmethod
     def _cleanup_close_retry_executor(cls):
-        pass  # 已委托到_command_svc
+        pass  # 已委托到。command_svc
 
     def __del__(self):
         try:

@@ -13,9 +13,9 @@ try:
         src = f.read()
     assert 'class ShadowStrategyEngine' in src, 'ShadowStrategyEngine类不存在'
     assert 'ShadowStrategyCoreService' not in src.split('class ShadowStrategyEngine')[1].split(':')[0], '仍继承ShadowStrategyCoreService'
-    assert 'self._core_service' in src, '未使用组合模式持有_core_service'
-    assert 'self._signal_service' in src, '未使用组合模式持有_signal_service'
-    assert 'self._pnl_service' in src, '未使用组合模式持有_pnl_service'
+    assert 'self._core_service' in src, '未使用组合模式持有界core_service'
+    assert 'self._signal_service' in src, '未使用组合模式持有界signal_service'
+    assert 'self._pnl_service' in src, '未使用组合模式持有界pnl_service'
     lines = src.split('\n')
     class_line = None
     for i, line in enumerate(lines):
@@ -47,10 +47,10 @@ except AssertionError as e:
 try:
     with open('risk/risk_service.py', 'r', encoding='utf-8') as f:
         src = f.read()
-    assert 'self._check_service.check_regulatory_compliance' in src, 'check_regulatory_compliance未走_check_service委托'
-    assert 'self._check_service.check_capital_sufficiency' in src, 'check_capital_sufficiency未走_check_service委托'
-    assert 'self._check_service.check_exchange_status' in src, 'check_exchange_status未走_check_service委托'
-    print('R2-3 PASS: 风控委托链已统一走_check_service')
+    assert 'self._check_service.check_regulatory_compliance' in src, 'check_regulatory_compliance未走。check_service委托'
+    assert 'self._check_service.check_capital_sufficiency' in src, 'check_capital_sufficiency未走。check_service委托'
+    assert 'self._check_service.check_exchange_status' in src, 'check_exchange_status未走。check_service委托'
+    print('R2-3 PASS: 风控委托链已统一走。check_service')
     PASS += 1
 except AssertionError as e:
     print(f'R2-3 FAIL: {e}')
@@ -81,7 +81,7 @@ try:
     assert 'DEPRECATED' in core_shim or 'shadow_strategy_core' in core_shim, '_shadow_strategy_core.py不是有效shim'
     with open('strategy/shadow_strategy_facade.py', 'r', encoding='utf-8') as f:
         facade_src = f.read()
-    assert '_shadow_strategy_signal' in facade_src, 'facade未导入_shadow_strategy_signal'
+    assert '_shadow_strategy_signal' in facade_src, 'facade未导入口shadow_strategy_signal'
     print('R2-5 PASS: 下划线前缀shim已创建+facade已更新导入')
     PASS += 1
 except AssertionError as e:

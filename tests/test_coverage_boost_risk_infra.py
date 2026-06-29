@@ -16,7 +16,7 @@ from ali2026v3_trading.infra.trading_utils import (
     classify_deviation, compute_commission, ThreadSafeCounter, ThreadSafeDict,
     Signal,
 )
-from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log
+from ali2026v3_trading.infra.security_service import structured_audit_log
 
 
 class TestDrawdownMonitorService:

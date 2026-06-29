@@ -1,4 +1,4 @@
-﻿# [M3-09] 策略行为诊断
+# [M3-09] 策略行为诊断
 # MODULE_ID: M3-625
 """
 策略行为诊断 (Strategy Behavior Diagnosis) — 生产就绪版 v1.1

@@ -18,14 +18,14 @@ if _project_root not in sys.path:
 
 
 def test_audit_logger_has_delegate_method():
-    """P1-07验证: AuditLogger实例拥有_delegate_to_structured_audit_log方法"""
+    """P1-07验证: AuditLogger实例拥有界delegate_to_structured_audit_log方法"""
     from ali2026v3_trading.config.config_logging import AuditLogger
     with tempfile.NamedTemporaryFile(suffix='.audit', delete=False) as f:
         log_path = f.name
     try:
         logger = AuditLogger(log_path)
         assert hasattr(logger, '_delegate_to_structured_audit_log'), \
-            "AuditLogger应拥有_delegate_to_structured_audit_log方法"
+            "AuditLogger应拥有界delegate_to_structured_audit_log方法"
         assert callable(getattr(logger, '_delegate_to_structured_audit_log')), \
             "_delegate_to_structured_audit_log应为可调用方法"
     finally:

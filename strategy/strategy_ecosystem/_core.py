@@ -1,6 +1,6 @@
 # MODULE_ID: M1-270
 """strategy_ecosystem._core - StrategyEcosystem主类(组合所有Mixin)
-+ CapitalRoutingService (从_capital_routing.py迁入)
++ CapitalRoutingService (从。capital_routing.py迁入)
 """
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 import time
-import types  # 用于__getattr__方法重绑定
+import types  # 用于。_getattr__方法重绑定
 from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -42,7 +42,7 @@ from ali2026v3_trading.strategy.strategy_ecosystem.services import (
 
 # P-12修复: LiveStrategySelector实盘集成初始化
 try:
-    from ali2026v3_trading.param_pool.cycle_resonance_module import LiveStrategySelector
+    from ali2026v3_trading.param_pool.optimization.cycle_sharpe import LiveStrategySelector
     from ali2026v3_trading.infra.module_load_status import mark_module_loaded
     mark_module_loaded('strategy_ecosystem_live_strategy_selector')
 except ImportError as _ie:
@@ -113,7 +113,7 @@ class CapitalRoutingService:
                 bss.set_capital_scale(scale_str)
             else:
                 setattr(bss, '_capital_scale', scale_str)
-                logger.warning("[StrategyEcosystem] BoxSpringStrategy无set_capital_scale方法，使用setattr设_capital_scale=%s", scale_str)
+                logger.warning("[StrategyEcosystem] BoxSpringStrategy无set_capital_scale方法，使用setattr设计capital_scale=%s", scale_str)
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             logger.warning("[StrategyEcosystem] propagate to BoxSpringStrategy failed: %s", e)
 
@@ -304,7 +304,7 @@ class CapitalRoutingService:
                 logger.debug("[StrategyEcosystem] 影子引擎降级检查跳过: %s", _sse_err)
 
             try:
-                from ali2026v3_trading.param_pool.cycle_resonance_module import get_cycle_resonance_module
+                from ali2026v3_trading.param_pool.optimization.cycle_sharpe import get_cycle_resonance_module
                 crm = get_cycle_resonance_module()
                 if crm:
                     _SLOT_TO_CRM_STRATEGY = {'master': 'resonance', 'reverse': 'box', 'other': 'high_freq', 'spring': 'spring', 'divergence': 'divergence'}
@@ -564,8 +564,7 @@ CapitalRoutingMixin = CapitalRoutingService
 
 
 class StrategyEcosystem:
-    """策略生态系统 — Facade组合（消灭Mixin继承）
-
+    """策略生态系统 — Facade组合（消灭Mixin继承）'
     六大策略协同：
     - correct_trending → 主策略(S2共振)
     - incorrect_reversal → 反向策略(S2影子A)
@@ -739,7 +738,7 @@ class StrategyEcosystem:
         self._degrade_frequency_callbacks: List = []
         if LiveStrategySelector is not None:
             try:
-                self._live_strategy_selector = LiveStrategySelector()
+                self._live_strategy_selector = LiveStrategySelector(mapping_table=None)
                 self._degrade_frequency_callbacks.append(self._on_degrade_frequency)
                 logging.info("[StrategyEcosystem] LiveStrategySelector集成成功(含P-13回调)")
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
@@ -887,7 +886,7 @@ class StrategyEcosystem:
         logger.info("[StrategyEcosystem] 初始化完成")
 
         self._capital_routing_service = CapitalRoutingService()
-        from ali2026v3_trading.strategy.lifecycle_service import StrategyLifecycleService
+        from ali2026v3_trading.strategy.lifecycle_service import LifecycleService as StrategyLifecycleService
         self._lifecycle_service = StrategyLifecycleService(provider=self, strategy_id=getattr(self, '_strategy_id', ''))
         self._trading_ev_service = TradingEVService()
         from ali2026v3_trading.strategy.strategy_monitoring_layer import EcosystemMonitoringService
@@ -916,6 +915,18 @@ class StrategyEcosystem:
         with self._lock:
             return self._active_strategy
 
+    def on_state_switched(self, old_state: str, new_state: str) -> None:
+        """状态切换回调：当SPM状态变化时联动策略切换"""
+        strategy_map = {
+            'correct_trending': 'master',
+            'incorrect_reversal': 'reverse',
+            'other': 'other',
+            'spring': 'spring',
+        }
+        target = strategy_map.get(new_state)
+        if target:
+            self.switch_active_strategy(target)
+
     def switch_active_strategy(self, target: str) -> Dict[str, Any]:
         """切换活跃策略"""
         with self._lock:
@@ -941,7 +952,19 @@ class StrategyEcosystem:
                 'capital_allocations': self.get_capital_allocations(),
             }
 
-    def check_mutual_exclusion(self, strategy_id: str, direction: str) -> tuple:
+    def resolve_strategy_id_from_state(self, state: str) -> str:
+        """将状态映射到策略ID"""
+        state_to_strategy = {
+            'correct_trending': 'master',
+            'incorrect_reversal': 'reverse',
+            'other': 'other',
+            'spring': 'spring',
+            'arbitrage': 'arbitrage',
+            'market_making': 'market_making',
+        }
+        return state_to_strategy.get(state, 'master')
+
+    def check_mutual_exclusion(self, strategy_id: str, direction: str, instrument_id: str = '') -> tuple:
         """检查互斥约束（策略切换后某些方向不允许开仓）"""
         with self._lock:
             # other状态下禁止master和reverse新开仓

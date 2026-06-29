@@ -14,7 +14,14 @@ _IMMUTABLE_TYPES = (int, float, str, bool, type(None), tuple)
 def _deep_copy_if_mutable(value: Any) -> Any:
     if isinstance(value, _IMMUTABLE_TYPES):
         return value
-    return copy.deepcopy(value)
+    try:
+        return copy.deepcopy(value)
+    except (TypeError, AttributeError) as e:
+        # 无法pickle的对象（如threading.Lock），返回原对象引用
+        # 这在状态存储场景中是安全的，因为这些对象本身就是线程安全的
+        import logging
+        logging.debug(f"[StateStore] Cannot deepcopy {type(value).__name__}, using reference: {e}")
+        return value
 
 
 class StateSnapshot:

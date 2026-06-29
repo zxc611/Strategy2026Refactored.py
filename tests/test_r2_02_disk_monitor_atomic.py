@@ -13,7 +13,7 @@ def test_disk_monitor_uses_atomic_replace():
     code_text = '\n'.join(code_lines)
     assert 'atomic_replace_file' in code_text, \
         "_save_history 应调用 atomic_replace_file"
-    # 检查没有 os.replace 作为语句调用（排除注释中的提及）
+    # 检查没有 os.replace 作为语句调用（排除注释中的提及）'
     import re
     os_replace_calls = re.findall(r'(?<![#\w])os\.replace\s*\(', code_text)
     assert len(os_replace_calls) == 0, \

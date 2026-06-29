@@ -803,23 +803,23 @@ class TestPhaseScan:
 
 
 # ============================================================
-# 34. ali2026v3_trading.param_pool.l1_quantification.meta_audit_passport
+# 34. ali2026v3_trading.precompute.meta_audit_passport
 # ============================================================
 class TestMetaAuditPassport:
     def test_audit_passport_import(self):
-        from ali2026v3_trading.param_pool.l1_quantification.meta_audit_passport import AuditPassport
+        from ali2026v3_trading.precompute.meta_audit_passport import AuditPassport
         assert AuditPassport is not None
 
     def test_certified_result_import(self):
-        from ali2026v3_trading.param_pool.l1_quantification.meta_audit_passport import CertifiedResult
+        from ali2026v3_trading.precompute.meta_audit_passport import CertifiedResult
         assert CertifiedResult is not None
 
     def test_sandbox_execution_auditor_import(self):
-        from ali2026v3_trading.param_pool.l1_quantification.meta_audit_passport import SandboxExecutionAuditor
+        from ali2026v3_trading.precompute.meta_audit_passport import SandboxExecutionAuditor
         assert SandboxExecutionAuditor is not None
 
     def test_restricted_exec_loader_import(self):
-        from ali2026v3_trading.param_pool.l1_quantification.meta_audit_passport import RestrictedExecLoader
+        from ali2026v3_trading.precompute.meta_audit_passport import RestrictedExecLoader
         assert RestrictedExecLoader is not None
 
 

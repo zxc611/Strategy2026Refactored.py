@@ -5,7 +5,7 @@ P2-05 断言测试: 日志系统交叉耦合修复验证
 验证:
 1. enhanced_phase_scan_gates.py 无模块级 basicConfig
 2. _preprocess.py 无模块级 basicConfig
-3. optuna_multiobjective_search.py 无模块级 basicConfig (临时_logging_temp除外)
+3. optuna_multiobjective_search.py 无模块级 basicConfig (临时常logging_temp除外)
 4. ProductionQuantSystem.py 委托 setup_logging (有fallback)
 5. 生产代码中模块级 logging.basicConfig 调用数 <= 2 (fallback + __main__)
 """
@@ -39,7 +39,7 @@ class TestP205LoggingCoupling(unittest.TestCase):
                 self.fail(f"_preprocess.py:{i} 仍有 logging.basicConfig 调用")
 
     def test_optuna_multiobjective_no_basic_config(self):
-        """optuna_multiobjective_search.py 不得有全局 logging.basicConfig (临时_logging_temp除外)"""
+        """optuna_multiobjective_search.py 不得有全局 logging.basicConfig (临时常logging_temp除外)"""
         src = self._read("param_pool/optuna_multiobjective_search.py")
         lines = src.splitlines()
         for i, line in enumerate(lines, 1):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 
@@ -38,6 +39,9 @@ class ServiceContainer:
       13. strategy_core (L3) - 依赖storage, event_bus, config, params
     """
 
+    _instance = None
+    _instance_lock = threading.RLock()
+
     UNKNOWN_LAYER = 99
 
     _LAYERS = {
@@ -47,7 +51,17 @@ class ServiceContainer:
         'strategy_core': 3,
     }
 
+    def __new__(cls):
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
     def __init__(self):
+        if getattr(self, '_initialized', False):
+            return
+        self._initialized = True
         self._services: Dict[str, Any] = {}
         self._dependencies: Dict[str, List[str]] = {
             'event_bus': [],
@@ -73,12 +87,14 @@ class ServiceContainer:
 
     def register(self, name: str, service: Any) -> None:
         """注册服务（带层级校验）"""
+        if name in self._services:
+            return
         self._services[name] = service
         svc_layer = self._LAYERS.get(name, self.UNKNOWN_LAYER)
         for dep in self._dependencies.get(name, []):
             dep_layer = self._LAYERS.get(dep, self.UNKNOWN_LAYER)
             if dep_layer >= svc_layer:
-                logging.warning(
+                logging.debug(
                     "[ServiceContainer] layer violation: %s(L%d) depends on %s(L%d)",
                     name, svc_layer, dep, dep_layer
                 )
@@ -147,10 +163,9 @@ class ServiceContainer:
                     raise
 
     def bind_cross_layer_dependencies(self) -> None:
-        """R5-T-01修复: 绑定跨层依赖（延迟绑定策略）
-
+        """R5-T-01修复: 绑定跨层依赖（延迟绑定策略）'
         L2层服务初始化时不立即绑定跨层依赖，
-        在initialize_all()完成后统一绑定，解决循环依赖问题。
+        在initialize_all()完成后统一绑定，解决循环依赖问题。'
         """
         logging.info("[ServiceContainer] binding cross-layer dependencies...")
 
@@ -215,17 +230,23 @@ class ServiceContainer:
             self.register('config', config)
             self.register('params', params)
 
-            from ali2026v3_trading import get_instrument_data_manager
-            storage = get_instrument_data_manager()
+            from ali2026v3_trading.data.data_service import get_data_service
+            storage = get_data_service()
             self.register('storage', storage)
 
-            # CORE-DEPENDENCY: QueryService是核心服务
+            # CORE-DEPENDENCY: QueryService提供market_data查询服务
             try:
-                from ali2026v3_trading.query_service import QueryService
+                from ali2026v3_trading.data.query_service import QueryService
                 market_data = QueryService(storage)
                 self.register('market_data', market_data)
             except ImportError as _e:
-                logging.error("[ServiceContainer] 核心服务QueryService加载失败: %s", _e)
+                logging.warning("[ServiceContainer] QueryService不可用，尝试ds_query_cache: %s", _e)
+                try:
+                    from ali2026v3_trading.data.ds_query_cache import DSQueryCache
+                    market_data = DSQueryCache(storage)
+                    self.register('market_data', market_data)
+                except ImportError as _e2:
+                    logging.warning("[ServiceContainer] market_data服务不可用: %s", _e2)
 
             # CORE-DEPENDENCY: GreeksCalculator是核心服务
             try:
@@ -252,17 +273,17 @@ class ServiceContainer:
             signal_service = SignalService(event_bus=event_bus)
             self.register('signal', signal_service)
 
-            # CORE-DEPENDENCY: TTypeService是核心服务
+            # CORE-DEPENDENCY: TTypeService在data模块中
             try:
-                from ali2026v3_trading.t_type_service import TTypeService
-                t_type = TTypeService()
+                from ali2026v3_trading.data.t_type_service import get_t_type_service
+                t_type = get_t_type_service()
                 self.register('t_type', t_type)
             except ImportError as _e:
-                logging.error("[ServiceContainer] 核心服务TTypeService加载失败: %s", _e)
+                logging.warning("[ServiceContainer] TTypeService不可用: %s", _e)
 
             # CORE-DEPENDENCY: DiagnosisService是核心服务
             try:
-                from ali2026v3_trading.infra.diagnosis_service import DiagnosisService
+                from ali2026v3_trading.infra.health_monitor import DiagnosisService
                 diagnosis = DiagnosisService()
                 self.register('diagnosis', diagnosis)
             except ImportError as _e:
@@ -270,7 +291,7 @@ class ServiceContainer:
 
             # OPTIONAL-DEPENDENCY: UIMixin是可选的UI服务
             try:
-                from ali2026v3_trading.ui_service import UIMixin
+                from ali2026v3_trading.config.ui_service import UIMixin
                 ui = UIMixin()
                 self.register('ui', ui)
             except ImportError as _e:
@@ -286,7 +307,7 @@ class ServiceContainer:
 
             # R21-OPS-18/20: 注册运维API（含容量压测+SOP）
             try:
-                from ali2026v3_trading.infra.health_check_api import get_operations_api
+                from ali2026v3_trading.infra.operations_api import get_operations_api
                 operations_api = get_operations_api()
                 self.register('operations_api', operations_api)
             except Exception as _e:

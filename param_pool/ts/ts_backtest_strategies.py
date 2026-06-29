@@ -1,4 +1,4 @@
-﻿# [M1-132] 6策略组回测函数
+# [M1-132] 6策略组回测函数
 # MODULE_ID: M1-191
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 #!/usr/bin/env python3
@@ -106,7 +106,7 @@ def _worker_init(train_data_shared: pd.DataFrame, test_data_shared: pd.DataFrame
 
 
 def cleanup_global_data() -> None:
-    """释放_TRAIN_DATA和_TEST_DATA全局DataFrame引用，回收内存。
+    """释放放TRAIN_DATA和。TEST_DATA全局DataFrame引用，回收内存。
 
     在回测任务全部完成后调用，避免大DataFrame在进程生命周期内持续占用内存。
     """
@@ -217,7 +217,7 @@ def _worker_task(task: dict) -> dict:
     # P1-R11-25修复: 显式合并PARAM_DEFAULTS，填补task['params']缺失键的默认值
     params = {**PARAM_DEFAULTS, **params}
 
-    # P-05修复: 在_worker_task入口调用影子参数独立性验证
+    # P-05修复: 在。worker_task入口调用影子参数独立性验证
     try:
         _vi = validate_shadow_param_independence(threshold=0.20)
         _vi_fail = {k: v for k, v in _vi.items() if v < 0.20}
@@ -701,7 +701,7 @@ def run_cycle_resonance_backtest_sweep(
 ) -> pd.DataFrame:
     """周期共振参数网格扫描
 
-    对指定策略，遍历参数网格，每次回测都启用周期共振模块调节风险曲面。
+    对指定策略，遍历参数网格，每次回测都启用周期共振模块调节风险曲面。'
     """
     from itertools import product as iterproduct
 
@@ -768,10 +768,10 @@ def run_cr_params_sweep(
 ) -> pd.DataFrame:
     """CRParams全参数网格扫描
 
-    对CRParams全部79个经验值进行网格搜索，每个参数3水平。
+    对CRParams全部79个经验值进行网格搜索，每个参数3水平。'
     为控制时间，随机采样max_combos个组合。
     """
-    from cycle_resonance_module import (
+    from ..optimization.cycle_sharpe import (
         CycleResonanceModule, CRParams, CR_PARAMS_DEFAULT,
         reset_cycle_resonance_module,
     )

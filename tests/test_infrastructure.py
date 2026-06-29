@@ -164,7 +164,7 @@ class TestStrategyCoreServiceNetworkFix:
         import inspect
         source = inspect.getsource(StrategyCoreService.__init__)
         assert '_heartbeat_interval_sec' in source, \
-            "StrategyCoreService应有_heartbeat_interval_sec属性(R21-NET-P2-01修复)"
+            "StrategyCoreService应有界heartbeat_interval_sec属性(R21-NET-P2-01修复)"
 
     def test_heartbeat_max_failures_defined(self):
         """验证心跳最大失败次数已定义(R21-NET-P1-03修复)"""
@@ -172,4 +172,4 @@ class TestStrategyCoreServiceNetworkFix:
         import inspect
         source = inspect.getsource(StrategyCoreService.__init__)
         assert '_heartbeat_max_failures' in source, \
-            "StrategyCoreService应有_heartbeat_max_failures属性(R21-NET-P1-03修复)"
+            "StrategyCoreService应有界heartbeat_max_failures属性(R21-NET-P1-03修复)"

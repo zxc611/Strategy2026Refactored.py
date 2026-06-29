@@ -69,43 +69,43 @@ class TestValidationChecksOrchestrator:
 
 class TestL1QuantificationCore:
     def test_bayesian_shrinkage_life_estimator(self):
-        from ali2026v3_trading.param_pool.l1_quantification._quantification_core import BayesianShrinkageLifeEstimator
+        from ali2026v3_trading.precompute._quantification_core import BayesianShrinkageLifeEstimator
         bsle = BayesianShrinkageLifeEstimator.__new__(BayesianShrinkageLifeEstimator)
         assert bsle is not None
 
     def test_optimization_result(self):
-        from ali2026v3_trading.param_pool.l1_quantification._quantification_core import OptimizationResult
+        from ali2026v3_trading.precompute._quantification_core import OptimizationResult
         or_ = OptimizationResult.__new__(OptimizationResult)
         assert or_ is not None
 
 
 class TestL1QuantificationMetaAuditPassport:
     def test_audit_passport(self):
-        from ali2026v3_trading.param_pool.l1_quantification.meta_audit_passport import AuditPassport
+        from ali2026v3_trading.precompute.meta_audit_passport import AuditPassport
         ap = AuditPassport.__new__(AuditPassport)
         assert ap is not None
 
     def test_auto_field_lineage_tracker(self):
-        from ali2026v3_trading.param_pool.l1_quantification.meta_audit_passport import AutoFieldLineageTracker
+        from ali2026v3_trading.precompute.meta_audit_passport import AutoFieldLineageTracker
         af = AutoFieldLineageTracker.__new__(AutoFieldLineageTracker)
         assert af is not None
 
 
 class TestL1QuantificationMetaAuditEngine:
     def test_init(self):
-        from ali2026v3_trading.param_pool.l1_quantification.meta_audit_engine import MetaAuditEngine
+        from ali2026v3_trading.precompute.meta_audit_engine import MetaAuditEngine
         mae = MetaAuditEngine.__new__(MetaAuditEngine)
         assert mae is not None
 
 
 class TestL1QuantificationDataValidation:
     def test_duckdb_tick_storage(self):
-        from ali2026v3_trading.param_pool.l1_quantification._data_validation import DuckDBTickStorage
+        from ali2026v3_trading.precompute._data_validation import DuckDBTickStorage
         dts = DuckDBTickStorage.__new__(DuckDBTickStorage)
         assert dts is not None
 
     def test_external_validation_pipeline(self):
-        from ali2026v3_trading.param_pool.l1_quantification._data_validation import ExternalValidationPipeline
+        from ali2026v3_trading.precompute._data_validation import ExternalValidationPipeline
         evp = ExternalValidationPipeline.__new__(ExternalValidationPipeline)
         assert evp is not None
 

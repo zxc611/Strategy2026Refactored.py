@@ -1,15 +1,15 @@
 # [M1-62] 弹性计算工具
 # MODULE_ID: M1-101
-"""resilience/统一容错模块 �?合并�?个子模块
+"""resilience/统一容错模块 —合并7个子模块
 
-子模�?
-  resilience_numeric.py  �?数值稳�?
-  resilience_circuit.py  �?断路�?
-  resilience_watchdog.py �?看门�?心跳
-  resilience_state.py    �?状态管�?
-  resilience_retry.py    �?重试/退�?超时
-  resilience_config.py   �?容错配置/校验
-  resilience_utils.py    �?资源守卫 + 兼容工具 + re-export
+子模块
+  resilience_numeric.py  —数值稳
+  resilience_circuit.py  —断路
+  resilience_watchdog.py —看门狗心跳
+  resilience_state.py    —状态管理
+  resilience_retry.py    —重试/退避超时
+  resilience_config.py   —容错配置/校验
+  resilience_utils.py    —资源守卫 + 兼容工具 + re-export
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 
 try:
     from ali2026v3_trading.infra.shared_utils import safe_int
-except ImportError:  # circular-import guard: shared_utils �?resilience_utils �?resilience
+except ImportError:  # circular-import guard: shared_utils →resilience_utils →resilience
     def safe_int(value, default=0):
         try:
             return int(value)
@@ -39,7 +39,7 @@ logger = get_logger(__name__)  # R9-5
 
 
 # ============================================================
-# Section 1: 数值稳�?(�?resilience_numeric.py)
+# Section 1: 数值稳定(←resilience_numeric.py)
 # ============================================================
 
 PRICE_TOLERANCE = 1e-6
@@ -92,13 +92,13 @@ def approx_greater(a: float, b: float, tolerance: float = PRICE_TOLERANCE) -> bo
 def compute_sharpe_stable(returns: List[float], risk_free_rate: float = 0.0,
                           annualize_factor: float = 252.0,
                           use_sample_std: bool = False) -> float:
-    """计算夏普比率（数值稳定版�?
+    """计算夏普比率（数值稳定版)
 
     Args:
-        returns: 收益率序�?
+        returns: 收益率序列
         risk_free_rate: 逐期无风险利率（非年化）
-        annualize_factor: 年化因子（日�?52，分钟频252*240�?
-        use_sample_std: True使用样本标准�?n-1分母)，False使用总体标准�?n分母)
+        annualize_factor: 年化因子（日频252，分钟频252*240）
+        use_sample_std: True使用样本标准差(n-1分母)，False使用总体标准差(n分母)
     """
     if len(returns) < 2:
         return 0.0
@@ -134,9 +134,9 @@ def safe_normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
 
 def should_trigger_stop_loss(current_price: float, stop_loss_price: float,
                               is_long: bool = True, rtol: float = 1e-8) -> bool:
-    """P0-03修复: 统一止损触发判断 �?生产/回测共用
+    """P0-03修复: 统一止损触发判断 —生产/回测共用
 
-    is_long=True�?current_price<=stop_loss_price触发), is_long=False�?current_price>=stop_loss_price触发)
+    is_long=True→current_price<=stop_loss_price触发), is_long=False→current_price>=stop_loss_price触发)
     rtol使用np.isclose相对容差，与STOP_PRICE_RTOL对齐
     """
     if stop_loss_price <= 0:
@@ -154,7 +154,7 @@ def should_trigger_stop_loss(current_price: float, stop_loss_price: float,
 
 def should_trigger_take_profit(current_price: float, take_profit_price: float,
                                 is_long: bool = True, rtol: float = 1e-8) -> bool:
-    """P0-03修复: 统一止盈触发判断 �?生产/回测共用"""
+    """P0-03修复: 统一止盈触发判断 —生产/回测共用"""
     if take_profit_price <= 0:
         return False
     try:
@@ -196,7 +196,7 @@ def safe_divide(numerator: float, denominator: float, default: float = 0.0,
 
 
 # ============================================================
-# Section 2: 断路�?(�?resilience_circuit.py)
+# Section 2: 断路器(←resilience_circuit.py)
 # ============================================================
 
 class CircuitBreakerHalfOpen:
@@ -268,7 +268,7 @@ class CircuitBreakerHalfOpen:
 
     @property
     def opened_at(self) -> float:
-        """断路器进入OPEN状态的时间戳（委托给CircuitBreakerService用于计算暂停截止时间�?""
+        """断路器进入OPEN状态的时间戳（委托给CircuitBreakerService用于计算暂停截止时间）"""
         with self._lock:
             return self._opened_at
 
@@ -280,10 +280,9 @@ class CircuitBreakerHalfOpen:
 
     def force_open(self, open_duration_sec: Optional[float] = None,
                    opened_at: Optional[float] = None) -> None:
-        """强制将断路器置为OPEN状态（由CircuitBreakerService在触发熔断时调用�?
-
+        """强制将断路器置为OPEN状态（由CircuitBreakerService在触发熔断时调用）'
         Args:
-            open_duration_sec: 新的OPEN持续时长（秒），None则保持原�?
+            open_duration_sec: 新的OPEN持续时长（秒），None则保持原值
             opened_at: OPEN状态起始时间戳，None则使用time.time()
         """
         with self._lock:
@@ -335,7 +334,7 @@ class RateLimitedLogger:
             if count <= self._max:
                 logging.log(level, msg, *args)
             elif count == self._max + 1:
-                logging.log(level, "[DR-P1-17] 日志抑制: '%s' �?.0fs内已输出%d�? 后续静默",
+                logging.log(level, "[DR-P1-17] 日志抑制: '%s' %.0fs内已输出%d次 后续静默",
                             msg[:50], self._window, self._max)
 
 
@@ -356,12 +355,12 @@ class GracefulDegradation:
                     return result
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[DR-P1-18] 策略%d/%d失败: %s", i + 1, len(self._strategies), e)
-        logging.warning("[DR-P1-18] 所有降级策略失�? %s", self._name)
+        logging.warning("[DR-P1-18] 所有降级策略失败 %s", self._name)
         return None
 
 
 # ============================================================
-# Section 3: 看门�?心跳 (�?resilience_watchdog.py)
+# Section 3: 看门狗心跳 (←resilience_watchdog.py)
 # ============================================================
 
 class Watchdog:
@@ -391,7 +390,7 @@ class Watchdog:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
             if self._thread.is_alive():
-                logging.warning("[R23-P2-17] 看门狗线�?%s'未在2.0s内终�?, self._name)
+                logging.warning("[R23-P2-17] 看门狗线程'%s'未在2.0s内终止", self._name)
 
     def feed(self) -> None:
         with self._lock:
@@ -405,13 +404,13 @@ class Watchdog:
                 elapsed = time.time() - self._last_feed
             if elapsed > self._timeout:
                 self._timeout_count += 1
-                logging.warning("[DR-P1-06] 看门�?%s'超时(%.1fs>%.1fs), �?d�?,
+                logging.warning("[DR-P1-06] 看门狗'%s'超时(%.1fs>%.1fs), 第%d次",
                                 self._name, elapsed, self._timeout, self._timeout_count)
                 if self._on_timeout:
                     try:
                         self._on_timeout()
                     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                        logging.error("[DR-P1-06] 看门狗回调异�? %s", e)
+                        logging.error("[DR-P1-06] 看门狗回调异常 %s", e)
                 with self._lock:
                     self._last_feed = time.time()
             time.sleep(min(self._timeout / 2, 5.0))
@@ -505,7 +504,7 @@ class AsyncTaskTimeout:
                 del self._pending[tid]
             self._timeout_count += len(timed_out)
         if timed_out:
-            logging.warning("[DR-P1-21] 异步任务超时: %d个任�?总计%d�?", len(timed_out), self._timeout_count)
+            logging.warning("[DR-P1-21] 异步任务超时: %d个任务总计%d次", len(timed_out), self._timeout_count)
         return timed_out
 
 
@@ -519,7 +518,7 @@ def get_process_health() -> ProcessHealthState:
 
 
 # ============================================================
-# Section 4: 状态管�?(�?resilience_state.py)
+# Section 4: 状态管理(←resilience_state.py)
 # ============================================================
 
 class AtomicConfigRef:
@@ -590,7 +589,7 @@ class ParamVersionManager:
     def save_version(self, version: str, params: Dict[str, Any]) -> None:
         with self._lock:
             self._versions[version] = dict(params)
-            logging.info("[FC-P1-02] 参数版本已保�? %s (%d参数)", version, len(params))
+            logging.info("[FC-P1-02] 参数版本已保存 %s (%d参数)", version, len(params))
         # P1-46修复: 同步版本到config_version_tracker统一追踪
         try:
             from ali2026v3_trading.config.config_version_tracker import record_param_version
@@ -606,7 +605,7 @@ class ParamVersionManager:
                 self._current_version = version
                 logging.info("[FC-P1-02] 参数版本已回滚至: %s", version)
                 return dict(params)
-            logging.warning("[FC-P1-02] 参数版本不存�? %s", version)
+            logging.warning("[FC-P1-02] 参数版本不存在 %s", version)
             return None
 
     def list_versions(self) -> List[str]:
@@ -661,7 +660,7 @@ class SignalLifecycleManager:
                 info['updated_at'] = time.time()
                 info['history'].append(new_state)
                 return True
-            logging.warning("[FC-P1-06] 信号状态转换非�? %s %s�?s", signal_id, current, new_state)
+            logging.warning("[FC-P1-06] 信号状态转换非法 %s %s→s", signal_id, current, new_state)
             return False
 
     def get_state(self, signal_id: str) -> Optional[str]:
@@ -679,7 +678,7 @@ class SignalLifecycleManager:
                 self._signals[sid]['state'] = self.EXPIRED
                 self._signals[sid]['history'].append(self.EXPIRED)
         if expired:
-            logging.warning("[FC-P1-06] 信号过期清理: %d�?, len(expired))
+            logging.warning("[FC-P1-06] 信号过期清理: %d条", len(expired))
         return len(expired)
 
 
@@ -698,10 +697,10 @@ def get_signal_lifecycle() -> SignalLifecycleManager:
 
 
 # ============================================================
-# Section 5: 重试/退�?超时 (�?resilience_retry.py)
+# Section 5: 重试/退避超时 (←resilience_retry.py)
 # ============================================================
 
-# PRICE_TOLERANCE / FLOAT_COMPARE_TOLERANCE 已在 Section 1 定义，此处不再重�?
+# PRICE_TOLERANCE / FLOAT_COMPARE_TOLERANCE 已在 Section 1 定义，此处不再重复
 
 PRICE_DISPLAY_DP = 4
 RATIO_DISPLAY_DP = 4
@@ -731,9 +730,9 @@ def thread_safe_log(logger_instance: logging.Logger, level: int, msg: str, *args
 
 
 def deprecated(reason: str = "", migration_guide: str = "", removal_version: str = ""):
-    """P1-21: deprecated装饰器权威定�?底层模块，避免循环导�?
+    """P1-21: deprecated装饰器权威定义底层模块，避免循环导入
 
-    shared_utils.py从此处re-export，其他模块统一从shared_utils导入�?
+    shared_utils.py从此处re-export，其他模块统一从shared_utils导入。'
     """
     import functools
     import warnings as _warnings
@@ -751,7 +750,7 @@ def deprecated(reason: str = "", migration_guide: str = "", removal_version: str
             if migration_guide:
                 msg_parts.append(f"迁移指南: {migration_guide}")
             if removal_version:
-                msg_parts.append(f"计划在版�?{removal_version} 中移�?)
+                msg_parts.append(f"计划在版本{removal_version} 中移除")
             msg = ". ".join(msg_parts) + "."
             _warnings.warn(msg, DeprecationWarning, stacklevel=2)
             return func(*args, **kwargs)
@@ -761,7 +760,7 @@ def deprecated(reason: str = "", migration_guide: str = "", removal_version: str
         wrapper._deprecated_reason = reason
         wrapper._deprecated_migration_guide = migration_guide
         wrapper._deprecated_removal_version = removal_version
-        # 保留api_version元数据（如果有的话）
+        # 保留api_version元数据（如果有的话）'
         for attr in ('_api_version', '_api_changelog', '_api_versioned'):
             val = getattr(func, attr, None)
             if val is not None:
@@ -770,9 +769,9 @@ def deprecated(reason: str = "", migration_guide: str = "", removal_version: str
     return decorator
 
 
-# [P2-12] 权威重试实现 �?retry_with_limit/ExponentialBackoff/BoundedRetry
-# 为全系统统一的重试模式权威定义。其他模块中的重试实现应逐步委托到此处�?
-# 已知非权威重试实�?
+# [P2-12] 权威重试实现 —retry_with_limit/ExponentialBackoff/BoundedRetry
+# 为全系统统一的重试模式权威定义。其他模块中的重试实现应逐步委托到此处。'
+# 已知非权威重试实现
 #   - order/order_persistence.py: NetworkRetryManager (TODO: 委托到BoundedRetry)
 #   - infra/_ops_framework.py: _execute_with_retry_and_timeout (TODO: 委托到BoundedRetry)
 #   - position/position_command_service.py: _schedule_close_retry (TODO: 委托到BoundedRetry)
@@ -829,7 +828,7 @@ class TimeoutGuard:
         if t.is_alive():
             logging.warning("[DR-P1-02] tick处理超时(%.1fs), 函数=%s", self._timeout, func.__name__)
             if t.is_alive():
-                logging.warning("[R23-P2-17] 超时线程未终�? %s", func.__name__)
+                logging.warning("[R23-P2-17] 超时线程未终止 %s", func.__name__)
             return self._default
         if error[0] is not None:
             raise error[0]
@@ -896,13 +895,13 @@ class BoundedRetry:
             self._total_failures += 1
         func_name = getattr(func, '__name__', '?')
         if self._on_exhausted == "raise":
-            logging.critical("[DR-P1-03] 有界重试耗尽(%d�?, 函数=%s", self._max_retries, func_name)
+            logging.critical("[DR-P1-03] 有界重试耗尽(%d次, 函数=%s", self._max_retries, func_name)
             raise last_exception
         elif self._on_exhausted == "warn":
-            logging.warning("[DR-P1-03] 有界重试耗尽(%d�?, 函数=%s, 继续执行", self._max_retries, func_name)
+            logging.warning("[DR-P1-03] 有界重试耗尽(%d次, 函数=%s, 继续执行", self._max_retries, func_name)
             return None
         else:
-            logging.critical("[DR-P1-03] 有界重试耗尽(%d�?, 函数=%s", self._max_retries, func_name)
+            logging.critical("[DR-P1-03] 有界重试耗尽(%d次, 函数=%s", self._max_retries, func_name)
             return None
 
     @property
@@ -929,13 +928,13 @@ class StrategyRestartGuard:
                     self._restart_count += 1
                     if self._restart_count > self._max_restarts:
                         logging.critical(
-                            "[DR-P1-04] 策略崩溃重启耗尽(%d�?, 最后异�? %s",
+                            "[DR-P1-04] 策略崩溃重启耗尽(%d次, 最后异常 %s",
                             self._max_restarts, e
                         )
                         raise
                     current_count = self._restart_count
                 logging.warning(
-                    "[DR-P1-04] 策略崩溃(异常=%s), %0.1fs后第%d次重�?上限%d)",
+                    "[DR-P1-04] 策略崩溃(异常=%s), %0.1fs后第%d次重试上限%d)",
                     type(e).__name__, self._restart_delay, current_count, self._max_restarts
                 )
                 time.sleep(self._restart_delay)
@@ -966,16 +965,16 @@ class DbQueryTimeout:
         t.start()
         t.join(timeout=_timeout)
         if t.is_alive():
-            logging.warning("[DR-P1-05] 数据库查询超�?%.1fs): %s", _timeout, getattr(func, '__name__', '?'))
+            logging.warning("[DR-P1-05] 数据库查询超时(%.1fs): %s", _timeout, getattr(func, '__name__', '?'))
             return None
         if error[0] is not None:
-            logging.warning("[DR-P1-05] 数据库查询异�? %s", error[0])
+            logging.warning("[DR-P1-05] 数据库查询异常 %s", error[0])
             return None
         return result[0]
 
 
 # ============================================================
-# Section 6: 容错配置/校验 (�?resilience_config.py)
+# Section 6: 容错配置/校验 (←resilience_config.py)
 # ============================================================
 
 def check_multi_level_cache_consistency() -> bool:
@@ -1030,7 +1029,7 @@ def validate_resilience_params(params: Dict[str, Any], strict: bool = False) -> 
                     errors.append(f'{key}={v} out of valid range')
     except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
         logging.debug("[R3-L2] resilience validate_param_range suppressed: %s", _r3_err)
-        # 回退到原始校�?
+        # 回退到原始校验
         if 'max_risk_ratio' in params:
             v = params['max_risk_ratio']
             if not isinstance(v, (int, float)) or v < 0 or v > 1:
@@ -1076,8 +1075,8 @@ def _auto_recovery_decision_tree(error_type: str, error_count: int, elapsed_sec:
 
 
 def check_hot_reload_compatibility(updates: Dict[str, Any]) -> Dict[str, Any]:
-    """P1-45修复: 原check_config_hot_reload重命名，消除与config_loader同名混淆�?
-    检查哪些配置项支持热更新（不支持的返回requires_restart=True）�?""
+    """P1-45修复: 原check_config_hot_reload重命名，消除与config_loader同名混淆。'
+    检查哪些配置项支持热更新（不支持的返回requires_restart=True）。"""
     _UNSUPPORTED_KEYS = frozenset([
         'tvf_enabled', 'tvf_sigmoid_scale', 'mode_engine_version',
         'max_risk_ratio', 'close_stop_loss_ratio', 'signal_cooldown_sec',
@@ -1130,9 +1129,9 @@ SLA_CONFIG = {
 
 ALARM_LEVELS = {
     'P0_CRITICAL': {'description': '系统不可用，需立即介入', 'notify': ['phone', 'sms'], 'escalation_sec': 60},
-    'P1_HIGH': {'description': '功能严重降级，需30分钟内介�?, 'notify': ['sms', 'email'], 'escalation_sec': 300},
+    'P1_HIGH': {'description': '功能严重降级，需30分钟内介入', 'notify': ['sms', 'email'], 'escalation_sec': 300},
     'P2_MEDIUM': {'description': '性能劣化，需当日处理', 'notify': ['email'], 'escalation_sec': 3600},
-    'P3_LOW': {'description': '潜在风险，记录跟�?, 'notify': ['log'], 'escalation_sec': 86400},
+    'P3_LOW': {'description': '潜在风险，记录跟踪', 'notify': ['log'], 'escalation_sec': 86400},
 }
 
 class ISOLATION_LEVELS(Enum):
@@ -1143,7 +1142,7 @@ class ISOLATION_LEVELS(Enum):
     CONTAINER = "container"
 
 CAPACITY_LIMITS = {
-    'max_instruments': 500, 'max_open_positions': 50, 'max_orders_per_sec': 20,
+    'max_instruments': 5000, 'max_open_positions': 50, 'max_orders_per_sec': 20,
     'max_memory_mb': 4096, 'max_cpu_pct': 80, 'max_disk_gb': 50, 'max_connections': 100,
 }
 
@@ -1155,7 +1154,7 @@ COLD_START_PHASES = {
 
 
 # ============================================================
-# Section 7: 资源守卫 + 兼容工具 (�?resilience_utils.py)
+# Section 7: 资源守卫 + 兼容工具 (←resilience_utils.py)
 # ============================================================
 
 class ThreadPoolGuard:
@@ -1202,7 +1201,7 @@ class SlowQueryDetector:
                     'duration_sec': duration_sec,
                     'timestamp': time.time(),
                 })
-            logging.warning("[DR-P1-12] 慢查�? %s 耗时%.3fs>阈�?.1fs",
+            logging.warning("[DR-P1-12] 慢查询 %s 耗时%.3fs>阈值%.1fs",
                             query_name, duration_sec, self._threshold)
 
     @property
@@ -1230,7 +1229,7 @@ class DataStalenessDetector:
     def check_and_alert(self, data_key: str) -> bool:
         stale = self.is_stale(data_key)
         if stale:
-            logging.warning("[DR-P1-14] 数据陈旧: %s (超过%.0fs未更�?", data_key, self._threshold)
+            logging.warning("[DR-P1-14] 数据陈旧: %s (超过%.0fs未更新", data_key, self._threshold)
         return stale
 
 class MemoryPressureGuard:
@@ -1313,7 +1312,7 @@ class ResourceLeakDetector:
             leaked = [k for k, t in self._acquired.items() if now - t > max_age_sec]
             self._leak_count += len(leaked)
             if leaked:
-                logging.warning("[DR-P1-20] 资源泄漏: %s %d个资源超�?.0fs未释�?总计%d�?",
+                logging.warning("[DR-P1-20] 资源泄漏: %s %d个资源超时.0fs未释放总计%d个",
                                 self._name, len(leaked), max_age_sec, self._leak_count)
             return len(leaked)
 
@@ -1384,7 +1383,7 @@ class SubscriberSnapshotGuard:
                 callback(event)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 errors.append(e)
-                logging.error("[RC-P1-03] 订阅者回调异常隔�? %s", e)
+                logging.error("[RC-P1-03] 订阅者回调异常隔离 %s", e)
         return errors
 
 class ShadowSyncBarrier:
@@ -1429,7 +1428,7 @@ class StrategyRegistry:
                 'metadata': metadata or {},
                 'registered_at': time.time(),
             }
-            logging.info("[FC-P1-01] 策略已注�? %s type=%s", strategy_id, strategy_type)
+            logging.info("[FC-P1-01] 策略已注册 %s type=%s", strategy_id, strategy_type)
 
     def discover(self, strategy_type: Optional[str] = None) -> List[str]:
         with self._lock:
@@ -1457,7 +1456,7 @@ def compat_round(value: float, ndigits: int = 0) -> float:
     return round(value, ndigits)
 
 
-@deprecated("请使用safe_float_to_int替代，避免浮点截断偏�?)
+@deprecated("请使用safe_float_to_int替代，避免浮点截断偏差")
 def compat_float_to_int(value: float) -> int:
     return int(value)
 

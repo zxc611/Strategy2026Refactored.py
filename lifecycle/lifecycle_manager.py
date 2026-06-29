@@ -1,7 +1,7 @@
 # MODULE_ID: M1-123
 """
 lifecycle_manager.py - LifecycleManager
-Phase 2 (CC-02+CC-04): 从_LifecycleMixin提取的生命周期管理Manager
+Phase 2 (CC-02+CC-04): 从。LifecycleMixin提取的生命周期管理Manager
 
 职责：
 - 策略状态管理（_state, _is_running, _is_paused）

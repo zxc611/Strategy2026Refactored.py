@@ -1,4 +1,4 @@
-﻿# [M1-101] 回测状态管理
+# [M1-101] 回测状态管理
 # MODULE_ID: M1-159
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 #!/usr/bin/env python3
@@ -69,7 +69,7 @@ def _get_life_estimator(params: Optional[Dict[str, Any]] = None):
     with _LIFE_ESTIMATOR_LOCK:
         if _LIFE_ESTIMATOR is None:
             try:
-                from ali2026v3_trading.param_pool.quantification._quantification_core import BayesianShrinkageLifeEstimator
+                from ali2026v3_trading.precompute._quantification_core import BayesianShrinkageLifeEstimator
                 _LIFE_ESTIMATOR = BayesianShrinkageLifeEstimator(params=params)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                 logger.warning("BayesianShrinkageLifeEstimator not available: %s", e)
@@ -715,7 +715,7 @@ backtest_validation.py — Re-export门面
   - validation_deep_checks.py: 各独立深度验证函数
   - validation_deep_orchestrator.py: 编排入口与DEEP_VALIDATION_TIERS
 
-所有公共API通过此门面文件re-export，确保现有import路径零修改。
+所有公共API通过此门面文件re-export，确保现有import路径零修改。'
 """
 
 import logging
@@ -727,7 +727,7 @@ import pandas as pd
 
 from ali2026v3_trading.infra.shared_utils import DEFAULT_RISK_FREE_RATE
 
-from ali2026v3_trading.infra.cross_system import CrossSystemExecutionKernel
+from ali2026v3_trading.infra.trading_utils import CrossSystemExecutionKernel
 _CROSS_SYSTEM_EXECUTION_KERNEL = CrossSystemExecutionKernel()
 
 from ali2026v3_trading.param_pool._param_grids import (

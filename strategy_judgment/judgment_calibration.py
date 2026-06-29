@@ -1,4 +1,4 @@
-﻿# [M3-06] 预测校准评判服务
+# [M3-06] 预测校准评判服务
 # MODULE_ID: M3-615
 """Prediction Calibration Judgment Service"""
 from __future__ import annotations

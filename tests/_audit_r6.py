@@ -13,7 +13,7 @@ try:
         src = f.read()
     assert 'bar_data=' in src, 'DVS调用未传入bar_data参数'
     assert '_dvs_params' in src or 'backtest_params' in src, 'DVS的params参数未改为回测参数'
-    assert '_dvs_context' not in src, '仍使用旧的_dvs_context'
+    assert '_dvs_context' not in src, '仍使用旧的指dvs_context'
     print('R6-1 PASS: DVS上下文已适配为回测参数+bar_data')
     PASS += 1
 except AssertionError as e:
@@ -78,7 +78,7 @@ try:
     pp_mod = importlib.import_module('ali2026v3_trading.param_pool')
     assert len(pp_mod.__all__) <= 7, f'param_pool __all__有{len(pp_mod.__all__)}个符号(>7)'
     cj_mod = importlib.import_module('ali2026v3_trading.evaluation.cascade_judge')
-    assert hasattr(cj_mod, '__all__'), 'cascade_judge缺少__all__'
+    assert hasattr(cj_mod, '__all__'), 'cascade_judge缺少。_all__'
     assert len(cj_mod.__all__) <= 7, f'cascade_judge __all__有{len(cj_mod.__all__)}个符号(>7)'
     print(f'R6-5 PASS: __all__收紧完成 (risk={len(rs_mod.__all__)}, param_pool={len(pp_mod.__all__)}, cascade_judge={len(cj_mod.__all__)})')
     PASS += 1

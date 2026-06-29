@@ -1,7 +1,7 @@
 # MODULE_ID: M2-549
 """Round9-F2 断言测试：P2-07 DrawdownManager订阅EventBus日回撤硬停止事件
 验证运行时行为：
-1) DrawdownManager有_subscribe_daily_hard_stop_event方法
+1) DrawdownManager有界subscribe_daily_hard_stop_event方法
 2) 硬停止触发后should_reduce_size/halt_new/full_stop返回True
 3) EventBus事件能触发DrawdownManager状态同步
 """
@@ -10,13 +10,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 
 def test_drawdown_manager_has_eventbus_subscription():
-    """DrawdownManager应有_subscribe_daily_hard_stop_event方法"""
+    """DrawdownManager应有界subscribe_daily_hard_stop_event方法"""
     from ali2026v3_trading.governance.mode_exit_rules import DrawdownManager, DrawdownAction
     dm = DrawdownManager(DrawdownAction.REDUCE_SIZE)
     assert hasattr(dm, '_subscribe_daily_hard_stop_event'), \
-        "DrawdownManager缺少_subscribe_daily_hard_stop_event方法"
+        "DrawdownManager缺少。subscribe_daily_hard_stop_event方法"
     assert hasattr(dm, '_on_daily_hard_stop_event'), \
-        "DrawdownManager缺少_on_daily_hard_stop_event回调"
+        "DrawdownManager缺少。on_daily_hard_stop_event回调"
     print("  OK: DrawdownManager有EventBus订阅方法")
 
 
@@ -44,7 +44,7 @@ def test_eventbus_event_triggers_hard_stop():
     # 模拟EventBus事件触发
     dm._on_daily_hard_stop_event(type('Event', (), {'drawdown_pct': 0.06}))
     assert dm._daily_hard_stop_triggered == True, \
-        "EventBus事件后_daily_hard_stop_triggered应为True"
+        "EventBus事件后。daily_hard_stop_triggered应为True"
     assert dm.should_full_stop() == True, \
         "EventBus事件后应触发全停"
     print("  OK: EventBus事件成功触发DrawdownManager硬停止")

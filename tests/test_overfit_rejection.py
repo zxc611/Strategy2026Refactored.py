@@ -17,7 +17,7 @@ class TestOverfitRejection:
         """_validate_parameter_set应拒绝过拟合参数集"""
         from ali2026v3_trading.param_pool.optimization.phase_scan import _validate_parameter_set
 
-        # 构造过拟合回测结果：equity_curve仅上涨（完美曲线=过拟合信号）
+        # 构造过拟合回测结果：equity_curve仅上涨（完美曲线=过拟合信号）'
         overfit_result = {
             'sharpe': 5.0,  # 异常高Sharpe
             'equity_curve': [1000000 + i * 1000 for i in range(100)],  # 完美线性上涨
@@ -48,20 +48,20 @@ class TestOverfitRejection:
         }
         robust_params = {'param1': 0.5, 'param2': 1.0}
 
-        # 稳健参数不应被拒绝（不抛出异常）
+        # 稳健参数不应被拒绝（不抛出异常）'
         _validate_parameter_set(robust_params, robust_result)  # 不应抛出异常
 
     def test_validate_parameter_set_handles_missing_data(self):
         """_validate_parameter_set应处理缺失数据（不崩溃）"""
         from ali2026v3_trading.param_pool.optimization.phase_scan import _validate_parameter_set
 
-        # 缺失equity_curve和_random_sharpes
+        # 缺失equity_curve和。random_sharpes
         minimal_result = {
             'sharpe': 1.0,
         }
         minimal_params = {'param1': 0.5}
 
-        # 缺失数据不应崩溃（跳过验证）
+        # 缺失数据不应崩溃（跳过验证）'
         _validate_parameter_set(minimal_params, minimal_result)  # 不应抛出异常
 
 
@@ -111,7 +111,7 @@ class TestNullValidator:
         assert not nv, "NullValidator should be falsy"
 
     def test_null_validator_has_is_null_flag(self):
-        """NullValidator有_is_null标识"""
+        """NullValidator有界is_null标识"""
         from ali2026v3_trading.param_pool.optimization.phase_scan import NullValidator
         nv = NullValidator("TestValidator")
         assert nv._is_null is True, "NullValidator._is_null should be True"

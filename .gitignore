@@ -46,7 +46,8 @@ htmlcov/
 *.db
 *.sqlite3
 logs/
-data/
+# data/ — 已移除：data/是M1生产系统核心子系统，源代码必须纳入版本控制
+# 如需忽略数据文件，请在data/下添加.gitignore精确匹配（如*.csv, *.parquet）
 
 # Local configuration
 .env

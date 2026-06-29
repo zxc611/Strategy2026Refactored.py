@@ -92,7 +92,7 @@ def verify_single_interface():
     with open(os.path.join(project_root, 'ali2026v3_trading', 'data_service.py'), 'r', encoding='utf-8') as f:
         ds_content = f.read()
     
-    # 检查是否有 insert_tick_data 方法（不应该有）
+    # 检查是否有 insert_tick_data 方法（不应该有）'
     if 'def insert_tick_data(' in ds_content:
         print("[FAIL] data_service.py 存在第二接口 insert_tick_data()")
         return False

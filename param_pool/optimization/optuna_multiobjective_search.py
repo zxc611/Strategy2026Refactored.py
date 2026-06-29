@@ -1,5 +1,5 @@
 # MODULE_ID: M1-173
-﻿# [M1-106] Optuna多目标优化
+# [M1-106] Optuna多目标优化
 #!/usr/bin/env python3
 """
 Optuna 多目标贝叶斯优化  对接真实回测引擎 + P0绿灯检验 + 策略评判集成
@@ -263,7 +263,7 @@ def run_backtest_wrapper(
     train: bool = True,
     strategy_type: str = "main",
 ) -> Dict[str, Any]:
-    # R21-MEM-P1-12修复: bar_data直接传递引用, 不做DataFrame copy, 由_prepare_df_for_subprocess在子进程侧按需精简
+    # R21-MEM-P1-12修复: bar_data直接传递引用, 不做DataFrame copy, 由。prepare_df_for_subprocess在子进程侧按需精简
     fn = _load_backtest_module()
     try:
         result = fn(params, bar_data, train=train, strategy_type=strategy_type)
@@ -671,8 +671,9 @@ def run_enhanced_optuna_optimization(
 
 # ---------- 结果持久化----------
 def save_pareto_results(study: optuna.Study, symbol: str, output_dir: str):
-    from ali2026v3_trading.data_access import get_data_access
-    from ali2026v3_trading.db_adapter import connect
+    # 五唯一性修复：import 路径统一为 ali2026v3_trading.data.data_access / data.db_adapter
+    from ali2026v3_trading.data.data_access import get_data_access
+    from ali2026v3_trading.data.db_adapter import connect
 
     os.makedirs(output_dir, exist_ok=True)
     pareto_trials = study.best_trials

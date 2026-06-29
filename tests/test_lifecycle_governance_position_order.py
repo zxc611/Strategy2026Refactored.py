@@ -79,12 +79,24 @@ class TestPositionCommandService:
         pcs = PositionCommandService.__new__(PositionCommandService)
         assert pcs is not None
 
+    def test_resolve_strategy_group_falls_back_without_facade_method(self):
+        from types import SimpleNamespace
+        from ali2026v3_trading.position.position_command_service import PositionCommandService
+        pcs = PositionCommandService(SimpleNamespace())
+        assert pcs._resolve_strategy_group('OTHER_SCALP') == 'box'
+
 
 class TestPositionPnlService:
     def test_init(self):
         from ali2026v3_trading.position.position_pnl_service import PositionPnlService
         pps = PositionPnlService.__new__(PositionPnlService)
         assert pps is not None
+
+    def test_resolve_strategy_group_falls_back_without_facade_method(self):
+        from types import SimpleNamespace
+        from ali2026v3_trading.position.position_pnl_service import PositionPnlService
+        pps = PositionPnlService(SimpleNamespace())
+        assert pps._resolve_strategy_group('OTHER_SCALP') == 'box'
 
 
 class TestPositionCheckService:

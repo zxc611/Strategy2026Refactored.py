@@ -4,7 +4,7 @@ import sys
 sys.path.insert(0, '..')
 
 import math
-from ali2026v3_trading.param_pool._preprocess import _bs_price_scalar, _bs_greeks_scalar
+from ali2026v3_trading.precompute._preprocess import _bs_price_scalar, _bs_greeks_scalar
 from ali2026v3_trading.governance.greeks_calculator import _norm_cdf, _norm_pdf, _bs_price, _bs_greeks
 
 
@@ -38,7 +38,7 @@ def test_norm_cdf_shared():
 
 
 def test_fallback_is_data_degradation_not_code_fallback():
-    from ali2026v3_trading.param_pool._preprocess import _bs_greeks_scalar
+    from ali2026v3_trading.precompute._preprocess import _bs_greeks_scalar
     import pandas as pd
     import numpy as np
     # _compute_greeks_fallback was removed; verify _bs_greeks_scalar works as the authoritative greeks path

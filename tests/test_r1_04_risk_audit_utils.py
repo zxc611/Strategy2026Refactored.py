@@ -49,14 +49,14 @@ def test_risk_audit_utils_importable():
 
 def test_structured_audit_log_from_risk_audit_utils():
     """structured_audit_log 应从 risk_audit_utils 可用"""
-    from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log
+    from ali2026v3_trading.infra.security_service import structured_audit_log
     assert callable(structured_audit_log), \
         "structured_audit_log 应为可调用对象"
 
 
 def test_alert_level_stub_works():
     """AlertLevel stub 应可正常使用"""
-    from ali2026v3_trading.infra.risk_audit_utils import AlertLevel, alert
+    from ali2026v3_trading.infra.security_service import AlertLevel, alert
     assert AlertLevel.INFO is not None
     assert AlertLevel.WARNING is not None
     # alert 不应抛异常

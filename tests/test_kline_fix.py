@@ -77,7 +77,7 @@ def test_estimate_kline_count_returns_negative():
     assert result == -1, f"期望 -1（最小值），实际 {result}"
     print("  ✅ 通过: 返回 -1（最小负值）")
 
-    # 2880分钟（2天）
+    # 2880分钟（2天）'
     result = _estimate_kline_count(2880, 'M1')
     print(f"  _estimate_kline_count(2880, 'M1') = {result}")
     assert result == -2880, f"期望 -2880，实际 {result}"
@@ -132,7 +132,7 @@ def test_try_calls_empty_list_handling():
     assert result == [{'data': 3}], f"期望 [{{'data': 3}}]，实际 {result}"
     print("  ✅ 通过: 第一个有效调用即返回")
 
-    # 场景E：返回None（非列表类型）
+    # 场景E：返回None（非列表类型）'
     call_specs = [
         ('call1', lambda: None),
         ('call2', lambda: [{'data': 5}]),

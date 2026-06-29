@@ -325,7 +325,7 @@ class CascadeJudge:
         V7.0手册§5.1 连亏约束 + §5.2 横盘约束 + §7.1 保证金约束
     Sigmoid映射参数(center/scale): V7.0手册§6.2 评分映射参数
 
-    R21-MEM-P1-16修复: 添加评判历史回收机制，防止长期运行时报告对象累积。
+    R21-MEM-P1-16修复: 添加评判历史回收机制，防止长期运行时报告对象累积。'
     """
 
     # P1-R11-24修复: 仅作YAML不可用时的回退默认值，YAML为唯一源
@@ -352,7 +352,7 @@ class CascadeJudge:
         },
     }
 
-    # R16-P2-019修复: 评判硬阈值参数化，默认值从_CASCADE_THRESHOLDS读取
+    # R16-P2-019修复: 评判硬阈值参数化，默认值从。CASCADE_THRESHOLDS读取
     def __init__(
         self,
         min_profit_ratio: float = None,
@@ -475,7 +475,7 @@ class CascadeJudge:
         """P1-R11-24修复: YAML为唯一源，DEFAULT_THRESHOLDS仅作回退
 
         YAML值覆盖DEFAULT_THRESHOLDS（以YAML为准），
-        YAML缺失的键使用DEFAULT_THRESHOLDS回退。
+        YAML缺失的键使用DEFAULT_THRESHOLDS回退。'
         差异时记录info日志（YAML为准，非warning）。
 
         Args:
@@ -521,7 +521,7 @@ class CascadeJudge:
                     params: Optional[Dict[str, Any]] = None) -> "CascadeJudge":
         """从cascade_config.yaml加载三系统统一配置
 
-        P1-R11-24修复: YAML为唯一源，DEFAULT_THRESHOLDS仅作回退。
+        P1-R11-24修复: YAML为唯一源，DEFAULT_THRESHOLDS仅作回退。'
         启动时YAML值覆盖DEFAULT_THRESHOLDS，缺失值使用DEFAULT_THRESHOLDS回退，
         差异以YAML为准并记录info日志。
 
@@ -664,7 +664,7 @@ class CascadeJudge:
             )
 
         # ========== 第一关：盈亏比验证（发动机） ==========
-        # R7-4: 通过_judge_l1/l2/l3委托，与gate_l1/l2/l3公共方法共享逻辑
+        # R7-4: 通过滤judge_l1/l2/l3委托，与gate_l1/l2/l3公共方法共享逻辑
         gates.append(self.gate_l1_rule_engine(metrics))
         if gates[-1].result == GateResult.WARN:
             logging.info("[R16-P1-018] 盈亏比%.2f低于阈值%.2f，评分降至30%%", metrics.profit_loss_ratio, self.thresholds["profit_ratio"])
@@ -886,7 +886,7 @@ class CascadeJudge:
     def _safe_sigmoid(self, x: float, center: float, scale: float) -> float:
         """R4-J-02/J-04修复: 安全Sigmoid归一化，防护scale=0导致NaN/除零
         R21-MATH-P2-04修复: 已有z裁剪[-500,500]防止exp溢出，确认保护完整
-        R7-M-13修复: 全局sigmoid_alpha/sigmoid_beta统一参数读取（手册5.2.3节）
+        R7-M-13修复: 全局sigmoid_alpha/sigmoid_beta统一参数读取（手册5.2.3节）'
         """
         # R7-M-13修复: 从config_params读取全局sigmoid归一化参数
         try:
@@ -906,7 +906,7 @@ class CascadeJudge:
         """13维度Sigmoid归一化综合评分
 
         R4-J-01修复(本轮补全): 扩展为13维度加权评分
-        R4-J-02修复: 统一使用_safe_sigmoid防护除零
+        R4-J-02修复: 统一使用例safe_sigmoid防护除零
         R4-J-04修复: 分母为零时不再返回NaN
         """
         s = self.sigmoid

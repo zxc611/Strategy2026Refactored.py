@@ -1,6 +1,6 @@
-﻿# [M1-105] L2优化器
+# [M1-105] L2优化器
 # MODULE_ID: M1-172
-from ali2026v3_trading.infra.cross_system import get_spawn_context  # NEW-P2-03修复
+from ali2026v3_trading.infra.trading_utils import get_spawn_context  # NEW-P2-03修复
 
 import logging
 from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
@@ -158,7 +158,7 @@ class L2Optimizer:
         """P1-R8-06修复: L2统计功效检验 — Cohen's d效应量+所需样本量+实际功效值
 
         手册0.4节要求: 每IV regime状态切换≥100次 + 跨fold最优区间重叠度≥60%
-        返回Dict而非bool，含效应量、所需样本量、实际功效、是否达标。
+        返回Dict而非bool，含效应量、所需样本量、实际功效、是否达标。'
         """
         result = {
             'sufficient': False,
@@ -234,7 +234,7 @@ class L2Optimizer:
                                      volume_col: str = "volume") -> Dict[str, Any]:
         """P1-裂缝1：检验训练集与验证集的时间独立性
 
-        使用波动率和成交量的分布JS散度评估独立性。
+        使用波动率和成交量的分布JS散度评估独立性。'
         JS散度 > 0.1 视为足够独立。
         """
         try:
@@ -416,7 +416,7 @@ class L2Optimizer:
 
     # P2-R3-T-08: optimize_l2_params_step1方法名偏差 — task_scheduler.py模块级函数
     # 命名为optimize_l2_params_step1，而l2_optimizer.py类方法命名为optimize_step1。
-    # 添加别名方法以保持跨模块调用一致性。
+    # 添加别名方法以保持跨模块调用一致性。'
     def optimize_l2_params_step1(self, bar_data: Any = None,
                                   independent_bar_data: Any = None) -> L2OptimizationResult:
         """别名方法: 委托到optimize_step1，保持与task_scheduler模块级函数命名一致"""
@@ -584,7 +584,7 @@ class TwelveStrategyRunner:
     # P0-R8-10修复: 1000次打乱反事实验证
     def _permutation_test(self, params: Dict, data: Any, n_permutations: int = 1000) -> Dict[str, Any]:
         """
-        手册2.4节要求: 执行至少1000次独立打乱，计算每次期望值，构建虚无分布。
+        手册2.4节要求: 执行至少1000次独立打乱，计算每次期望值，构建虚无分布。'
         真实策略期望值必须>95%分位数，并报告p值。
         """
         import random
@@ -640,7 +640,7 @@ class TwelveStrategyRunner:
     # P0-R8-11修复: Bonferroni和Benjamini-Hochberg多重比较校正
     def _apply_multiple_comparison_correction(self, p_values: List[float]) -> Dict[str, float]:
         """
-        手册2.5节要求: 多参数同时扫描时使用Bonferroni校正或BH程序调整显著性阈值。
+        手册2.5节要求: 多参数同时扫描时使用Bonferroni校正或BH程序调整显著性阈值。'
         返回bonferroni和bh校正后的p值。
         """
         n = len(p_values)
@@ -671,7 +671,7 @@ class TwelveStrategyRunner:
         """将数据分为早/中/近三段，分别计算accuracy及95%CI，
         检查各段CI之间重叠比例是否>60%。
 
-        返回: 最小重叠比例 (0.0~1.0)，若任两段CI重叠>60%则返回对应值。
+        返回: 最小重叠比例 (0.0~1.0)，若任两段CI重叠>60%则返回对应值。'
         """
         if data is None or not hasattr(data, '__len__') or len(data) < 30:
             return 0.0
@@ -742,7 +742,7 @@ class TwelveStrategyRunner:
     ) -> Dict[str, Any]:
         """P0-Q2质量门: 验证回测参数与实盘参数的一致性
 
-        检查关键参数在回测和实盘之间是否一致，差异超过tolerance则不通过。
+        检查关键参数在回测和实盘之间是否一致，差异超过tolerance则不通过。'
         """
         _KEYS_TO_CHECK = [
             'close_take_profit_ratio', 'close_stop_loss_ratio',
@@ -785,7 +785,7 @@ class TwelveStrategyRunner:
         """P0-Q3质量门: 验证参数跨时段稳定性
 
         将数据分为n_periods段，分别评估accuracy，检查各段accuracy的标准差
-        是否在可接受范围内。
+        是否在可接受范围内。'
         """
         if bar_data is None or not hasattr(bar_data, '__len__') or len(bar_data) < 30:
             return {'passed': False, 'details': {'reason': '数据不足'}}
@@ -829,7 +829,7 @@ class TwelveStrategyRunner:
     ) -> Dict[str, Any]:
         """P0-Q4质量门: 验证Greeks约束是否满足
 
-        检查参数配置是否满足Greeks风险约束（delta/gamma/vega/theta）。
+        检查参数配置是否满足Greeks风险约束（delta/gamma/vega/theta）。'
         """
         if greeks_exposure is None:
             greeks_exposure = {}
@@ -893,10 +893,9 @@ class TwelveStrategyRunner:
         """计算存活偏差修正后的真实盈亏比
 
         公式: adjusted_ratio = raw_ratio * (n_survived / n_total)
-        存活偏差修正: 仅存活策略的盈亏比被观测到，真实盈亏比需乘以存活率。
-
+        存活偏差修正: 仅存活策略的盈亏比被观测到，真实盈亏比需乘以存活率。'
         Args:
-            raw_win_loss_ratio: 原始盈亏比（仅基于存活策略计算）
+            raw_win_loss_ratio: 原始盈亏比（仅基于存活策略计算）'
             n_survived: 存活策略数
             n_total: 总策略数（含淘汰策略）
 

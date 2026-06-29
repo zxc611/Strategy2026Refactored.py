@@ -2,9 +2,9 @@
 """R5-F1: P1-49/60 预处理流水线大面积重复 断言测试
 
 验证运行时行为:
-1. preprocess_ticks的公共函数委托到_preprocess
+1. preprocess_ticks的公共函数委托到。preprocess
 2. MinuteBoundaryResult和check_minute_boundary_integrity保留在preprocess_ticks
-3. preprocess_ticks导入的函数与_preprocess是同一实例
+3. preprocess_ticks导入的函数与审preprocess是同一实例
 4. preprocess_ticks产生DeprecationWarning
 """
 import os

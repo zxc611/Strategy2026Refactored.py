@@ -87,6 +87,38 @@ class TestBindPlatformApis:
             with patch('ali2026v3_trading.config.params_service._read_param', return_value=None):
                 lb.bind_platform_apis(strategy)
 
+    def test_binds_subscription_manager_to_data_service(self):
+        provider = MagicMock()
+        provider._lock = threading.Lock()
+        provider._runtime_market_center = None
+        provider._fallback_market_center = None
+        provider._api_ready = False
+        provider._kline_ready = False
+        provider._lifecycle_platform = MagicMock()
+        provider._platform_insert_order = None
+        provider._ensure_order_service = MagicMock()
+        provider._inject_runtime_context = MagicMock()
+        provider._extract_runtime_market_center = MagicMock(return_value=None)
+        provider._get_fallback_market_center = MagicMock(return_value=None)
+        provider.transition_to = MagicMock()
+        provider.storage = MagicMock()
+        provider.storage.subscription_manager = MagicMock()
+
+        strategy = MagicMock()
+        strategy.sub_market_data = MagicMock(return_value=True)
+        strategy.unsub_market_data = MagicMock(return_value=True)
+
+        lb = LifecycleBind(provider)
+        provider._do_bind_platform_apis = lb._do_bind_platform_apis
+        data_service = MagicMock()
+        with patch('ali2026v3_trading.config.config_service.resolve_product_exchange', return_value='CFFEX'):
+            with patch('ali2026v3_trading.config.params_service._read_param', return_value=None):
+                with patch('ali2026v3_trading.data.data_service.get_data_service', return_value=data_service):
+                    lb.bind_platform_apis(strategy)
+
+        provider.storage.subscription_manager.bind_data_manager.assert_called_once_with(data_service)
+        data_service.bind_data_manager.assert_called_once_with(data_service)
+
 
 class TestInjectRuntimeContext:
     def test_inject_dict_params(self):

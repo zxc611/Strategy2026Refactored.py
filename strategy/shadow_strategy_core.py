@@ -1,5 +1,5 @@
 # MODULE_ID: M1-260
-"""影子策略核心服务与类型定义 - 合并自_shadow_strategy_core.py, _shadow_internals.py, shadow_strategy_types.py (2026-06-12)"""
+"""影子策略核心服务与类型定义 - 合并自旋shadow_strategy_core.py, _shadow_internals.py, shadow_strategy_types.py (2026-06-12)"""
 from __future__ import annotations
 
 import copy
@@ -196,12 +196,30 @@ class ShadowStrategyCoreService:
         """R19-UG-01修复: 从config/params.yaml加载ABSOLUTE_EV_FLOOR
 
         升A路径T2.1: 通过ConfigService.get_param统一读取，YAML为唯一参数真相源。
+        FIX: get_param不支持点分路径且params字典不含parameter_attributes键，
+        需直接从params.yaml读取嵌套值parameter_attributes.shadow_absolute_ev_floor.default
         """
         from ali2026v3_trading.config.config_service import get_param
-        _ev_floor = get_param("parameter_attributes.shadow_absolute_ev_floor.default")
+        _ev_floor = get_param("shadow_absolute_ev_floor")
+        if _ev_floor is None:
+            # get_param无法获取嵌套键，直接从params.yaml读取
+            try:
+                import os as _os
+                from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
+                _yaml_path = _os.path.join(
+                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                    'config', 'params.yaml'
+                )
+                with open(_yaml_path, 'r', encoding='utf-8') as _f:
+                    _raw = yaml_safe_load(_f) or {}
+                _pa = _raw.get('parameter_attributes', {})
+                _saef = _pa.get('shadow_absolute_ev_floor', {})
+                _ev_floor = _saef.get('default') if isinstance(_saef, dict) else None
+            except (IOError, OSError, ValueError, KeyError, TypeError, ImportError) as _yaml_err:
+                logging.warning("[ShadowStrategyEngine] 从params.yaml读取shadow_absolute_ev_floor失败: %s", _yaml_err)
         if _ev_floor is None:
             raise ConfigError(
-                "parameter_attributes.shadow_absolute_ev_floor.default 未找到，"
+                "shadow_absolute_ev_floor 未找到，"
                 "升A路径T1.3: params.yaml为唯一参数真相源"
             )
         self._absolute_ev_floor: float = float(_ev_floor)
@@ -333,7 +351,7 @@ class ShadowStrategyCoreService:
         self._trade_id_counter: int = 0
 
         self._log_write_queue: deque = deque(maxlen=self.LOG_QUEUE_MAX_LEN)
-        self._log_queue_lock = threading.RLock()  # R10-P0-05修复: 改为RLock避免_async_flush_log_queue重入死锁
+        self._log_queue_lock = threading.RLock()  # R10-P0-05修复: 改为RLock避免免async_flush_log_queue重入死锁
         self._log_seq_counter: int = 0  # P2-R9-02修复: 日志序列号计数器
         # R15-P1-PERF-05修复: ThreadPoolExecutor已设置max_workers=1，防止线程数无限增长
         # R15-P1-RES-05修复: 添加RejectedExecutionHandler(队列满时丢弃+warning)
@@ -397,7 +415,7 @@ class ShadowStrategyCoreService:
 
         Args:
             wait: 是否等待未完成的任务
-            timeout: 等待超时（秒）
+            timeout: 等待超时（秒）'
         """
         # 先刷盘剩余日志
         try:
@@ -437,7 +455,7 @@ class ShadowStrategyCoreService:
         """P2-R11-11修复: 设置策略级影子参数覆盖
 
         Args:
-            strategy_group: 策略组名（如hft/main/box_extreme等）
+            strategy_group: 策略组名（如hft/main/box_extreme等）'
             shadow_type: 影子类型（shadow_a/shadow_b）
             overrides: 参数覆盖字典
         """
@@ -541,7 +559,7 @@ class ShadowStrategyCoreService:
             if a_val is not None and b_val is not None and a_val != 0:
                 diffs.append(abs(b_val - a_val) / abs(a_val))
         if not diffs:
-            logger.warning("[P0-10修复] 影子参数独立性验证: 无可比较的关键参数")
+            logger.info("[P0-10修复] 影子参数独立性验证: 无可比较的关键参数")
             return True
         avg_diff = sum(diffs) / len(diffs)
         min_diff_pct = 0.20
@@ -634,7 +652,7 @@ class ShadowStrategyCoreService:
     def _async_flush_log_queue(self) -> None:
         # R13-P2-LOG-10修复: 替换ThreadPoolExecutor为同步写入，
         # 避免线程池开销和潜在的日志丢失。日志写入本身是I/O密集型，
-        # 单线程同步写入更可靠，且日志量不大时性能影响可忽略。
+        # 单线程同步写入更可靠，且日志量不大时性能影响可忽略。'
         try:
             items = []
             with self._log_queue_lock:

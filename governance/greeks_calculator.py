@@ -458,7 +458,7 @@ class TradingCalendar:
                 self.holidays = _auto_holidays
                 logger.info("[TradingCalendar] auto-loaded chinese_calendar holidays: %d", len(self.holidays))
         except ImportError:
-            logger.warning("[TradingCalendar] chinese_calendar not installed, holidays list empty, weekends only")
+            logger.info("[TradingCalendar] chinese_calendar not installed, holidays list empty, weekends only")
 
     @staticmethod
     def _fetch_year_holidays(chinese_calendar, year):
@@ -524,7 +524,7 @@ class TradingCalendar:
 
 
 # ============================================================================
-# 增强的 GreeksCalculator（原 greeks_calculator.py 主体）
+# 增强的 GreeksCalculator（原 greeks_calculator.py 主体）'
 # ============================================================================
 
 class GreeksCalculator:
@@ -720,7 +720,7 @@ class GreeksCalculator:
         Delegates to SubscriptionManager.parse_option to extract strike_price.
         """
         try:
-            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
             parsed = SubscriptionManager.parse_option(instrument_id)
             strike = parsed.get('strike_price')
             return float(strike) if strike is not None else None
@@ -1079,7 +1079,7 @@ class GreeksCalculator:
     @staticmethod
     def _parse_option_month(inst_id):
         try:
-            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
             parsed = SubscriptionManager.parse_option(inst_id)
             return parsed.get('year_month', '')
         except (ValueError, KeyError, TypeError):
@@ -1212,8 +1212,7 @@ def validate_greeks_calendar_iv_noise(
     calendar: Optional['TradingCalendar'] = None,
 ) -> Dict[str, Any]:
     """
-    P2-GR-004修复: 验证Greeks日历效应和IV噪声稳定性。
-
+    P2-GR-004修复: 验证Greeks日历效应和IV噪声稳定性。'
     检查:
     1. 日历效应: 周末/假日前后IV是否有异常跳变
     2. IV噪声: 对IV序列添加高斯噪声(sigma=iv_noise_sigma)后Greeks是否稳定
@@ -1222,8 +1221,7 @@ def validate_greeks_calendar_iv_noise(
         greeks_calculator: GreeksCalculator实例，从中提取缓存的IV数据
         iv_noise_sigma: IV噪声标准差
         n_simulations: 噪声模拟次数
-        calendar: TradingCalendar实例（可选，为空则自动创建）
-
+        calendar: TradingCalendar实例（可选，为空则自动创建）'
     Returns:
         Dict with keys: 'passed' (bool), 'calendar_anomaly_count' (int),
         'iv_noise_max_delta_change' (float), 'details' (str)

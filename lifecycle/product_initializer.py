@@ -24,7 +24,7 @@ _PRODUCT_PARAMS: Dict[str, Dict[str, Any]] = {
     'IO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
     'HO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
     'MO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
-    'EO': {'tick_size': 0.2, 'contract_size': 100, 'exchange': 'CFFEX', 'type': 'option'},
+
     'IF': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future', 'price_limit_pct': 0.10, 'margin_ratio': 0.12},
     'IC': {'tick_size': 0.2, 'contract_size': 200.0, 'exchange': 'CFFEX', 'type': 'future', 'price_limit_pct': 0.10, 'margin_ratio': 0.12},
     'IH': {'tick_size': 0.2, 'contract_size': 300.0, 'exchange': 'CFFEX', 'type': 'future', 'price_limit_pct': 0.10, 'margin_ratio': 0.12},
@@ -64,7 +64,7 @@ _PRODUCT_PARAMS: Dict[str, Dict[str, Any]] = {
     'EG': {'tick_size': 1.0, 'contract_size': 5, 'exchange': 'DCE', 'type': 'option'},
     'C':  {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
     'CS': {'tick_size': 1.0, 'contract_size': 10, 'exchange': 'DCE', 'type': 'option'},
-    # EX-P2-01: 补充SHFE/DCE/CZCE/INE主要品种tick_size配置（期货类型）
+    # EX-P2-01: 补充SHFE/DCE/CZCE/INE主要品种tick_size配置（期货类型）'
     # EX-P2-02: 同时添加price_limit_pct涨跌停幅度
     'CU_F': {'tick_size': 10.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
     'AL_F': {'tick_size': 5.0, 'contract_size': 5, 'exchange': 'SHFE', 'type': 'future', 'price_limit_pct': 0.06, 'margin_ratio': 0.10},
@@ -150,6 +150,199 @@ def _get_option_underlying_product(option_product: str) -> str:
     return entry[0] if entry else option_product
 
 
+def _reset_config_instrument_catalog(data_service) -> None:
+    """按配置全集重建合约元数据，避免历史upsert遗留冲突和配置外污染。"""
+    conn = data_service.get_connection()
+    try:
+        conn.execute("BEGIN")
+        for table_name in (
+            'instruments_registry',
+            'option_instruments',
+            'futures_instruments',
+            'option_products',
+            'future_products',
+        ):
+            conn.execute(f"DELETE FROM {table_name}")
+        conn.execute("DROP SEQUENCE IF EXISTS instrument_id_seq")
+        conn.execute("CREATE SEQUENCE instrument_id_seq START 1")
+        conn.execute("COMMIT")
+        logging.info("[ensure_products] 已按配置全集清空元数据并重建instrument_id_seq")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        data_service._return_connection(conn)
+
+
+def _rebuild_instruments_registry(data_service) -> Dict[str, int]:
+    conn = data_service.get_connection()
+    try:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM instruments_registry")
+        conn.execute("""
+            INSERT INTO instruments_registry (
+                instrument_id, product, exchange, year_month, internal_id,
+                option_type, strike_price, underlying_future_id, registered_at
+            )
+            SELECT instrument_id, product, exchange, year_month, CAST(internal_id AS INTEGER),
+                   NULL, NULL, NULL, CURRENT_TIMESTAMP
+            FROM futures_instruments
+        """)
+        conn.execute("""
+            INSERT INTO instruments_registry (
+                instrument_id, product, exchange, year_month, internal_id,
+                option_type, strike_price, underlying_future_id, registered_at
+            )
+            SELECT instrument_id, product, exchange, year_month, CAST(internal_id AS INTEGER),
+                   option_type, strike_price, underlying_future_id, CURRENT_TIMESTAMP
+            FROM option_instruments
+        """)
+        conn.execute("COMMIT")
+        row = conn.execute("""
+            SELECT COUNT(*) total,
+                   SUM(CASE WHEN internal_id IS NULL THEN 1 ELSE 0 END) null_internal,
+                   SUM(CASE WHEN option_type IS NOT NULL AND underlying_future_id IS NULL THEN 1 ELSE 0 END) null_underlying
+            FROM instruments_registry
+        """).fetchone()
+        return {
+            'registry_total': int(row[0] or 0),
+            'registry_null_internal': int(row[1] or 0),
+            'registry_null_underlying': int(row[2] or 0),
+        }
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        data_service._return_connection(conn)
+
+
+def _insert_rows_via_arrow(conn, view_name: str, table_name: str, columns, rows) -> None:
+    if not rows:
+        return
+    import pyarrow as pa
+
+    records = [dict(zip(columns, row)) for row in rows]
+    table = pa.Table.from_pylist(records)
+    conn.register(view_name, table)
+    try:
+        conn.execute(
+            f"INSERT INTO {table_name} ({', '.join(columns)}) "
+            f"SELECT {', '.join(columns)} FROM {view_name}"
+        )
+    finally:
+        try:
+            conn.unregister(view_name)
+        except Exception:
+            pass
+
+
+def _rebuild_config_instruments(data_service, futures_parsed, options_parsed, future_products_set, option_products_set) -> Tuple[int, int]:
+    """一次事务批量重建配置合约，保证期货/期权internal_id全局唯一。"""
+    from ali2026v3_trading.infra.shared_utils import ShardRouter
+
+    future_product_rows = []
+    for product in sorted(future_products_set):
+        exchange = next((f[2] for f in futures_parsed if f[1] == product), 'CFFEX')
+        params = get_product_params(product)
+        future_product_rows.append((
+            product, exchange, '{product}{year_month}',
+            params.get('tick_size', 0.2), params.get('contract_size', 1.0), True,
+        ))
+
+    option_product_rows = []
+    for product, exchange, underlying_product in sorted(option_products_set):
+        option_product_rows.append((
+            product, exchange, underlying_product,
+            '{product}{year_month}-{option_type}-{strike_price}', 0.2, 1.0, True,
+        ))
+
+    future_rows = []
+    future_id_map = {}
+    next_internal_id = 1
+    for instrument_id, product, exchange, year_month in futures_parsed:
+        product_code = product.lower() if product else None
+        shard_key = ShardRouter._deterministic_hash(product_code) if product_code else None
+        future_rows.append((
+            next_internal_id, instrument_id, product, exchange, year_month,
+            '{product}{year_month}', None, None,
+            'klines_raw', 'ticks_raw', product_code, shard_key, True,
+        ))
+        future_id_map[(product, year_month)] = next_internal_id
+        next_internal_id += 1
+
+    option_rows = []
+    for instrument_id, product, exchange, year_month, option_type, strike_price, underlying_future_key in options_parsed:
+        underlying_future_id = future_id_map[underlying_future_key]
+        underlying_product = _get_option_underlying_product(product)
+        product_code = product.lower() if product else None
+        shard_key = ShardRouter._deterministic_hash(product_code) if product_code else None
+        option_rows.append((
+            next_internal_id, instrument_id, product, exchange,
+            underlying_future_id, underlying_product, year_month, option_type, strike_price,
+            '{product}{year_month}-{option_type}-{strike_price}', None, None,
+            'klines_raw', 'ticks_raw', product_code, shard_key, True,
+        ))
+        next_internal_id += 1
+
+    conn = data_service.get_connection()
+    try:
+        conn.execute("BEGIN")
+        for table_name in (
+            'instruments_registry',
+            'option_instruments',
+            'futures_instruments',
+            'option_products',
+            'future_products',
+        ):
+            conn.execute(f"DELETE FROM {table_name}")
+        conn.execute("DROP SEQUENCE IF EXISTS instrument_id_seq")
+        conn.execute(f"CREATE SEQUENCE instrument_id_seq START {next_internal_id}")
+
+        _insert_rows_via_arrow(
+            conn, '_future_product_rows', 'future_products',
+            ['product', 'exchange', 'format_template', 'tick_size', 'contract_size', 'is_active'],
+            future_product_rows,
+        )
+        _insert_rows_via_arrow(
+            conn, '_option_product_rows', 'option_products',
+            ['product', 'exchange', 'underlying_product', 'format_template', 'tick_size', 'contract_size', 'is_active'],
+            option_product_rows,
+        )
+        _insert_rows_via_arrow(
+            conn, '_future_instrument_rows', 'futures_instruments',
+            ['internal_id', 'instrument_id', 'product', 'exchange', 'year_month',
+             'format', 'expire_date', 'listing_date', 'kline_table', 'tick_table', 'product_code', 'shard_key', 'is_active'],
+            future_rows,
+        )
+        _insert_rows_via_arrow(
+            conn, '_option_instrument_rows', 'option_instruments',
+            ['internal_id', 'instrument_id', 'product', 'exchange',
+             'underlying_future_id', 'underlying_product', 'year_month', 'option_type', 'strike_price',
+             'format', 'expire_date', 'listing_date', 'kline_table', 'tick_table', 'product_code', 'shard_key', 'is_active'],
+            option_rows,
+        )
+        conn.execute("COMMIT")
+        logging.info(
+            "[ensure_products] 配置全集批量重建完成: 期货=%d, 期权=%d, next_internal_id=%d",
+            len(future_rows), len(option_rows), next_internal_id,
+        )
+        return len(future_rows), len(option_rows)
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        data_service._return_connection(conn)
+
+
 def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, int]:
     """
     三机制根因修复 + 期货建表时同时赋映射ID
@@ -164,8 +357,9 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
     机制3 - 删除回填SQL：不再需要 underlying_product + year_month 的字符串匹配回填
     """
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # ali2026v3_trading 根目录
-    futures_file = os.path.join(base_dir, 'subscription_futures_fixed.txt')
-    options_file = os.path.join(base_dir, 'subscription_options_fixed.txt')
+    config_dir = os.path.join(base_dir, 'config')
+    futures_file = os.path.join(config_dir, 'subscription_futures_fixed.txt')
+    options_file = os.path.join(config_dir, 'subscription_options_fixed.txt')
     last_error = None
 
     for attempt in range(1, max_retries + 1):
@@ -193,7 +387,7 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                             instrument_id = parts[-1] if len(parts) > 1 else line
                             exchange = parts[0] if len(parts) > 1 else 'CFFEX'
                         try:
-                            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+                            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
                             parsed = SubscriptionManager.parse_future(instrument_id)
                             product = parsed.get('product', '')
                             year_month = parsed.get('year_month', '')
@@ -227,7 +421,7 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                             instrument_id = parts[-1] if len(parts) > 1 else line
                             exchange = parts[0] if len(parts) > 1 else 'CFFEX'
                         try:
-                            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+                            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
                             parsed_opt = SubscriptionManager.parse_option(instrument_id)
                             product = parsed_opt['product']
                             year_month = parsed_opt['year_month']
@@ -243,6 +437,20 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                         option_products_set.add((product, exchange, underlying_product))
             else:
                 raise RuntimeError(f"期权配置文件不存在: {options_file}")
+
+            # 1B-defensive: 验证config_exchange中声明的期权品种在TXT中都有合约
+            try:
+                from ali2026v3_trading.config.config_exchange import ExchangeConfig
+                _ec = ExchangeConfig()
+                _declared_option_products = set(_ec.option_products.keys())
+                _loaded_option_products = {p[0] for p in option_products_set}
+                _missing_in_txt = _declared_option_products - _loaded_option_products
+                if _missing_in_txt:
+                    logging.warning(
+                        "[ensure_products] 配置声明但TXT缺失的期权品种: %s — 这些品种将无法订阅tick数据",
+                        sorted(_missing_in_txt))
+            except Exception as _e:
+                logging.debug("[ensure_products] 期权品种完整性检查跳过: %s", _e)
 
             if errors:
                 logging.error("[ensure_products] 配置解析错误: %s", errors[:10])
@@ -263,84 +471,78 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
 
             # ========== 阶段2：写DB（所有关系已在内存中验证完毕） ==========
 
-            futures_loaded = 0
-            options_loaded = 0
-
-            # 2A. upsert 期货品种 + 合约，建立 instrument_id -> internal_id 映射
-            future_id_map = {}
-            for product in sorted(future_products_set):
-                exchange = next((f[2] for f in futures_parsed if f[1] == product), 'CFFEX')
-                params = get_product_params(product)
-                tick_size = params.get('tick_size', 0.2)
-                contract_size = params.get('contract_size', 1.0)
-                data_service.upsert_future_product(
-                    product=product, exchange=exchange,
-                    format_template='{product}{year_month}',
-                    tick_size=tick_size, contract_size=contract_size, is_active=True
-                )
-
-            for instrument_id, product, exchange, year_month in futures_parsed:
-                internal_id = data_service.upsert_future_instrument(
-                    instrument_id=instrument_id, product=product,
-                    exchange=exchange, year_month=year_month, is_active=True
-                )
-                future_id_map[(product, year_month)] = internal_id
-                futures_loaded += 1
-
-            # 2B. upsert 期权品种 + 合约，underlying_future_id 从已验证的映射中获取
-            for product_key in sorted(option_products_set):
-                product, exchange, underlying_product = product_key
-                fmt = '{product}{year_month}-{option_type}-{strike_price}'
-                data_service.upsert_option_product(
-                    product=product, exchange=exchange,
-                    underlying_product=underlying_product,
-                    format_template=fmt, tick_size=0.2,
-                    contract_size=1.0, is_active=True
-                )
-
-            for instrument_id, product, exchange, year_month, option_type, strike_price, underlying_future_key in options_parsed:
-                if underlying_future_key not in future_id_map:
-                    raise ValueError(f"underlying_future_key {underlying_future_key} not found in future_id_map for option {instrument_id}")
-                underlying_future_id = future_id_map[underlying_future_key]
-                underlying_product = _get_option_underlying_product(product)
-                data_service.upsert_option_instrument(
-                    instrument_id=instrument_id, product=product,
-                    exchange=exchange, underlying_future_id=underlying_future_id,
-                    underlying_product=underlying_product, year_month=year_month,
-                    option_type=option_type, strike_price=strike_price, is_active=True
-                )
-                options_loaded += 1
+            futures_loaded, options_loaded = _rebuild_config_instruments(
+                data_service, futures_parsed, options_parsed, future_products_set, option_products_set
+            )
 
             # ========== 阶段3：硬断言核查（0 个 NULL，否则初始化失败） ==========
 
             conn = data_service.get_connection()
+            try:
+                null_future_count = conn.execute(
+                    "SELECT COUNT(*) FROM option_instruments WHERE underlying_future_id IS NULL"
+                ).fetchone()[0]
+                if null_future_count > 0:
+                    raise RuntimeError(
+                        f"ID完整性违约：{null_future_count} 个期权合约的 underlying_future_id 为 NULL，初始化终止"
+                    )
 
-            null_future_count = conn.execute(
-                "SELECT COUNT(*) FROM option_instruments WHERE underlying_future_id IS NULL"
-            ).fetchone()[0]
-            if null_future_count > 0:
+                invalid_future_count = conn.execute("""
+                    SELECT COUNT(*)
+                    FROM option_instruments oi
+                    LEFT JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id
+                    WHERE oi.underlying_future_id IS NOT NULL
+                      AND fi.internal_id IS NULL
+                """).fetchone()[0]
+                if invalid_future_count > 0:
+                    raise RuntimeError(
+                        f"ID完整性违约：{invalid_future_count} 个期权合约的 underlying_future_id 指向无效期货，初始化终止"
+                    )
+
+                duplicate_internal_id_count = conn.execute("""
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT internal_id FROM (
+                            SELECT internal_id FROM futures_instruments
+                            UNION ALL
+                            SELECT internal_id FROM option_instruments
+                        ) all_ids
+                        GROUP BY internal_id HAVING COUNT(*) > 1
+                    ) dup
+                """).fetchone()[0]
+                if duplicate_internal_id_count > 0:
+                    raise RuntimeError(
+                        f"ID完整性违约：{duplicate_internal_id_count} 组internal_id重复，初始化终止"
+                    )
+            finally:
+                data_service._return_connection(conn)
+
+            registry_result = _rebuild_instruments_registry(data_service)
+            if registry_result['registry_total'] != futures_loaded + options_loaded:
                 raise RuntimeError(
-                    f"ID完整性违约：{null_future_count} 个期权合约的 underlying_future_id 为 NULL，初始化终止"
+                    f"registry重建数量错误：{registry_result['registry_total']} != {futures_loaded + options_loaded}"
                 )
+            if registry_result['registry_null_internal'] or registry_result['registry_null_underlying']:
+                raise RuntimeError(f"registry完整性违约：{registry_result}")
 
-            invalid_future_count = conn.execute("""
-                SELECT COUNT(*)
-                FROM option_instruments oi
-                LEFT JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id
-                WHERE oi.underlying_future_id IS NOT NULL
-                  AND fi.internal_id IS NULL
-            """).fetchone()[0]
-            if invalid_future_count > 0:
+            coverage_result = data_service.ensure_config_coverage_for_today()
+            expected_total = futures_loaded + options_loaded
+            if coverage_result['ticks_raw_count'] != expected_total or coverage_result['klines_raw_count'] != expected_total:
                 raise RuntimeError(
-                    f"ID完整性违约：{invalid_future_count} 个期权合约的 underlying_future_id 指向无效期货，初始化终止"
+                    f"覆盖落库不完整：expected={expected_total}, coverage={coverage_result}"
                 )
 
             # CHECKPOINT 确保持久化
+            checkpoint_conn = None
             try:
-                conn.execute("CHECKPOINT")
+                checkpoint_conn = data_service.get_connection()
+                checkpoint_conn.execute("CHECKPOINT")
                 logging.info("[ensure_products] 合约数据已持久化（CHECKPOINT）")
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as checkpoint_err:
                 logging.warning(f"[ensure_products] CHECKPOINT失败: {checkpoint_err}")
+            finally:
+                if checkpoint_conn is not None:
+                    data_service._return_connection(checkpoint_conn)
 
             # 刷新 ParamsService 缓存
             try:
@@ -354,20 +556,14 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
             if futures_loaded == 0 and options_loaded == 0:
                 raise RuntimeError("合约表加载后仍为空")
 
-            # 标记品种配置已加载完成，允许后续访问 params_service
-            try:
-                data_service.mark_products_loaded()
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as mark_err:
-                logging.warning(f"[ensure_products] 标记品种加载状态失败: {mark_err}")
-
-            # 显式加载 ParamsService 缓存，确保 validate_contracts_loaded 能通过
+            # P1-15修复：先加载ParamsService缓存，再标记品种配置已加载完成
             try:
                 from ali2026v3_trading.config.params_service import get_params_service
                 ps = get_params_service()
                 ps.load_caches_from_db(data_service)
                 all_cache = ps.get_all_instrument_cache()
-                futures_cached = sum(1 for k in all_cache if '-' not in k)  # R21-MEM-P2-03修复: 生成器替代列表推导式
-                options_cached = sum(1 for k in all_cache if '-' in k)  # R21-MEM-P2-03修复: 生成器替代列表推导式
+                futures_cached = sum(1 for k in all_cache if '-' not in k)
+                options_cached = sum(1 for k in all_cache if '-' in k)
                 logging.info(
                     f"[ensure_products] ParamsService 缓存已加载: "
                     f"期货={futures_cached}, 期权={options_cached}"
@@ -375,6 +571,12 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as load_err:
                 logging.error(f"[ensure_products] ParamsService 缓存加载失败: {load_err}")
                 raise RuntimeError(f"ParamsService 缓存加载失败，策略无法继续初始化: {load_err}")
+
+            # 标记品种配置已加载完成（必须在load_caches_from_db之后）
+            try:
+                data_service.mark_products_loaded()
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as mark_err:
+                logging.warning(f"[ensure_products] 标记品种加载状态失败: {mark_err}")
 
             logging.info(
                 f"[ensure_products] 合约初始化完成(第{attempt}次): "

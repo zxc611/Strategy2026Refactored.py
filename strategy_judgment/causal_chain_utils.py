@@ -1,4 +1,4 @@
-﻿# [M3-16] 数据因果链工具
+# [M3-16] 数据因果链工具
 # MODULE_ID: M3-612
 """
 causal_chain_utils.py — R32 P0修复: 数据因果链追踪/隔离/清理/回滚
@@ -60,7 +60,7 @@ class CausalChainTracker:
 
     @classmethod
     def get_instance(cls) -> "CausalChainTracker":
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('causal_chain_tracker')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -123,7 +123,7 @@ class ContaminationGuard:
 
     @classmethod
     def get_instance(cls) -> "ContaminationGuard":
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('contamination_guard')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -200,7 +200,7 @@ class CyclicDependencyGuard:
 
     @classmethod
     def get_instance(cls) -> "CyclicDependencyGuard":
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('cyclic_dependency_guard')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -222,7 +222,9 @@ class CyclicDependencyGuard:
                     "cycle": list(stack) + [node],
                     "timestamp": _utc_now(),
                 })
-            _logger.warning("[CC-04/CC-11] Cyclic dependency detected: %s->%s", "->".join(stack), node)
+            _cycle_count = len(self._cycle_detections)
+            if _cycle_count <= 3 or _cycle_count % 100 == 0:
+                _logger.info("[CC-04/CC-11] Cyclic dependency detected: %s->%s (total=%d)", "->".join(stack), node, _cycle_count)
             return False
         if len(stack) >= self._max_depth:
             _logger.warning("[CC-04] Call chain too deep (%d), possible loop: %s", len(stack), "->".join(stack[-5:]))
@@ -232,8 +234,11 @@ class CyclicDependencyGuard:
 
     def exit(self, node: str) -> None:
         stack = getattr(self._call_stack, 'stack', None)
-        if stack and stack and stack[-1] == node:
-            stack.pop()
+        if stack:
+            try:
+                stack.remove(node)
+            except ValueError:
+                pass
 
     def get_cycle_detections(self) -> List[Dict[str, Any]]:
         with self._detect_lock:
@@ -251,7 +256,7 @@ class ParamIsolationGuard:
 
     @classmethod
     def get_instance(cls) -> "ParamIsolationGuard":
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('param_isolation_guard')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -316,7 +321,7 @@ class TradeRollbackSnapshot:
     instrument_id: str
     correlation_id: str
     timestamp: datetime = field(default_factory=_utc_now)
-    # 持仓快照（交易前）
+    # 持仓快照（交易前）'
     position_existed: bool = False
     prev_volume: int = 0
     prev_direction: str = ""
@@ -354,7 +359,7 @@ class TradeRollbackManager:
 
     @classmethod
     def get_instance(cls) -> "TradeRollbackManager":
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('trade_rollback_manager')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -424,26 +429,20 @@ class TradeRollbackManager:
             pos_svc = get_position_service()
             instrument_id = snapshot.instrument_id
 
-            if not snapshot.position_existed:
-                # 交易前无持仓 → 删除错误创建的持仓
-                positions = pos_svc.positions.get(instrument_id, {})
-                if position_id in positions:
-                    del positions[position_id]
-                    _logger.info("[R28-C023] 删除错误持仓: %s %s", instrument_id, position_id)
-            else:
-                # 交易前有持仓 → 恢复到交易前状态
-                positions = pos_svc.positions.get(instrument_id, {})
-                pos = positions.get(position_id)
-                if pos is not None:
-                    pos.volume = snapshot.prev_volume
-                    pos.direction = snapshot.prev_direction
-                    pos.open_price = snapshot.prev_open_price
-                    pos.stop_profit_price = snapshot.prev_stop_profit_price
-                    pos.stop_loss_price = snapshot.prev_stop_loss_price
-                    pos.current_plr = snapshot.prev_current_plr
-                    pos._max_profit_pct = snapshot.prev_max_profit_pct
-                    pos.chase_count = snapshot.prev_chase_count
-                    _logger.info("[R28-C023] 恢复持仓到交易前: %s %s", instrument_id, position_id)
+            # FIX-R37-UNIQUE-CLOSE: 交易回滚必须通过统一入口，不能直接del持仓。
+            # 原代码直接 del positions[position_id] 绕过了_reduce_position的所有副作用:
+            # (PnL统计、事件发布、审计日志、_closing重置)。
+            # 现在委托到 PositionService._rollback_position 统一处理。
+            # FIX-R38-LOCK: 交易回滚必须持有instrument锁，防止与_reduce_position/on_tick并发修改
+            with pos_svc._get_instrument_lock(instrument_id):
+                if not snapshot.position_existed:
+                    # 交易前无持仓 → 删除错误创建的持仓
+                    pos_svc._rollback_position(instrument_id, position_id, reason='trade_rollback_no_prior')
+                    _logger.info("[R28-C023] 删除错误持仓(通过统一入口): %s %s", instrument_id, position_id)
+                else:
+                    # 交易前有持仓 → 恢复到交易前状态
+                    pos_svc._restore_position_state(position_id, instrument_id, snapshot)
+                    _logger.info("[R28-C023] 恢复持仓到交易前(通过统一入口): %s %s", instrument_id, position_id)
         except (ValueError, KeyError, TypeError, AttributeError) as e:
             _logger.error("[R28-C023] 持仓回滚异常: %s", e, exc_info=True)
 
@@ -452,7 +451,7 @@ class TradeRollbackManager:
             from ali2026v3_trading.risk.risk_service import get_risk_service
             risk_svc = get_risk_service()
             if risk_svc is not None and hasattr(risk_svc, '_consecutive_loss_counts'):
-                # 重置连亏计数（回滚的交易不应计入连亏）
+                # 重置连亏计数（回滚的交易不应计入连亏）'
                 for key in list(risk_svc._consecutive_loss_counts.keys()):
                     if snapshot.instrument_id in key:
                         risk_svc._consecutive_loss_counts[key] = snapshot.prev_consecutive_losses

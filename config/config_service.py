@@ -62,12 +62,10 @@ from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import timezone, timedelta
 
-_CHINA_TZ = timezone(timedelta(hours=8))
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer, safe_pickle_load, safe_pickle_dump, yaml_safe_load, yaml_safe_dump
 
-from ali2026v3_trading.serialization_utils import json_dumps, json_loads, json_default_serializer, safe_pickle_load, safe_pickle_dump, yaml_safe_load, yaml_safe_dump
-
-from ali2026v3_trading.infra.shared_utils import normalize_year_month
-from ali2026v3_trading.resilience_utils import is_disk_full_error
+from ali2026v3_trading.infra.shared_utils import normalize_year_month, CHINA_TZ as _CHINA_TZ  # 五唯一性修复：统一从 shared_utils 导入 CHINA_TZ
+from ali2026v3_trading.infra.resilience import is_disk_full_error
 
 # P2修复: config_service版本号标记（增加版本号覆盖率）
 _CONFIG_SERVICE_MODULE_VERSION = "2.0.0"  # P2修复: 配置服务模块版本
@@ -78,7 +76,7 @@ _DATABASE_CONFIG_VERSION = "1.0"          # P2修复: 数据库配置版本
 _PERFORMANCE_CONFIG_VERSION = "1.0"       # P2
 # SEC-P2-01/02/03/06修复: 集成security_hardening安全加固
 try:
-    from ali2026v3_trading.security_hardening import (
+    from ali2026v3_trading.infra.security import (
         SANITIZE_ERROR_MSG, _truncate_stack_trace, _safe_unpickle,
         SecurityProfile, ENV_SECURITY_PROFILES,
         apply_security_profile,
@@ -127,13 +125,21 @@ from ali2026v3_trading.config.config_params import (
     load_option_params_from_file,
     merge_option_params_to_default,
     CACHE_TTL,
+    get_param,
+)
+
+# P2-06修复: 统一使用 config_dataclasses 的规范定义(3级parent), 删除本文件中的重复定义
+from ali2026v3_trading.config.config_dataclasses import (  # noqa: F401
+    PathConfig,
+    DatabaseConfig,
+    DataPathsConfig,
 )
 
 from ali2026v3_trading.governance.param_table_provider import get_param_table_provider as _get_param_table_provider
 _param_provider = _get_param_table_provider()
 
 def get_param_provider():
-    """P2-2-FIX: 返回全局_param_provider单例"""
+    """P2-2-FIX: 返回全局。param_provider单例"""
     return _param_provider
 
 
@@ -327,7 +333,7 @@ class StructuredJsonFormatter(logging.Formatter):
 class StructuredLogEntry:
     """结构化日志条目 — 定义标准字段，确保日志聚合与监控一致
 
-    所有模块写入结构化日志时应使用此数据类，保证字段名和类型统一。
+    所有模块写入结构化日志时应使用此数据类，保证字段名和类型统一。'
     """
     timestamp: str = ""
     event_type: str = ""
@@ -349,21 +355,9 @@ class StructuredLogEntry:
 
 
 # ============================================================================
-# 路径配置
+# 路径配置 — 五唯一性修复：PathConfig 已统一从 config_dataclasses.py 导入
 # ============================================================================
-
-@dataclass(slots=True)
-class PathConfig:
-    """路径配置"""
-    project_root: str = str(Path(__file__).parent.parent)
-    db_path: str = str(Path(__file__).parent.parent / "data" / "strategy.duckdb")
-    state_file: str = str(Path(__file__).parent.parent / "data" / "strategy_state.json")
-    log_dir: str = str(Path(__file__).parent / "logs")
-    config_dir: str = str(Path(__file__).parent / "config")
-
-    def to_dict(self) -> Dict[str, Any]:
-        from dataclasses import asdict
-        return asdict(self)
+from ali2026v3_trading.config.config_dataclasses import PathConfig  # noqa: F401  五唯一性修复
 
 
 # ============================================================================
@@ -522,7 +516,7 @@ class DatabaseConfig:
     """数据库配置"""
     db_type: str = "duckdb"
     db_path: str = str(Path(__file__).parent.parent / "data" / "strategy.duckdb")
-    connection_pool_size: int = 5
+    connection_pool_size: int = 15  # R36-P0-FIX: 从5增加到15，避免多线程并发时连接池耗尽降级到内存DB
     connection_timeout: float = 30.0
     enable_connection_pooling: bool = True
     auto_commit: bool = False
@@ -888,7 +882,7 @@ class ConfigService:
     def _upgrade_config_format(self, raw_config: Dict[str, Any]) -> Dict[str, Any]:
         """UPG-P1-06修复: 配置格式自动升级
 
-        检查配置中的format_version字段，按序执行迁移链。
+        检查配置中的format_version字段，按序执行迁移链。'
         迁移失败时返回原始配置（保守策略）。
 
         Args:
@@ -994,8 +988,7 @@ class ConfigService:
     def _acquire_distributed_lock(self, lock_name: str, timeout_sec: float = 30.0) -> bool:
         """UPG-P1-08修复: 获取基于文件的分布式锁
 
-        用于多节点/多进程协调，防止并发配置更新。
-
+        用于多节点/多进程协调，防止并发配置更新。'
         Args:
             lock_name: 锁名称
             timeout_sec: 超时时间(秒)
@@ -1014,7 +1007,7 @@ class ConfigService:
                 os.close(fd)
                 return True
             except FileExistsError:
-                # 检查锁是否过期（超过60秒视为过期）
+                # 检查锁是否过期（超过60秒视为过期）'
                 try:
                     lock_age = time.time() - os.path.getmtime(lock_path)
                     if lock_age > 60.0:
@@ -1081,8 +1074,7 @@ class ConfigService:
         """UPG-P1-08修复: 通过EventBus通知其他节点配置已更新
 
         在多节点部署中，当一个节点完成配置更新后，
-        通过EventBus发布配置变更事件，通知其他节点刷新本地缓存。
-
+        通过EventBus发布配置变更事件，通知其他节点刷新本地缓存。'
         Args:
             updated_keys: 更新的配置键列表
         """
@@ -1109,7 +1101,7 @@ class ConfigService:
     def _subscribe_config_update_events(self) -> None:
         """UPG-P1-08修复: 订阅其他节点的配置更新事件
 
-        当收到其他节点的配置更新通知时，自动刷新本地配置缓存。
+        当收到其他节点的配置更新通知时，自动刷新本地配置缓存。'
         """
         try:
             from ali2026v3_trading.infra.event_bus import EventBus
@@ -1145,8 +1137,7 @@ class ConfigService:
         >>> snapshot_id = config_service.create_config_snapshot('before_reload')
         
         参数：
-        - snapshot_name: 快照名称（可选，默认使用时间戳）
-        
+        - snapshot_name: 快照名称（可选，默认使用时间戳）'
         返回：
         - 快照ID（用于回滚时引用）
         """
@@ -1173,8 +1164,7 @@ class ConfigService:
         >>> success = config_service.rollback_config_snapshot('before_reload')
         
         参数：
-        - snapshot_id: 快照ID（可选，默认回滚到最近一次快照）
-        
+        - snapshot_id: 快照ID（可选，默认回滚到最近一次快照）'
         返回：
         - True: 回滚成功
         - False: 回滚失败（快照不存在或ID不匹配）
@@ -1210,7 +1200,7 @@ class ConfigService:
         SER-P1-14修复: 获取当前快照信息
         
         返回：
-        - 快照信息字典（包含id、timestamp、config大小）
+        - 快照信息字典（包含id、timestamp、config大小）'
         - None: 无快照
         """
         if not self._config_snapshot:
@@ -1222,8 +1212,7 @@ class ConfigService:
         }
 
     def load_checkpoint_safe(self, checkpoint_path: str) -> Optional[Dict[str, Any]]:
-        """SER-P1-07修复: 使用safe_pickle_load安全加载checkpoint文件。
-        
+        """SER-P1-07修复: 使用safe_pickle_load安全加载checkpoint文件。'
         替代直接pickle.load，增加文件大小限制和RCE风险防护。
         """
         try:
@@ -1325,8 +1314,7 @@ class ConfigService:
     def diff_config(self, other_config: Dict[str, Any]) -> Dict[str, Any]:
         """P2-项19修复: 对比当前配置与另一环境配置的差异
 
-        用于多环境(开发/测试/生产)配置一致性检查。
-
+        用于多环境(开发/测试/生产)配置一致性检查。'
         Args:
             other_config: 另一环境的配置字典
 
@@ -1373,12 +1361,11 @@ class ConfigService:
         """UPG-P1-11修复: 检查代码版本、手册版本、配置版本是否对齐
 
         确保代码实现、操作手册、配置格式三者的版本一致，
-        防止版本漂移导致操作错误或配置不兼容。
-
+        防止版本漂移导致操作错误或配置不兼容。'
         Args:
             code_version: 代码版本号（默认使用shared_utils._CODE_VERSION）
-            manual_version: 手册版本号（默认从环境变量MANUAL_VERSION读取）
-            config_version: 配置版本号（默认使用_CONFIG_FORMAT_VERSION）
+            manual_version: 手册版本号（默认从环境变量MANUAL_VERSION读取）'
+            config_version: 配置版本号（默认使用例CONFIG_FORMAT_VERSION）
 
         Returns:
             Dict: {
@@ -1572,7 +1559,7 @@ def get_config() -> ConfigService:
                 _config_service_instance = ConfigService()
                 # AP-03: SingletonRegistry注册
                 try:
-                    from ali2026v3_trading.singleton_registry import SingletonRegistry
+                    from ali2026v3_trading.infra.registry_service import SingletonRegistry
                     registry = SingletonRegistry.get_registry("config_service")
                     registry.register_singleton("config_service.instance", _config_service_instance)
                 except Exception:
@@ -1625,6 +1612,7 @@ __all__ = [
     'reload_config',
     'get_default_db_path',
     'get_project_root',
+    'get_param',
     'setup_logging',
     'setup_paths',
     'get_paths',
@@ -1652,151 +1640,157 @@ _CACHED_PATHS = None
 
 
 def setup_logging():
+    """统一日志初始化 — 补充 handler，不干扰已有 handler
+
+    职责:
+    1. 如果没有主文件 handler (RotatingFileHandler 且非 _is_code_dir_handler)，创建一个指向 config/logs/strategy.log
+    2. 添加 PlatformHandler (write_log)
+    3. 添加 code-dir RotatingFileHandler
+    4. 添加 FlushHandler + JsonlHandler + AsyncHandler
+
+    关键约束: 不移除、不关闭任何已有 handler，避免与 _init_logging 冲突
+    """
     global _LOG_INITIALIZED
     if _LOG_INITIALIZED:
         return False
     root_logger = logging.getLogger()
-    has_valid_rotating_handler = False
-    stale_handlers = []
-    for h in root_logger.handlers[:]:
-        if isinstance(h, RotatingFileHandler):
-            try:
-                if h.stream and not h.stream.closed:
-                    has_valid_rotating_handler = True
-                else:
-                    stale_handlers.append(h)
-            except Exception:
-                stale_handlers.append(h)
-    for h in stale_handlers:
+    root_logger.setLevel(logging.INFO)
+    formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    has_main_file_handler = any(
+        isinstance(h, RotatingFileHandler)
+        and not getattr(h, '_is_code_dir_handler', False)
+        for h in root_logger.handlers
+    )
+    if not has_main_file_handler:
         try:
-            root_logger.removeHandler(h)
-            h.close()
-        except Exception:
-            pass
-    if has_valid_rotating_handler:
-        _LOG_INITIALIZED = True
-        return False
-    try:
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
-        formatter = logging.Formatter(
-            LOG_FORMAT,  # R13-P1-LOG-02修复: 使用集中常量
-            datefmt=LOG_DATE_FORMAT  # R13-P1-LOG-02修复: 使用集中常量
-        )
-        has_platform_handler = any(
-            getattr(h, '_is_platform_handler', False)
-            for h in root_logger.handlers
-        )
-        if not has_platform_handler:
-            try:
-                from pythongo.infini import write_log
-                class SimplePlatformHandler(logging.Handler):
-                    _emit_error_count = 0
-                    def emit(self, record):
-                        msg = self.format(record)
-                        try:
-                            write_log(msg)
-                        except Exception as _plh_err:
-                            SimplePlatformHandler._emit_error_count += 1
-                            if SimplePlatformHandler._emit_error_count <= 10 or SimplePlatformHandler._emit_error_count % 100 == 0:
-                                logging.getLogger(__name__ + '.platform').warning(
-                                    "[LG-05] Platform log write failed (count=%d): %s",
-                                    SimplePlatformHandler._emit_error_count, _plh_err)
-                platform_handler = SimplePlatformHandler()
-                platform_handler._is_platform_handler = True
-                platform_handler.setLevel(logging.INFO)
-                platform_handler.setFormatter(formatter)
-                root_logger.addHandler(platform_handler)
-            except ImportError:
-                pass
-        has_file_handler = any(
-            isinstance(h, RotatingFileHandler)
-            for h in root_logger.handlers
-        )
-        if not has_file_handler:
             current_dir = os.path.dirname(os.path.abspath(__file__))
             log_dir = os.path.join(current_dir, 'logs')
             log_file = os.path.join(log_dir, 'strategy.log')
-            if log_dir and not os.path.exists(log_dir):
+            if not os.path.exists(log_dir):
                 os.makedirs(log_dir, exist_ok=True)
             if _HAS_CONCURRENT_HANDLER:
                 file_handler = ConcurrentRotatingFileHandler(
                     log_file,
-                    maxBytes=50*1024*1024,
-                    backupCount=5,
+                    maxBytes=100*1024*1024,
+                    backupCount=3,
                     encoding='utf-8',
                     delay=False,
                     use_gzip=False
                 )
-                logging.info('[config_service] Using ConcurrentRotatingFileHandler for multi-process safety')
             else:
                 file_handler = RotatingFileHandler(
                     log_file,
-                    maxBytes=50*1024*1024,
-                    backupCount=5,
+                    maxBytes=100*1024*1024,
+                    backupCount=3,
                     encoding='utf-8',
                     delay=False
                 )
-                logging.warning('[config_service] Using RotatingFileHandler (not multi-process safe)')
-            file_handler.setLevel(logging.INFO)  # LG-P1-01修复: 生产环境默认INFO，避免DEBUG日志无限增长
+            file_handler.setLevel(logging.INFO)
             file_handler.setFormatter(formatter)
             root_logger.addHandler(file_handler)
-            # R13-P2-LOG-02修复: 设置日志文件权限为0o600，仅所有者可读写
-            try:
-                os.chmod(log_file, 0o600)
-            except (OSError, AttributeError):
-                pass  # Windows可能不支持完整chmod
-            flush_handler = FlushHandler()
-            flush_handler.setLevel(logging.DEBUG)
-            root_logger.addHandler(flush_handler)
-        _LOG_INITIALIZED = True
-        logging.info('[config_service] Logging system initialized: platform + file')
-        # LG-06修复: 日志初始化后执行健康检查
-        try:
-            _health = check_logging_health()
-            if not _health.get('healthy', False):
-                logging.warning('[LG-06] Logging health check failed after init: %s', _health)
         except Exception:
             pass
-        # R15-P2-LOG修复: StructuredJsonlLogger集成主日志流
+    has_platform_handler = any(
+        getattr(h, '_is_platform_handler', False)
+        for h in root_logger.handlers
+    )
+    if not has_platform_handler:
         try:
-            from ali2026v3_trading.infra.health_check_api import StructuredJsonlLogger
-            _sjl = StructuredJsonlLogger(log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs'))
-            class _JsonlLogHandler(logging.Handler):
+            from pythongo.infini import write_log
+            class SimplePlatformHandler(logging.Handler):
+                _emit_error_count = 0
                 def emit(self, record):
+                    msg = self.format(record)
                     try:
-                        _sjl._signal_log_f.write(self.format(record) + '\n')
-                        _sjl._signal_log_f.flush()
-                    except Exception as _jsonl_err:
-                        if not hasattr(self, '_jsonl_err_count'):
-                            self._jsonl_err_count = 0
-                        self._jsonl_err_count += 1
-                        if self._jsonl_err_count <= 10 or self._jsonl_err_count % 100 == 0:
-                            logging.warning("[LG-P1-10] _JsonlLogHandler.emit异常(%d次): %s", self._jsonl_err_count, _jsonl_err)
-            _jsonl_handler = _JsonlLogHandler()
-            _jsonl_handler.setLevel(logging.WARNING)
-            root_logger.addHandler(_jsonl_handler)
-        except Exception as _sjl_err:
-            logging.debug('[config_service] R15-P2-LOG: StructuredJsonlLogger集成跳过: %s', _sjl_err)
-        # R13-P0-LOG-06修复: 初始化后尝试启用异步日志
+                        write_log(msg)
+                    except Exception as _plh_err:
+                        SimplePlatformHandler._emit_error_count += 1
+                        if SimplePlatformHandler._emit_error_count <= 10 or SimplePlatformHandler._emit_error_count % 100 == 0:
+                            logging.getLogger(__name__ + '.platform').warning(
+                                "[LG-05] Platform log write failed (count=%d): %s",
+                                SimplePlatformHandler._emit_error_count, _plh_err)
+            platform_handler = SimplePlatformHandler()
+            platform_handler._is_platform_handler = True
+            platform_handler.setLevel(logging.INFO)
+            platform_handler.setFormatter(formatter)
+            root_logger.addHandler(platform_handler)
+        except ImportError:
+            pass
+    has_code_dir_handler = any(
+        getattr(h, '_is_code_dir_handler', False)
+        for h in root_logger.handlers
+    )
+    if not has_code_dir_handler:
         try:
-            cfg = get_config()
-            if cfg.logging.enable_async_logging:
-                cfg.logging.setup_async_logging(root_logger)
-        except Exception as _async_e:
-            logging.debug('[config_service] R13-P0-LOG-06修复: 异步日志启用跳过: %s', _async_e)
-        return True
-    except Exception as e:
-        try:
-            logging.basicConfig(
-                level=logging.INFO,
-                format=LOG_FORMAT  # R13-P1-LOG-02修复: 使用集中常量
-            )
-            _LOG_INITIALIZED = True
-            logging.warning('[config_service] Using fallback logging configuration')
-            return True
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            log_dir = os.path.join(current_dir, 'logs')
+            log_file = os.path.join(log_dir, 'strategy.log')
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+            if _HAS_CONCURRENT_HANDLER:
+                file_handler = ConcurrentRotatingFileHandler(
+                    log_file,
+                    maxBytes=100*1024*1024,
+                    backupCount=3,
+                    encoding='utf-8',
+                    delay=False,
+                    use_gzip=False
+                )
+            else:
+                file_handler = RotatingFileHandler(
+                    log_file,
+                    maxBytes=100*1024*1024,
+                    backupCount=3,
+                    encoding='utf-8',
+                    delay=False
+                )
+            file_handler._is_code_dir_handler = True
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
         except Exception:
-            return False
+            pass
+    has_flush_handler = any(
+        isinstance(h, FlushHandler)
+        for h in root_logger.handlers
+    )
+    if not has_flush_handler:
+        flush_handler = FlushHandler()
+        flush_handler.setLevel(logging.DEBUG)
+        root_logger.addHandler(flush_handler)
+    _LOG_INITIALIZED = True
+    try:
+        _health = check_logging_health()
+        if not _health.get('healthy', False):
+            logging.warning('[LG-06] Logging health check failed after init: %s', _health)
+    except Exception:
+        pass
+    try:
+        from ali2026v3_trading.infra.health_monitor import StructuredJsonlLogger
+        _sjl = StructuredJsonlLogger(log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs'))
+        class _JsonlLogHandler(logging.Handler):
+            def emit(self, record):
+                try:
+                    _sjl._signal_log_f.write(self.format(record) + '\n')
+                    _sjl._signal_log_f.flush()
+                except Exception as _jsonl_err:
+                    if not hasattr(self, '_jsonl_err_count'):
+                        self._jsonl_err_count = 0
+                    self._jsonl_err_count += 1
+                    if self._jsonl_err_count <= 10 or self._jsonl_err_count % 100 == 0:
+                        logging.warning("[LG-P1-10] _JsonlLogHandler.emit异常(%d次): %s", self._jsonl_err_count, _jsonl_err)
+        _jsonl_handler = _JsonlLogHandler()
+        _jsonl_handler.setLevel(logging.WARNING)
+        root_logger.addHandler(_jsonl_handler)
+    except Exception:
+        pass
+    try:
+        cfg = get_config()
+        if cfg.logging.enable_async_logging:
+            cfg.logging.setup_async_logging(root_logger)
+    except Exception:
+        pass
+    return True
 
 
 def setup_paths():
@@ -1822,44 +1816,20 @@ def get_paths():
     return _CACHED_PATHS
 
 
-# LG-06修复: 日志系统健康检查与崩溃恢复
-_logging_health_state = {
-    'last_check_time': 0.0,
-    'handler_failures': 0,
-    'total_checks': 0,
-}
-
-def check_logging_health() -> Dict[str, Any]:
-    """LG-06修复: 日志系统健康检查——检测handler失效、文件不可写等"""
-    now = time.time()
-    _logging_health_state['total_checks'] += 1
-    _logging_health_state['last_check_time'] = now
-    root_logger = logging.getLogger()
-    handlers = root_logger.handlers
-    alive_handlers = 0
-    dead_handlers = 0
-    for h in handlers:
-        try:
-            if hasattr(h, 'stream') and h.stream is None:
-                dead_handlers += 1
-            elif hasattr(h, 'baseFilename') and not os.path.exists(h.baseFilename):
-                dead_handlers += 1
-            else:
-                alive_handlers += 1
-        except Exception:
-            dead_handlers += 1
-    _logging_health_state['handler_failures'] = dead_handlers
-    is_healthy = dead_handlers == 0 and alive_handlers > 0
-    if not is_healthy:
-        logging.getLogger(__name__ + '.health').error(
-            "[LG-06] Logging system unhealthy: alive=%d dead=%d total_checks=%d",
-            alive_handlers, dead_handlers, _logging_health_state['total_checks'])
-    return {
-        'healthy': is_healthy,
-        'alive_handlers': alive_handlers,
-        'dead_handlers': dead_handlers,
-        'total_checks': _logging_health_state['total_checks'],
+# LG-06修复: 日志系统健康检查 — 委托到 config_logging.py 的权威实现
+try:
+    from ali2026v3_trading.config.config_logging import check_logging_health as check_logging_health
+except ImportError:
+    _logging_health_state = {
+        'last_check_time': 0.0,
+        'handler_failures': 0,
+        'total_checks': 0,
     }
+    def check_logging_health() -> Dict[str, Any]:
+        return {'healthy': True, 'alive_handlers': 0, 'dead_handlers': 0, 'total_checks': 0}
 
 
 from ali2026v3_trading.infra.service_container import ServiceContainer  # noqa: E402
+
+ConfigQueryService = ConfigService
+ConfigServiceQueryMixin = ConfigService

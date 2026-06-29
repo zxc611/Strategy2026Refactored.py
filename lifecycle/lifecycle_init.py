@@ -24,7 +24,24 @@ class LifecycleInit:
         p = self.p
         with p._lock:
             if p._initialized:
-                logging.info("[StrategyCoreService.on_init] Already initialized, skipping")
+                logging.info("[StrategyCoreService.on_init] Already initialized, ensuring ParamsService cache loaded")
+                try:
+                    from ali2026v3_trading.config.params_service import get_params_service
+                    _ps = get_params_service()
+                    if _ps is not None and hasattr(_ps, '_instrument_id_to_internal_id'):
+                        with _ps._lock:
+                            if not _ps._instrument_id_to_internal_id:
+                                from ali2026v3_trading.data.data_service import get_existing_data_service
+                                _ds = get_existing_data_service()
+                                if _ds is not None:
+                                    _ps.load_caches_from_db(_ds)
+                                    logging.info("[StrategyCoreService.on_init] ParamsService缓存已从DB加载: %d 个合约", len(_ps._instrument_id_to_internal_id))
+                                else:
+                                    logging.warning("[StrategyCoreService.on_init] DataService不可用，无法加载ParamsService缓存")
+                            else:
+                                logging.info("[StrategyCoreService.on_init] ParamsService缓存已有 %d 个合约，无需重新加载", len(_ps._instrument_id_to_internal_id))
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _cache_err:
+                    logging.warning("[StrategyCoreService.on_init] ParamsService缓存加载失败: %s", _cache_err)
                 return True
             if not _state_is(p._state, StrategyState.INITIALIZING) and not _state_is(p._state, StrategyState.ERROR):
                 logging.warning(f"[StrategyCoreService.on_init] Cannot initialize in state: {p._state}")
@@ -54,7 +71,7 @@ class LifecycleInit:
                 p.params = kwargs.get('params')
                 p._init_lifecycle_submodules()
                 p._init_logging(kwargs.get('params'))
-                p._init_scheduler()
+
                 logging.info("[Init-Step2] 从合约配置文件加载合约列表+预注册...")
                 if p.storage is None:
                     raise RuntimeError("[Init-Step2] storage初始化失败，无法加载合约列表")
@@ -67,6 +84,8 @@ class LifecycleInit:
                     f"[Init-Step2] 合约加载+预注册完成: 期货=%d, 期权=%d, 共=%d",
                     total_f, total_o, len(p._init_instruments_result['subscribed_instruments']),
                 )
+                # P1-15a修复：_init_scheduler移到Init-Step2之后，确保合约数据已加载
+                p._init_scheduler()
                 p._analytics_warmup_done = False
                 p._analytics_warmup_thread = None
                 p._start_analytics_warmup_async(p.params)
@@ -171,7 +190,7 @@ class LifecycleInit:
             return futures_instruments, option_instruments
         try:
             from ali2026v3_trading.data.query_service import QueryService
-            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
             qs = QueryService(storage)
             registered_ids = storage.get_registered_instrument_ids()
             logging.debug(f"[InitServices] 已注册合约数量: {len(registered_ids)}")
@@ -199,7 +218,7 @@ class LifecycleInit:
             pass
             pass
         try:
-            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
             from ali2026v3_trading.data.data_service import get_data_service
             parsed = SubscriptionManager.parse_option(inst_id)
             option_product = parsed['product']
@@ -207,7 +226,7 @@ class LifecycleInit:
             OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
             future_product = OPTION_TO_FUTURE_MAP.get(option_product, option_product)
             rows = get_data_service().query(
-                "SELECT instrument_id FROM futures_instrument WHERE product=? AND year_month=?",
+                "SELECT instrument_id FROM futures_instruments WHERE product=? AND year_month=?",
                 [future_product, year_month]
             ).to_pylist()
             if rows:
@@ -227,9 +246,26 @@ class LifecycleInit:
         from ali2026v3_trading.data.t_type_service import get_t_type_service
         p.t_type_service = get_t_type_service()
         logging.info("[AnalyticsInit] t_type_service initialized")
-        if hasattr(p, 'storage') and p.storage and hasattr(p.storage, 'subscription_manager'):
-            p.storage.subscription_manager.set_t_type_service(p.t_type_service)
+        _storage = getattr(p, 'storage', None) or storage
+        _sm = None
+        if _storage is not None:
+            _sm = getattr(_storage, 'subscription_manager', None)
+            if callable(_sm):
+                _sm = _sm()
+        if _sm is None:
+            logging.warning("[AnalyticsInit] storage.subscription_manager is None, trying DataService fallback")
+            try:
+                from ali2026v3_trading.data.data_service import get_data_service
+                _ds = get_data_service()
+                if _ds is not None:
+                    _sm = _ds.subscription_manager
+            except Exception as _sm_fb_err:
+                logging.warning("[AnalyticsInit] DataService fallback for SubscriptionManager failed: %s", _sm_fb_err)
+        if _sm is not None and hasattr(_sm, 'set_t_type_service'):
+            _sm.set_t_type_service(p.t_type_service)
             logging.info("[AnalyticsInit] TTypeService injected into SubscriptionManager")
+        else:
+            logging.warning("[AnalyticsInit] SubscriptionManager not available, TTypeService not injected")
         if not p.t_type_service:
             raise RuntimeError("[AnalyticsInit] t_type_service 初始化失败，策略无法继续")
         instruments_result = getattr(p, '_init_instruments_result', None)
@@ -239,19 +275,23 @@ class LifecycleInit:
         options_metadata = instruments_result.get('options_metadata', {})
         futures_list = instruments_result.get('futures_list', [])
         from ali2026v3_trading.data.data_service import get_latest_price
+        from ali2026v3_trading.config.params_service import get_params_service as _get_ps
+        _ps = _get_ps()
         futures_registered = 0
         for inst_id in futures_list:
             try:
                 meta = futures_metadata.get(inst_id, {})
-                internal_id = meta.get('internal_id')
+                db_meta = _ps.get_instrument_meta_by_id(inst_id)
+                internal_id = db_meta.get('internal_id') if db_meta else meta.get('internal_id')
                 if internal_id is None:
-                    logging.warning("[AnalyticsInit] 期货 %s 无 internal_id，跳过", inst_id)
+                    logging.warning("[AnalyticsInit] 期货 %s 无 internal_id（TXT=%s, DB=%s），跳过",
+                                    inst_id, meta.get('internal_id'), db_meta)
                     continue
                 price = get_latest_price(inst_id) or 0.0
                 if price <= 0:
                     price = 0.0
                 future_internal_id = int(internal_id)
-                year_month = meta.get('year_month') or p._extract_contract_year_month(inst_id) or ''
+                year_month = (db_meta.get('year_month') if db_meta else None) or meta.get('year_month') or p._extract_contract_year_month(inst_id) or ''
                 p.t_type_service._width_cache.register_future(future_internal_id, float(price), month=year_month)
                 futures_registered += 1
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
@@ -264,26 +304,37 @@ class LifecycleInit:
         options_dict = instruments_result.get('options_dict', {})
         options_registered = 0
         options_total = sum(len(v) for v in options_dict.values())
+        _underlying_id_cache = {}
         for product, option_ids in options_dict.items():
             for opt_id in option_ids:
                 try:
                     meta = options_metadata.get(opt_id, {})
-                    internal_id = meta.get('internal_id')
-                    underlying_future_id = meta.get('underlying_future_id')
-                    option_product = meta.get('product')
-                    month = meta.get('year_month')
-                    opt_type = meta.get('option_type')
-                    strike = meta.get('strike_price')
+                    db_meta = _ps.get_instrument_meta_by_id(opt_id)
+                    internal_id = db_meta.get('internal_id') if db_meta else meta.get('internal_id')
+                    underlying_future_id = db_meta.get('underlying_future_id') if db_meta else meta.get('underlying_future_id')
+                    if underlying_future_id is None and db_meta and db_meta.get('underlying_product'):
+                        _up = db_meta['underlying_product']
+                        _ym = db_meta.get('year_month', '')
+                        if _up and _ym and (_up, _ym) not in _underlying_id_cache:
+                            from ali2026v3_trading.config.config_exchange import make_platform_future_id
+                            _fut_inst = make_platform_future_id(_up, _ym)
+                            _fut_meta = _ps.get_instrument_meta_by_id(_fut_inst)
+                            _underlying_id_cache[(_up, _ym)] = _fut_meta.get('internal_id') if _fut_meta else None
+                        underlying_future_id = _underlying_id_cache.get((_up, _ym))
+                    option_product = (db_meta.get('product') if db_meta else None) or meta.get('product')
+                    month = (db_meta.get('year_month') if db_meta else None) or meta.get('year_month')
+                    opt_type = (db_meta.get('option_type') if db_meta else None) or meta.get('option_type')
+                    strike = (db_meta.get('strike_price') if db_meta else None) or meta.get('strike_price')
                     if internal_id is None or underlying_future_id is None:
-                        logging.warning("[AnalyticsInit] 期权 %s metadata缺失(internal_id=%s, underlying_future_id=%s)，跳过",
-                                        opt_id, internal_id, underlying_future_id)
+                        logging.warning("[AnalyticsInit] 期权 %s metadata缺失(internal_id=%s, underlying_future_id=%s, db=%s)，跳过",
+                                        opt_id, internal_id, underlying_future_id, bool(db_meta))
                         continue
                     if not option_product or not month or not opt_type or not strike or strike <= 0:
                         logging.warning("[AnalyticsInit] 期权 %s 字段无效(product=%s, month=%s, type=%s, strike=%s)，跳过",
                                         opt_id, option_product, month, opt_type, strike)
                         continue
                     price = get_latest_price(opt_id) or 0.0
-                    p.t_type_service.register_option_contract(
+                    _reg_result = p.t_type_service.register_option_contract(
                         instrument_id=opt_id,
                         underlying_product=option_product,
                         month=month,
@@ -293,6 +344,9 @@ class LifecycleInit:
                         underlying_future_id=int(underlying_future_id),
                         internal_id=int(internal_id),
                     )
+                    if _reg_result is None:
+                        logging.warning("[AnalyticsInit] register_option_contract returned None: %s", opt_id)
+                        continue
                     options_registered += 1
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error("[AnalyticsInit] 注册期权 %s 失败: %s", opt_id, e)
@@ -383,33 +437,28 @@ class LifecycleInit:
         root_logger = logging.getLogger()
         log_file = params.get('log_file', 'logs/strategy.log') if params else 'logs/strategy.log'
         abs_log_file = os.path.abspath(log_file)
-        has_valid_file_handler = False
         stale_handlers = []
         for h in root_logger.handlers[:]:
             if isinstance(h, (FileHandler, RotatingFileHandler)):
                 handler_file = os.path.abspath(getattr(h, 'baseFilename', ''))
                 if handler_file == abs_log_file:
                     try:
-                        if h.stream and not h.stream.closed:
-                            has_valid_file_handler = True
+                        file_exists = os.path.exists(handler_file)
+                        if h.stream and not h.stream.closed and file_exists:
+                            return
                         else:
                             stale_handlers.append(h)
-                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    except (ValueError, KeyError, TypeError, AttributeError):
                         stale_handlers.append(h)
         for h in stale_handlers:
             try:
                 root_logger.removeHandler(h)
                 h.close()
-            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-                logging.debug("[R3-L2] suppressed exception", exc_info=True)
+            except (ValueError, KeyError, TypeError, AttributeError):
                 pass
-                pass
-        if has_valid_file_handler:
-            logging.debug("[StrategyCoreService._init_logging] Logging already initialized, skipping")
-            return
         log_level_name = str((params or {}).get('log_level') or os.getenv('LOG_LEVEL', 'INFO'))
         log_level = getattr(logging, log_level_name, logging.INFO)
-        log_dir = os.path.dirname(log_file)
+        log_dir = os.path.dirname(abs_log_file)
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
         root_logger.setLevel(log_level)
@@ -425,10 +474,54 @@ class LifecycleInit:
         if not has_target_file_handler:
             max_bytes = int((params or {}).get('log_max_bytes', 100 * 1024 * 1024))
             backup_count = int((params or {}).get('log_backup_count', 3))
-            file_handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
-            file_handler.setLevel(log_level)
-            file_handler.setFormatter(formatter)
-            root_logger.addHandler(file_handler)
+            try:
+                file_handler = RotatingFileHandler(abs_log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
+                file_handler.setLevel(log_level)
+                file_handler.setFormatter(formatter)
+                root_logger.addHandler(file_handler)
+                file_handler.flush()
+            except (OSError, IOError, PermissionError):
+                pass
+        has_stream_handler = any(isinstance(h, StreamHandler) for h in root_logger.handlers)
+        if not has_stream_handler:
+            console_handler = StreamHandler(sys.stdout)
+            console_handler.setLevel(log_level)
+            console_handler.setFormatter(formatter)
+            root_logger.addHandler(console_handler)
+            error_handler = StreamHandler(sys.stderr)
+            error_handler.setLevel(logging.ERROR)
+            error_handler.setFormatter(formatter)
+            root_logger.addHandler(error_handler)
+        log_level_name = str((params or {}).get('log_level') or os.getenv('LOG_LEVEL', 'INFO'))
+        log_level = getattr(logging, log_level_name, logging.INFO)
+        log_dir = os.path.dirname(abs_log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        root_logger.setLevel(log_level)
+        formatter = logging.Formatter(
+            '%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        has_target_file_handler = any(
+            isinstance(h, (FileHandler, RotatingFileHandler))
+            and os.path.abspath(getattr(h, 'baseFilename', '')) == abs_log_file
+            for h in root_logger.handlers
+        )
+        if not has_target_file_handler:
+            max_bytes = int((params or {}).get('log_max_bytes', 100 * 1024 * 1024))
+            backup_count = int((params or {}).get('log_backup_count', 3))
+            try:
+                file_handler = RotatingFileHandler(abs_log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
+                file_handler.setLevel(log_level)
+                file_handler.setFormatter(formatter)
+                root_logger.addHandler(file_handler)
+                file_handler.flush()
+                if os.path.exists(abs_log_file):
+                    logging.info("[_init_logging] Created RotatingFileHandler: %s (verified)", abs_log_file)
+                else:
+                    logging.warning("[_init_logging] RotatingFileHandler created but file not found: %s", abs_log_file)
+            except (OSError, IOError, PermissionError) as _fh_err:
+                logging.warning("[_init_logging] Failed to create RotatingFileHandler for %s: %s", abs_log_file, _fh_err)
         has_stream_handler = any(isinstance(h, StreamHandler) for h in root_logger.handlers)
         if not has_stream_handler:
             console_handler = StreamHandler(sys.stdout)

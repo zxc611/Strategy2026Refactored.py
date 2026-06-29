@@ -24,7 +24,7 @@ class TestInstrumentManager:
         mock_ps = MagicMock()
         mock_ps.get_instrument_meta_by_id.return_value = None
         with patch('ali2026v3_trading.config.params_service.get_params_service', return_value=mock_ps), \
-             patch('ali2026v3_trading.infra.subscription_manager.SubscriptionManager.is_option', return_value=False):
+             patch('ali2026v3_trading.infra.subscription_service.SubscriptionManager.is_option', return_value=False):
             result = mgr.extract_contract_year_month('')
             assert result is None
 
@@ -33,7 +33,7 @@ class TestInstrumentManager:
         mock_ps = MagicMock()
         mock_ps.get_instrument_meta_by_id.return_value = None
         with patch('ali2026v3_trading.config.params_service.get_params_service', return_value=mock_ps), \
-             patch('ali2026v3_trading.infra.subscription_manager.SubscriptionManager.is_option', return_value=False):
+             patch('ali2026v3_trading.infra.subscription_service.SubscriptionManager.is_option', return_value=False):
             result = mgr.extract_contract_year_month(None)
             assert result is None
 

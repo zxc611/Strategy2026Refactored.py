@@ -22,9 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from ali2026v3_trading.infra._deprecated_reexports import (
-    Signal, DeviationResult, classify_deviation, classify_signal_sequence,
-)
+from ali2026v3_trading.infra.trading_utils import Signal, DeviationResult, classify_deviation, classify_signal_sequence
 
 
 # ============================================================================
@@ -182,7 +180,7 @@ class TestDualBacktestFence:
     # ------------------------------------------------------------------
     def test_checkpoint_service_method_equivalence(self):
         """CheckpointService vs StrategyCheckpointMixin: 方法签名等价"""
-        from ali2026v3_trading.strategy.checkpoint_service import CheckpointService
+        from ali2026v3_trading.strategy.persistence_service import CheckpointService
 
         after_methods = {m for m in dir(CheckpointService) if not m.startswith('_') or m in ('save_checkpoint',)}
         before_methods = {'save_checkpoint', 'on_system_event_checkpoint', 'validate_service_dependencies', 'sync_state_to_store'}
@@ -375,7 +373,7 @@ class TestDualBacktestFence:
         from ali2026v3_trading.strategy.instrument_service import InstrumentService
         from ali2026v3_trading.strategy.service_factory import ServiceFactory
         from ali2026v3_trading.strategy.tick_processing_service import MarketEvent, TickEvent, BarCompletedEvent
-        from ali2026v3_trading.strategy.checkpoint_service import CheckpointService
+        from ali2026v3_trading.strategy.persistence_service import CheckpointService
         from ali2026v3_trading.strategy.recovery_service import RecoveryService
         from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
 

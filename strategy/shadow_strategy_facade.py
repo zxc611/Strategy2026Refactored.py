@@ -1,4 +1,3 @@
-# MODULE_ID: M1-261
 """shadow_strategy_facade.py - 影子策略子系统唯一公共入口（ARCH-01 Facade模式）
 
 外部消费者只能通过此模块访问影子策略功能。
@@ -17,7 +16,7 @@ R2-1: 纯组合模式（消除继承），Core通过组合持有+显式委托
 """
 from __future__ import annotations
 
-from ali2026v3_trading.strategy.shadow_strategy_core import (
+from ali2026v3_trading.strategy.shadow_strategy_types import (
     ShadowTradeRecord,
     AlphaMetrics,
     ShadowParamsSnapshot,
@@ -28,10 +27,10 @@ from ali2026v3_trading.strategy.shadow_strategy_core import (
 from ali2026v3_trading.strategy._shadow_strategy_signal import (
     ShadowStrategySignalService,
 )
-from ali2026v3_trading.strategy.shadow_strategy_pnl import (
+from ali2026v3_trading.strategy._shadow_strategy_pnl import (
     ShadowStrategyPnLService,
 )
-from ali2026v3_trading.strategy import shadow_strategy_core as _internals
+from ali2026v3_trading.strategy import _shadow_internals as _internals
 
 
 class ShadowStrategyEngine:
@@ -103,22 +102,22 @@ class ShadowStrategyEngine:
         if risk_free_rate is None:
             from ali2026v3_trading.infra.shared_utils import DEFAULT_RISK_FREE_RATE
             risk_free_rate = DEFAULT_RISK_FREE_RATE
-        from ali2026v3_trading.strategy.shadow_strategy_pnl import ShadowStrategyPnLMetricsService
+        from ali2026v3_trading.strategy._shadow_strategy_pnl_metrics import ShadowStrategyPnLMetricsService
         return ShadowStrategyPnLMetricsService._compute_sharpe(returns, annualize_factor, risk_free_rate)
 
     @staticmethod
     def _compute_max_drawdown(equity_curve):
-        from ali2026v3_trading.strategy.shadow_strategy_pnl import ShadowStrategyPnLMetricsService
+        from ali2026v3_trading.strategy._shadow_strategy_pnl_metrics import ShadowStrategyPnLMetricsService
         return ShadowStrategyPnLMetricsService._compute_max_drawdown(equity_curve)
 
     @staticmethod
     def _compute_expected_value(trades):
-        from ali2026v3_trading.strategy.shadow_strategy_pnl import ShadowStrategyPnLMetricsService
+        from ali2026v3_trading.strategy._shadow_strategy_pnl_metrics import ShadowStrategyPnLMetricsService
         return ShadowStrategyPnLMetricsService._compute_expected_value(trades)
 
     @staticmethod
     def _equity_to_returns(equity_curve):
-        from ali2026v3_trading.strategy.shadow_strategy_pnl import ShadowStrategyPnLMetricsService
+        from ali2026v3_trading.strategy._shadow_strategy_pnl_metrics import ShadowStrategyPnLMetricsService
         return ShadowStrategyPnLMetricsService._equity_to_returns(equity_curve)
 
 
@@ -131,7 +130,15 @@ def get_shadow_strategy_engine(**kwargs) -> ShadowStrategyEngine:
     """
     with _internals._shadow_engine_lock:
         if _internals._shadow_engine is None:
-            _internals._shadow_engine = ShadowStrategyEngine(**kwargs)
+            if getattr(_internals, '_shadow_engine_init_failed', False):
+                return None
+            try:
+                _internals._shadow_engine = ShadowStrategyEngine(**kwargs)
+            except Exception as _init_err:
+                import logging
+                logging.error("[ShadowStrategyEngine] 单例创建失败: %s", _init_err)
+                _internals._shadow_engine_init_failed = True
+                return None
         return _internals._shadow_engine
 
 

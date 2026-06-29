@@ -230,7 +230,7 @@ class ProductionQuantSystem:
             try:
                 if self._crm is None:
                     import importlib  # R21-CC-P2-03修复: 动态导入 — 每次tick都可能触发，应缓存模块引用
-                    crm_module = importlib.import_module('ali2026v3_trading.param_pool.cycle_resonance_module')
+                    crm_module = importlib.import_module('ali2026v3_trading.param_pool.optimization.cycle_sharpe')
                     self._crm = crm_module.get_cycle_resonance_module()
                 hmm_label = hmm_result.get('state_label', 'NORMAL') if isinstance(hmm_result, dict) else 'NORMAL'
                 hmm_posterior = tuple(hmm_result.get('posterior', [0.33, 0.34, 0.33])) if isinstance(hmm_result, dict) else (0.33, 0.34, 0.33)
@@ -353,7 +353,7 @@ class ProductionQuantSystem:
         hmm_state = self.persistence.load('hmm_state')
         if hmm_state:
             restored['hmm_state'] = hmm_state
-        # P1-17修复: 补充读取last_atomic_version和vol_regime（与persist_state对齐）
+        # P1-17修复: 补充读取last_atomic_version和vol_regime（与persist_state对齐）'
         last_atomic_version = self.persistence.load('last_atomic_version')
         if last_atomic_version is not None:
             restored['last_atomic_version'] = last_atomic_version

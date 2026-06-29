@@ -21,10 +21,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from datetime import datetime, timezone, timedelta
 
-from ali2026v3_trading.serialization_utils import json_dumps, json_loads, json_default_serializer, safe_jsonl_append_line
-from ali2026v3_trading.infra.shared_utils import sanitize_sql_identifier, sanitize_sql_value
-
-_CHINA_TZ = timezone(timedelta(hours=8))
+from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer, safe_jsonl_append_line
+from ali2026v3_trading.infra.shared_utils import sanitize_sql_identifier, sanitize_sql_value, CHINA_TZ as _CHINA_TZ  # 五唯一性修复：统一从 shared_utils 导入 CHINA_TZ
+from ali2026v3_trading.infra._backup_restore import get_backup_service, DuckDBBackupService  # P2-04: 备份服务去重，规范版本位于 _backup_restore.py
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ OPTION_PRODUCT_SPECS = {
     'IO': {'tick_size': 0.2, 'contract_size': 100},
     'HO': {'tick_size': 0.2, 'contract_size': 100},
     'MO': {'tick_size': 0.2, 'contract_size': 100},
-    'EO': {'tick_size': 0.2, 'contract_size': 100},
+
     'CU': {'tick_size': 10.0, 'contract_size': 5},
     'AL': {'tick_size': 5.0, 'contract_size': 5},
     'ZN': {'tick_size': 5.0, 'contract_size': 5},
@@ -87,8 +86,7 @@ def _normalize_code(code: str) -> str:
     """标准化代码（交易所/产品），保留原始格式
 
     Args:
-        code: 代码字符串（交易所或产品）
-
+        code: 代码字符串（交易所或产品）'
     Returns:
         str: 原始格式的代码
     """
@@ -134,7 +132,7 @@ def _table_exists(ds: Any, table_name: str) -> bool:
 
 
 # ============================================================================
-# 存储维护服务（从 query_service.py 迁移）
+# 存储维护服务（从 query_service.py 迁移）'
 # ============================================================================
 
 class StorageMaintenanceService:
@@ -156,14 +154,14 @@ class StorageMaintenanceService:
     
     MAINTENANCE_VERSION = 20260403
     
-    # 2605 合约诊断配置
-    DIAGNOSTIC_CONTRACTS_2605 = [
-        {'exchange': 'CFFEX', 'future': 'IF2605', 'option': 'IO2605-C-4500'},  # CFFEX 沪深 300 股指期权
-        {'exchange': 'SHFE', 'future': 'CU2605', 'option': 'cu2605C100000'},  # SHFE 铜期权 (小写 +C+ 行权价)
-        {'exchange': 'DCE', 'future': 'M2605', 'option': 'm2605-C-2950'},  # DCE 豆粕期权 (小写)
-        {'exchange': 'CZCE', 'future': 'MA2605', 'option': 'MA605C3000'},  # CZCE PTA 期权 (605 表示 2605)
-        {'exchange': 'INE', 'future': 'LU2605', 'option': 'sc2605C660'},  # INE 原油期权 (小写 +C+ 行权价)
-        {'exchange': 'GFEX', 'future': 'LC2605', 'option': 'lc2605-C-16000'},  # GFEX 工业硅期权
+    # 2607 合约诊断配置
+    DIAGNOSTIC_CONTRACTS_2607 = [
+        {'exchange': 'CFFEX', 'future': 'IF2607', 'option': 'IO2607-C-4500'},  # CFFEX 沪深 300 股指期权
+        {'exchange': 'SHFE', 'future': 'CU2607', 'option': 'cu2607C100000'},  # SHFE 铜期权 (小写 +C+ 行权价)
+        {'exchange': 'DCE', 'future': 'M2607', 'option': 'm2607-C-2950'},  # DCE 豆粕期权 (小写)
+        {'exchange': 'CZCE', 'future': 'MA2607', 'option': 'MA607C3000'},  # CZCE PTA 期权 (607 表示 2607)
+        {'exchange': 'INE', 'future': 'LU2607', 'option': 'sc2607C660'},  # INE 原油期权 (小写 +C+ 行权价)
+        {'exchange': 'GFEX', 'future': 'LC2607', 'option': 'lc2607-C-16000'},  # GFEX 工业硅期权
     ]
     
     def __init__(self, manager: Any):
@@ -189,11 +187,11 @@ class StorageMaintenanceService:
         """P1-3修复：startup checks fast path。
         
         正常重启时，如果 maintenance version 已是最新，只执行轻量健康检查
-        （序列同步 + 缺表修复），跳过重维护逻辑。
+        （序列同步 + 缺表修复），跳过重维护逻辑。'
         只有 maintenance version 变化时，才执行全量 startup checks。
         
         设计约束（修改必看十原则）：
-        1. fast path 必须包含序列同步（轻量但关键，防止 ID 冲突）
+        1. fast path 必须包含序列同步（轻量但关键，防止 ID 冲突）'
         2. fast path 必须包含缺表修复（轻量但关键，防止表缺失）
         3. 重维护逻辑（orphan 恢复、FK 修复、订阅去重等）只在 version 变化时执行
         4. 新增迁移脚本、缺表修复、索引补建时，必须声明是否允许在启动热路径执行
@@ -218,7 +216,7 @@ class StorageMaintenanceService:
                 except Exception as e:
                     logging.warning("[StorageMaintenance] _repair_missing_instrument_tables failed: %s", e)
             
-            # DR-P2修复: 数据完整性抽样（检查最近100条tick记录可读性）
+            # DR-P2修复: 数据完整性抽样（检查最近100条tick记录可读性）'
             # 抽样失败时降级到完整检查路径，而非静默跳过
             try:
                 sampled = 0
@@ -247,8 +245,8 @@ class StorageMaintenanceService:
                         self.run_startup_checks(conn)
                         return
                 finally:
-                    if hasattr(ds, 'return_connection'):
-                        ds.return_connection(conn)
+                    if hasattr(ds, '_return_connection'):
+                        ds._return_connection(conn)
             except Exception as samp_err:
                 logging.warning("[StorageMaintenance] DR-P2: 数据抽样异常(%s)，降级到完整检查", samp_err)
                 self.run_startup_checks(conn)
@@ -305,8 +303,7 @@ class StorageMaintenanceService:
         启动时执行必要检查 (DuckDB 版本)
         
         Args:
-            conn: 数据库连接（已废弃，保留参数用于兼容）
-            
+            conn: 数据库连接（已废弃，保留参数用于兼容）'
         注意：不抛出异常，避免影响系统启动
         """
         try:
@@ -390,10 +387,13 @@ class StorageMaintenanceService:
             if _ds and hasattr(_ds, '_get_connection'):
                 _conn = _ds._get_connection()
                 if _conn:
-                    for _iid in list(local_positions.keys())[:5]:
-                        _bt_result = verify_bar_tick_consistency(_conn, _iid, '')
-                        if not _bt_result.get('is_consistent', True):
-                            logging.warning("[R27-P1-DI-03] bar/tick不一致: instrument=%s", _iid)
+                    try:
+                        for _iid in list(local_positions.keys())[:5]:
+                            _bt_result = verify_bar_tick_consistency(_conn, _iid, '')
+                            if not _bt_result.get('is_consistent', True):
+                                logging.warning("[R27-P1-DI-03] bar/tick不一致: instrument=%s", _iid)
+                    finally:
+                        _ds._return_connection(_conn)
         except Exception as e:
             logging.debug("[R27-P1-DI-03] bar/tick一致性校验跳过: %s", e)
         # R27-P1: 孤立函数调用——sync_order_status_with_exchange
@@ -433,10 +433,10 @@ class StorageMaintenanceService:
 
     def run_periodic_diagnostic(self, conn=None) -> None:
         """
-        运行 2605 合约日志诊断（手动调用，每 30 秒）(DuckDB 版本)
+        运行 2607 合约日志诊断（手动调用，每 30 秒）(DuckDB 版本)
         
         Args:
-            conn: 数据库连接（已废弃，保留参数用于兼容）
+            conn: 数据库连接（已废弃，保留参数用于兼容）'
         """
         # RES-P2-10: 灾难恢复手册引用
         try:
@@ -447,15 +447,12 @@ class StorageMaintenanceService:
 
         try:
             logging.info("\n" + "="*80)
-            logging.info("📊 [2605 合约诊断] 开始检查 (每 30 秒自动输出)")
-            logging.info("="*80)
-            
-            total_futures_subscribed = 0
-            total_futures_received = 0
-            total_options_subscribed = 0
-            total_options_received = 0
-            
-            for idx, contract in enumerate(self.DIAGNOSTIC_CONTRACTS_2605, 1):
+            logging.info("📊 [2607 合约诊断] 开始检查 (每 30 秒自动输出)")
+        except Exception:
+            logging.info("📊 [2607 合约诊断] 开始检查 (每 30 秒自动输出)")
+        
+        try:
+            for idx, contract in enumerate(self.DIAGNOSTIC_CONTRACTS_2607, 1):
                 exchange = contract['exchange']
                 future_id = contract['future']
                 option_id = contract['option']
@@ -484,13 +481,10 @@ class StorageMaintenanceService:
             
             logging.info("\n" + "-"*80)
             logging.info("📋 汇总统计:")
-            total_options_count = len(self.DIAGNOSTIC_CONTRACTS_2605)
-            logging.info(f"  期货：{total_futures_subscribed}/{total_options_count} 已订阅，{total_futures_received}/{total_options_count} 有数据")
-            logging.info(f"  期权：{total_options_subscribed}/{total_options_count} 已订阅，{total_options_received}/{total_options_count} 有数据")
-            logging.info("="*80 + "\n")
-            
+            total_options_count = len(self.DIAGNOSTIC_CONTRACTS_2607)
+            logging.info(f"📊 [2607 合约诊断] 检查完成: {success_count}/{total_options_count} 正常")
         except Exception as exc:
-            logging.error(f"[2605 合约诊断] 执行失败：{exc}", exc_info=True)
+            logging.error(f"[2607 合约诊断] 执行失败：{exc}", exc_info=True)
     
     def _log_contract_diagnosis(self, idx: int, exchange: str, instrument_id: str, 
                                  contract_type: str, status: Dict) -> None:
@@ -544,11 +538,12 @@ class StorageMaintenanceService:
     
     def ensure_instrument_id_sequence(self) -> int:
         """确保全局 instrument_id_sequence 存在并返回当前 next_id (DuckDB 版本)"""
+        # 五唯一性修复：表创建规范见 ds_schema_manager.py / _storage.py，此处仅确保表存在
         if not _HAS_DATA_SERVICE:
             return 1
         try:
             ds = get_data_service()
-            
+
             ds.query("""
                 CREATE TABLE IF NOT EXISTS instrument_id_sequence (
                     name TEXT PRIMARY KEY,
@@ -586,7 +581,7 @@ class StorageMaintenanceService:
     def reserve_next_global_id(self) -> int:
         """从统一序列中预留一个新的全局 internal_id (DuckDB 版本)
         
-        线程安全：通过 _sequence_lock 保证读-改原子性。
+        线程安全：通过 _sequence_lock 保证读-改原子性。'
         异常安全：失败时抛出 RuntimeError 而非返回默认值，避免 ID 冲突。
         """
         if not _HAS_DATA_SERVICE:
@@ -717,8 +712,7 @@ class StorageMaintenanceService:
         return futures_count + option_count
 
     def repair_option_underlying_product_references(self) -> int:
-        """修复 option_instruments.underlying_product 指向旧期货品种或缺失占位符的问题。
-        
+        """修复 option_instruments.underlying_product 指向旧期货品种或缺失占位符的问题。'
         P2 Bug #112修复：明确返回值含义为"待更新行数"而非"已更新行数"
         DuckDB不支持changes()，因此先COUNT待更新行数，再执行UPDATE
         """
@@ -985,11 +979,11 @@ class StorageMaintenanceService:
     def backup_database(self, force: bool = False, caller_id: str = "system") -> Dict[str, Any]:
         """OPS-09修复: 执行DuckDB数据库备份
 
-        将DuckDB文件复制到备份目录，文件名带时间戳。
+        将DuckDB文件复制到备份目录，文件名带时间戳。'
         委托给DuckDBBackupService执行实际备份。
 
         Args:
-            force: 是否强制执行（忽略时间间隔限制）
+            force: 是否强制执行（忽略时间间隔限制）'
             caller_id: 操作人标识
 
         Returns:
@@ -1027,14 +1021,14 @@ class StorageMaintenanceService:
         return result
 
     # P2-项20修复: 数据归档策略
+    # 五唯一性修复：归档逻辑规范见 infra/_storage.py::StorageCatalogService.archive_old_data()
     def archive_old_data(self, table_name: str,
                           archive_before_days: int = 90,
                           dry_run: bool = False) -> Dict[str, Any]:
-        """P2-项20修复: 数据归档策略
+        """P2-项20修复: 数据归档策略 (P2-04去重后委托到 canonical StorageCatalogService)
 
         将指定表中超过archive_before_days天的数据归档到历史表，
         减小活跃表体积，提升查询性能。
-
         Args:
             table_name: 要归档的表名
             archive_before_days: 归档多少天前的数据
@@ -1043,74 +1037,15 @@ class StorageMaintenanceService:
         Returns:
             Dict: {rows_archived, archive_table, dry_run, success}
         """
-        result = {
-            'table_name': table_name,
-            'archive_before_days': archive_before_days,
-            'rows_archived': 0,
-            'archive_table': f'__archived_{table_name}',
-            'dry_run': dry_run,
-            'success': False,
-        }
-        try:
-            cutoff_date = (datetime.now(_CHINA_TZ) - timedelta(days=archive_before_days)).isoformat()
-
-            db_path = getattr(self, '_db_path', None)
-            if db_path is None:
-                result['error'] = '未配置数据库路径'
-                return result
-
-            from ali2026v3_trading.data.data_access import get_data_access
-            _da = get_data_access()
-            from ali2026v3_trading.data.db_adapter import connect
-            conn = connect(db_path, read_only=False)
+        from ali2026v3_trading.infra._storage import StorageCatalogService as _CanonicalSCS
+        canonical = _CanonicalSCS(self.manager)
+        # 同步 _db_path 以保持原有行为（若实例已注入）
+        if getattr(self, '_db_path', None) is not None:
             try:
-                # 统计待归档行数
-                count_row = conn.execute(
-                    f"SELECT COUNT(*) FROM {sanitize_sql_identifier(table_name)} WHERE created_at < {sanitize_sql_value(cutoff_date)}"
-                ).fetchone()
-                rows_to_archive = count_row[0] if count_row else 0
-                result['rows_to_archive'] = rows_to_archive
-
-                if rows_to_archive == 0:
-                    result['success'] = True
-                    result['message'] = '无需归档'
-                    return result
-
-                if dry_run:
-                    result['success'] = True
-                    result['message'] = f'试运行: 将归档{rows_to_archive}行'
-                    return result
-
-                # 创建归档表（如不存在）
-                archive_table = result['archive_table']
-                conn.execute(
-                    f"CREATE TABLE IF NOT EXISTS {sanitize_sql_identifier(archive_table)} AS "
-                    f"SELECT * FROM {sanitize_sql_identifier(table_name)} WHERE 1=0"
-                )
-
-                # 插入归档数据
-                conn.execute(
-                    f"INSERT INTO {sanitize_sql_identifier(archive_table)} SELECT * FROM {sanitize_sql_identifier(table_name)} "
-                    f"WHERE created_at < {sanitize_sql_value(cutoff_date)}"
-                )
-                result['rows_archived'] = rows_to_archive
-
-                # 删除已归档数据
-                conn.execute(
-                    f"DELETE FROM {sanitize_sql_identifier(table_name)} WHERE created_at < {sanitize_sql_value(cutoff_date)}"
-                )
-
-                result['success'] = True
-                logger.info(
-                    "[MaintenanceService] 归档完成: %s → %s, %d行",
-                    table_name, archive_table, rows_to_archive,
-                )
-            finally:
-                conn.close()
-        except Exception as e:
-            result['error'] = str(e)
-            logger.error("[MaintenanceService] 归档失败: %s → %s", table_name, e)
-        return result
+                setattr(canonical, '_db_path', self._db_path)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass
+        return canonical.archive_old_data(table_name, archive_before_days, dry_run)
 
 
 # ============================================================================
@@ -1263,8 +1198,7 @@ class OpsOperationManager:
 
     # OPS-P1-09: 预演机制
     def dry_run(self, operation: OpsOperation) -> Dict[str, Any]:
-        """预演模式执行（不实际修改状态）
-
+        """预演模式执行（不实际修改状态）'
         Args:
             operation: 运维操作对象
 
@@ -1308,8 +1242,7 @@ class OpsOperationManager:
     def execute_operation(self, operation: OpsOperation,
                           approval_token: Optional[str] = None,
                           dry_run: bool = False) -> Dict[str, Any]:
-        """执行运维操作（完整生命周期）
-
+        """执行运维操作（完整生命周期）'
         执行流程: 审批验证 -> 幂等检查 -> 并发控制 -> 依赖检查 ->
                  前置验证 -> 影响评估 -> (预演|执行) -> 后置验证 -> 通知
 
@@ -1509,7 +1442,7 @@ class OpsOperationManager:
         }
         # 尝试获取系统关键状态
         try:
-            from ali2026v3_trading.infra.health_check_api import HealthCheckAPI
+            from ali2026v3_trading.infra.health_monitor import HealthCheckAPI
             api = HealthCheckAPI()
             snapshot['health_status'] = api.get_health_status()
         except Exception:
@@ -1735,199 +1668,8 @@ def get_disk_space_monitor() -> DiskSpaceMonitor:
         return _disk_space_monitor
 
 
-# ============================================================================
-# DR-P1-01修复: DuckDB定期备份机制
-# DR-P1-03修复: 备份异地存储标记(backup_manifest.json)
-# ============================================================================
-class DuckDBBackupService:
-    """DuckDB定期备份服务
-
-    DR-P1-01: 每小时备份一次，保留最近24个备份
-    DR-P1-03: 生成backup_manifest.json记录备份完整性
-    """
-
-    BACKUP_INTERVAL_SEC = 3600.0  # 1小时
-    MAX_BACKUPS = 24
-    REMOTE_BACKUP_ENABLED = False  # DR-P1-03: 异地存储标记，需手动配置后启用
-
-    def __init__(self, db_path: Optional[str] = None,
-                 backup_dir: Optional[str] = None):
-        self._db_path = db_path
-        self._backup_dir = backup_dir or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), '..', 'backups'
-        )
-        self._manifest_path = os.path.join(self._backup_dir, 'backup_manifest.json')
-        self._last_backup_time: float = 0.0
-        self._lock = threading.Lock()
-        os.makedirs(self._backup_dir, exist_ok=True)
-
-    def _ensure_db_path(self) -> str:
-        if self._db_path and os.path.exists(self._db_path):
-            return self._db_path
-        try:
-            from ali2026v3_trading.storage_core import _get_default_db_path
-            return _get_default_db_path()
-        except Exception:
-            default = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), '..', 'trading_data.duckdb'
-            )
-            return default
-
-    def backup_duckdb(self, force: bool = False) -> Optional[str]:
-        """执行DuckDB备份
-
-        DR-P1-01: 每小时执行一次，保留最近24个备份
-        DR-P1-03: 记录backup_manifest.json
-
-        Returns:
-            备份文件路径，跳过时返回None
-        """
-        now = time.time()
-        if not force and (now - self._last_backup_time) < self.BACKUP_INTERVAL_SEC:
-            return None
-
-        db_path = self._ensure_db_path()
-        if not os.path.exists(db_path):
-            logger.warning("[DR-P1-01] DuckDB文件不存在，跳过备份: %s", db_path)
-            return None
-
-        timestamp = datetime.fromtimestamp(now).strftime('%Y%m%d_%H%M%S')
-        backup_filename = f"ticks_{timestamp}.duckdb"
-        backup_path = os.path.join(self._backup_dir, backup_filename)
-
-        try:
-            _conn = None
-            try:
-                from ali2026v3_trading.data.data_access import get_data_access
-                _da_bak = get_data_access()
-                from ali2026v3_trading.data.db_adapter import connect
-                _conn = connect(db_path, read_only=True)
-                _conn.execute(f"EXPORT DATABASE '{backup_path}' (FORMAT PARQUET)")
-            except Exception:
-                if _conn:
-                    try:
-                        _conn.execute(f"COPY (SELECT 1) TO '{backup_path}' (FORMAT PARQUET)")
-                    except Exception:
-                        pass
-                import shutil as _shutil
-                _shutil.copy2(db_path, backup_path)
-            finally:
-                if _conn:
-                    try:
-                        _conn.close()
-                    except Exception:
-                        pass
-
-            with self._lock:
-                self._last_backup_time = now
-
-            self._record_backup_manifest(backup_path)
-            self._rotate_backups()
-            logger.info("[DR-P1-01] DuckDB备份完成: %s", backup_path)
-            return backup_path
-        except Exception as e:
-            logger.error("[DR-P1-01] DuckDB备份失败: %s", e)
-            return None
-
-    def _record_backup_manifest(self, backup_path: str) -> None:
-        """DR-P1-03: 记录备份到backup_manifest.json"""
-        import hashlib
-        try:
-            file_size = os.path.getsize(backup_path)
-            sha256_hash = hashlib.sha256()
-            with open(backup_path, 'rb') as f:
-                for chunk in iter(lambda: f.read(8192), b''):
-                    sha256_hash.update(chunk)
-            file_hash = sha256_hash.hexdigest()
-        except Exception as e:
-            logger.warning("[DR-P1-03] 计算备份哈希失败: %s", e)
-            file_size = 0
-            file_hash = ''
-
-        entry = {
-            'file_path': backup_path,
-            'file_size': file_size,
-            'hash': file_hash,
-            'created_at': datetime.now(_CHINA_TZ).isoformat(),
-        }
-
-        manifest = []
-        if os.path.exists(self._manifest_path):
-            try:
-                with open(self._manifest_path, 'r', encoding='utf-8') as f:
-                    manifest = json.load(f)
-            except Exception:
-                manifest = []
-
-        manifest.append(entry)
-        with open(self._manifest_path, 'w', encoding='utf-8') as f:
-            f.write(json_dumps(manifest, indent=2))
-        logger.info("[DR-P1-03] 备份清单已更新: %s (size=%d, hash=%s...)", backup_path, file_size, file_hash[:16])
-
-    def verify_backup_integrity(self, backup_file: str) -> bool:
-        """DR-P1-03: 验证备份文件完整性"""
-        if not os.path.exists(backup_file):
-            logger.warning("[DR-P1-03] 备份文件不存在: %s", backup_file)
-            return False
-        if not os.path.exists(self._manifest_path):
-            logger.warning("[DR-P1-03] 备份清单不存在，无法验证")
-            return False
-        try:
-            import hashlib
-            with open(self._manifest_path, 'r', encoding='utf-8') as f:
-                manifest = json.load(f)
-            target_entry = None
-            for entry in manifest:
-                if entry.get('file_path') == backup_file:
-                    target_entry = entry
-                    break
-            if not target_entry:
-                logger.warning("[DR-P1-03] 备份清单中未找到: %s", backup_file)
-                return False
-            expected_hash = target_entry.get('hash', '')
-            if not expected_hash:
-                return True
-            sha256_hash = hashlib.sha256()
-            with open(backup_file, 'rb') as f:
-                for chunk in iter(lambda: f.read(8192), b''):
-                    sha256_hash.update(chunk)
-            actual_hash = sha256_hash.hexdigest()
-            if actual_hash != expected_hash:
-                logger.error("[DR-P1-03] 备份完整性校验失败: %s", backup_file)
-                return False
-            logger.info("[DR-P1-03] 备份完整性校验通过: %s", backup_file)
-            return True
-        except Exception as e:
-            logger.error("[DR-P1-03] 验证备份完整性异常: %s", e)
-            return False
-
-    def _rotate_backups(self) -> None:
-        """DR-P1-01: 保留最近MAX_BACKUPS个备份，删除旧的"""
-        try:
-            backup_files = sorted(
-                [os.path.join(self._backup_dir, f) for f in os.listdir(self._backup_dir)
-                 if f.startswith('ticks_') and f.endswith('.duckdb')],
-                key=os.path.getmtime,
-            )
-            while len(backup_files) > self.MAX_BACKUPS:
-                oldest = backup_files.pop(0)
-                os.remove(oldest)
-                logger.info("[DR-P1-01] 删除旧备份: %s", oldest)
-        except Exception as e:
-            logger.warning("[DR-P1-01] 备份轮转失败: %s", e)
-
-
-# 全局单例
-_backup_service: Optional[DuckDBBackupService] = None
-_backup_service_lock = threading.Lock()
-
-
-def get_backup_service() -> DuckDBBackupService:
-    global _backup_service
-    with _backup_service_lock:
-        if _backup_service is None:
-            _backup_service = DuckDBBackupService()
-        return _backup_service
+# P2-04: DuckDBBackupService 与 get_backup_service() 已去重，规范实现位于
+# ali2026v3_trading.infra._backup_restore，文件顶部已 import。
 
 
 class OnCallManager:
@@ -2433,8 +2175,7 @@ def generate_ops_report(report_type: str = "daily") -> Dict[str, Any]:
 def estimate_ops_cost() -> Dict[str, Any]:
     """P2修复: 运维成本评估函数
 
-    估算当前系统的运维资源消耗和成本。
-
+    估算当前系统的运维资源消耗和成本。'
     Returns:
         Dict: {storage_cost, compute_cost, estimated_monthly_cost}
     """
@@ -2564,7 +2305,7 @@ class OpsSLA:
 class CapacityStressTestFramework:
     """OPS-18修复: 容量压测框架
 
-    提供系统容量压测能力，验证性能上限。
+    提供系统容量压测能力，验证性能上限。'
     """
 
     def __init__(self):
@@ -2608,7 +2349,7 @@ def get_capacity_stress_test() -> CapacityStressTestFramework:
 class StandardOperatingProcedures:
     """OPS-20修复: 运维标准操作程序(SOP)
 
-    定义标准化的运维操作步骤，确保操作一致性和可追溯性。
+    定义标准化的运维操作步骤，确保操作一致性和可追溯性。'
     """
 
     def __init__(self):

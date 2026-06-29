@@ -1,5 +1,7 @@
-# MODULE_ID: M1-195
-"""signal/子系统(P2-S1)"""
+"""signal/子系统(P2-S1)
+
+五唯一性修复：包级 __init__.py 不需要独立 MODULE_ID，已删除原 M1-195（与 adv_validation_misc.py 重复）。
+"""
 from __future__ import annotations
 
 __all__ = [

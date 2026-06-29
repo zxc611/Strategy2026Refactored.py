@@ -17,10 +17,10 @@ def __getattr__(name: str):
         from .optuna_multiobjective_search import latin_hypercube_sample
         return latin_hypercube_sample
     if name == "get_cycle_resonance_module":
-        from .cycle_resonance_module import get_cycle_resonance_module
+        from .optimization.cycle_sharpe import get_cycle_resonance_module
         return get_cycle_resonance_module
     if name == "CycleResonanceOutput":
-        from .cycle_resonance_module import CycleResonanceOutput
+        from .optimization.cycle_sharpe import CycleResonanceOutput
         return CycleResonanceOutput
     if name == "ParamTierManager":
         from .adv_validation_misc import ParamTierManager
@@ -29,26 +29,26 @@ def __getattr__(name: str):
         from .backtest_state import evaluate_state_accuracy
         return evaluate_state_accuracy
     if name == "MetaAuditEngine":
-        from .l1_quantification.meta_audit_engine import MetaAuditEngine
+        from ali2026v3_trading.precompute.meta_audit_engine import MetaAuditEngine
         return MetaAuditEngine
     if name == "audit_backtest_engine_integrity":
-        from .l1_quantification import audit_backtest_engine_integrity
-        return audit_backtest_engine_integrity
+        from ali2026v3_trading.precompute.meta_audit_engine import MetaAuditEngine
+        return MetaAuditEngine.audit_backtest_engine_integrity
     if name == "ExternalSourceConfig":
-        from .l1_quantification._data_validation import ExternalSourceConfig
+        from ali2026v3_trading.precompute._data_validation import ExternalSourceConfig
         return ExternalSourceConfig
     if name == "TierConfig":
-        from .l1_quantification._quantification_core import TierConfig
+        from ali2026v3_trading.precompute._quantification_core import TierConfig
         return TierConfig
     if name == "PerformanceTierManager":
-        from .l1_quantification._quantification_core import PerformanceTierManager
+        from ali2026v3_trading.precompute._quantification_core import PerformanceTierManager
         return PerformanceTierManager
     if name == "get_tier_config":
-        from .l1_quantification import get_tier_config
-        return get_tier_config
+        from ali2026v3_trading.precompute._quantification_core import PerformanceTierManager
+        return PerformanceTierManager.get_tier_config
     if name == "STATES":
-        from .l1_quantification import STATES
-        return STATES
+        from ali2026v3_trading.precompute._quantification_core import TripleTruthAnchor
+        return TripleTruthAnchor.STATES
     if name == "backtest_position_manager":
         from . import backtest_state as backtest_position_manager
         return backtest_position_manager

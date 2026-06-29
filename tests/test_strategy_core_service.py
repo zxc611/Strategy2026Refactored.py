@@ -87,7 +87,7 @@ class TestStrategyCoreServiceHealthStatus(unittest.TestCase):
         from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
         svc = StrategyCoreService(strategy_id="test_health_component")
         health = svc.get_health_status()
-        # health_status返回的dict包含各组件检查结果（key以_check_开头）
+        # health_status返回的dict包含各组件检查结果（key以。check_开头）'
         self.assertTrue(any(k.startswith('_check_') for k in health), "health dict should contain component check keys")
 
     def test_health_status_has_status_key(self):

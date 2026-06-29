@@ -32,9 +32,9 @@ def test_cached_param_table_uses_lru_cache():
 
     provider = MockProvider()
     cached = CachedParamTableProvider(provider, cache_size=16)
-    # 验证有_cached_get_params属性（lru_cache包装的函数）
+    # 验证有界cached_get_params属性（lru_cache包装的函数）'
     assert hasattr(cached, '_cached_get_params'), \
-        "CachedParamTableProvider应有_cached_get_params属性"
+        "CachedParamTableProvider应有界cached_get_params属性"
     # lru_cache包装的函数有cache_info方法
     assert hasattr(cached._cached_get_params, 'cache_info'), \
         "_cached_get_params应有cache_info方法（lru_cache特征）"
@@ -65,7 +65,7 @@ def test_cached_param_table_cache_hit():
     r1 = cached.get_params('strategy_a')
     assert call_count == 1, f"第一次调用应触发provider，实际调用{call_count}次"
 
-    # 第二次调用（应命中缓存）
+    # 第二次调用（应命中缓存）'
     r2 = cached.get_params('strategy_a')
     assert call_count == 1, f"第二次调用应命中缓存，实际调用{call_count}次"
     assert r1 == r2

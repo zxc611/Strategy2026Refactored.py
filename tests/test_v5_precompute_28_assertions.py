@@ -170,12 +170,12 @@ def test_P1_A6_source_table_parameterized():
 
 
 def test_P1_A9_code_deduplication():
-    """P1-A9: _precompute_symbol与_precompute_symbol_incremental合并"""
+    """P1-A9: _precompute_symbol与审precompute_symbol_incremental合并"""
     content = _read_file("param_pool/precompute/_engine.py")
     method_defs = _grep_pattern(r"def _precompute_symbol_incremental\(", "param_pool/precompute/_engine.py")
     assert len(method_defs) == 1, "P1-A9 FAIL: 存在重复的方法定义"
     assert "return self._precompute_symbol(symbol, since_date=since_date)" in content, \
-        "P1-A9 FAIL: _precompute_symbol_incremental未委托给_precompute_symbol"
+        "P1-A9 FAIL: _precompute_symbol_incremental未委托给给precompute_symbol"
 
 
 def test_P1_9_temp_table_management():

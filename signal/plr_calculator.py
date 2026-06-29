@@ -152,7 +152,7 @@ class ProfitLossRatioCalculator:
         """DFG-P1-12修复: 评估PLR分布质量，解决PLR计算结果仅用于过滤、无质量评估的数据流断裂
 
         评估维度:
-        1. PLR稳定性 — 近期PLR波动率（标准差/均值）
+        1. PLR稳定性 — 近期PLR波动率（标准差/均值）'
         2. 胜率一致性 — 胜率是否在合理范围(30%-70%)
         3. 盈亏比趋势 — 盈亏比是否呈下降趋势
         4. 整体质量等级 — excellent/good/fair/poor
@@ -258,7 +258,7 @@ def get_plr_calculator(default_target_plr: float = 2.0) -> ProfitLossRatioCalcul
             _plr_calculator_instance = ProfitLossRatioCalculator(default_target_plr=default_target_plr)
             # AP-03: SingletonRegistry注册
             try:
-                from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+                from ali2026v3_trading.infra.registry_service import SingletonRegistry
                 registry = SingletonRegistry.get_registry("plr_calculator")
                 registry.register_singleton("plr_calculator.instance", _plr_calculator_instance)
             except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:

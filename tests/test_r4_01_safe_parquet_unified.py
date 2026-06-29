@@ -21,7 +21,7 @@ class TestSafeParquetUnified:
     """R4-1: .to_parquet()→safe_dataframe_to_parquet统一断言测试"""
 
     def test__preprocess_uses_safe_parquet(self):
-        """验证_preprocess.py导入了safe_dataframe_to_parquet"""
+        """验证验preprocess.py导入了safe_dataframe_to_parquet"""
         path = os.path.join(_project_root, "param_pool", "_preprocess.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()
@@ -29,7 +29,7 @@ class TestSafeParquetUnified:
             "_preprocess.py应导入safe_dataframe_to_parquet"
 
     def test__preprocess_no_raw_to_parquet(self):
-        """验证_preprocess.py不再直接调用.to_parquet()"""
+        """验证验preprocess.py不再直接调用.to_parquet()"""
         path = os.path.join(_project_root, "param_pool", "_preprocess.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()
@@ -40,7 +40,7 @@ class TestSafeParquetUnified:
             f"_preprocess.py仍有.to_parquet()调用: {code_lines}"
 
     def test_quantification_core_uses_safe_parquet(self):
-        """验证_quantification_core.py导入了safe_dataframe_to_parquet"""
+        """验证验quantification_core.py导入了safe_dataframe_to_parquet"""
         path = os.path.join(_project_root, "param_pool", "l1_quantification",
                             "_quantification_core.py")
         with open(path, 'r', encoding='utf-8') as f:
@@ -49,7 +49,7 @@ class TestSafeParquetUnified:
             "_quantification_core.py应导入safe_dataframe_to_parquet"
 
     def test_quantification_core_no_raw_to_parquet(self):
-        """验证_quantification_core.py不再直接调用.to_parquet()"""
+        """验证验quantification_core.py不再直接调用.to_parquet()"""
         path = os.path.join(_project_root, "param_pool", "l1_quantification",
                             "_quantification_core.py")
         with open(path, 'r', encoding='utf-8') as f:

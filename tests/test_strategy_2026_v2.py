@@ -464,47 +464,47 @@ class TestFullInit:
 
 class TestLifecycleDuplicatePrevention:
 
-    def test_onStart_duplicate_prevention(self):
-        """_start_executed=True 时 onStart 应提前返回 None。"""
+    def test_on_start_duplicate_prevention(self):
+        """_start_executed=True 时 on_start 应提前返回 None。"""
         s = _make_strategy(_start_executed=True)
-        result = s.onStart()
+        result = s.on_start()
         assert result is None
         # strategy_core.start 不应被调用
         s.strategy_core.start.assert_not_called()
 
-    def test_onStop_sets_flags(self):
-        """onStop 应设置 _stop_executed=True。"""
+    def test_on_stop_sets_flags(self):
+        """on_stop 应设置 _stop_executed=True。"""
         s = _make_strategy()
-        # onStop 中会调用 self.save_instance_file()，需要 mock
+        # on_stop 中会调用 self.save_instance_file()，需要 mock
         s.save_instance_file = MagicMock()
-        # onStop 中会设置 self.trading = False
+        # on_stop 中会设置 self.trading = False
         s.trading = True
 
-        s.onStop()
+        s.on_stop()
 
         assert s._stop_executed is True
         assert s._stop_requested is True
         assert s._callbacks_enabled is False
 
-    def test_onStop_duplicate_prevention(self):
-        """_stop_executed=True 时 onStop 应提前返回 None。"""
+    def test_on_stop_duplicate_prevention(self):
+        """_stop_executed=True 时 on_stop 应提前返回 None。"""
         s = _make_strategy(_stop_executed=True)
-        result = s.onStop()
+        result = s.on_stop()
         assert result is None
         s.strategy_core.stop.assert_not_called()
 
-    def test_onStop_calls_core_stop(self):
-        """onStop 应调用 strategy_core.stop()。"""
+    def test_on_stop_calls_core_stop(self):
+        """on_stop 应调用 strategy_core.stop()。"""
         s = _make_strategy()
         s.save_instance_file = MagicMock()
         s.trading = True
 
-        s.onStop()
+        s.on_stop()
 
         s.strategy_core.stop.assert_called_once()
 
-    def test_onStop_cleans_core_attributes(self):
-        """onStop 应清理 strategy_core 的5个实例属性。"""
+    def test_on_stop_cleans_core_attributes(self):
+        """on_stop 应清理 strategy_core 的5个实例属性。"""
         s = _make_strategy()
         s.save_instance_file = MagicMock()
         s.trading = True
@@ -513,7 +513,7 @@ class TestLifecycleDuplicatePrevention:
                       '_strategy_ecosystem', '_hft_engine', '_snapshot_collector'):
             setattr(s.strategy_core, attr, MagicMock())
 
-        s.onStop()
+        s.on_stop()
 
         for attr in ('_shadow_engine', '_signal_service',
                       '_strategy_ecosystem', '_hft_engine', '_snapshot_collector'):

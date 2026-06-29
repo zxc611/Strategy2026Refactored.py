@@ -1,5 +1,5 @@
 # MODULE_ID: M1-193
-﻿# [M1-97] 结果执行器
+# [M1-97] 结果执行器
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 #!/usr/bin/env python3
 """ts_result_executor — 执行轮次子模块 (从ts_result_writer.py拆分)

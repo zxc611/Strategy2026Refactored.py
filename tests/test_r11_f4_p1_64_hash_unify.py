@@ -31,7 +31,7 @@ def test_params_core_uses_compute_content_hash():
     _path = os.path.join(_project_root, 'config', '_params_core.py')
     with open(_path, encoding='utf-8') as f:
         src = f.read()
-    # 不应有直接的hashlib.md5调用（除了import语句）
+    # 不应有直接的hashlib.md5调用（除了import语句）'
     lines = src.split('\n')
     for i, line in enumerate(lines, 1):
         stripped = line.strip()

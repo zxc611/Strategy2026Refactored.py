@@ -1,6 +1,4 @@
-# [M1-59] 统一健康检查+诊断
-# MODULE_ID: M1-091
-"""health/统一健康检查模�?�?合并�?个子模块"""
+"""health/统一健康检查模块 — 合并自4个子模块"""
 from __future__ import annotations
 
 import errno
@@ -19,7 +17,7 @@ from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
 from ali2026v3_trading.infra.event_bus import RateLimiter
 
 logger = get_logger(__name__)  # R9-5
-"""diagnosis/统一诊断模块 �?合并�?个子模块"""
+"""diagnosis/统一诊断模块 — 合并自3个子模块"""
 import functools
 import importlib
 import queue
@@ -31,22 +29,22 @@ from typing import Dict, List, Any, Optional, Protocol, Set, Tuple, runtime_chec
 from ali2026v3_trading.infra.serialization_utils import json_dumps
 from ali2026v3_trading.infra.shared_utils import normalize_instrument_id, CHINA_TZ
 # ============================================================
-# Section 1: 探针诊断 (�?diagnosis_probe.py)
+# Section 1: 探针诊断 (原 diagnosis_probe.py)
 # ============================================================
 
 
 
 
 # ============================================================
-# Section 1: 健康监控�?(�?health_monitor.py)
+# Section 1: 健康监控器 (原 health_monitor.py)
 # ============================================================
 
 class HealthMonitor:
-    """DR-P1-07修复: 心跳检�?+ 自动故障判定
+    """DR-P1-07修复: 心跳检测 + 自动故障判定
 
-    心跳检测：�?0秒检查核心服务是否响�?
-    连续3次心跳失�?�?标记 DEGRADED
-    连续5次心跳失�?�?标记 CRITICAL �?触发自动恢复
+    心跳检测：每30秒检查核心服务是否响应
+    连续3次心跳失败 → 标记 DEGRADED
+    连续5次心跳失败 → 标记 CRITICAL → 触发自动恢复
     故障日志写入 logs/health_events.jsonl
     """
 
@@ -68,10 +66,10 @@ class HealthMonitor:
         self._core_services[name] = service
 
     def heartbeat(self) -> str:
-        """执行一次心跳检测，返回当前状�?
+        """执行一次心跳检测，返回当前状态
 
         Returns:
-            'HEALTHY', 'DEGRADED', �?'CRITICAL'
+            'HEALTHY', 'DEGRADED', 或 'CRITICAL'
         """
         now = time.time()
         self._last_heartbeat = now
@@ -83,19 +81,19 @@ class HealthMonitor:
                     if hasattr(svc, 'health_check'):
                         if not svc.health_check():
                             all_ok = False
-                            logging.warning("[DR-P1-07] 服务 %s 健康检查失�?, name)
+                            logging.warning("[DR-P1-07] 服务 %s 健康检查失败", name)
                     elif hasattr(svc, 'is_alive'):
                         if not svc.is_alive():
                             all_ok = False
-                            logging.warning("[DR-P1-07] 服务 %s 线程已死�?, name)
+                            logging.warning("[DR-P1-07] 服务 %s 线程已死亡", name)
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     all_ok = False
-                    logging.warning("[DR-P1-07] 服务 %s 健康检查异�? %s", name, e)
+                    logging.warning("[DR-P1-07] 服务 %s 健康检查异常: %s", name, e)
 
         with self._lock:
             if all_ok:
                 if self._consecutive_failures > 0:
-                    logging.info("[DR-P1-07] 心跳恢复正常 (之前%d次连续失�?", self._consecutive_failures)
+                    logging.info("[DR-P1-07] 心跳恢复正常 (之前%d次连续失败)", self._consecutive_failures)
                 self._consecutive_failures = 0
                 self._status = "HEALTHY"
             else:
@@ -110,11 +108,11 @@ class HealthMonitor:
                 if new_status != self._status:
                     self._status = new_status
                     self._log_health_event(
-                        f"状态变�? {new_status}",
+                        f"状态变更: {new_status}",
                         consecutive_failures=self._consecutive_failures,
                     )
                     logging.warning(
-                        "[DR-P1-07] 健康状态变�? %s (连续失败=%d)",
+                        "[DR-P1-07] 健康状态变更: %s (连续失败=%d)",
                         new_status, self._consecutive_failures,
                     )
 
@@ -139,16 +137,16 @@ class HealthMonitor:
             logging.debug("[DR-P1-07] 健康事件日志写入失败: %s", e)
 
     def get_status(self) -> str:
-        """获取当前健康状�?""
+        """获取当前健康状态"""
         with self._lock:
             return self._status
 
     def is_critical(self) -> bool:
-        """是否为CRITICAL状�?""
+        """是否为CRITICAL状态"""
         return self.get_status() == "CRITICAL"
 
     def is_degraded(self) -> bool:
-        """是否为DEGRADED状�?""
+        """是否为DEGRADED状态"""
         return self.get_status() == "DEGRADED"
 
     def reset(self) -> None:
@@ -171,14 +169,14 @@ def get_health_monitor() -> HealthMonitor:
 
 
 def check_disk_space(path: str = '.') -> Dict[str, Any]:
-    """DR-P1-14: 磁盘空间预警检�?
+    """DR-P1-14: 磁盘空间预警检查
 
     使用 shutil.disk_usage 检查磁盘使用率
-    磁盘 < 10% �?WARNING
-    磁盘 < 5%  �?CRITICAL
+    磁盘 < 10% → WARNING
+    磁盘 < 5%  → CRITICAL
 
     Args:
-        path: 要检查的路径，默认当前目�?
+        path: 要检查的路径，默认当前目录
 
     Returns:
         dict: {total_gb, used_gb, free_gb, usage_percent, status}
@@ -218,7 +216,7 @@ def check_disk_space(path: str = '.') -> Dict[str, Any]:
             'status': status,
         }
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-        logging.error("[DR-P1-14] 磁盘空间检查失�? %s", e)
+        logging.error("[DR-P1-14] 磁盘空间检查失败: %s", e)
         return {
             'total_gb': 0, 'used_gb': 0, 'free_gb': 0,
             'usage_percent': 0, 'status': 'UNKNOWN', 'error': str(e),
@@ -226,7 +224,7 @@ def check_disk_space(path: str = '.') -> Dict[str, Any]:
 
 
 # ============================================================
-# Section 2: 结构化JSONL日志 (�?health_jsonl_logger.py)
+# Section 2: 结构化JSONL日志 (原 health_jsonl_logger.py)
 # ============================================================
 
 class StructuredJsonlLogger:
@@ -258,12 +256,12 @@ class StructuredJsonlLogger:
                 os.replace(path, f"{path}.1")
         except OSError as _os_err:
             if getattr(_os_err, 'errno', None) == errno.ENOSPC:
-                logging.critical("[P1-16] 磁盘空间不足，日志轮转失�? %s", _os_err)
+                logging.critical("[P1-16] 磁盘空间不足，日志轮转失败: %s", _os_err)
             else:
                 logging.debug("[P1-16] 日志轮转OSError(非ENOSPC): %s", _os_err)
 
     def close(self):
-        """关闭文件句柄 �?NEW-P1-01修复: 添加异常安全保护"""
+        """关闭文件句柄 — NEW-P1-01修复: 添加异常安全保护"""
         for attr_name in ('_signal_log_f', '_order_log_f'):
             fh = getattr(self, attr_name, None)
             if fh:
@@ -317,7 +315,7 @@ class StructuredJsonlLogger:
             "volume": order.get("volume", 0),
             "order_type": order.get("order_type", ""),
             "status": order.get("status", ""),
-            "filled_volume": order.get("filled_volume", 0),
+            "traded_volume": order.get("traded_volume", 0),
             "remaining_volume": order.get("remaining_volume", 0),
         }
         _sanitize_keys = {'api_key', 'access_key', 'access_secret', 'password', 'token', 'secret', 'credential'}
@@ -389,7 +387,7 @@ class StructuredJsonlLogger:
 
 
 # ============================================================
-# Section 3: 健康检查API (�?health_check_service.py)
+# Section 3: 健康检查API (原 health_check_service.py)
 # ============================================================
 
 class HealthCheckAPI:
@@ -429,8 +427,8 @@ class HealthCheckAPI:
         self._signal_stale_seconds = self.DEFAULT_SIGNAL_STALE_SECONDS
         self._order_stale_seconds = self.DEFAULT_ORDER_STALE_SECONDS
         try:
-            from ali2026v3_trading.config.config_service import get_config_service
-            cs = get_config_service()
+            from ali2026v3_trading.config.config_service import ConfigService
+            cs = ConfigService()
             self._signal_stale_seconds = cfg.get(
                 'signal_stale_seconds',
                 getattr(cs.trading, 'strategy_heartbeat_interval_seconds', self.DEFAULT_SIGNAL_STALE_SECONDS) * 10
@@ -493,7 +491,7 @@ class HealthCheckAPI:
         return 'unknown'
 
     def _refresh_unknown_components(self) -> None:
-        """R30-P0-03修复: 刷新所有unknown组件的状�?""
+        """R30-P0-03修复: 刷新所有unknown组件的状态"""
         for comp, status in list(self._component_status.items()):
             if status == 'unknown':
                 probed = self._probe_component_status(comp)
@@ -501,7 +499,7 @@ class HealthCheckAPI:
                     self._component_status[comp] = probed
 
     def _on_greeks_dashboard_updated(self, event: Any) -> None:
-        """DFG-P1-04修复: 消费Greeks仪表盘更新事件，缓存最新数�?""
+        """DFG-P1-04修复: 消费Greeks仪表盘更新事件，缓存最新数据"""
         try:
             if isinstance(event, dict):
                 self._cached_greeks_dashboard = event.get('data', event)
@@ -512,7 +510,7 @@ class HealthCheckAPI:
             pass
 
     def _push_health_status(self):
-        """定时推送健康状态而非仅被动查�?""
+        """定时推送健康状态而非仅被动查询"""
         while not self._push_stop.is_set():
             self._push_stop.wait(timeout=self._push_interval_sec)
             if self._push_stop.is_set():
@@ -533,10 +531,10 @@ class HealthCheckAPI:
                 )
                 bus.publish(event, async_mode=True)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
-                logging.debug("OPS-P1-02: EventBus健康状态推送异�? %s", e)
+                logging.debug("OPS-P1-02: EventBus健康状态推送异常: %s", e)
 
     def start_push(self, callback, interval_sec: float = None) -> None:
-        """启动健康状态主动推�?""
+        """启动健康状态主动推送"""
         self._push_callback = callback
         if interval_sec:
             self._push_interval_sec = interval_sec
@@ -557,7 +555,7 @@ class HealthCheckAPI:
         self._last_order_time = timestamp if timestamp is not None else time.time()
 
     def get_health_status(self) -> Dict[str, Any]:
-        # P1-01修复: 优先委托HealthCheckAggregator获取核心健康状�?
+        # P1-01修复: 优先委托HealthCheckAggregator获取核心健康状态
         _aggregator_result = self._delegate_to_aggregator()
         if _aggregator_result is not None:
             # 合并聚合器结果与API独有信息
@@ -628,7 +626,7 @@ class HealthCheckAPI:
             logging.debug("[R3-L2] unknown suppressed: %s", _r3_err)
             pass
         try:
-            from ali2026v3_trading.infra.shared_utils import ThreadLifecycleManager as ThreadMgr
+            from ali2026v3_trading.infra.shared_utils import ThreadMgr
             _hm = get_health_monitor()
             _tm_candidates = [svc for svc in getattr(_hm, '_core_services', {}).values() if isinstance(svc, ThreadMgr)]
             if _tm_candidates:
@@ -670,9 +668,9 @@ class HealthCheckAPI:
         return result
 
     def _delegate_to_aggregator(self) -> Optional[Dict[str, Any]]:
-        """P1-01修复: 委托HealthCheckAggregator获取核心健康状态�?
+        """P1-01修复: 委托HealthCheckAggregator获取核心健康状态。
         若聚合器可用且有strategy_service引用，返回聚合结果；
-        否则返回None，回退到HealthCheckAPI原有逻辑�?
+        否则返回None，回退到HealthCheckAPI原有逻辑。
         """
         try:
             from ali2026v3_trading.infra.service_container import get_service_container
@@ -718,7 +716,7 @@ class HealthCheckAPI:
             _sid = str(getattr(self, 'strategy_id', '') or 'global')
             safety = get_safety_meta_layer(params=self._params if hasattr(self, '_params') else None, strategy_id=_sid)
             if safety is not None:
-                # [P0-29修复] �?_risk_cb_half_open 派生暂停/冷静状�?
+                # [P0-29修复] 从 _risk_cb_half_open 派生暂停/冷静状态
                 cb = getattr(safety, '_risk_cb_half_open', None)
                 if cb is not None and cb.state == 'OPEN' and cb.opened_at > 0:
                     if time.time() < cb.opened_at + cb.open_duration:
@@ -742,7 +740,7 @@ class HealthCheckAPI:
         return alerts
 
     def get_greeks_dashboard(self) -> Dict[str, Any]:
-        """DFG-P1-04修复: 返回当前Greeks仪表盘数�?""
+        """DFG-P1-04修复: 返回当前Greeks仪表盘数据"""
         try:
             from ali2026v3_trading.risk.risk_service import get_risk_service
             rs = get_risk_service()
@@ -801,7 +799,7 @@ class HealthCheckAPI:
             event_bus = EventBus.get_instance()
             event_bus.subscribe("health_status_changed", callback)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-            logging.debug("[health] 属性访问降�? %s", _r3_err)
+            logging.debug("[health] 属性访问降级: %s", _r3_err)
             if callback not in self._health_change_callbacks:
                 self._health_change_callbacks.append(callback)
 
@@ -819,7 +817,7 @@ class HealthCheckAPI:
             event_bus = EventBus.get_instance()
             event_bus.publish("health_status_changed", event)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-            logging.debug("[health] 属性访问降�? %s", _r3_err)
+            logging.debug("[health] 属性访问降级: %s", _r3_err)
             for cb in self._health_change_callbacks:
                 try:
                     cb(event)
@@ -827,7 +825,7 @@ class HealthCheckAPI:
                     logging.warning("OPS-P1-02: 健康变更回调异常: %s", e)
 
     def get_log_stats(self, root_logger_name: str = "") -> Dict[str, Any]:
-        """返回最近日志统计信息，用于日志聚合与监�?""
+        """返回最近日志统计信息，用于日志聚合与监控"""
         try:
             target_logger = logging.getLogger(root_logger_name)
             stats: Dict[str, Any] = {
@@ -858,7 +856,7 @@ class HealthCheckAPI:
             return {"error": "Internal error occurred"}
 
     def check_capacity_limits(self) -> Dict[str, Any]:
-        """OPS-11修复: 检查系统容量是否接近上�?""
+        """OPS-11修复: 检查系统容量是否接近上限"""
         import shutil
         capacity_status = {
             'timestamp': time.time(),
@@ -897,10 +895,7 @@ class HealthCheckAPI:
             capacity_status['checks']['positions'] = {'status': 'ERROR', 'error': str(e)}
 
         try:
-            try:
-                import resource as _resource
-            except ImportError:
-                _resource = None
+            import resource as _resource
             try:
                 usage = shutil.disk_usage('.')
                 mem_status = 'OK'
@@ -936,7 +931,6 @@ class HealthCheckAPI:
             if rate_limiter:
                 max_calls = getattr(rate_limiter, '_capacity', 60)
                 current_tokens = getattr(rate_limiter, '_tokens', float(max_calls))
-                recent_calls = max_calls - current_tokens
                 freq_usage = 1.0 - (current_tokens / max_calls) if max_calls > 0 else 0
                 if freq_usage >= 0.9:
                     freq_status = 'WARNING'
@@ -972,20 +966,20 @@ class HealthCheckAPI:
 
 
 # ============================================================
-# Section 4: 健康检查聚合器 (�?health_check_aggregator.py)
+# Section 4: 健康检查聚合器 (原 health_check_aggregator.py)
 # ============================================================
 
-# P1-01: 本模块为唯一健康检查入�?权威�?，其他健康检查模块已deprecated
+# P1-01: 本模块为唯一健康检查入口(权威源)，其他健康检查模块已deprecated
 class HealthCheckAggregator:
     """健康检查聚合器
 
     _CHECKS定义6个独立检查项:
-    1. _check_connection_state: 连接状态检�?
-    2. _check_heartbeat_status: 心跳状态检�?
-    3. _check_resource_usage: 资源使用检�?
-    4. _check_shadow_engine: 影子引擎检�?
-    5. _check_strategy_ecosystem: 策略生态系统检�?
-    6. _check_safety_meta_layer: 安全元层检�?
+    1. _check_connection_state: 连接状态检查
+    2. _check_heartbeat_status: 心跳状态检查
+    3. _check_resource_usage: 资源使用检查
+    4. _check_shadow_engine: 影子引擎检查
+    5. _check_strategy_ecosystem: 策略生态系统检查
+    6. _check_safety_meta_layer: 安全元层检查
     """
 
     _CHECKS = [
@@ -1001,7 +995,7 @@ class HealthCheckAggregator:
         self._svc = strategy_service
 
     def aggregate(self) -> Dict[str, Any]:
-        """编排�? 聚合所有检查项，≤20行，圈复杂度�?"""
+        """编排器: 聚合所有检查项，≤20行，圈复杂度≤3"""
         results = {}
         for check_name in self._CHECKS:
             try:
@@ -1013,7 +1007,7 @@ class HealthCheckAggregator:
         return results
 
     def _check_connection_state(self) -> Dict[str, Any]:
-        """检�?: 连接状�?平台/交易所连接)"""
+        """检查1: 连接状态(平台/交易所连接)"""
         _connected = getattr(self._svc, '_platform_api_ready', False)
         return {
             'status': 'OK' if _connected else 'DEGRADED',
@@ -1021,7 +1015,7 @@ class HealthCheckAggregator:
         }
 
     def _check_heartbeat_status(self) -> Dict[str, Any]:
-        """检�?: 心跳状�?最近心跳时�?延迟)
+        """检查2: 心跳状态(最近心跳时间+延迟)
         P1-01修复: 优先委托 HealthMonitor.heartbeat() 获取心跳状态，失败则回退到原有逻辑
         """
         try:
@@ -1043,7 +1037,7 @@ class HealthCheckAggregator:
         }
 
     def _check_resource_usage(self) -> Dict[str, Any]:
-        """检�?: 资源使用(线程�?内存/订单�?"""
+        """检查3: 资源使用(线程池/内存/订单数)"""
         import threading
         _thread_count = threading.active_count()
         _orders = len(getattr(self._svc, '_orders_by_id', {})) if hasattr(self._svc, '_orders_by_id') else 0
@@ -1054,7 +1048,7 @@ class HealthCheckAggregator:
         }
 
     def _check_shadow_engine(self) -> Dict[str, Any]:
-        """检�?: 影子引擎状�?Alpha衰减/暂停)"""
+        """检查4: 影子引擎状态(Alpha衰减/暂停)"""
         try:
             _shadow = getattr(self._svc, '_shadow_engine', None)
             if _shadow is None:
@@ -1068,7 +1062,7 @@ class HealthCheckAggregator:
             return {'status': 'ERROR', 'error': str(e)}
 
     def _check_strategy_ecosystem(self) -> Dict[str, Any]:
-        """检�?: 策略生态系�?策略活跃�?资金分配)
+        """检查5: 策略生态系统(策略活跃度/资金分配)
         P1-01修复: 优先委托 LifecycleMonitor.health_check() 获取策略状态，失败则回退到原有逻辑
         """
         try:
@@ -1100,7 +1094,7 @@ class HealthCheckAggregator:
             return {'status': 'ERROR', 'error': str(e)}
 
     def _check_safety_meta_layer(self) -> Dict[str, Any]:
-        """检�?: 安全元层(熔断�?合规/资金充足�?
+        """检查6: 安全元层(熔断器/合规/资金充足性)
         P1-01修复: 优先委托 HealthCheckAPI._get_circuit_breaker_status() 获取熔断器状态，失败则回退到原有逻辑
         """
         try:
@@ -1130,7 +1124,7 @@ class HealthCheckAggregator:
             return {'status': 'ERROR', 'error': str(e)}
 
     def _determine_overall(self, results: Dict[str, Any]) -> str:
-        """根据各检查项确定整体状�?""
+        """根据各检查项确定整体状态"""
         _statuses = [v.get('status', 'UNKNOWN') for v in results.values() if isinstance(v, dict)]
         if any(s == 'CRITICAL' for s in _statuses):
             return 'CRITICAL'
@@ -1144,7 +1138,7 @@ class HealthCheckAggregator:
 
 
 class CodeQualityMetrics:
-    """运行时代码质量指标采�?""
+    """运行时代码质量指标采集"""
 
     def collect(self) -> dict:
         return {
@@ -1170,20 +1164,20 @@ class CodeQualityMetrics:
         return count
 
     def _check_whitelist(self) -> int:
-        """检查API白名单违规数�?""
-        return 0  # 需要运行时数据才能检�?
+        """检查API白名单违规数量"""
+        return 0  # 需要运行时数据才能检测
 
     def _get_component_failure_rate(self) -> float:
-        """获取组件失败�?""
+        """获取组件失败率"""
         try:
             from ali2026v3_trading.strategy_judgment._judgment_services import was_blocked
             return 1.0 if was_blocked() else 0.0
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-            logging.debug("[health] 属性访问降�? %s", _r3_err)
+            logging.debug("[health] 属性访问降级: %s", _r3_err)
             return 0.0
 
     def _count_suppressed_errors(self) -> int:
-        """统计try/except抑制的错误数�?""
+        """统计try/except抑制的错误数量"""
         import logging
         logger = logging.getLogger('ali2026v3_trading')
         # 返回当前日志中的错误计数
@@ -1191,28 +1185,273 @@ class CodeQualityMetrics:
             return logger.error_count
         return 0
 
+_runtime_strategy_ref = None
+
+def set_runtime_strategy_ref(strategy_obj):
+    global _runtime_strategy_ref
+    _runtime_strategy_ref = strategy_obj
+
 _DEFAULT_MONITORED_CONTRACTS = {
-    'IH2605': {'exchange': 'CFFEX', 'name': '上证50股指期货', 'type': 'future'},
-    'IF2605': {'exchange': 'CFFEX', 'name': '沪深300股指期货', 'type': 'future'},
-    'IM2605': {'exchange': 'CFFEX', 'name': '中证1000股指期货', 'type': 'future'},
-    'cu2605': {'exchange': 'SHFE', 'name': '铜期�?, 'type': 'future'},
-    'au2605': {'exchange': 'SHFE', 'name': '黄金期货', 'type': 'future'},
-    'al2605': {'exchange': 'SHFE', 'name': '铝期�?, 'type': 'future'},
-    'zn2605': {'exchange': 'SHFE', 'name': '锌期�?, 'type': 'future'},
-    'HO2605-C-2800': {'underlying': 'IH2605', 'exchange': 'CFFEX', 'name': 'IH看涨2800', 'type': 'option'},
-    'IO2605-C-4200': {'underlying': 'IF2605', 'exchange': 'CFFEX', 'name': 'IF看涨4200', 'type': 'option'},
-    'MO2605-C-7000': {'underlying': 'IM2605', 'exchange': 'CFFEX', 'name': 'IM看涨7000', 'type': 'option'},
-    'cu2605C90000': {'underlying': 'cu2605', 'exchange': 'SHFE', 'name': '铜看�?0000', 'type': 'option'},
-    'au2605C1000': {'underlying': 'au2605', 'exchange': 'SHFE', 'name': '黄金看涨1000', 'type': 'option'},
-    'al2605C24000': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看�?4000', 'type': 'option'},
-    'zn2605C26000': {'underlying': 'zn2605', 'exchange': 'SHFE', 'name': '锌看�?6000', 'type': 'option'},
-    'cu2605C104000': {'underlying': 'cu2605', 'exchange': 'SHFE', 'name': '铜看�?04000', 'type': 'option'},
-    'au2605C1032': {'underlying': 'au2605', 'exchange': 'SHFE', 'name': '黄金看涨1032', 'type': 'option'},
-    'al2605C22600': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看�?2600', 'type': 'option'},
-    'al2605C25200': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看�?5200', 'type': 'option'},
-    'al2605C26200': {'underlying': 'al2605', 'exchange': 'SHFE', 'name': '铝看�?6200', 'type': 'option'},
-    'zn2605C20000': {'underlying': 'zn2605', 'exchange': 'SHFE', 'name': '锌看�?0000', 'type': 'option'},
+    'IH2609': {'exchange': 'CFFEX', 'name': '上证50股指期货', 'type': 'future'},
+    'IF2609': {'exchange': 'CFFEX', 'name': '沪深300股指期货', 'type': 'future'},
+    'IM2609': {'exchange': 'CFFEX', 'name': '中证1000股指期货', 'type': 'future'},
+    'cu2609': {'exchange': 'SHFE', 'name': '铜期货', 'type': 'future'},
+    'au2609': {'exchange': 'SHFE', 'name': '黄金期货', 'type': 'future'},
+    'al2609': {'exchange': 'SHFE', 'name': '铝期货', 'type': 'future'},
+    'zn2609': {'exchange': 'SHFE', 'name': '锌期货', 'type': 'future'},
+    'HO2609-C-2800': {'underlying': 'IH2609', 'exchange': 'CFFEX', 'name': 'IH看涨2800', 'type': 'option'},
+    'IO2609-C-4200': {'underlying': 'IF2609', 'exchange': 'CFFEX', 'name': 'IF看涨4200', 'type': 'option'},
+    'MO2609-C-7000': {'underlying': 'IM2609', 'exchange': 'CFFEX', 'name': 'IM看涨7000', 'type': 'option'},
+    'cu2609C90000': {'underlying': 'cu2609', 'exchange': 'SHFE', 'name': '铜看涨90000', 'type': 'option'},
+    'au2609C1000': {'underlying': 'au2609', 'exchange': 'SHFE', 'name': '黄金看涨1000', 'type': 'option'},
+    'al2609C24000': {'underlying': 'al2609', 'exchange': 'SHFE', 'name': '铝看涨24000', 'type': 'option'},
+    'zn2609C26000': {'underlying': 'zn2609', 'exchange': 'SHFE', 'name': '锌看涨26000', 'type': 'option'},
+    'cu2609C104000': {'underlying': 'cu2609', 'exchange': 'SHFE', 'name': '铜看涨104000', 'type': 'option'},
+    'au2609C1032': {'underlying': 'au2609', 'exchange': 'SHFE', 'name': '黄金看涨1032', 'type': 'option'},
+    'al2609C22600': {'underlying': 'al2609', 'exchange': 'SHFE', 'name': '铝看涨22600', 'type': 'option'},
+    'al2609C25200': {'underlying': 'al2609', 'exchange': 'SHFE', 'name': '铝看涨25200', 'type': 'option'},
+    'al2609C26200': {'underlying': 'al2609', 'exchange': 'SHFE', 'name': '铝看涨26200', 'type': 'option'},
+    'zn2609C20000': {'underlying': 'zn2609', 'exchange': 'SHFE', 'name': '锌看涨20000', 'type': 'option'},
 }
+
+
+def _find_config_dir() -> Optional[str]:
+    _this_file = os.path.abspath(__file__)
+    _candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(_this_file)), 'config'),
+        os.path.join(os.path.dirname(_this_file), '..', 'config'),
+        os.path.join(os.getcwd(), 'ali2026v3_trading', 'config'),
+        os.path.join(os.getcwd(), 'pyStrategy', 'demo', 'ali2026v3_trading', 'config'),
+    ]
+    if 'INFINITRADER_SIMULATIONX64' in _this_file.upper() or 'InfiniTrader_SimulationX64' in _this_file:
+        _base = _this_file.split('pyStrategy')[0] if 'pyStrategy' in _this_file else os.path.dirname(os.path.dirname(os.path.dirname(_this_file)))
+        _candidates.append(os.path.join(_base, 'pyStrategy', 'demo', 'ali2026v3_trading', 'config'))
+    for _d in _candidates:
+        _resolved = os.path.normpath(_d)
+        if os.path.isdir(_resolved) and os.path.exists(os.path.join(_resolved, 'subscription_futures_fixed.txt')):
+            return _resolved
+    return None
+
+
+def _rank_option_candidates_by_duckdb_activity(option_candidates: List[Tuple[str, Dict]]) -> List[Tuple[str, Dict]]:
+    if not option_candidates:
+        return option_candidates
+    try:
+        import duckdb
+        db_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'strategy.duckdb')
+        )
+        if not os.path.exists(db_path):
+            return option_candidates
+        candidate_set = {inst_id for inst_id, _ in option_candidates}
+        activity = {}
+        with duckdb.connect(db_path) as con:
+            rows = con.execute("""
+                SELECT instrument_id, COUNT(*) AS cnt, MAX(timestamp) AS max_ts
+                FROM ticks_raw
+                WHERE regexp_matches(instrument_id, '^[A-Za-z]+[0-9]{3,4}[-]?[CP][-]?[0-9]')
+                GROUP BY instrument_id
+                ORDER BY max_ts DESC NULLS LAST, cnt DESC
+                LIMIT 5000
+            """).fetchall()
+        for rank, (inst_id, cnt, max_ts) in enumerate(rows):
+            if inst_id in candidate_set:
+                try:
+                    max_ts_value = max_ts.timestamp() if max_ts is not None and hasattr(max_ts, 'timestamp') else 0.0
+                except (ValueError, TypeError, AttributeError, OSError):
+                    max_ts_value = 0.0
+                activity[inst_id] = (0, -max_ts_value, -int(cnt or 0), rank)
+        return sorted(
+            option_candidates,
+            key=lambda item: activity.get(item[0], (1, 0.0, 0, 0)),
+            reverse=False,
+        )
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError, OSError) as e:
+        logging.debug("[%s] 活跃期权诊断清单排序失败，回退订阅文件顺序: %s", MONITORED_DIAG_LABEL if 'MONITORED_DIAG_LABEL' in globals() else '合约诊断', e)
+        return option_candidates
+
+
+def _load_tick_activity_by_instrument() -> Dict[str, int]:
+    try:
+        import duckdb
+        db_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'strategy.duckdb')
+        )
+        if not os.path.exists(db_path):
+            return {}
+        with duckdb.connect(db_path) as con:
+            rows = con.execute("""
+                SELECT instrument_id, COUNT(*) AS cnt
+                FROM ticks_raw
+                WHERE COALESCE(sync_status, '') <> 'simulated_coverage'
+                GROUP BY instrument_id
+            """).fetchall()
+        return {inst_id: int(cnt or 0) for inst_id, cnt in rows}
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError, OSError) as e:
+        logging.debug("[%s] tick活跃度读取失败: %s", MONITORED_DIAG_LABEL if 'MONITORED_DIAG_LABEL' in globals() else '合约诊断', e)
+        return {}
+
+
+def _load_full_chain_entry_counts() -> Dict[str, int]:
+    try:
+        import duckdb
+        db_path = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'strategy.duckdb')
+        )
+        if not os.path.exists(db_path):
+            return {}
+        with duckdb.connect(db_path) as con:
+            row = con.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM instruments_registry),
+                    (SELECT COUNT(*) FROM futures_instruments),
+                    (SELECT COUNT(*) FROM option_instruments),
+                    (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date = CURRENT_DATE),
+                    (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date = CURRENT_DATE AND COALESCE(sync_status, '') <> 'simulated_coverage'),
+                    (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date = CURRENT_DATE AND sync_status = 'simulated_coverage'),
+                    (SELECT COUNT(DISTINCT internal_id) FROM klines_raw WHERE trade_date = CURRENT_DATE),
+                    (SELECT COUNT(*) FROM chain_coverage_audit)
+            """).fetchone()
+            latest = con.execute("""
+                SELECT config_count, subscription_confirmed_count, tick_return_count,
+                       tick_buffer_count, ticks_raw_count, klines_raw_count,
+                       simulated_coverage_tick_count, simulated_coverage_kline_count
+                FROM chain_coverage_audit
+                ORDER BY audit_time DESC
+                LIMIT 1
+            """).fetchone()
+        result = {
+            'registry_count': int(row[0] or 0),
+            'future_count': int(row[1] or 0),
+            'option_count': int(row[2] or 0),
+            'ticks_raw_today_count': int(row[3] or 0),
+            'real_tick_today_count': int(row[4] or 0),
+            'simulated_tick_today_count': int(row[5] or 0),
+            'klines_raw_today_count': int(row[6] or 0),
+            'audit_rows': int(row[7] or 0),
+        }
+        if latest:
+            result.update({
+                'audit_config_count': int(latest[0] or 0),
+                'audit_subscription_confirmed_count': int(latest[1] or 0),
+                'audit_tick_return_count': int(latest[2] or 0),
+                'audit_tick_buffer_count': int(latest[3] or 0),
+                'audit_ticks_raw_count': int(latest[4] or 0),
+                'audit_klines_raw_count': int(latest[5] or 0),
+                'audit_simulated_tick_count': int(latest[6] or 0),
+                'audit_simulated_kline_count': int(latest[7] or 0),
+            })
+        return result
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError, OSError) as e:
+        logging.debug("[%s] 全链路入口统计读取失败: %s", MONITORED_DIAG_LABEL if 'MONITORED_DIAG_LABEL' in globals() else '合约诊断', e)
+        return {}
+
+
+def _log_full_chain_entry_counts(runtime_subscribed_count: int) -> None:
+    counts = _load_full_chain_entry_counts()
+    if not counts:
+        logging.info("[%s] 全链路入口统计: 暂无可用DB统计，runtime_subscribed=%d", MONITORED_DIAG_LABEL, runtime_subscribed_count)
+        return
+    expected = counts.get('audit_config_count') or counts.get('registry_count') or 0
+    logging.info(
+        "[%s] 全链路入口统计: config=%d, registry=%d, futures=%d, options=%d, runtime_subscribed=%d, "
+        "ticks_raw_today=%d(real=%d, simulated=%d), klines_raw_today=%d",
+        MONITORED_DIAG_LABEL,
+        expected,
+        counts.get('registry_count', 0),
+        counts.get('future_count', 0),
+        counts.get('option_count', 0),
+        runtime_subscribed_count,
+        counts.get('ticks_raw_today_count', 0),
+        counts.get('real_tick_today_count', 0),
+        counts.get('simulated_tick_today_count', 0),
+        counts.get('klines_raw_today_count', 0),
+    )
+    if counts.get('audit_rows', 0):
+        logging.info(
+            "[%s] 最新覆盖审计: config=%d -> subscribe=%d -> tick_return=%d -> tick_buffer=%d -> "
+            "ticks_raw=%d -> klines_raw=%d, simulated_tick=%d, simulated_kline=%d",
+            MONITORED_DIAG_LABEL,
+            counts.get('audit_config_count', 0),
+            counts.get('audit_subscription_confirmed_count', 0),
+            counts.get('audit_tick_return_count', 0),
+            counts.get('audit_tick_buffer_count', 0),
+            counts.get('audit_ticks_raw_count', 0),
+            counts.get('audit_klines_raw_count', 0),
+            counts.get('audit_simulated_tick_count', 0),
+            counts.get('audit_simulated_kline_count', 0),
+        )
+
+
+def _load_monitored_contracts_from_subscription_files() -> Optional[Dict[str, Dict]]:
+    try:
+        config_dir = _find_config_dir()
+        if not config_dir:
+            return None
+        futures_path = os.path.join(config_dir, 'subscription_futures_fixed.txt')
+        options_path = os.path.join(config_dir, 'subscription_options_fixed.txt')
+        if not os.path.exists(futures_path):
+            return None
+        result = {}
+        _EXCHANGE_MAP = {
+            'CFFEX': 'CFFEX', 'SHFE': 'SHFE', 'DCE': 'DCE', 'CZCE': 'CZCE', 'GFEX': 'GFEX', 'INE': 'INE',
+        }
+        future_candidates = []
+        option_candidates = []
+        with open(futures_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split('|')
+                if len(parts) >= 4:
+                    exchange = parts[0].split('.')[0] if '.' in parts[0] else ''
+                    inst_id = parts[0].split('.')[-1] if '.' in parts[0] else parts[0]
+                    future_candidates.append((
+                        inst_id,
+                        {'exchange': _EXCHANGE_MAP.get(exchange, exchange), 'name': f'{parts[2]}期货', 'type': 'future'},
+                    ))
+        if os.path.exists(options_path):
+            with open(options_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('|')
+                    if len(parts) >= 7:
+                        symbol = parts[0]
+                        exchange = symbol.split('.')[0] if '.' in symbol else ''
+                        inst_id = symbol.split('.')[-1] if '.' in symbol else symbol
+                        underlying = parts[4] if len(parts) > 4 else ''
+                        option_candidates.append((
+                            inst_id,
+                            {'underlying': underlying, 'exchange': _EXCHANGE_MAP.get(exchange, exchange), 'name': f'{inst_id}', 'type': 'option'},
+                        ))
+        activity = _load_tick_activity_by_instrument()
+
+        def append_candidate(candidate):
+            inst_id, info = candidate
+            if inst_id not in result and len(result) < 20:
+                result[inst_id] = info
+
+        for exchange in sorted({info.get('exchange') for _, info in future_candidates if info.get('exchange')}):
+            match = next((item for item in future_candidates if item[1].get('exchange') == exchange), None)
+            if match:
+                append_candidate(match)
+
+        for candidates, has_tick in ((future_candidates, True), (future_candidates, False), (option_candidates, True), (option_candidates, False)):
+            match = next((item for item in candidates if bool(activity.get(item[0], 0)) is has_tick), None)
+            if match:
+                append_candidate(match)
+
+        for inst_id, info in _rank_option_candidates_by_duckdb_activity(option_candidates):
+            append_candidate((inst_id, info))
+            if len(result) >= 20:
+                break
+
+        for candidate in future_candidates:
+            append_candidate(candidate)
+            if len(result) >= 20:
+                break
+        if result:
+            return result
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as e:
+        pass
+    return None
 
 
 def _load_monitored_contracts_from_config() -> Dict[str, Dict]:
@@ -1222,11 +1461,12 @@ def _load_monitored_contracts_from_config() -> Dict[str, Dict]:
             import json
             custom = json.loads(env_contracts)
             if isinstance(custom, dict) and custom:
-                logging.info(f"Loaded {len(custom)} monitored contracts from MONITORED_CONTRACTS_LIST env")
                 return custom
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
-        logging.warning(f"Failed to load MONITORED_CONTRACTS from env, using hardcoded fallback ({len(_DEFAULT_MONITORED_CONTRACTS)} contracts): {e}")
-    logging.warning(f"Using {len(_DEFAULT_MONITORED_CONTRACTS)} hardcoded monitored contracts as fallback")  # R24-P1-DF-03修复: debug→warning
+        pass
+    _from_files = _load_monitored_contracts_from_subscription_files()
+    if _from_files:
+        return _from_files
     return _DEFAULT_MONITORED_CONTRACTS
 
 
@@ -1330,7 +1570,13 @@ def diagnose_parse_failure(stage: str, instrument_id: str, reason: str) -> None:
     logging.error("[PROBE_PARSE_FAILURE] Stage=%s | Instrument=%s | Reason=%s", stage, instrument, reason)
 
 
-_CONTRACT_PATTERN = re.compile(r'^([A-Za-z]{2,4})(\d{4})(?:-([CP])-(\d+)|([CP])(\d+))?$')
+# 五唯一性修复：合约校验正则与 subscription_service.parse_future/parse_option 规范正则兼容
+# 原 {2,4} 改为 +（允许单字母品种如 m/c/al）；原 \d{4} 改为 \d{3,4}（允许 CZCE 三位月份）；
+# 原 \d+ 改为 \d+(?:\.\d+)?（允许小数行权价）
+_CONTRACT_PATTERN = re.compile(
+    r'^([A-Za-z]+)(\d{3,4})'
+    r'(?:-([CP])-(\d+(?:\.\d+)?)|([CP])(\d+(?:\.\d+)?)?)?$'
+)
 
 
 def validate_contract_format(instrument_id: str) -> Tuple[bool, str]:  # [R22-P2-TS21]
@@ -1348,17 +1594,17 @@ def validate_contract_format(instrument_id: str) -> Tuple[bool, str]:  # [R22-P2
         underlying = info.get('underlying', '')
         exchange = info.get('exchange', '')
         try:
-            from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
             parsed = SubscriptionManager.parse_option(instrument_id)
             if parsed:
                 if exchange == 'CFFEX':
                     prefix = parsed.get('product', '')
                     if underlying.startswith('IH') and prefix != 'HO':
-                        return False, "股指期权应使用HO代码（IH→HO�?, instrument_id
+                        return False, "股指期权应使用HO代码（IH→HO）", instrument_id
                     if underlying.startswith('IF') and prefix != 'IO':
-                        return False, "股指期权应使用IO代码（IF→IO�?, instrument_id
+                        return False, "股指期权应使用IO代码（IF→IO）", instrument_id
                     if underlying.startswith('IM') and prefix != 'MO':
-                        return False, "股指期权应使用MO代码（IM→MO�?, instrument_id
+                        return False, "股指期权应使用MO代码（IM→MO）", instrument_id
                     return True, "股指期权标准格式: XX####-C/P-#####", instrument_id
                 return True, "商品期权标准格式: xx####C/P#####", instrument_id
         except (ValueError, KeyError, TypeError) as _parse_err:
@@ -1391,7 +1637,7 @@ def diagnose_format_validation(instrument_id: str, is_valid_format: bool,
                               actual_format: Optional[str] = None) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    status = "�? if is_valid_format else "�?
+    status = "✅" if is_valid_format else "❌"
     if is_valid_format:
         logging.debug(f"[PROBE_FORMAT_VALIDATION] {instrument_id} | Format={status}")
     else:
@@ -1404,7 +1650,7 @@ def diagnose_format_validation(instrument_id: str, is_valid_format: bool,
 def diagnose_config_file_presence(instrument_id: str, exists_in_file: bool) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    status = "�? if exists_in_file else "�?
+    status = "✅" if exists_in_file else "❌"
     logging.info(f"[PROBE_CONFIG_FILE] {instrument_id} | InFile={status}")
 
 
@@ -1412,8 +1658,8 @@ def diagnose_config_loaded_status(instrument_id: str, loaded_in_memory: bool,
                                  in_cache: bool = False) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    mem_status = "�? if loaded_in_memory else "�?
-    cache_status = "�? if in_cache else "�?
+    mem_status = "✅" if loaded_in_memory else "❌"
+    cache_status = "✅" if in_cache else "❌"
     logging.info(f"[PROBE_CONFIG_LOADED] {instrument_id} | InMemory={mem_status} | InCache={cache_status}")
 
 
@@ -1421,15 +1667,15 @@ def diagnose_pre_registration(instrument_id: str, in_subscribe_list: bool,
                               registered: bool) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    sub_status = "�? if in_subscribe_list else "�?
-    reg_status = "�? if registered else "�?
+    sub_status = "✅" if in_subscribe_list else "❌"
+    reg_status = "✅" if registered else "❌"
     logging.info(f"[PROBE_PRE_REGISTRATION] {instrument_id} | InSubList={sub_status} | Registered={reg_status}")
 
 
 def diagnose_subscription(instrument_id: str, contract_type: str, success: bool, reason: str = None) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    status = "�? if success else "�?
+    status = "✅" if success else "❌"
     msg = f"[PROBE_SUBSCRIPTION] {instrument_id} | Type={contract_type} | Success={status}"
     if reason:
         msg += f" | Reason={reason}"
@@ -1482,19 +1728,19 @@ def diagnose_tick_entry(instrument_id: str, price: float, volume: int,
 def diagnose_tick_buffer(instrument_id: str, buffered: bool) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    logging.debug(f"[PROBE_TICK_BUFFER] {instrument_id} | Buffered={'�? if buffered else '�?}")
+    logging.debug(f"[PROBE_TICK_BUFFER] {instrument_id} | Buffered={'✅' if buffered else '❌'}")
 
 
 def diagnose_tick_flush(instrument_id: str, flushed: bool) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    logging.debug(f"[PROBE_TICK_FLUSH] {instrument_id} | Flushed={'�? if flushed else '�?}")
+    logging.debug(f"[PROBE_TICK_FLUSH] {instrument_id} | Flushed={'✅' if flushed else '❌'}")
 
 
 def diagnose_storage_enqueue(instrument_id: str, success: bool, reason: str = None) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    status = "�? if success else "�?
+    status = "✅" if success else "❌"
     msg = f"[PROBE_STORAGE_ENQUEUE] {instrument_id} | Success={status}"
     if reason:
         msg += f" | Reason={reason}"
@@ -1510,26 +1756,53 @@ def diagnose_async_write(instrument_id: str, func_name: str, data_count: int) ->
 def diagnose_duckdb_insert(instrument_id: str, success: bool, reason: str = None) -> None:
     if not is_monitored_contract(instrument_id):
         return
-    status = "�? if success else "�?
+    status = "✅" if success else "❌"
     msg = f"[PROBE_DUCKDB_INSERT] {instrument_id} | Success={status}"
     if reason:
         msg += f" | Reason={reason}"
     logging.debug(msg)
 
 
+_reg_option_result_counts = {'success': 0, 'none': 0, 'error': 0}
+_reg_option_result_lock = threading.Lock()
+_reg_option_result_last_log = 0.0
+
+
+def diagnose_register_option_result(instrument_id: str, result, error: str = None) -> None:
+    global _reg_option_result_last_log
+    now = time.time()
+    with _reg_option_result_lock:
+        if result is True:
+            _reg_option_result_counts['success'] += 1
+        elif result is None:
+            _reg_option_result_counts['none'] += 1
+        else:
+            _reg_option_result_counts['error'] += 1
+        if now - _reg_option_result_last_log >= 30.0:
+            logging.info(
+                "[PROBE_REG_OPTION] success=%d none=%d error=%d",
+                _reg_option_result_counts['success'],
+                _reg_option_result_counts['none'],
+                _reg_option_result_counts['error'],
+            )
+            _reg_option_result_counts.clear()
+            _reg_option_result_counts.update({'success': 0, 'none': 0, 'error': 0})
+            _reg_option_result_last_log = now
+
+
 class DiagnosisProbeManager:
-    """12环节诊断探针统一管理�?""
+    """12环节诊断探针统一管理器"""
 
     _shard_enqueue_lock = threading.Lock()
 
     def __init__(self):
         self._shard_enqueue_counts: Dict[int, int] = {}
-        # R21-NET-P1-05修复: 上线监控回调 �?诊断探针可注册回调，在检测到异常时主动通知上层
+        # R21-NET-P1-05修复: 上线监控回调 — 诊断探针可注册回调，在检测到异常时主动通知上层
         self._online_monitor_callbacks: List[Any] = []  # List[Callable[[str, Dict], None]]
 
     # R21-NET-P1-05修复: 注册上线监控回调
     def register_online_monitor_callback(self, callback):
-        """注册上线监控回调函数，签�? callback(event_type: str, detail: Dict)"""
+        """注册上线监控回调函数，签名: callback(event_type: str, detail: Dict)"""
         if callable(callback) and callback not in self._online_monitor_callbacks:
             self._online_monitor_callbacks.append(callback)
 
@@ -1696,17 +1969,22 @@ class DiagnosisProbeManager:
             logging.info("[ContractWatch] OK contract=%s type=%s ticks=%d first=%.3fs last=%.3fs first_price=%s last_price=%s",
                          item['instrument_id'], item['type'], item['tick_count'], first_elapsed, last_elapsed, item['first_price'], item['last_price'])
         for item in no_tick:
-            logging.warning("[ContractWatch] NO_TICK contract=%s type=%s waited=%.3fs name=%s",
+            # FIX-R37-CONTRACT-NOISE: 不活跃合约无tick是预期行为，降为DEBUG避免噪音；summary已记录WARNING
+            logging.debug("[ContractWatch] NO_TICK contract=%s type=%s waited=%.3fs name=%s",
                             item['instrument_id'], item['type'], elapsed, item['name'])
-        # R21-NET-P1-05修复: 检测到无tick合约时触发上线监控回�?
+        # R21-NET-P1-05修复: 检测到无tick合约时触发上线监控回调
         if no_tick:
             try:
-                self._fire_online_monitor('contract_no_tick', {
-                    'run_id': run.get('run_id', ''),
-                    'no_tick_count': len(no_tick),
-                    'no_tick_instruments': [item['instrument_id'] for item in no_tick],
-                    'elapsed': elapsed,
-                })
+                for _cb in cls._online_monitor_callbacks:
+                    try:
+                        _cb('contract_no_tick', {
+                            'run_id': run.get('run_id', ''),
+                            'no_tick_count': len(no_tick),
+                            'no_tick_instruments': [item['instrument_id'] for item in no_tick],
+                            'elapsed': elapsed,
+                        })
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
+                        logging.debug("[R21-NET-P1-05修复] 上线监控回调异常: %s", _e)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _fire_err:
                 logging.debug("[R22-EP-05] 上线监控回调触发失败: %s", _fire_err)
         for item in not_subscribed:
@@ -1763,8 +2041,8 @@ class DiagnosisProbeManager:
             logging.info("[StartupProbe] event run=%s t=%.3fs name=%s", run['run_id'], elapsed, name)
 
     # R21-MEM-P2-17修复: startup_step()为@contextmanager生成器，
-    # with语句保证GeneratorExit触发finally块执行，自动调用生成�?close()�?
-    # 当前实现已有try/finally保护，确保step计时和状态记录在异常时也能完成�?
+    # with语句保证GeneratorExit触发finally块执行，自动调用生成器.close()。
+    # 当前实现已有try/finally保护，确保step计时和状态记录在异常时也能完成。
     @classmethod
     @contextmanager
     def startup_step(cls, name: str, detail: str = None):
@@ -1831,20 +2109,20 @@ class DiagnosisProbeManager:
     def diagnose_subscribe_api_return(strategy_core, test_contracts=None):
         if test_contracts is None:
             test_contracts = [
-                ('SHFE', 'al2605C25200', 'AL期权-有tick'), ('SHFE', 'au2605C1032', 'AU期权-无tick'),
-                ('SHFE', 'cu2605C104000', 'CU期权-无tick'), ('SHFE', 'zn2605C20000', 'ZN期权-无tick'),
+                ('SHFE', 'al2607C25200', 'AL期权-有tick'), ('SHFE', 'au2607C1032', 'AU期权-无tick'),
+                ('SHFE', 'cu2607C104000', 'CU期权-无tick'), ('SHFE', 'zn2607C20000', 'ZN期权-无tick'),
             ]
         results = {'timestamp': datetime.now(CHINA_TZ).isoformat(), 'contracts': {},
                    'summary': {'total': 0, 'success': 0, 'failed': 0, 'no_return': 0}}
         logging.info("=" * 80)
-        logging.info("[SubscribeReturnDiag] 开始诊�?sub_market_data 返回�?)
+        logging.info("[SubscribeReturnDiag] 开始诊断 sub_market_data 返回值")
         logging.info("=" * 80)
         sub_api = getattr(strategy_core, '_runtime_strategy_host', None)
         if sub_api is None:
             sub_api = strategy_core
         sub_method = getattr(sub_api, 'sub_market_data', None)
         if not callable(sub_method):
-            logging.error("[SubscribeReturnDiag] sub_market_data 方法不可�?)
+            logging.error("[SubscribeReturnDiag] sub_market_data 方法不可用")
             results['error'] = 'sub_market_data not callable'
             return results
         for exchange, inst_id, desc in test_contracts:
@@ -1858,18 +2136,18 @@ class DiagnosisProbeManager:
                 if ret is None:
                     contract_result['status'] = 'no_return'
                     results['summary']['no_return'] += 1
-                    logging.warning(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回�?None, 可能被忽�?)
+                    logging.warning(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回值=None, 可能被忽略")
                 elif ret is False:
                     contract_result['status'] = 'failed'
                     results['summary']['failed'] += 1
-                    logging.error(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回�?False, 订阅失败")
+                    logging.error(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回值=False, 订阅失败")
                 elif ret is True:
                     contract_result['status'] = 'success'
                     results['summary']['success'] += 1
-                    logging.info(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回�?True, 订阅成功")
+                    logging.info(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回值=True, 订阅成功")
                 else:
                     contract_result['status'] = 'other'
-                    logging.info(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回�?{ret}, 类型={type(ret).__name__}")
+                    logging.info(f"[SubscribeReturnDiag] {inst_id} ({desc}): 返回值={ret}, 类型={type(ret).__name__}")
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 contract_result['exception'] = str(e)
                 contract_result['status'] = 'exception'
@@ -1877,7 +2155,7 @@ class DiagnosisProbeManager:
                 logging.error(f"[SubscribeReturnDiag] {inst_id} ({desc}): 异常={e}")
             results['contracts'][inst_id] = contract_result
         logging.info("-" * 80)
-        logging.info(f"[SubscribeReturnDiag] 汇�? total={results['summary']['total']}, success={results['summary']['success']}, failed={results['summary']['failed']}, no_return={results['summary']['no_return']}")
+        logging.info(f"[SubscribeReturnDiag] 汇总: total={results['summary']['total']}, success={results['summary']['success']}, failed={results['summary']['failed']}, no_return={results['summary']['no_return']}")
         logging.info("=" * 80)
         return results
 
@@ -1885,9 +2163,9 @@ class DiagnosisProbeManager:
     def diagnose_option_metadata_diff(strategy_core):
         from ali2026v3_trading.config.params_service import get_params_service
         ps = get_params_service()
-        test_contracts = [('al2605C25200', 'AL期权-有tick'), ('au2605C1032', 'AU期权-无tick'),
-                          ('cu2605C104000', 'CU期权-无tick'), ('zn2605C20000', 'ZN期权-无tick'),
-                          ('HO2605-C-2800', 'HO指数期权-有tick')]
+        test_contracts = [('al2607C25200', 'AL期权-有tick'), ('au2607C1032', 'AU期权-无tick'),
+                          ('cu2607C104000', 'CU期权-无tick'), ('zn2607C20000', 'ZN期权-无tick'),
+                          ('HO2607-C-2800', 'HO指数期权-有tick')]
         results = {'timestamp': datetime.now(CHINA_TZ).isoformat(), 'contracts': {}, 'diff_fields': {}}
         logging.info("=" * 80)
         logging.info("[OptionMetaDiff] 开始诊断期权元数据差异")
@@ -1921,7 +2199,7 @@ class DiagnosisProbeManager:
 
 
 # ============================================================
-# Section 2: 周期性诊�?(�?diagnosis_periodic.py)
+# Section 2: 周期性诊断 (原 diagnosis_periodic.py)
 # ============================================================
 
 
@@ -1932,20 +2210,39 @@ def _get_runtime_state():
     historical_in_progress = False
     startup_ready = False
     try:
-        from ali2026v3_trading.config.config_service import get_cached_params
-        cached_params = get_cached_params() or {}
-        runtime_strategy = cached_params.get('strategy')
+        global _runtime_strategy_ref
+        if _runtime_strategy_ref is not None:
+            runtime_strategy = _runtime_strategy_ref
+        if runtime_strategy is None:
+            from ali2026v3_trading.config.config_service import get_cached_params
+            cached_params = get_cached_params() or {}
+            runtime_strategy = cached_params.get('strategy')
+        if runtime_strategy is None:
+            try:
+                from ali2026v3_trading.config.config_params import _param_table_cache
+                if _param_table_cache is not None:
+                    runtime_strategy = _param_table_cache.get('strategy')
+            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                pass
         runtime_core = getattr(runtime_strategy, 'strategy_core', None) if runtime_strategy is not None else None
-        subscribed_source = runtime_core if runtime_core is not None else runtime_strategy
-        runtime_subscribed = set(getattr(subscribed_source, '_subscribed_instruments', []) or [])
-        historical_in_progress = bool(getattr(subscribed_source, '_historical_load_in_progress', False))
+        _raw_subscribed = None
+        for _src in [runtime_strategy, getattr(runtime_strategy, 'params', None), runtime_core]:
+            if _src is not None:
+                _raw_subscribed = getattr(_src, '_subscribed_instruments', None)
+                if _raw_subscribed:
+                    break
+        runtime_subscribed = set(_raw_subscribed) if _raw_subscribed else set()
+        _historical_src = runtime_strategy if runtime_strategy is not None else runtime_core
+        historical_in_progress = bool(getattr(_historical_src, '_historical_load_in_progress', False))
         startup_ready = bool(
             getattr(runtime_strategy, '_start_completed', False)
             or getattr(runtime_core, '_is_running', False)
             or runtime_subscribed
         )
+        if not runtime_subscribed:
+            logging.debug(f"[{MONITORED_DIAG_LABEL}] runtime_subscribed is empty: strategy={runtime_strategy is not None}, core={runtime_core is not None}")
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as exc:
-        logging.debug(f"[{MONITORED_DIAG_LABEL}] 获取运行时状态失�? {exc}")
+        logging.debug(f"[{MONITORED_DIAG_LABEL}] 获取运行时状态失败: {exc}")
     return runtime_strategy, runtime_core, runtime_subscribed, historical_in_progress, startup_ready
 
 
@@ -1965,7 +2262,7 @@ def _ensure_grace_period_started() -> float:
         if _first_diagnosis_call_time is None:
             _first_diagnosis_call_time = now
             logging.info(
-                "[%s] 诊断宽限期开始计时，宽限�?%.0fs，诊断将�?.0fs后启�?,
+                "[%s] 诊断宽限期开始计时，宽限期=%.0fs，诊断将在%.0fs后启动",
                 MONITORED_DIAG_LABEL, _DIAGNOSIS_STARTUP_GRACE_SECONDS,
                 _DIAGNOSIS_STARTUP_GRACE_SECONDS,
             )
@@ -1982,21 +2279,22 @@ def reset_diagnosis_grace_period():
 
 def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> None:
     logging.info("\n" + "="*100)
-    logging.info("📊 [%s] 开始检�?, MONITORED_DIAG_LABEL)
+    logging.info("📊 [%s] 开始检查", MONITORED_DIAG_LABEL)
     logging.info("="*100)
 
     runtime_strategy, runtime_core, runtime_subscribed, historical_in_progress, startup_ready = _get_runtime_state()
+    _log_full_chain_entry_counts(len(runtime_subscribed))
 
     if historical_in_progress:
         logging.info(
-            "[%s] 历史K线加载进行中，跳过本轮以避免启动期误�? subscribed=%d" % MONITORED_DIAG_LABEL,
+            "[%s] 历史K线加载进行中，跳过本轮以避免启动期误报: subscribed=%d" % MONITORED_DIAG_LABEL,
             len(runtime_subscribed),
         )
         logging.info("="*100)
         return
 
     if runtime_strategy is not None and not startup_ready:
-        logging.info("[%s] 启动桥接尚未完成，跳过本轮以避免初始化误�?, MONITORED_DIAG_LABEL)
+        logging.info("[%s] 启动桥接尚未完成，跳过本轮以避免初始化误报", MONITORED_DIAG_LABEL)
         logging.info("="*100)
         return
 
@@ -2006,21 +2304,21 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
 
     if historical_in_progress:
         logging.info(
-            "[%s] 历史K线加载进行中，跳过本轮以避免启动期误�? subscribed=%d" % MONITORED_DIAG_LABEL,
+            "[%s] 历史K线加载进行中，跳过本轮以避免启动期误报: subscribed=%d" % MONITORED_DIAG_LABEL,
             len(runtime_subscribed),
         )
         logging.info("="*100)
         return
 
     if runtime_strategy is not None and not startup_ready:
-        logging.info("[%s] 启动桥接尚未完成，跳过本轮以避免初始化误�?, MONITORED_DIAG_LABEL)
+        logging.info("[%s] 启动桥接尚未完成，跳过本轮以避免初始化误报", MONITORED_DIAG_LABEL)
         logging.info("="*100)
         return
 
     grace_elapsed = _ensure_grace_period_started()
     if grace_elapsed < _DIAGNOSIS_STARTUP_GRACE_SECONDS:
         logging.info(
-            "[%s] 诊断宽限期未�?已过%.0fs/%.0fs)，跳过本轮以避免启动期误�?,
+            "[%s] 诊断宽限期未过(已过%.0fs/%.0fs)，跳过本轮以避免启动期误报",
             MONITORED_DIAG_LABEL, grace_elapsed, _DIAGNOSIS_STARTUP_GRACE_SECONDS,
         )
         logging.info("="*100)
@@ -2038,7 +2336,8 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
             expected_format = None
 
             try:
-                config_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ali2026v3_trading')
+                # FIX: config_dir路径错误，原为'ali2026v3_trading'子目录（不存在），应为'config'子目录
+                config_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config')
                 config_lines = []
                 for cfg_name in ['subscription_futures_fixed.txt', 'subscription_options_fixed.txt']:
                     cfg_path = os.path.join(config_dir, cfg_name)
@@ -2053,12 +2352,18 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
                 logging.debug(f"Diagnosis: config file check failed: {e}")
 
             try:
-                from ali2026v3_trading.config.config_service import get_cached_params
-                cached_params = get_cached_params() or {}
-                if isinstance(cached_params, dict):
-                    loaded_in_memory = contract in cached_params
+                from ali2026v3_trading.config.params_service import get_params_service
+                _ps = get_params_service()
+                if _ps is None:
+                    loaded_in_memory = False
+                    logging.debug(f"Diagnosis: get_params_service() returned None for {contract}")
                 else:
-                    loaded_in_memory = hasattr(cached_params, contract)
+                    _meta = _ps.get_instrument_meta_by_id(contract)
+                    loaded_in_memory = _meta is not None
+                    if not loaded_in_memory:
+                        _int_id = _ps.get_internal_id(contract) if hasattr(_ps, 'get_internal_id') else None
+                        _cache_size = len(_ps._instrument_id_to_internal_id) if hasattr(_ps, '_instrument_id_to_internal_id') else -1
+                        logging.debug(f"Diagnosis: {contract} not in cache (internal_id={_int_id}, cache_size={_cache_size})")
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                 logging.debug(f"Diagnosis: memory load check failed: {e}")
 
@@ -2082,24 +2387,50 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
             tick_count = 0
             kline_count = 0
 
-            if runtime_core is not None:
-                sub_mgr = getattr(runtime_core, '_subscription_manager', None)
-                if sub_mgr:
-                    subscribed = bool(sub_mgr.is_subscribed(contract))
-                    reg_info = sub_mgr.get_registration_info(contract)
-                    if reg_info:
-                        registered = True
-                        internal_id = reg_info.get('internal_id')
-                        has_internal_id = internal_id is not None
+            _sub_mgr = None
+            if storage and hasattr(storage, 'subscription_manager'):
+                _sub_mgr = getattr(storage, 'subscription_manager', None)
+            if _sub_mgr is None and runtime_core is not None:
+                _core_storage = getattr(runtime_core, 'storage', None)
+                if _core_storage and hasattr(_core_storage, 'subscription_manager'):
+                    _sub_mgr = getattr(_core_storage, 'subscription_manager', None)
+            if _sub_mgr is None:
+                try:
+                    from ali2026v3_trading.data.data_service import get_data_service
+                    _ds = get_data_service()
+                    if _ds is not None:
+                        _sub_mgr = getattr(_ds, 'subscription_manager', None)
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+                    logging.debug(f"Diagnosis: data_service subscription_manager fallback failed: {e}")
 
-            if runtime_strategy is not None:
-                reg_info2 = getattr(runtime_strategy, '_option_info', {}).get(contract)
-                if reg_info2 and isinstance(reg_info2, dict):
-                    if not registered:
+            if _sub_mgr is not None:
+                try:
+                    _sub_success = getattr(_sub_mgr, '_subscription_success', None)
+                    if _sub_success and isinstance(_sub_success, dict):
+                        _subscribe_times = _sub_success.get('subscribe_time', {})
+                        subscribed = contract in _subscribe_times
+                        _tick_instruments = _sub_success.get('tick_instruments', set())
+                        tick_buffered = contract in _tick_instruments
+                        tick_entry_count = 1 if tick_buffered else 0
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    logging.debug(f"Diagnosis: subscription_manager check failed: {e}")
+
+            try:
+                from ali2026v3_trading.config.params_service import get_params_service
+                _ps = get_params_service()
+                if _ps is not None:
+                    _meta = _ps.get_instrument_meta_by_id(contract)
+                    if _meta is not None:
                         registered = True
-                    if not has_internal_id:
-                        internal_id = reg_info2.get('internal_id')
+                        internal_id = _meta.get('internal_id') if isinstance(_meta, dict) else None
                         has_internal_id = internal_id is not None
+                    _int_id = _ps.get_internal_id(contract) if hasattr(_ps, 'get_internal_id') else None
+                    if _int_id is not None and not has_internal_id:
+                        registered = True
+                        internal_id = _int_id
+                        has_internal_id = True
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+                logging.debug(f"Diagnosis: params_service registration check failed: {e}")
 
             if query_service:
                 try:
@@ -2163,15 +2494,20 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
                     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                         pass
 
-            tick_source = runtime_core if runtime_core is not None else runtime_strategy
-            if tick_source and hasattr(tick_source, '_tick_buffer'):
-                try:
-                    buf = tick_source._tick_buffer
-                    if isinstance(buf, list):
-                        tick_entry_count = sum(1 for t in buf if isinstance(t, dict) and t.get('instrument_id') == contract)
-                        tick_buffered = (tick_entry_count > 0)
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                    logging.debug(f"Diagnosis: tick buffer check failed: {e}")
+            if not tick_buffered:
+                _tick_src = runtime_core if runtime_core is not None else runtime_strategy
+                if _tick_src:
+                    _tps = getattr(_tick_src, '_tick_processing_service', None)
+                    if _tps is None:
+                        _tps = getattr(_tick_src, 'tick_processing_service', None)
+                    if _tps and hasattr(_tps, '_tick_buffer'):
+                        try:
+                            buf = _tps._tick_buffer
+                            if isinstance(buf, list):
+                                tick_entry_count = sum(1 for t in buf if isinstance(t, dict) and t.get('instrument_id') == contract)
+                                tick_buffered = (tick_entry_count > 0)
+                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                            logging.debug(f"Diagnosis: tick buffer check failed: {e}")
 
             if storage and hasattr(storage, '_queue_stats'):
                 try:
@@ -2189,26 +2525,26 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
                 success_contracts.append(contract)
             else:
                 failure_reasons = []
-                if not exists_in_file:
-                    failure_reasons.insert(0, "�?不在配置文件�?)
-                elif not loaded_in_memory:
-                    failure_reasons.insert(0, "�?配置表未加载到内�?)
+                if not loaded_in_memory:
+                    failure_reasons.insert(0, "❌ 合约元数据未加载")
+                elif not exists_in_file:
+                    failure_reasons.insert(0, "❌ 不在订阅文件中")
                 elif not in_subscribe_list:
-                    failure_reasons.insert(0, "�?未加入订阅列�?)
+                    failure_reasons.insert(0, "❌ 未加入运行时订阅列表")
                 elif not is_valid_format:
-                    failure_reasons.insert(0, f"�?格式错误: {expected_format}")
+                    failure_reasons.insert(0, f"❌ 格式错误: {expected_format}")
                 elif in_subscribe_list and not registered:
-                    failure_reasons.insert(0, "⚠️ 在订阅列表但未注�?)
+                    failure_reasons.insert(0, "⚠️ 在订阅列表但未注册")
                 elif not registered:
-                    failure_reasons.insert(0, "�?合约未注�?)
+                    failure_reasons.insert(0, "❌ 合约未注册")
                 else:
                     if not has_tick_data:
                         failure_reasons.append("⚠️ 无Tick数据(实时链路异常)")
                     if not has_kline_data:
                         if has_tick_data:
-                            failure_reasons.append("⚠️ 无K线数�?Tick已入库但K线未合成)")
+                            failure_reasons.append("⚠️ 无K线数据(Tick已入库但K线未合成)")
                         else:
-                            failure_reasons.append("⚠️ 无K线数�?无数据源)")
+                            failure_reasons.append("⚠️ 无K线数据(无数据源)")
 
                 failed_contracts.append({
                     'contract': contract,
@@ -2234,11 +2570,11 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
                 'async_written': False, 'duckdb_inserted': False,
                 'has_kline_data': False, 'has_tick_data': False,
                 'internal_id': 'N/A', 'kline_count': 0, 'tick_count': 0,
-                'reasons': [f"�?异常: {str(e)}"]
+                'reasons': [f"❌ 异常: {str(e)}"]
             })
 
     if success_contracts:
-        logging.info(f"�?正常合约 ({len(success_contracts)}/{len(MONITORED_CONTRACTS)}):")
+        logging.info(f"✅ 正常合约 ({len(success_contracts)}/{len(MONITORED_CONTRACTS)}):")
         futures = [c for c in success_contracts if MONITORED_CONTRACTS[c]['type'] == 'future']
         options = [c for c in success_contracts if MONITORED_CONTRACTS[c]['type'] == 'option']
         if futures:
@@ -2247,7 +2583,7 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
             logging.info(f"  期权: {', '.join(options)}")
 
     if failed_contracts:
-        logging.warning(f"\n�?异常合约 ({len(failed_contracts)}/{len(MONITORED_CONTRACTS)}):")  # [R22-P2-EP04]
+        logging.info(f"❌ 异常合约 ({len(failed_contracts)}/{len(MONITORED_CONTRACTS)}):")  # [R22-P2-EP04]
         reason_stats = {}
         for fail_info in failed_contracts:
             reasons = fail_info['reasons']
@@ -2256,11 +2592,11 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
                 reason_stats[primary_reason] = []
             reason_stats[primary_reason].append(fail_info['contract'])
         for reason, contracts in reason_stats.items():
-            logging.info(f"  {reason} ({len(contracts)}�?: {', '.join(contracts[:5])}{'...' if len(contracts) > 5 else ''}")
-        logging.info(f"\n  [{MONITORED_CONTRACT_COUNT}Diagnosis] 📊 12环节状态汇�?")
+            logging.info(f"  {reason} ({len(contracts)}个): {', '.join(contracts[:5])}{'...' if len(contracts) > 5 else ''}")
+        logging.info(f"\n  [{MONITORED_CONTRACT_COUNT}Diagnosis] 📊 12环节状态汇总:")
         stage_stats = {
-            '1-Config': sum(1 for f in failed_contracts if not f.get('exists_in_file', False)),
-            '2-Memory': sum(1 for f in failed_contracts if not f.get('loaded_in_memory', False)),
+            '1-MetaLoaded': sum(1 for f in failed_contracts if not f.get('loaded_in_memory', False)),
+            '2-SubFile': sum(1 for f in failed_contracts if not f.get('exists_in_file', False)),
             '3-Subscribe': sum(1 for f in failed_contracts if not f.get('in_subscribe_list', False)),
             '4-Format': sum(1 for f in failed_contracts if not f.get('is_valid_format', False)),
             '5-Subscribed': sum(1 for f in failed_contracts if not f.get('subscribed', False)),
@@ -2274,7 +2610,7 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
         }
         for stage_name, fail_count in stage_stats.items():
             if fail_count > 0:
-                status = '�? if fail_count == len(failed_contracts) else '⚠️'
+                status = '❌' if fail_count == len(failed_contracts) else '⚠️'
                 logging.info(f"    {stage_name:15s}: {fail_count}/{len(failed_contracts)} {status}")
 
     total = len(MONITORED_CONTRACTS)
@@ -2292,11 +2628,11 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
             total_max = tick_max + kline_max + (storage._maintenance_queue.maxsize if hasattr(storage, '_maintenance_queue') else 0)
             usage_rate = (total_size / total_max * 100) if total_max > 0 else 0
             if usage_rate > 90:
-                logging.critical(f"[QUEUE_CRITICAL] 写入队列使用率超�?0%: {usage_rate:.1f}% ({total_size}/{total_max})")
+                logging.critical(f"[QUEUE_CRITICAL] 写入队列使用率超过90%: {usage_rate:.1f}% ({total_size}/{total_max})")
             elif usage_rate > 80:
-                logging.warning(f"[QUEUE_WARNING] 写入队列使用率超�?0%: {usage_rate:.1f}% ({total_size}/{total_max})")
+                logging.warning(f"[QUEUE_WARNING] 写入队列使用率超过80%: {usage_rate:.1f}% ({total_size}/{total_max})")
             elif usage_rate > 70:
-                logging.info(f"[QUEUE_INFO] 写入队列使用�? {usage_rate:.1f}% ({total_size}/{total_max})")
+                logging.info(f"[QUEUE_INFO] 写入队列使用率: {usage_rate:.1f}% ({total_size}/{total_max})")
             for si in range(len(storage._tick_shard_queues)):
                 q = storage._tick_shard_queues[si]
                 sz = q.qsize()
@@ -2305,23 +2641,38 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
                     logging.info(f"  TickShard-{si}: {sz}/{q.maxsize} ({fill:.1f}%)")
             if hasattr(storage, 'get_queue_stats'):
                 stats = storage.get_queue_stats()
-                logging.info(f"队列统计: 接收={stats.get('total_received', 0)}, 写入={stats.get('total_written', 0)}, 丢弃={stats.get('drops_count', 0)}, 峰�?{stats.get('max_queue_size_seen', 0)}")
+                logging.info(f"队列统计: 接收={stats.get('total_received', 0)}, 写入={stats.get('total_written', 0)}, 丢弃={stats.get('drops_count', 0)}, 峰值={stats.get('max_queue_size_seen', 0)}")
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.debug(f"[QUEUE_CHECK] 队列状态检查失�? {e}")
+            logging.debug(f"[QUEUE_CHECK] 队列状态检查失败: {e}")
 
     logging.info("="*100)
 
 
 class ResourceOwnershipScanner:
-    """资源所有权诊断扫描�?""
+    """资源所有权诊断扫描器"""
 
     @staticmethod
     def log_resource_ownership_table(strategy_core, phase: str = 'unknown') -> None:
         import threading as _threading
-        # P1-R11-17修复: strategy_id缺失时发出警告，防止审计溯源歧义
-        _sid = getattr(strategy_core, 'strategy_id', None)
+        _sid = None
+        for _obj in [strategy_core]:
+            if _obj is not None:
+                _sid = getattr(_obj, 'strategy_id', None)
+                if _sid is not None:
+                    break
         if _sid is None:
-            logging.warning("[P1-R11-17] strategy_id未提供，使用'unknown'作为默认值。调用方应显式传入strategy_id�?)
+            try:
+                from ali2026v3_trading.config.config_service import get_cached_params
+                _cp = get_cached_params() or {}
+                _rs = _cp.get('strategy')
+                for _obj in [_rs, getattr(_rs, 'strategy_core', None)]:
+                    if _obj is not None:
+                        _sid = getattr(_obj, 'strategy_id', None)
+                        if _sid is not None:
+                            break
+            except Exception:
+                pass
+        if _sid is None:
             _sid = 'unknown'
         strategy_id = _sid
         run_id = getattr(strategy_core, '_lifecycle_run_id', 'N/A')
@@ -2360,17 +2711,17 @@ class ResourceOwnershipScanner:
                 )
         if strategy_threads:
             for name in strategy_threads:
-                logging.warning(
+                logging.debug(
                     f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
                     f"[run_id={run_id}][source_type=resource-ownership] "
-                    f"⚠️ LEAKED thread: {name} (expected: should be gone after strategy stop)"
+                    f"LEAKED thread: {name} (expected: should be gone after strategy stop)"
                 )
         else:
             if phase == 'stop':
                 logging.info(
                     f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
                     f"[run_id={run_id}][source_type=resource-ownership] "
-                    f"�?No strategy-instance threads leaked"
+                    f"✅ No strategy-instance threads leaked"
                 )
         scheduler_mgr = getattr(strategy_core, '_scheduler_manager', None)
         if scheduler_mgr and hasattr(scheduler_mgr, 'get_jobs_by_owner'):
@@ -2388,7 +2739,7 @@ class ResourceOwnershipScanner:
                         logging.info(
                             f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
                             f"[run_id={run_id}][source_type=strategy-job] "
-                            f"�?No strategy-instance scheduler jobs leaked"
+                            f"✅ No strategy-instance scheduler jobs leaked"
                         )
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug(
@@ -2441,7 +2792,7 @@ class ResourceOwnershipScanner:
                     logging.info(
                         f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
                         f"[run_id={run_id}][source_type=event-tail] "
-                        f"�?EventBus pending callbacks empty"
+                        f"✅ EventBus pending callbacks empty"
                     )
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.debug(
@@ -2451,7 +2802,7 @@ class ResourceOwnershipScanner:
 
 
 class ControlActionLogger:
-    """控制动作日志记录�?""
+    """控制动作日志记录器"""
 
     _logger = logging.getLogger("ControlActionLogger")
 
@@ -2497,11 +2848,11 @@ class ControlActionLogger:
 
 
 # ============================================================
-# Section 3: 诊断服务 (�?diagnosis_service.py)
+# Section 3: 诊断服务 (原 diagnosis_service.py)
 # ============================================================
 
 
-# 核心类定�?
+# 核心类定义
 @dataclass(slots=True)
 class DiagnoserConfig:
     """诊断器配置类"""
@@ -2538,7 +2889,7 @@ class StrategyProtocol(Protocol):
 
 
 class DiagnosisReport(object):
-    """诊断报告数据�?""
+    """诊断报告数据类"""
 
     def __init__(self, config: Optional[DiagnoserConfig] = None):
         self.config = config or DiagnoserConfig()
@@ -2629,11 +2980,11 @@ class DiagnosisReport(object):
 
 
 class StrategyDiagnoser:
-    """策略诊断�?- Core 层辅助服�?
+    """策略诊断器 - Core 层辅助服务
 
     职责:
     - 全链路诊断（数据源、合约、订阅、K 线）
-    - 断点检�?
+    - 断点检测
     - 问题排查
     - 健康评分
     - 自动修复建议
@@ -2662,7 +3013,7 @@ class StrategyDiagnoser:
         if self.config.enable_async_log and self.report._log_queue:
             self._start_log_worker()
 
-        # DFG-P1-10修复: 订阅信号过滤统计事件，持久化到诊断服�?
+        # DFG-P1-10修复: 订阅信号过滤统计事件，持久化到诊断服务
         self._last_filter_stats: Optional[Dict[str, Any]] = None
         try:
             from ali2026v3_trading.infra.event_bus import get_global_event_bus
@@ -2683,17 +3034,17 @@ class StrategyDiagnoser:
 
         for attr in required_attrs:
             if not hasattr(self.strategy, attr):
-                self._log(f"策略缺少属�? {attr}", "WARN")
+                self._log(f"策略缺少属性: {attr}", "WARN")
                 return False
 
         return True
 
-    # DFG-P1-10修复: 信号过滤统计事件消费�?
+    # DFG-P1-10修复: 信号过滤统计事件消费者
     def _on_filter_stats_event(self, event: Any) -> None:
-        """DFG-P1-10修复: 消费信号过滤统计事件，持久化到诊断服�?
+        """DFG-P1-10修复: 消费信号过滤统计事件，持久化到诊断服务
 
-        当信号过滤统计更新时，缓存到诊断服务�?
-        供诊断报告和健康检查使用�?
+        当信号过滤统计更新时，缓存到诊断服务，
+        供诊断报告和健康检查使用。
         """
         try:
             if isinstance(event, dict):
@@ -2702,19 +3053,19 @@ class StrategyDiagnoser:
                 self._last_filter_stats = event.stats
             if self._last_filter_stats:
                 self.report.add_metric('signal_filter_stats', self._last_filter_stats)
-                # P2修复: 信号过滤统计持久�?�?将统计写入磁盘文�?
+                # P2修复: 信号过滤统计持久化 — 将统计写入磁盘文件
                 self._persist_filter_stats(self._last_filter_stats)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.debug("[R3-L2] _on_filter_stats_event suppressed: %s", _r3_err)
             pass
 
-    # P2修复: 信号过滤统计持久�?
+    # P2修复: 信号过滤统计持久化
     _FILTER_STATS_PERSIST_DIR: Optional[str] = None
 
     def _persist_filter_stats(self, stats: Dict[str, Any]) -> None:
-        """P2修复: 将信号过滤统计持久化到磁�?
+        """P2修复: 将信号过滤统计持久化到磁盘
 
-        每次统计更新时追加写入JSONL文件，确保重启后可恢复历史统计�?
+        每次统计更新时追加写入JSONL文件，确保重启后可恢复历史统计。
 
         Args:
             stats: 信号过滤统计数据
@@ -2740,7 +3091,7 @@ class StrategyDiagnoser:
             with open(persist_file, 'a', encoding='utf-8') as f:
                 f.write(json_dumps(record) + '\n')
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.debug("[DiagnosisService] P2修复: 过滤统计持久化失�? %s", e)
+            logging.debug("[DiagnosisService] P2修复: 过滤统计持久化失败: %s", e)
 
     def load_persisted_filter_stats(self, days: int = 7) -> List[Dict[str, Any]]:
         """P2修复: 加载持久化的信号过滤统计
@@ -2776,7 +3127,7 @@ class StrategyDiagnoser:
                                 except json.JSONDecodeError:
                                     pass
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.debug("[DiagnosisService] P2修复: 加载持久化统计失�? %s", e)
+            logging.debug("[DiagnosisService] P2修复: 加载持久化统计失败: %s", e)
         return records
 
     def _publish_event_with_retry(self, event_type: str, data: Dict[str, Any], max_retries: int = 3) -> None:
@@ -2857,7 +3208,7 @@ class StrategyDiagnoser:
             log_func(f"[Diagnoser] {msg}")
 
     def _run_incremental_diagnosis(self, start_time: float) -> Dict[str, Any]:
-        self._log("\n【增量诊断模式�?, "INFO")
+        self._log("\n【增量诊断模式】", "INFO")
 
         if self.strategy:
             current_trading = getattr(self.strategy, 'my_trading', False)
@@ -2867,7 +3218,7 @@ class StrategyDiagnoser:
                 self._log(f"交易状态变化：{last_trading} -> {current_trading}", "INFO")
                 self._diagnose_state()
             else:
-                self._log("状态无显著变化，跳过详细诊�?, "INFO")
+                self._log("状态无显著变化，跳过详细诊断", "INFO")
 
         elapsed = time.time() - start_time
         self.report.add_metric('diagnosis_duration_ms', elapsed * 1000)
@@ -2897,7 +3248,7 @@ class StrategyDiagnoser:
                 return self._run_incremental_diagnosis(start_time)
 
             if self.strategy is None:
-                self._log("警告：策略实例为 None，仅运行基础检�?, "WARN")
+                self._log("警告：策略实例为 None，仅运行基础检查", "WARN")
                 self._diagnose_basic()
             else:
                 self._diagnose_data_source()
@@ -2927,7 +3278,7 @@ class StrategyDiagnoser:
             return result
 
     def _diagnose_basic(self) -> None:
-        self._log("\n【基础诊断�?)
+        self._log("\n【基础诊断】")
 
         import sys
         self._log(f"Python 版本：{sys.version}")
@@ -2939,44 +3290,44 @@ class StrategyDiagnoser:
                 importlib.import_module(mod)
                 self._log(f"模块 {mod}: OK")
             except ImportError as e:
-                error_msg = f"模块 {mod} 不可�?
+                error_msg = f"模块 {mod} 不可用"
                 self.report.add_error(error_msg)
                 logging.error(f"[Diagnoser] {error_msg}: {e}")
 
     def _diagnose_data_source(self) -> None:
-        self._log("\n【数据源诊断�?)
+        self._log("\n【数据源诊断】")
         s = self.strategy
 
         infini = getattr(s, 'infini', None)
         if infini is None:
-            self.report.add_warning("infini 对象�?None")
+            self.report.add_warning("infini 对象为 None")
             self.report.add_breakpoint(
-                "DataSource", "infini", "infini 对象�?None",
+                "DataSource", "infini", "infini 对象为 None",
                 "无法访问交易平台", "CRITICAL",
-                "检查平台连接配�?
+                "检查平台连接配置"
             )
         else:
             self._log("infini 对象：OK")
 
         mc = getattr(s, 'market_center', None)
         if mc is None:
-            self.report.add_warning("market_center �?None")
+            self.report.add_warning("market_center 为 None")
             self.report.add_breakpoint(
-                "DataSource", "market_center", "market_center �?None",
+                "DataSource", "market_center", "market_center 为 None",
                 "无法获取行情数据", "HIGH",
-                "检�?MarketCenter 初始�?
+                "检查 MarketCenter 初始化"
             )
         else:
             self._log("market_center: OK")
 
     def _diagnose_instruments(self) -> None:
-        self._log("\n【合约加载诊断�?)
+        self._log("\n【合约加载诊断】")
         s = self.strategy
 
         params = getattr(s, 'params', None)
         if params is None:
             self.report.add_breakpoint(
-                "Instrument", "params", "参数对象�?None",
+                "Instrument", "params", "参数对象为 None",
                 "无法获取配置", "CRITICAL",
                 "检查参数初始化"
             )
@@ -2986,22 +3337,22 @@ class StrategyDiagnoser:
         for p in key_params:
             val = getattr(params, p, None)
             if val is None:
-                self.report.add_warning(f"参数 {p} 未设�?)
+                self.report.add_warning(f"参数 {p} 未设置")
             else:
                 self._log(f"参数 {p}: {val}")
 
         fut_insts = getattr(s, 'future_instruments', None)
         if fut_insts is None:
             self.report.add_breakpoint(
-                "Instrument", "future_instruments", "期货合约列表�?None",
+                "Instrument", "future_instruments", "期货合约列表为 None",
                 "无法计算期权宽度", "CRITICAL",
                 "检查期货合约加载逻辑"
             )
         elif len(fut_insts) == 0:
             self.report.add_breakpoint(
                 "Instrument", "future_instruments", "期货合约列表为空",
-                "无标的期货数�?, "HIGH",
-                "检查合约代码配�?
+                "无标的期货数据", "HIGH",
+                "检查合约代码配置"
             )
         else:
             self._log(f"期货合约数：{len(fut_insts)}")
@@ -3009,21 +3360,21 @@ class StrategyDiagnoser:
         opt_insts = getattr(s, 'option_instruments', None)
         if opt_insts is None:
             self.report.add_breakpoint(
-                "Instrument", "option_instruments", "期权合约字典�?None",
+                "Instrument", "option_instruments", "期权合约字典为 None",
                 "无法加载期权数据", "CRITICAL",
                 "检查期权合约加载逻辑"
             )
         elif len(opt_insts) == 0:
             self.report.add_breakpoint(
                 "Instrument", "option_instruments", "期权合约字典为空",
-                "无期权数据可�?, "HIGH",
-                "检查期权合约代码配�?
+                "无期权数据可用", "HIGH",
+                "检查期权合约代码配置"
             )
         else:
             self._log(f"期权合约数：{len(opt_insts)}")
 
     def _diagnose_subscriptions(self) -> None:
-        self._log("\n【订阅状态诊断�?)
+        self._log("\n【订阅状态诊断】")
         s = self.strategy
 
         if not hasattr(s, 'subscribe'):
@@ -3046,20 +3397,20 @@ class StrategyDiagnoser:
             self._log("订阅方法：OK")
 
     def _diagnose_klines(self) -> None:
-        self._log("\n【K 线数据诊断�?)
+        self._log("\n【K 线数据诊断】")
         s = self.strategy
 
         kline_data = getattr(s, 'kline_data', None)
         if kline_data is None:
             self.report.add_breakpoint(
                 "Kline", "kline_data", "K 线字典为 None",
-                "无法获取 K 线数�?, "CRITICAL",
-                "检�?K 线初始化"
+                "无法获取 K 线数据", "CRITICAL",
+                "检查 K 线初始化"
             )
             return
 
         if len(kline_data) == 0:
-            self.report.add_warning("K 线数据为�?)
+            self.report.add_warning("K 线数据为空")
         else:
             self._log(f"K 线合约数：{len(kline_data)}")
 
@@ -3070,28 +3421,28 @@ class StrategyDiagnoser:
                         latest_price = close_array[-1]
                         self._log(f"{inst_id} 最新价：{latest_price}")
                     else:
-                        self.report.add_warning(f"{inst_id} K 线数据为�?)
+                        self.report.add_warning(f"{inst_id} K 线数据为空")
                 else:
-                    self.report.add_warning(f"{inst_id} K 线对象无�?)
+                    self.report.add_warning(f"{inst_id} K 线对象无效")
 
     def _diagnose_state(self) -> None:
-        self._log("\n【状态管理诊断�?)
+        self._log("\n【状态管理诊断】")
         s = self.strategy
 
         state_attributes = ['my_state', 'my_is_running', 'my_trading']
         for attr in state_attributes:
             val = getattr(s, attr, None)
             if val is None:
-                self.report.add_warning(f"状�?{attr} 未定�?)
+                self.report.add_warning(f"状态 {attr} 未定义")
             else:
                 self._log(f"{attr}: {val}")
 
         trading = getattr(s, 'my_trading', False)
         if not trading:
-            self.report.add_warning("当前不在交易状�?)
+            self.report.add_warning("当前不在交易状态")
 
     def _generate_recommendations(self) -> None:
-        self._log("\n【生成修复建议�?)
+        self._log("\n【生成修复建议】")
 
         for bp in self.report.breakpoints:
             if bp['severity'] == 'CRITICAL':
@@ -3100,7 +3451,7 @@ class StrategyDiagnoser:
                 self.report.add_recommendation(f"[重要] {bp['fix']} - {bp['component']}")
 
         if len(self.report.warnings) > 5:
-            self.report.add_recommendation("[建议] 检查策略初始化流程，确保所有组件正确加�?)
+            self.report.add_recommendation("[建议] 检查策略初始化流程，确保所有组件正确加载")
 
         if len(self.report.errors) > 0:
             self.report.add_recommendation("[严重] 优先解决所有错误，然后处理警告")
@@ -3112,11 +3463,11 @@ class StrategyDiagnoser:
             self._log("健康状态：良好", "INFO")
             self.report.add_recommendation("[建议] 处理 HIGH 级别断点可提升健康度")
         elif health_score >= 50:
-            self._log("健康状态：一�?, "WARN")
-            self.report.add_recommendation("[注意] 建议处理 CRITICAL �?HIGH 级别断点")
+            self._log("健康状态：一般", "WARN")
+            self.report.add_recommendation("[注意] 建议处理 CRITICAL 和 HIGH 级别断点")
         else:
             self._log("健康状态：较差", "ERROR")
-            self.report.add_recommendation("[紧急] 立即处理所�?CRITICAL 级别断点")
+            self.report.add_recommendation("[紧急] 立即处理所有 CRITICAL 级别断点")
 
     def get_quick_report(self) -> Dict[str, Any]:
         with self._lock:
@@ -3130,13 +3481,13 @@ class StrategyDiagnoser:
             }
 
 
-# 向后兼容别名: DiagnosisService �?StrategyDiagnoser
+# 向后兼容别名: DiagnosisService → StrategyDiagnoser
 DiagnosisService = StrategyDiagnoser
 
 
 
 
-# 异常处理装饰�?
+# 异常处理装饰器
 def handle_import_errors(allow_failure=False, default_value=None):
     def decorator(func):
         @functools.wraps(func)

@@ -1,4 +1,4 @@
-﻿# [M3-04] 行为一致性评判服务
+# [M3-04] 行为一致性评判服务
 # MODULE_ID: M3-614
 """Behavior Consistency Judgment Service"""
 from __future__ import annotations
@@ -165,7 +165,7 @@ class BehaviorJudger:
         # 维度3: Wilson降权比CV
         wr_cv = float(np.std(wilson_ratios)) / (float(np.mean(wilson_ratios)) + 1e-8) if wilson_ratios else 0.0
 
-        # 维度4: 月份权重归一化一致性（KS距离）
+        # 维度4: 月份权重归一化一致性（KS距离）'
         # 按品种分组，比较组间correct_up_pct分布的KS距离
         ks_distance = 0.0
         ks_pass = True
@@ -189,7 +189,7 @@ class BehaviorJudger:
         ks_bonus = 0.15 if ks_pass else 0.0
         score = float(np.clip(base_score + tier_bonus + ks_bonus, 0.0, 1.0))
 
-        # 综合判定（与文档对齐：全部条件必须满足）
+        # 综合判定（与文档对齐：全部条件必须满足）'
         passed = (cup_cv < 0.40 and wr_cv < 0.30
                   and tier1_pct < 0.20 and tier4_pct > 0.30
                   and ks_pass

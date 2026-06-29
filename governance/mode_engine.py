@@ -191,7 +191,7 @@ class ModeEngine:
                 old_scale, scale_str, config.mode.name, propagated, reason,
             )
             try:
-                from ali2026v3_trading.health_check_api import StructuredJsonlLogger
+                from ali2026v3_trading.infra.health_monitor import StructuredJsonlLogger
                 _sjl = StructuredJsonlLogger()
                 _sjl.log_strategy_switch(old_scale or 'unknown', scale_str, reason)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _sjl_err:

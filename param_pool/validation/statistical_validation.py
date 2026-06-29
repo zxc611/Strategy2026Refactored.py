@@ -1,4 +1,4 @@
-﻿# [M1-127] 统计验证
+# [M1-127] 统计验证
 # MODULE_ID: M1-197
 import numpy as np
 import logging
@@ -369,7 +369,7 @@ def validate_capital_utilization_gap(initial_equity: float = 1_000_000.0,
             pnl = -premium_per_trade
         continuous_equity.append(continuous_equity[-1] + pnl)
 
-    # 离散资金曲线模拟（权利金全损跳变）
+    # 离散资金曲线模拟（权利金全损跳变）'
     discrete_equity = [initial_equity]
     available_capital = initial_equity
     for _ in range(n_trades):

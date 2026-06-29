@@ -1,5 +1,5 @@
-﻿# [M3-10] 拐点显微镜
-# MODULE_ID: M3-627
+# [M3-10] 拐点显微镜
+# MODULE_ID: M3-628
 """
 
 æç¹æ¾å¾®é?(Turning Point Microscope) â?ç­ç¥å¾®è§è¡ä¸ºè¯æ­ç³»ç»çæ°æ®åºç¡
@@ -874,7 +874,7 @@ class TurningPointMicroscope:
 
         """
 
-        从预处理DataFrame（如_preprocess.py输出）构建拐点显微镜
+        从预处理DataFrame（如。preprocess.py输出）构建拐点显微镜
 
 
 
@@ -982,8 +982,7 @@ class TurningPointMicroscope:
 
 
 æ ¸å¿è®¾è®¡ï¼?
-  1. 预期转折点：周期共振相位转换时（蓄力→释放、释放→衰竭等）
-
+  1. 预期转折点：周期共振相位转换时（蓄力→释放、释放→衰竭等）'
      标记"市场预期即将发生转折"，但价格尚未确认
 
   2. å®éè½¬æç¹ï¼EnhancedBarçæå¼åºå?+ å±æ¯æ¹åç¡®è®¤
@@ -1017,7 +1016,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
 
-    from ..param_pool.cycle_resonance_module import CycleResonanceOutput
+    from ..param_pool.optimization.cycle_sharpe import CycleResonanceOutput
 
 
 
@@ -1039,15 +1038,15 @@ logger = get_logger(__name__)  # R9-5
 
 class TurningPointType(Enum):
 
-    EXPECTED_TREND_CONTINUATION = "预期_趋势延续"
+    EXPECTED_TREND_CONTINUATION = "预期权趋势延续"
 
-    EXPECTED_TREND_REVERSAL = "预期_趋势反转"
+    EXPECTED_TREND_REVERSAL = "预期权趋势反转"
 
     EXPECTED_OSCILLATION_EXTREME = "é¢æ_éè¡æå?"
 
-    ACTUAL_TREND_CONTINUATION = "实际_趋势延续"
+    ACTUAL_TREND_CONTINUATION = "实际的趋势延续"
 
-    ACTUAL_TREND_REVERSAL = "实际_趋势反转"
+    ACTUAL_TREND_REVERSAL = "实际的趋势反转"
 
     ACTUAL_OSCILLATION_EXTREME = "å®é_éè¡æå?"
 
@@ -1633,8 +1632,7 @@ class ResonanceTurningPointMarker:
         éå¯¹æ¡ä»¶ï¼?
           1. é¢æä¸å®éç±»åæ¹åä¸è´ï¼é½é¢æåè½¬âå®éåè½¬ï¼?
           2. æ¶é´å·®å¨ç¡®è®¤çªå£å?
-          3. 方向一致（同为高点或低点）
-
+          3. 方向一致（同为高点或低点）'
         """
 
         best_match = None

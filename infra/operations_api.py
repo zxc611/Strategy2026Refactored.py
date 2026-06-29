@@ -1,6 +1,3 @@
-# [M1-69] 运维API
-# MODULE_ID: M1-096
-# [M1-69] ��άAPI
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 import json
 import logging
@@ -20,10 +17,10 @@ logger = get_logger(__name__)  # R9-5
 
 
 class OperationsAPI:
-    """OPS-17修复: 运维操作API �?集中管理常见运维操作
+    """OPS-17修复: 运维操作API — 集中管理常见运维操作
 
-    提供统一的运维操作入口，避免所有运维依赖手动命令行�?
-    每个操作自动记录审计日志�?
+    提供统一的运维操作入口，避免所有运维依赖手动命令行。
+    每个操作自动记录审计日志。
     """
 
     def __init__(self):
@@ -39,7 +36,7 @@ class OperationsAPI:
 
     def emergency_stop(self, caller_id: str = "unknown",
                        reason: str = "") -> Dict[str, Any]:
-        """紧急停�? 暂停策略 + 撤销挂单 + 平所有仓�?""
+        """紧急停止: 暂停策略 + 撤销挂单 + 平所有仓位"""
         try:
             from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreService
             from ali2026v3_trading.infra.service_container import ServiceContainer
@@ -60,7 +57,7 @@ class OperationsAPI:
     def emergency_degrade(self, target_count: int = 1,
                           caller_id: str = "unknown",
                           reason: str = "") -> Dict[str, Any]:
-        """紧急降�? 减少活跃策略数量"""
+        """紧急降级: 减少活跃策略数量"""
         try:
             from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
             eco = get_strategy_ecosystem()
@@ -73,7 +70,7 @@ class OperationsAPI:
             return {'success': False, 'error': str(e)}
 
     def emergency_close_all(self, caller_id: str = "unknown") -> Dict[str, Any]:
-        """紧急平�? 撤销所有挂�?+ 市价平所有持�?""
+        """紧急平仓: 撤销所有挂单 + 市价平所有持仓"""
         try:
             from ali2026v3_trading.order.order_service import get_order_service
             os_svc = get_order_service()
@@ -83,7 +80,7 @@ class OperationsAPI:
 
     def force_backupbackup_database(self, force: bool = False,
                         caller_id: str = "system") -> Dict[str, Any]:
-        """数据库备�?""
+        """数据库备份"""
         try:
             from ali2026v3_trading.infra.maintenance_service import StorageMaintenanceService
             from ali2026v3_trading.infra.service_container import ServiceContainer
@@ -107,7 +104,7 @@ class OperationsAPI:
             return {'success': False, 'error': str(e)}
 
     def check_capacity(self) -> Dict[str, Any]:
-        """容量检�?""
+        """容量检查"""
         result = self._health_api.check_capacity_limits()
         if self._stress_test:
             result['stress_test_available'] = True
@@ -128,13 +125,13 @@ class OperationsAPI:
         return self._stress_test.get_stress_test_report()
 
     def get_health(self) -> Dict[str, Any]:
-        """获取健康状�?""
+        """获取健康状态"""
         return self._health_api.get_health_status()
 
     def confirm_daily_resume(self, caller_id: str = "unknown",
                              approver_id: str = "",
                              approval_reason: str = "") -> Dict[str, Any]:
-        """确认恢复日回撤硬停止（需审批�?""
+        """确认恢复日回撤硬停止（需审批）"""
         try:
             from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
             _sid = str(getattr(self, 'strategy_id', '') or 'global')
@@ -173,41 +170,41 @@ class OperationsAPI:
             return [{'error': str(e)}]
 
     def get_help(self, topic: Optional[str] = None) -> Dict[str, Any]:
-        """P2-�?2修复: 运维培训自文档化帮助系统"""
+        """P2-项22修复: 运维培训自文档化帮助系统"""
         _HELP_TOPICS = {
             'emergency_stop': {
-                'title': '紧急停�?,
-                'description': '暂停策略+撤销挂单+平所有仓�?,
+                'title': '紧急停止',
+                'description': '暂停策略+撤销挂单+平所有仓位',
                 'usage': 'operations_api.emergency_stop(caller_id="ops", reason="...")',
                 'prerequisites': '需有OrderService和StrategyCore可用',
-                'risk_level': 'HIGH - 会平掉所有持�?,
+                'risk_level': 'HIGH - 会平掉所有持仓',
             },
             'emergency_degrade': {
-                'title': '紧急降�?,
-                'description': '减少活跃策略数量到指定数�?,
+                'title': '紧急降级',
+                'description': '减少活跃策略数量到指定数量',
                 'usage': 'operations_api.emergency_degrade(target_count=1)',
                 'prerequisites': '需有StrategyEcosystem可用',
-                'risk_level': 'MEDIUM - 会冻结部分策�?,
+                'risk_level': 'MEDIUM - 会冻结部分策略',
             },
             'backup_database': {
-                'title': '数据库备�?,
-                'description': '手动触发DuckDB数据库备�?,
+                'title': '数据库备份',
+                'description': '手动触发DuckDB数据库备份',
                 'usage': 'operations_api.backup_database(force=True)',
-                'prerequisites': '需有DuckDB数据库文�?,
+                'prerequisites': '需有DuckDB数据库文件',
                 'risk_level': 'LOW - 只读操作',
             },
             'confirm_daily_resume': {
                 'title': '确认恢复日回撤硬停止',
-                'description': '在日回撤硬停止触发后，人工确认恢复交�?,
+                'description': '在日回撤硬停止触发后，人工确认恢复交易',
                 'usage': 'operations_api.confirm_daily_resume(caller_id="ops", approver_id="manager")',
-                'prerequisites': '需有SafetyMetaLayer可用，需审批人确�?,
+                'prerequisites': '需有SafetyMetaLayer可用，需审批人确认',
                 'risk_level': 'HIGH - 恢复交易可能再次触发回撤',
             },
             'health_check': {
-                'title': '健康检�?,
-                'description': '获取系统健康状�?,
+                'title': '健康检查',
+                'description': '获取系统健康状态',
                 'usage': 'operations_api.get_health()',
-                'prerequisites': '�?,
+                'prerequisites': '无',
                 'risk_level': 'LOW - 只读操作',
             },
         }
@@ -219,28 +216,28 @@ class OperationsAPI:
         return _HELP_TOPICS.get(topic, {'error': f'未知主题: {topic}'})
 
     def query_knowledge_base(self, keyword: str) -> Dict[str, Any]:
-        """P2-�?3修复: 运维知识库查�?""
+        """P2-项23修复: 运维知识库查询"""
         _KB_ENTRIES = [
             {
                 'id': 'KB-001',
                 'title': '日回撤硬停止恢复流程',
-                'keywords': ['回撤', '硬停�?, '恢复', 'daily_drawdown'],
+                'keywords': ['回撤', '硬停止', '恢复', 'daily_drawdown'],
                 'steps': [
-                    '1. 确认回撤原因（查看audit_log�?,
+                    '1. 确认回撤原因（查看audit_log）',
                     '2. 评估市场状况是否改善',
-                    '3. 调用confirm_daily_resume需审批人确�?,
-                    '4. 恢复后密切监�?0分钟',
+                    '3. 调用confirm_daily_resume需审批人确认',
+                    '4. 恢复后密切监控30分钟',
                 ],
             },
             {
                 'id': 'KB-002',
-                'title': '紧急降级操作流�?,
-                'keywords': ['降级', '紧�?, 'degrade', 'freeze'],
+                'title': '紧急降级操作流程',
+                'keywords': ['降级', '紧急', 'degrade', 'freeze'],
                 'steps': [
                     '1. 调用emergency_degrade减少活跃策略',
-                    '2. 检查各策略状态（get_health�?,
-                    '3. 确认降级后系统稳�?,
-                    '4. 记录降级原因和恢复条�?,
+                    '2. 检查各策略状态（get_health）',
+                    '3. 确认降级后系统稳定',
+                    '4. 记录降级原因和恢复条件',
                 ],
             },
             {
@@ -250,7 +247,7 @@ class OperationsAPI:
                 'steps': [
                     '1. 调用backup_database(force=True)强制备份',
                     '2. 确认备份文件大小和时间戳',
-                    '3. 恢复时停止所有写入操�?,
+                    '3. 恢复时停止所有写入操作',
                     '4. 用备份文件替换当前数据库文件',
                 ],
             },
@@ -268,7 +265,7 @@ class OperationsAPI:
         }
 
     def run_diagnostics(self, scope: str = 'all') -> Dict[str, Any]:
-        """P2-�?4修复: 运行诊断工具"""
+        """P2-项24修复: 运行诊断工具"""
         result = {'scope': scope, 'checks': {}, 'timestamp': datetime.now(CHINA_TZ).isoformat()}
         try:
             if scope in ('all', 'risk'):
@@ -291,7 +288,7 @@ class OperationsAPI:
                     'disk_pct': psutil.disk_usage('/').percent,
                 }
         except ImportError:
-            result['checks']['system'] = {'available': False, 'reason': 'psutil未安�?}
+            result['checks']['system'] = {'available': False, 'reason': 'psutil未安装'}
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             result['checks']['error'] = str(e)
 
@@ -304,19 +301,19 @@ class OperationsAPI:
         return result
 
     def list_available_tools(self) -> List[Dict[str, str]]:
-        """P2-�?4修复: 列出所有可用运维工�?""
+        """P2-项24修复: 列出所有可用运维工具"""
         return [
-            {'name': 'emergency_stop', 'description': '紧急停止所有交�?},
-            {'name': 'emergency_degrade', 'description': '紧急降级策�?},
-            {'name': 'emergency_close_all', 'description': '紧急平所有仓�?},
-            {'name': 'backup_database', 'description': '数据库备�?},
-            {'name': 'check_capacity', 'description': '容量检�?},
-            {'name': 'get_health', 'description': '健康状态检�?},
+            {'name': 'emergency_stop', 'description': '紧急停止所有交易'},
+            {'name': 'emergency_degrade', 'description': '紧急降级策略'},
+            {'name': 'emergency_close_all', 'description': '紧急平所有仓位'},
+            {'name': 'backup_database', 'description': '数据库备份'},
+            {'name': 'check_capacity', 'description': '容量检查'},
+            {'name': 'get_health', 'description': '健康状态检查'},
             {'name': 'confirm_daily_resume', 'description': '确认恢复日回撤硬停止'},
             {'name': 'get_audit_log', 'description': '查看审计日志'},
             {'name': 'run_diagnostics', 'description': '运行诊断工具'},
             {'name': 'get_help', 'description': '运维帮助系统'},
-            {'name': 'query_knowledge_base', 'description': '运维知识库查�?},
+            {'name': 'query_knowledge_base', 'description': '运维知识库查询'},
             {'name': 'collect_metrics', 'description': '标准指标采集'},
             {'name': 'generate_report', 'description': '运维报告生成'},
             {'name': 'estimate_cost', 'description': '运维成本估算'},
@@ -324,7 +321,7 @@ class OperationsAPI:
 
     def auto_remediate(self, alert_type: str,
                         context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """P2-�?5修复: 自动修复常见运维问题"""
+        """P2-项25修复: 自动修复常见运维问题"""
         ctx = context or {}
         result = {'alert_type': alert_type, 'action_taken': 'none', 'success': False}
 
@@ -342,14 +339,14 @@ class OperationsAPI:
             try:
                 from ali2026v3_trading.infra.maintenance_service import StorageMaintenanceService
                 result['success'] = True
-                result['message'] = '已触发清理任�?
+                result['message'] = '已触发清理任务'
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                 result['error'] = str(e)
 
         elif alert_type == 'stale_data':
             result['action_taken'] = 'refresh_subscription'
             result['success'] = True
-            result['message'] = '建议检查数据订阅状�?
+            result['message'] = '建议检查数据订阅状态'
 
         else:
             result['message'] = f'无自动修复方案，需人工处理: {alert_type}'
@@ -357,7 +354,7 @@ class OperationsAPI:
         return result
 
     def collect_metrics(self) -> Dict[str, Any]:
-        """P2-�?6修复: 采集标准化运维指�?""
+        """P2-项26修复: 采集标准化运维指标"""
         metrics = {
             'timestamp': datetime.now(CHINA_TZ).isoformat(),
             'system': {},
@@ -389,7 +386,7 @@ class OperationsAPI:
         try:
             from ali2026v3_trading.risk.risk_service import get_risk_service
             rs = get_risk_service()
-            # [P0-29修复] �?_risk_cb_half_open 派生暂停状�?
+            # [P0-29修复] 从 _risk_cb_half_open 派生暂停状态
             _safety = getattr(rs, '_safety_meta_layer', None)
             _cb = getattr(_safety, '_risk_cb_half_open', None) if _safety is not None else None
             _trading_paused = (_cb.state == 'OPEN' and _cb.opened_at > 0
@@ -407,7 +404,7 @@ class OperationsAPI:
     def generate_report(self, report_type: str = 'daily',
                          start_time: Optional[str] = None,
                          end_time: Optional[str] = None) -> Dict[str, Any]:
-        """P2-�?7修复: 自动生成运维报告"""
+        """P2-项27修复: 自动生成运维报告"""
         report = {
             'report_type': report_type,
             'generated_at': datetime.now(CHINA_TZ).isoformat(),
@@ -449,7 +446,7 @@ class OperationsAPI:
         return report
 
     def estimate_cost(self, period_days: int = 30) -> Dict[str, Any]:
-        """P2-�?8修复: 运维成本估算"""
+        """P2-项28修复: 运维成本估算"""
         try:
             import psutil
             mem_gb = psutil.virtual_memory().total / (1024 ** 3)
@@ -483,7 +480,7 @@ class OperationsAPI:
                 'total': deterministic_round(total, 2),
             },
             'currency': 'CNY',
-            'note': '估算值，基于简化成本模�?,
+            'note': '估算值，基于简化成本模型',
         }
 
     SLA_DEFINITIONS = {
@@ -500,12 +497,12 @@ class OperationsAPI:
         'data_freshness': {
             'target_sec': 5,
             'measurement_window': 'realtime',
-            'description': '行情数据新鲜�?,
+            'description': '行情数据新鲜度',
         },
         'risk_check_latency': {
             'target_ms': 50,
             'measurement_window': 'daily',
-            'description': '风控检查延�?,
+            'description': '风控检查延迟',
         },
         'backup_rto': {
             'target_min': 30,
@@ -515,16 +512,16 @@ class OperationsAPI:
         'backup_rpo': {
             'target_min': 5,
             'measurement_window': 'per_incident',
-            'description': '备份恢复点目�?,
+            'description': '备份恢复点目标',
         },
     }
 
     def get_sla_definitions(self) -> Dict[str, Any]:
-        """P2-�?9修复: 获取SLA定义"""
+        """P2-项29修复: 获取SLA定义"""
         return dict(self.SLA_DEFINITIONS)
 
     def check_sla_compliance(self) -> Dict[str, Any]:
-        """P2-�?9修复: 检查SLA合规�?""
+        """P2-项29修复: 检查SLA合规性"""
         compliance = {}
         for sla_name, sla_def in self.SLA_DEFINITIONS.items():
             compliance[sla_name] = {

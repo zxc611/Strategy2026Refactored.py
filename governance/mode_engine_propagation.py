@@ -57,7 +57,7 @@ class ModeEnginePropagationService:
             logging.error('[ModeEngine] PredictiveStateEngine propagation failed (non-critical, skipping): %s', e)
 
     def _auto_register_known_components(self) -> None:
-        """在__init__中尝试自动注册所有已知组件，避免仅注册单个组件"""
+        """在。_init__中尝试自动注册所有已知组件，避免仅注册单个组件"""
         _known_components = [
             ('RiskService', 'ali2026v3_trading.risk.risk_service', 'get_risk_service'),
             ('SignalService', 'ali2026v3_trading.signal.signal_service', 'get_signal_service'),
@@ -191,7 +191,7 @@ class ModeEnginePropagationService:
     def check_auto_recovery(self) -> Optional[str]:
         """定期检查降级后是否满足恢复条件，满足则自动切回原规模
         Returns:
-            恢复到的规模字符串，或None（未恢复）
+            恢复到的规模字符串，或None（未恢复）'
         """
         if self._degraded_at is None or self._degraded_from is None:
             return None

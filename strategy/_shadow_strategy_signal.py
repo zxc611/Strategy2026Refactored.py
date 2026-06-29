@@ -1,4 +1,3 @@
-# MODULE_ID: M1-245
 """
 shadow_strategy_signal.py - signal generation mixin
 
@@ -25,7 +24,7 @@ from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 
 from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
-from ali2026v3_trading.strategy.shadow_strategy_core import ShadowTradeRecord, AlphaMetrics, ShadowParamsSnapshot
+from ali2026v3_trading.strategy.shadow_strategy_types import ShadowTradeRecord, AlphaMetrics, ShadowParamsSnapshot
 from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer, yaml_safe_load
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.infra.resilience import (
@@ -306,9 +305,10 @@ class ShadowStrategySignalService:
             for sig in signals:
                 market_state = sig.get('market_state', '')
                 instrument_id = sig.get('instrument_id', '')
-                signal_direction = sig.get('signal_direction', '')
+                # P2-09: 信号字段统一为 signal_type/volume（与 SignalContext 规范对齐）
+                signal_direction = sig.get('signal_type', '')
                 price = sig.get('price', 0.0)
-                quantity = sig.get('quantity', 0)
+                quantity = sig.get('volume', 0)
                 signal_strength = sig.get('signal_strength', 0.0)
 
                 reversed_dir = reverse_map.get(signal_direction, signal_direction)
@@ -459,18 +459,18 @@ class ShadowStrategySignalService:
                 ps = get_position_service()
                 if ps:
                     shadow_positions = set(self._paper_account['positions'].keys())
-                    for _inst_id, pos_dict in ps.positions.items():
-                        for _pid, rec in pos_dict.items():
-                            if getattr(rec, 'volume', 0) != 0 and rec.instrument_id in shadow_positions:
-                                if self._paper_account['positions'].get(rec.instrument_id, 0) != 0:
-                                    logging.critical(
-                                        "[ShadowStrategyEngine] R13-P0-DEAD-01: 隔离性被破坏! "
-                                        "paper_account与主策略持仓重叠 instrument=%s",
-                                        rec.instrument_id,
-                                    )
-                                    # 更新_is_shadow_mode状态
-                                    self._is_shadow_mode = False
-                                    return False
+                    with ps.global_lock:
+                        for _inst_id, pos_dict in ps.positions.items():
+                            for _pid, rec in pos_dict.items():
+                                if getattr(rec, 'volume', 0) != 0 and rec.instrument_id in shadow_positions:
+                                    if self._paper_account['positions'].get(rec.instrument_id, 0) != 0:
+                                        logging.critical(
+                                            "[ShadowStrategyEngine] R13-P0-DEAD-01: 隔离性被破坏! "
+                                            "paper_account与主策略持仓重叠 instrument=%s",
+                                            rec.instrument_id,
+                                        )
+                                        self._is_shadow_mode = False
+                                        return False
             except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
                 pass  # PositionService不可用时默认通过
 
@@ -513,12 +513,13 @@ class ShadowStrategySignalService:
                 ps = get_position_service()
                 if ps:
                     shadow_positions = set(self._paper_account['positions'].keys())
-                    for _inst_id, pos_dict in ps.positions.items():
-                        for _pid, rec in pos_dict.items():
-                            if getattr(rec, 'volume', 0) != 0 and rec.instrument_id in shadow_positions:
-                                if self._paper_account['positions'].get(rec.instrument_id, 0) != 0:
-                                    position_overlap = True
-                                    break
+                    with ps.global_lock:
+                        for _inst_id, pos_dict in ps.positions.items():
+                            for _pid, rec in pos_dict.items():
+                                if getattr(rec, 'volume', 0) != 0 and rec.instrument_id in shadow_positions:
+                                    if self._paper_account['positions'].get(rec.instrument_id, 0) != 0:
+                                        position_overlap = True
+                                        break
             except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
                 logging.debug("[R3-L2] silent except triggered: %s", _r3_err)
                 pass

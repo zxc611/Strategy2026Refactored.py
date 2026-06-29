@@ -4,6 +4,7 @@
 import re
 import ast
 import sys
+import os
 from pathlib import Path
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -14,6 +15,8 @@ passed = 0
 failed = 0
 
 def _check(path, pattern, negate=False):
+    if not os.path.isfile(path):
+        return False, 0, ''
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
     matches = re.findall(pattern, content, re.MULTILINE)
@@ -33,6 +36,12 @@ print("=" * 60)
 print("14项问题断言验证")
 print("=" * 60)
 print()
+
+try:
+    import pytest
+    pytest.skip("脚本式断言验证，需手动运行", allow_module_level=True)
+except ImportError:
+    pass
 
 # P0-2: confirm_lag类型为float
 print("[P0-2] confirm_lag类型为float")

@@ -337,7 +337,7 @@ class RecoveryService:
                         _recovery_details['orders_restored'] = True
                         logging.info("[DR-P1-04] 订单状态已从JSONL恢复")
                     else:
-                        logging.warning("[DR-P1-04] OrderService缺少_recover_order_state方法")
+                        logging.warning("[DR-P1-04] OrderService缺少。recover_order_state方法")
                         _recovery_details['orders_restored'] = False
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error("[DR-P1-04] 订单状态恢复失败: %s", e)
@@ -383,7 +383,7 @@ class RecoveryService:
                     _recovery_details['idempotent_restored'] = True
                     logging.info("[DR-P1-04] 幂等状态已恢复")
                 else:
-                    logging.warning("[DR-P1-04] OrderService缺少_recover_idempotent_state方法")
+                    logging.warning("[DR-P1-04] OrderService缺少。recover_idempotent_state方法")
                     _recovery_details['idempotent_restored'] = False
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[DR-P1-04] 幂等状态恢复失败: %s", e)

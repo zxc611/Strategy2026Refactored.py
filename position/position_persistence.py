@@ -23,7 +23,7 @@ from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, 
 from ali2026v3_trading.infra.shared_utils import atomic_replace_file  # R8-5
 
 try:
-    from ali2026v3_trading.infra.risk_audit_utils import structured_audit_log as _structured_audit_log  # R1-4修复
+    from ali2026v3_trading.infra.security_service import structured_audit_log as _structured_audit_log  # R1-4修复
 except ImportError:
     _structured_audit_log = None
 
@@ -39,7 +39,7 @@ class PositionPersistenceService:
 
     # P2-01修复: 委托到infra/serialization_utils.py的公共函数
     def _rotate_jsonl_if_needed(self, filepath: str) -> None:
-        from ali2026v3_trading.serialization_utils import rotate_jsonl_if_needed as _rotate
+        from ali2026v3_trading.infra.serialization_utils import rotate_jsonl_if_needed as _rotate
         _rotate(filepath, self._POSITION_STATE_MAX_BYTES, self._POSITION_STATE_BACKUP_COUNT)
 
     def _append_position_state(self, instrument_id: str, position_id: str, action: str, detail: dict = None, signal_id: str = ''):
@@ -69,6 +69,15 @@ class PositionPersistenceService:
                 return
             recovered = 0
             total_records = 0
+            close_records = 0
+            # FIX-R37-POS-RECOVER: 先收集所有OPEN记录，再用CLOSE记录回放平仓
+            # 这样可以正确恢复持仓的open_time/止盈止损价等关键字段
+            _open_snapshots = {}  # position_id -> snapshot dict
+            _close_ops = []  # [(instrument_id, position_id, close_detail)]
+            # FIX-R37-UNIQUE-UPDATE(E1/E2): 收集 ROLLBACK 和 UPDATE 操作
+            # E1: ROLLBACK 记录在恢复时被忽略，导致已回滚持仓在重启后"复活"为幽灵持仓
+            # E2: 部分平仓(UPDATE)未持久化，重启后 volume 恢复为开仓原始量
+            _rollback_ops = []  # [(instrument_id, position_id)]
             with open(self._ps._position_state_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     total_records += 1
@@ -78,18 +87,87 @@ class PositionPersistenceService:
                         pid = record.get('position_id')
                         act = record.get('action')
                         if inst_id and pid and act == 'OPEN':
-                            self._ps.positions.setdefault(inst_id, {})
-                            recovered += 1
+                            # FIX-R37-POS-RECOVER: 优先使用完整快照恢复PositionRecord
+                            _snapshot = record.get('snapshot')
+                            if _snapshot:
+                                _open_snapshots[pid] = _snapshot
+                            else:
+                                # 兼容旧格式(无snapshot字段): 只记录instrument_id
+                                _open_snapshots[pid] = {
+                                    'instrument_id': inst_id,
+                                    'volume': record.get('volume', 0),
+                                    'open_price': record.get('price', 0),
+                                    'open_reason': record.get('open_reason', ''),
+                                }
+                        elif inst_id and pid and act == 'CLOSE':
+                            close_records += 1
+                            _close_ops.append((inst_id, pid, record))
+                        # FIX-R37-UNIQUE-UPDATE(E1): ROLLBACK 记录等同于持仓删除，与 CLOSE 一起回放
+                        elif inst_id and pid and act == 'ROLLBACK':
+                            close_records += 1
+                            _close_ops.append((inst_id, pid, record))
+                        # FIX-R37-UNIQUE-UPDATE(E2): UPDATE 记录覆盖 OPEN 快照为最新状态
+                        # 部分平仓后写入 UPDATE 记录，恢复时使用最新 volume
+                        elif inst_id and pid and act == 'UPDATE':
+                            _snapshot = record.get('snapshot')
+                            if _snapshot:
+                                _open_snapshots[pid] = _snapshot  # 覆盖OPEN快照为最新状态
                     except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                         continue
+            # FIX-R37-POS-RECOVER: 从快照重建PositionRecord
+            from ali2026v3_trading.position.position_service import PositionRecord
+            for pid, snap in _open_snapshots.items():
+                inst_id = snap.get('instrument_id', '')
+                if not inst_id:
+                    continue
+                # FIX-OPEN-UNIQUE(P2): 恢复路径绕过 _add_position 全部校验，
+                # 增加基本数据完整性校验，避免恢复无效持仓
+                _snap_vol = snap.get('volume', 0)
+                _snap_price = snap.get('open_price', 0.0)
+                if _snap_vol == 0:
+                    logging.warning("[R37-POS-RECOVER] P2跳过volume=0的无效持仓: pid=%s inst=%s", pid, inst_id)
+                    continue
+                if _snap_price <= 0:
+                    logging.warning("[R37-POS-RECOVER] P2跳过open_price<=0的无效持仓: pid=%s inst=%s", pid, inst_id)
+                    continue
+                try:
+                    # 完整快照恢复
+                    if 'position_id' in snap and 'open_time' in snap:
+                        rec = PositionRecord.from_dict(snap)
+                        # 重启后_closing必须重置为False，避免卡住
+                        rec._closing = False
+                        rec.closing_order_id = ''
+                        # FIX-READ-UNIQUE-12: 重启恢复时重置close_method，
+                        # 避免快照中残留的close_method(如'stop_loss')误导后续平仓触发路径
+                        if hasattr(rec, 'close_method'):
+                            rec.close_method = ''
+                        self._ps.positions.setdefault(inst_id, {})[pid] = rec
+                        recovered += 1
+                    else:
+                        # 旧格式兼容: 只创建空instrument字典(降级行为)
+                        self._ps.positions.setdefault(inst_id, {})
+                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                    logging.debug("[PositionService] R15-P0-RES-06: PositionRecord恢复失败 pid=%s: %s", pid, _r3_err)
+                    self._ps.positions.setdefault(inst_id, {})
+            # FIX-R37-POS-RECOVER: 回放CLOSE记录，减少或删除已平仓的持仓
+            for inst_id, pid, close_record in _close_ops:
+                _pos_dict = self._ps.positions.get(inst_id, {})
+                if pid in _pos_dict:
+                    # 该持仓在OPEN之后被CLOSE，删除它
+                    del _pos_dict[pid]
+                    if not _pos_dict:
+                        del self._ps.positions[inst_id]
             if recovered > 0:
-                logging.info("[PositionService] R15-P0-RES-06: 从position_state.jsonl恢复%d条持仓", recovered)
-            if total_records > 0 and recovered != total_records:
-                logging.warning(
-                    "[PositionService] DR-01: 恢复完整性校验警告 — "
-                    "total_records=%d recovered=%d (差异=%d)",
-                    total_records, recovered, total_records - recovered,
-                )
+                logging.info("[PositionService] R15-P0-RES-06: 从position_state.jsonl恢复%d条持仓(完整快照), CLOSE回放%d条",
+                             recovered, close_records)
+            if total_records > 0:
+                _open_count = len(_open_snapshots)
+                if close_records > 0:
+                    logging.info(
+                        "[PositionService] DR-01: 持仓恢复统计 — "
+                        "total_records=%d OPEN=%d CLOSE=%d recovered=%d",
+                        total_records, _open_count, close_records, recovered,
+                    )
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[PositionService] R15-P0-RES-06: _recover_position_state failed: %s", e)
 

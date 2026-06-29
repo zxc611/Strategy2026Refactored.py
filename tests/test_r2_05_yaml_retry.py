@@ -60,7 +60,7 @@ def test_resilience_retry_lists_non_authority_implementations():
     assert 'NetworkRetryManager' in content, \
         "resilience.py未列出NetworkRetryManager为非权威实现"
     assert '_execute_with_retry_and_timeout' in content, \
-        "resilience.py未列出_execute_with_retry_and_timeout为非权威实现"
+        "resilience.py未列出后execute_with_retry_and_timeout为非权威实现"
 
 
 def test_shared_utils_retry_has_delegation_todo():
@@ -82,19 +82,19 @@ def test_order_persistence_retry_has_delegation_todo():
 
 
 def test_ops_framework_retry_has_delegation_todo():
-    """ops_service.py的_execute_with_retry_and_timeout已使用BoundedRetry"""
+    """ops_service.py的指execute_with_retry_and_timeout已使用BoundedRetry"""
     content = _read_file('infra/ops_service.py')
     assert 'BoundedRetry' in content, \
-        "ops_service.py的_execute_with_retry_and_timeout未使用BoundedRetry"
+        "ops_service.py的指execute_with_retry_and_timeout未使用BoundedRetry"
     assert 'resilience' in content, \
         "ops_service.py未指向resilience"
 
 
 def test_position_command_retry_has_delegation_todo():
-    """position_command_service.py的_schedule_close_retry已使用BoundedRetry"""
+    """position_command_service.py的指schedule_close_retry已使用BoundedRetry"""
     content = _read_file('position/position_command_service.py')
     assert 'BoundedRetry' in content, \
-        "position_command_service.py的_schedule_close_retry未使用BoundedRetry"
+        "position_command_service.py的指schedule_close_retry未使用BoundedRetry"
     assert 'resilience' in content, \
         "position_command_service.py未指向resilience"
 

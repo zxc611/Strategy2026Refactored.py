@@ -327,14 +327,14 @@ class TestDelegationBehavior:
         s = SafetyMetaLayer()
         s._drawdown_monitor_svc._daily_hard_stop_triggered = True
         assert s._daily_hard_stop_triggered is True, \
-            "__getattr__应代理到_drawdown_monitor_svc"
+            "__getattr__应代理到。drawdown_monitor_svc"
 
     def test_setattr_delegates_to_drawdown_monitor(self):
         """写入委托属性 → 写入 DrawdownMonitorService"""
         s = SafetyMetaLayer()
         s._daily_drawdown = 0.05
         assert s._drawdown_monitor_svc._daily_drawdown == 0.05, \
-            "__setattr__应代理到_drawdown_monitor_svc"
+            "__setattr__应代理到。drawdown_monitor_svc"
 
     def test_getattr_unknown_raises(self):
         """读取非委托属性 → 抛出AttributeError"""

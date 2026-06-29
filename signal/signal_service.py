@@ -119,7 +119,14 @@ class SignalGenerator:
 
     def generate_signal(self, ctx: SignalContext) -> SignalContext:
         for filter_name in self._FILTER_CHAIN:
-            ctx = getattr(self, filter_name)(ctx)
+            try:
+                ctx = getattr(self, filter_name)(ctx)
+            except Exception as e:
+                if not getattr(self, '_filter_exc_logged', False):
+                    self._filter_exc_logged = True
+                    logging.exception("[SignalService] filter %s exception, fail-safe pass: %s", filter_name, e)
+                else:
+                    logging.warning("[SignalService] filter %s exception, fail-safe pass: %s", filter_name, e)
             if ctx.rejected:
                 return ctx
         ctx = self._create_signal_record(ctx)
@@ -133,7 +140,7 @@ class SignalGenerator:
             ctx.reject_reason = 'empty_instrument_id'
             ctx.filter_name = 'strength'
             return ctx
-        if ctx.signal_type in OPEN_SIGNAL_TYPES and ctx.signal_strength < 0.0:
+        if ctx.signal_type in OPEN_SIGNAL_TYPES and ctx.signal_strength <= 0.0:
             self._svc._stats['filtered_signals'] += 1
             self._svc._stats['strength_filtered'] = self._svc._stats.get('strength_filtered', 0) + 1
             logging.debug("[SignalService] Signal filtered (zero_strength): %s %s", ctx.instrument_id, ctx.signal_type)
@@ -209,8 +216,10 @@ class SignalGenerator:
                     ctx.rejected = True
                     ctx.reject_reason = ctx.decision_result.get('filter_reason', '')
                     ctx.filter_name = 'decision_score'
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                logging.warning("[R22-EP-P1] decision_score_filter异常, fail-safe阻断: %s", e)
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, NameError) as e:
+                if not getattr(self._svc, '_dsf_warn_suppressed', False):
+                    logging.warning("[R22-EP-P1] decision_score_filter异常, fail-safe阻断: %s (后续同类异常静默)", e)
+                    self._svc._dsf_warn_suppressed = True
                 ctx.rejected = True
                 ctx.reject_name = 'decision_score_exception'
                 ctx.filter_name = 'decision_score'

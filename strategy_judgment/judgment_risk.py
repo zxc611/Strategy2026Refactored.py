@@ -1,4 +1,4 @@
-﻿# [M3-05] 风险合规评判服务
+# [M3-05] 风险合规评判服务
 # MODULE_ID: M3-618
 """Risk Compliance Judgment Service"""
 from __future__ import annotations
@@ -126,8 +126,7 @@ class RiskJudger:
         )
 
     def judge_realtime_risk_score(self, result, threshold=0.50, weight=0.10) -> _JudgmentDimension:
-        """第13维度：11维度实时风险评分（桥接生产风控与事后评判）
-
+        """第13维度：11维度实时风险评分（桥接生产风控与事后评判）'
         输入格式: {
             "composite_score": 0.75,          # 11维度加权综合评分
             "d1_state_strength": 0.8,         # 五态状态强度

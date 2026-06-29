@@ -83,7 +83,7 @@ class TestSeededRandom:
                 continue
             with open(tf, 'r', encoding='utf-8') as f:
                 source = f.read()
-            # 不应有裸的 np.random.seed(42) 在方法体中（setUp除外）
+            # 不应有裸的 np.random.seed(42) 在方法体中（setUp除外）'
             # 检查是否有seeded_random参数或setUp
             if 'np.random.seed(42)' in source:
                 # 如果仍有，必须只在setUp中

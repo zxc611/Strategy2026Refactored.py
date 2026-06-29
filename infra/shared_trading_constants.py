@@ -24,6 +24,23 @@ import pandas as pd
 _logger = logging.getLogger(__name__)
 
 
+CONTRACT_MULTIPLIER_MAP = {
+    'IF': 300.0,
+    'IC': 200.0,
+    'IH': 300.0,
+    'TS': 200.0,
+    'TF': 10000.0,
+    'T': 10000.0,
+    'AU': 1000.0,
+    'AG': 15.0,
+    'CU': 5.0,
+    'RB': 10.0,
+}
+
+# 五唯一性修复：期权品种→标的期货品种映射（统一定义）
+OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
+
+
 # R16-P1-001修复: REASON_MULTIPLIERS已扩展为7条目(原手册5条目+ARBITRAGE+MARKET_MAKING)
 # 新增条目对应策略生态系统的ARBITRAGE和MARKET_MAKING策略类型
 REASON_MULTIPLIERS = {

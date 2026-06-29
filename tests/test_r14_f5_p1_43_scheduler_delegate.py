@@ -34,7 +34,7 @@ def test_remove_jobs_by_owner_cleans_delegated():
     """remove_jobs_by_owner 清理 _delegated_jobs"""
     from ali2026v3_trading.strategy.strategy_scheduler import StrategyScheduler
     src = inspect.getsource(StrategyScheduler.remove_jobs_by_owner)
-    assert '_delegated_jobs' in src, "remove_jobs_by_owner未清理_delegated_jobs"
+    assert '_delegated_jobs' in src, "remove_jobs_by_owner未清理理delegated_jobs"
     assert 'cancel_job' in src, "remove_jobs_by_owner未调用SchedulerService.cancel_job"
 
 

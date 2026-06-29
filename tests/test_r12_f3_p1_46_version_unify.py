@@ -41,7 +41,7 @@ def test_model_version_manager_exists():
     from ali2026v3_trading.infra.shared_utils import ModelVersionManager
     mvm = ModelVersionManager()
     assert hasattr(mvm, '_versions'), \
-        "ModelVersionManager应有_versions属性"
+        "ModelVersionManager应有界versions属性"
 
 
 def test_three_version_managers_not_fully_independent():

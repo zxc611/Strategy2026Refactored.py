@@ -75,7 +75,7 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
             ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
             direction_raw = ''
             try:
-                from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+                from ali2026v3_trading.infra.subscription_service import SubscriptionManager
                 if SubscriptionManager.is_option(instrument_id):
                     direction_raw = 'buy'
                 else:
@@ -236,6 +236,23 @@ def execute_pursuit_exit(svc, hft: Any, exit_signal: Dict[str, Any], instrument_
             logging.warning("[HFT] pursuit exit: %s was never opened on platform, cleaned up", instrument_id)
             return
     close_signal_type = 'CLOSE_LONG' if direction == 'SELL' else 'CLOSE_SHORT'
+    # FIX-R37-UNIQUE-CLOSE(A6): execute_pursuit_exit 必须设置 PositionService 持仓 _closing 标志，
+    # 否则止盈止损/时间止损检查时 _closing=False 会重复触发平仓，导致双重平仓。
+    # pursuit_engine 有自己的 _positions(PursuitPosition)，但 PositionService.positions
+    # 也可能有对应持仓(通过 instrument_id 关联)，必须同步设置 _closing。
+    try:
+        from ali2026v3_trading.position.position_service import get_position_service
+        _pos_svc = get_position_service()
+        if _pos_svc:
+            with _pos_svc._get_instrument_lock(instrument_id):
+                for _rec in _pos_svc.positions.get(instrument_id, {}).values():
+                    if not getattr(_rec, '_closing', False):
+                        _rec._closing = True
+                        _rec.closing_order_id = f"PENDING_PURSUIT_{_rec.position_id}"
+                        _rec.close_method = f'pursuit_{reason}'
+                        _rec.close_reason = f'PURSUIT_{reason}'
+    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _a6_err:
+        logging.debug("[R37-UNIQUE-CLOSE] A6设置_closing失败: %s", _a6_err)
     try:
         if svc._ensure_order_service_fn is not None:
             try:
@@ -279,6 +296,7 @@ def execute_pursuit_exit(svc, hft: Any, exit_signal: Dict[str, Any], instrument_
                 reason=f"hft_{reason}",
                 priority=10,
                 cooldown_seconds=0,
+                signal_strength=1.0,
             )
             if close_signal:
                 logging.info("[HFT] pursuit exit signal emitted: %s %s vol=%d reason=%s",
@@ -418,6 +436,7 @@ def handle_arbitrage_signal(svc, arbitrage_signal: Dict[str, Any], instrument_id
                 instrument_id=instrument_id, signal_type=signal_type,
                 price=arbitrage_signal.get('entry_price', 0.0), volume=1,
                 reason='hft_arbitrage_deviation', priority=7, cooldown_seconds=5,
+                signal_strength=min(abs(deviation) / 100.0, 1.0),
             )
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.debug("[HFT] _handle_arbitrage_signal error: %s", e)
@@ -450,6 +469,7 @@ def handle_transition_signal(svc, transition_signal: Dict[str, Any],
                     price=signal_price, volume=1,
                     reason='hft_transition_capture',
                     priority=9, cooldown_seconds=3,
+                    signal_strength=0.8,
                 )
                 logging.info("[HFT] transition entry signal: %s dir=BUY reason=%s price=%.4f",
                              instrument_id, transition_type, signal_price)
@@ -459,7 +479,8 @@ def handle_transition_signal(svc, transition_signal: Dict[str, Any],
 
 def handle_smart_money_signal(svc, smart_money_signal: Dict[str, Any], instrument_id: str) -> None:
     signal = smart_money_signal.get('signal', 'neutral')
-    strength = smart_money_signal.get('strength', 0.0)
+    # P2-09: 信号强度字段统一为 signal_strength（与 SignalContext 规范对齐）
+    strength = smart_money_signal.get('signal_strength', 0.0)
     if signal == 'neutral' or strength < 0.3:
         return
     direction = 'BUY' if signal == 'buy' else 'SELL'
@@ -480,6 +501,7 @@ def handle_smart_money_signal(svc, smart_money_signal: Dict[str, Any], instrumen
                 price=0.0, volume=1,
                 reason='hft_smart_money_flow',
                 priority=8, cooldown_seconds=5,
+                signal_strength=strength,
             )
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.debug("[HFT] _handle_smart_money_signal error: %s", e)
@@ -517,7 +539,7 @@ class PursuitPosition:
 def check_hard_time_stop_for_position(risk_service, position_id: str, open_time: float,
                                        max_profit_reached: float, profit_slope: float = 0.0,
                                        peak_profit_pct: float = 0.0, current_profit_pct: float = 0.0,
-                                       bar_time: Optional[float] = None) -> Optional[str]:
+                                       bar_time: Optional[float] = None, strategy_group: str = '') -> Optional[str]:
     """实盘两阶段硬时间止损检查入口，调用SafetyMetaLayer.check_position_hard_time_stop"""
     safety = getattr(risk_service, '_safety_meta_layer', None)
     if safety is None:
@@ -526,7 +548,7 @@ def check_hard_time_stop_for_position(risk_service, position_id: str, open_time:
         return safety.check_position_hard_time_stop(
             position_id, open_time, max_profit_reached,
             profit_slope, peak_profit_pct, current_profit_pct,
-            bar_time=bar_time
+            bar_time=bar_time, strategy_group=strategy_group
         )
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.warning("[R27-P0-FC-01] 硬时间止损检查异常: %s", e)
@@ -593,8 +615,10 @@ class DynamicPursuitEngine:
                 }
             else:
                 stop_profit = self._calc_initial_stop(current_price, direction)
+                # FIX-R37-UNIQUE-ID: 增加随机熵，避免同毫秒同合约pos_id冲突导致持仓覆盖
+                from ali2026v3_trading.infra.shared_utils import generate_prefixed_id as _gen_id
                 pos = PursuitPosition(
-                    position_id=f"PURSUIT_{instrument_id}_{int(time.time()*1000)}",
+                    position_id=f"PURSUIT_{instrument_id}_{int(time.time()*1000)}_{_gen_id('', 8)}",
                     instrument_id=instrument_id, direction=direction,
                     entries=[{'price': current_price, 'volume': 1, 'strength': current_strength,
                               'strength_delta': strength_delta, 'timestamp': time.time(), 'entry_type': 'initial'}],
@@ -744,7 +768,7 @@ class PyramidAddPositionEngine:
     """金字塔加仓引擎：信号增强时逐级递减加仓
 
     原理：每次加仓量为前次的pyramid_ratio倍（如0.5），
-    形成金字塔结构——底部仓位大、顶部仓位小。
+    形成金字塔结构——底部仓位大、顶部仓位小。'
     ATR自适应：加仓量与当前ATR反相关，高波动时减量。
     """
 

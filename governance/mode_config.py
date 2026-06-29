@@ -170,7 +170,7 @@ _YAML_TO_MODECONFIG_MAP = {
 def _validate_yaml_modeconfig_mapping(yaml_params: Dict[str, Any]) -> None:
     """P1-R11-23修复: 验证YAML键名与ModeConfig字段名映射一致性
 
-    读取tvf_params.yaml中所有键，检查每个键是否在_YAML_TO_MODECONFIG_MAP中有映射条目。
+    读取tvf_params.yaml中所有键，检查每个键是否在。YAML_TO_MODECONFIG_MAP中有映射条目。
     对未映射的键记录警告，防止参数静默丢失。
 
     Args:
@@ -197,7 +197,7 @@ def _validate_yaml_modeconfig_mapping(yaml_params: Dict[str, Any]) -> None:
     if unmapped:
         logging.debug(
             "[P1-R11-23] tvf_params.yaml中存在未映射的键: %s，"
-            "这些键不会被ModeConfig识别，请检查_YAML_TO_MODECONFIG_MAP",
+            "这些键不会被ModeConfig识别，请检查链YAML_TO_MODECONFIG_MAP",
             unmapped,
         )
 
@@ -213,7 +213,7 @@ def _validate_yaml_modeconfig_mapping(yaml_params: Dict[str, Any]) -> None:
 
 
 
-# R15-P2-PERF-15修复: 大字典多层嵌套查询添加_flatten_cache
+# R15-P2-PERF-15修复: 大字典多层嵌套查询添加权flatten_cache
 _flatten_cache: Dict[str, Any] = {}
 _flatten_cache_ts: float = 0.0
 
@@ -310,7 +310,7 @@ def _make_mode_config(
     # P1-R11-23: tvf_params.yaml is loaded as a global config.
     # ModeConfig mappings should be validated against tvf_params at startup.
     # Consider adding automated consistency check.
-    # R14-P1-DOC-P1-02修复: YAML加载后被硬编码ModeConfig覆盖(P0-20集成: TVFParamLoader参数池加载，失败回退到_DEFAULT_TVF_PARAMS)
+    # R14-P1-DOC-P1-02修复: YAML加载后被硬编码ModeConfig覆盖(P0-20集成: TVFParamLoader参数池加载，失败回退到。DEFAULT_TVF_PARAMS)
     _tvf_kwargs = dict(_get_default_tvf_params())
     try:
         from ali2026v3_trading.config.tvf_param_loader import get_tvf_param_loader

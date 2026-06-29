@@ -31,7 +31,7 @@ def example_minimal_integration():
         symbol="rb",
         strategy_id="high_freq_rb_v3",
         strategy_type="high_freq",
-        output_dir="./策略评判_output",
+        output_dir="./策略评判断output",
     )
 
     hooks = BacktestIntegrationHooks(config)

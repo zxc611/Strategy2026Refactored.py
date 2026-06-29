@@ -23,7 +23,7 @@ def _read(rel_path: str) -> str:
 def test_meta_audit_passport_no_hashlib_sha256_string():
     """meta_audit_passport.py不应有hashlib.sha256(xxx.encode())"""
     src = _read('param_pool/l1_quantification/meta_audit_passport.py')
-    # 检查字符串哈希模式（排除import行和注释）
+    # 检查字符串哈希模式（排除import行和注释）'
     for line in src.split('\n'):
         stripped = line.strip()
         if 'hashlib.sha256(' in stripped and 'encode()' in stripped:

@@ -1,5 +1,5 @@
 # MODULE_ID: M1-262
-"""影子策略PnL服务 - 合并自_shadow_strategy_pnl.py和_shadow_strategy_pnl_metrics.py (2026-06-12)"""
+"""影子策略PnL服务 - 合并自旋shadow_strategy_pnl.py和。shadow_strategy_pnl_metrics.py (2026-06-12)"""
 from __future__ import annotations
 
 import json
@@ -48,7 +48,7 @@ class ShadowStrategyPnLMetricsService:
                         risk_free_rate: float = DEFAULT_RISK_FREE_RATE) -> float:
         """P1-47修复: 委托给 infra/resilience_numeric.compute_sharpe_stable
 
-        保留原签名以兼容所有调用点，内部委托给权威实现。
+        保留原签名以兼容所有调用点，内部委托给权威实现。'
         use_sample_std=True 保持与原实现(样本方差n-1)一致。
         """
         # risk_free_rate 在原实现中是年化值，需转换为逐期值
@@ -423,7 +423,7 @@ class ShadowStrategyPnLMetricsService:
         """P1-裂缝15：验证影子B策略夏普的95%置信区间
 
         用n_seeds个不同种子运行影子B，计算夏普的95%CI。
-        若CI宽度>1.0，则影子B不可用于Alpha扣除，应改用期望收益而非单路径。
+        若CI宽度>1.0，则影子B不可用于Alpha扣除，应改用期望收益而非单路径。'
         """
         import random as _random
         base_sharpes = []
@@ -479,7 +479,7 @@ class ShadowStrategyPnLMetricsService:
 
         若主策略与影子策略的Sharpe置信区间重叠比例 > 50%，
         则Alpha可能只是抽样误差，标记alpha_unreliable，
-        资金分配回退到基础权重。
+        资金分配回退到基础权重。'
         """
         with self._lock:
             master_returns = self._equity_to_returns(self._master_equity_curve)
@@ -668,7 +668,7 @@ class ShadowStrategyPnLService(ShadowStrategyPnLMetricsService):
             alpha_ratio = self._last_alpha_metrics.alpha_ratio if self._last_alpha_metrics else 0.0
             master_ev = self._last_alpha_metrics.master_expected_value if self._last_alpha_metrics else 0.0
             last_alpha_ts = self._last_alpha_metrics.timestamp if self._last_alpha_metrics else None
-            # P-32修复: 三态健康检查 OK/WARNING/CRITICAL（手册12.1节）
+            # P-32修复: 三态健康检查 OK/WARNING/CRITICAL（手册12.1节）'
             if self._absolute_ev_pause:
                 status = "CRITICAL"
             elif self._degradation_active or alpha_ratio < 1.0:

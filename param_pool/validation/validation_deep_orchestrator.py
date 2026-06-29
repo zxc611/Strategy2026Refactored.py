@@ -1,4 +1,4 @@
-﻿# [M1-126] 深度验证编排器
+# [M1-126] 深度验证编排器
 # MODULE_ID: M1-198
 """validation_deep_orchestrator.py - 深度验证编排入口与DEEP_VALIDATION_TIERS常量"""
 
@@ -324,7 +324,7 @@ def validate_hmm_online_vs_offline(iv_series: pd.Series,
                                     mismatch_threshold: float = 0.20) -> Dict[str, Any]:
     """P1-裂缝8：验证HMM在线推断与离线全局状态偏差
 
-    在线推断：仅用截至当前时刻的数据（前向算法逐步推进）
+    在线推断：仅用截至当前时刻的数据（前向算法逐步推进）'
     离线推断：使用全历史IV序列一次性拟合HMM
 
     若不一致率 > 20%，建议降低周期共振模块调节权重(×0.7)
@@ -404,7 +404,7 @@ def _compute_state_switches(bar_data: pd.DataFrame,
         window = states[i - confirm_bars + 1:i + 1]
         if len(set(window)) == 1:
             confirmed_states[i] = window[0]
-    # 统计状态切换次数（同时统计有方向变化时的开仓数）
+    # 统计状态切换次数（同时统计有方向变化时的开仓数）'
     switches = 0
     prev = confirmed_states[0]
     for s in confirmed_states[1:]:
@@ -418,8 +418,7 @@ def validate_state_window_boundary_jitter(bar_data: pd.DataFrame = None,
                                             params: Dict[str, float] = None,
                                             confirm_bars_range: Tuple[int, int] = (2, 5),
                                             n_jitter: int = 20) -> Dict[str, Any]:
-    """P1-裂缝24修复：基于真实Bar数据计算状态确认窗口边界抖动对开仓变化率的影响。
-
+    """P1-裂缝24修复：基于真实Bar数据计算状态确认窗口边界抖动对开仓变化率的影响。'
     对比base_confirm_bars与±1个确认Bar下的实际状态切换次数，
     若开仓变化率>30%，需增加状态确认的鲁棒性机制。
     """
@@ -430,7 +429,7 @@ def validate_state_window_boundary_jitter(bar_data: pd.DataFrame = None,
     jitter_range = range(max(1, base_confirm - 1), base_confirm + 2)
     non_other_threshold = params.get("non_other_ratio_threshold", 0.65)
 
-    # P1-裂缝24修复: 使用真实Bar数据驱动计算（原estimated_switches=max(1,100//cb)为静态估算）
+    # P1-裂缝24修复: 使用真实Bar数据驱动计算（原estimated_switches=max(1,100//cb)为静态估算）'
     switch_counts = {}
     for cb in jitter_range:
         switch_counts[cb] = _compute_state_switches(bar_data, non_other_threshold, cb)
@@ -527,7 +526,7 @@ def validate_trend_score_bar_vs_tick_correlation(
 
 # ── Deep Checks (merged from validation_deep_checks.py on 2026-06-12) ──
 
-"""validation_deep_checks.py - 各独立深度验证函数与_DeepValidationResult"""
+"""validation_deep_checks.py - 各独立深度验证函数与审DeepValidationResult"""
 
 
 from dataclasses import dataclass, field

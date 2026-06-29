@@ -48,7 +48,7 @@ VALID_STATE_TRANSITIONS: Dict[StrategyState, List[StrategyState]] = {
     StrategyState.PARALLEL_RUNNING: [StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED],
     StrategyState.PAUSED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR],
     StrategyState.DEGRADED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED_STOP],
-    StrategyState.ERROR: [StrategyState.INITIALIZING, StrategyState.STOPPED],
+    StrategyState.ERROR: [StrategyState.INITIALIZING, StrategyState.STOPPED, StrategyState.DEGRADED],
     StrategyState.DEGRADED_STOP: [StrategyState.STOPPED, StrategyState.INITIALIZING],
     StrategyState.STOPPED: [StrategyState.INITIALIZING, StrategyState.DESTROYED],
     StrategyState.DESTROYED: [],

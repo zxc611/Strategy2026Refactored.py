@@ -1,4 +1,4 @@
-﻿# [M1-130] L2超参验证
+# [M1-130] L2超参验证
 # MODULE_ID: M1-199
 """validation_l2_hyperparams.py - L-2超参数处理函数与常量"""
 
@@ -46,7 +46,7 @@ def check_l2_conflict(
 ) -> Dict[str, Any]:
     """比较两套L-2参数是否存在冲突
 
-    对每个共同key，计算相对差异。若任一参数差异超过tolerance，则判定为冲突。
+    对每个共同key，计算相对差异。若任一参数差异超过tolerance，则判定为冲突。'
     """
     any_conflict = False
     conflicts = {}
@@ -178,7 +178,7 @@ def analyze_l2_sensitivity(
     """张力一：L-2超参数敏感性分析
 
     L-2参数在十八策略扫描中作为超参数固定（不参与网格搜索），
-    但需在最终报告中做敏感性分析：±sensitivity_range扰动对结果的影响。
+    但需在最终报告中做敏感性分析：±sensitivity_range扰动对结果的影响。'
     """
     if l2_params is None:
         l2_params = L2_HYPERPARAMS
@@ -233,8 +233,7 @@ def compute_alpha_confidence_interval(
     n_signals: int,
     confidence: float = 0.95,
 ) -> Dict[str, float]:
-    """Alpha置信区间修正（张力二相关：伪精确性修正）
-
+    """Alpha置信区间修正（张力二相关：伪精确性修正）'
     不同策略的信号数差异巨大（S1可能10000个，S4可能50个），
     直接比较Sharpe而不给置信区间是伪精确。
 

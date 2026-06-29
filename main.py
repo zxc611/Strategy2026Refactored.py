@@ -88,7 +88,7 @@ def __getattr__(name):
     
     if name in _LAZY_IMPORTS:
         import importlib  # R21-CC-P2-03修复: 动态导入importlib — 用于延迟加载避免循环依赖，但需注意：
-        # 1. importlib.import_module在每次调用时执行模块搜索，高频调用有性能开销（本处有缓存所以影响小）
+        # 1. importlib.import_module在每次调用时执行模块搜索，高频调用有性能开销（本处有缓存所以影响小）'
         # 2. 动态导入的模块中若包含大数据对象，被pickle序列化到子进程时开销显著
         # 3. 动态导入的模块路径为硬编码字符串，无外部可控参数，当前安全风险可控
         entry = _LAZY_IMPORTS[name]

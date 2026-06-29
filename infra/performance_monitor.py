@@ -23,7 +23,7 @@ import os
 import threading
 import logging
 import json
-from ali2026v3_trading.serialization_utils import json_dumps
+from ali2026v3_trading.infra.serialization_utils import json_dumps
 from datetime import datetime
 from typing import Any, Dict, Optional, Callable
 from functools import wraps
@@ -62,7 +62,7 @@ class PathCounter:
     _PERSIST_INTERVAL_SEC = 300.0
 
     def __new__(cls):
-        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('performance_monitor')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -140,7 +140,7 @@ class PathCounter:
         
         Args:
             path: 调用路径（如 module.function 或 Class.method）
-            execution_time: 执行时间（秒）
+            execution_time: 执行时间（秒）'
             exception: 异常信息（如果有）
         """
         counter = cls()
@@ -183,17 +183,15 @@ class PathCounter:
     
     @classmethod
     def get_stats(cls, output_format: str = 'dict', **kwargs) -> Any:
-        """获取性能统计数据（统一接口）
-        
+        """获取性能统计数据（统一接口）'
         Args:
             output_format: 输出格式 ('dict', 'json', 'console')
-                   - 'dict': 返回字典（默认）
-                   - 'json': 导出到JSON文件（需指定filepath参数）
+                   - 'dict': 返回字典（默认）'
+                   - 'json': 导出到JSON文件（需指定filepath参数）'
                    - 'console': 打印到控制台
         
         Returns:
-            dict: 性能统计数据（当output_format='dict'时）
-        
+            dict: 性能统计数据（当output_format='dict'时）'
         Usage:
             # 获取字典数据
             stats = PathCounter.get_stats()
@@ -263,7 +261,7 @@ class PathCounter:
     
     @classmethod
     def reset(cls) -> None:
-        from ali2026v3_trading.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('performance_monitor')
         _registry.remove('instance')
         counter = cls()

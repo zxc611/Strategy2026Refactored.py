@@ -1,5 +1,5 @@
 # MODULE_ID: M1-174
-﻿# [M1-104] 相位扫描
+# [M1-104] 相位扫描
 """核心扫描函数 + EnhancedPhaseScanOptimizer类"""
 from __future__ import annotations
 
@@ -159,7 +159,7 @@ def _validate_parameter_set(params: Dict[str, Any], backtest_result: Dict[str, A
 
 def crop_pullback_grid(strategy_params: Dict[str, Any]) -> Dict[str, List]:
     """
-    基于策略参数动态裁剪PULLBACK网格。
+    基于策略参数动态裁剪PULLBACK网格。'
     裁剪规则:
     1. pullback_wait_bars <= resonance_hard_time_stop_min / 10
     2. pullback_retrace_pct in [0.1, 0.8]
@@ -534,7 +534,7 @@ def phase2_scan(best_strategy: Dict, train_data, test_data, strategy_type="main"
     """P0-1修复: AUX_PARAM_GRID纳入联合扫描, 不再遗漏10个辅助参数"""
     _soft_optimizer = None
     try:
-        from ali2026v3_trading.param_pool.quantification._quantification_core import SoftConstrainedOptimizer
+        from ali2026v3_trading.precompute._quantification_core import SoftConstrainedOptimizer
         _soft_optimizer = SoftConstrainedOptimizer(
             penalty_coefficients={'pullback_soft': 0.05, 'take_profit_hard': 0.10, 'holding_time_soft': 0.03},
             exploration_mode=False,

@@ -23,7 +23,7 @@ df = pd.DataFrame({
 
 try:
     print('1. OBOS向量化测试')
-    from ali2026v3_trading.param_pool.precompute._obos import compute_obos_vectorized
+    from ali2026v3_trading.precompute._obos import compute_obos_vectorized
     start = time.time()
     obos = compute_obos_vectorized(df)
     elapsed = time.time() - start
@@ -36,7 +36,7 @@ print()
 
 try:
     print('2. KL-RPD向量化测试')
-    from ali2026v3_trading.param_pool.precompute._kl_rpd import compute_kl_rpd_vectorized
+    from ali2026v3_trading.precompute._kl_rpd import compute_kl_rpd_vectorized
     start = time.time()
     kl_rpd = compute_kl_rpd_vectorized(df)
     elapsed = time.time() - start
@@ -49,7 +49,7 @@ print()
 
 try:
     print('3. Signals向量化测试')
-    from ali2026v3_trading.param_pool.precompute._signals import compute_signals_vectorized
+    from ali2026v3_trading.precompute._signals import compute_signals_vectorized
     start = time.time()
     signals = compute_signals_vectorized(df)
     elapsed = time.time() - start
@@ -62,7 +62,7 @@ print()
 
 try:
     print('4. 信号衰减向量化测试')
-    from ali2026v3_trading.param_pool.precompute._signal_decay import compute_decay_and_linkage_vectorized
+    from ali2026v3_trading.precompute._signal_decay import compute_decay_and_linkage_vectorized
     df2 = df.copy()
     df2['signal_raw'] = np.random.randn(n)
     df2['signal_direction'] = np.random.choice([-1, 0, 1], n)
@@ -78,7 +78,7 @@ print()
 
 try:
     print('5. L0状态向量化测试')
-    from ali2026v3_trading.param_pool.precompute._l0_state import compute_l0_state_vectorized
+    from ali2026v3_trading.precompute._l0_state import compute_l0_state_vectorized
     df3 = df.copy()
     df3['signal_raw'] = np.random.randn(n)
     start = time.time()
@@ -93,7 +93,7 @@ print()
 
 try:
     print('6. Position决策向量化测试')
-    from ali2026v3_trading.param_pool.precompute._position_decision import compute_position_decision_vectorized
+    from ali2026v3_trading.precompute._position_decision import compute_position_decision_vectorized
     df4 = df.copy()
     df4['signal_strength'] = np.random.rand(n)
     df4['signal_direction'] = np.random.choice([-1, 0, 1], n)

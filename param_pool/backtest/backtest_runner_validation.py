@@ -1,4 +1,4 @@
-﻿# [M1-100] 回测安全检查器
+# [M1-100] 回测安全检查器
 # MODULE_ID: M1-158
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 from __future__ import annotations
@@ -179,7 +179,7 @@ def _check_backtest_health(bt, params: Dict[str, float], bar_time) -> bool:
 def _check_bar_data_monotonic(bar_data: pd.DataFrame) -> None:
     """NP-P2-15: 检查bar时间序列是否单调递增
 
-    支持多种时间列名（minute/timestamp/datetime），并按symbol分组检查。
+    支持多种时间列名（minute/timestamp/datetime），并按symbol分组检查。'
     """
     if bar_data is None or bar_data.empty:
         return
@@ -354,7 +354,7 @@ def check_safety(bt, bar_time, params, allow_close=False, bar=None, **deps):
         daily_drawdown = (_risk_daily_start - _risk_equity_dd) / _risk_daily_start
         _prev_5day_avg = getattr(bt, 'prev_5day_avg_profit', 0.0) or params.get('prev_5day_avg_profit', 0.0)
         _dd_multiplier = params.get('daily_drawdown_multiplier', 2.0)
-        from ali2026v3_trading.infra.risk_rules import resolve_and_check_daily_drawdown
+        from ali2026v3_trading.infra.security_service import resolve_and_check_daily_drawdown
         should_stop, _reason = resolve_and_check_daily_drawdown(
             daily_drawdown_pct=daily_drawdown,
             hard_stop_pct=params.get("daily_loss_hard_stop_pct", None),

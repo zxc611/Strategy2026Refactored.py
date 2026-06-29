@@ -43,9 +43,10 @@ class GreeksExposure:
 
 _REASON_STRATEGY_MAP = {
     'CORRECT_RESONANCE': 'high_freq', 'CORRECT_DIVERGENCE': 'high_freq',
-    'INCORRECT_REVERSAL': 'resonance', 'OTHER_SCALP': 'box',
-    'BOX_SPRING': 'spring', 'MANUAL': 'manual',
-    'ARBITRAGE': 'arbitrage', 'MARKET_MAKING': 'market_making',  # R27-P1-FIX: 补充arbitrage和market_making映射
+    'INCORRECT_REVERSAL': 'resonance', 'INCORRECT_DIVERGENCE': 'resonance',
+    'OTHER_SCALP': 'box', 'BOX_SPRING': 'spring',
+    'ARBITRAGE': 'arbitrage', 'MARKET_MAKING': 'market_making',
+    'MANUAL': 'manual',
 }
 
 
@@ -102,9 +103,21 @@ def _estimate_option_gamma(instrument_id: str, volume: int) -> float:
     return PositionService.OPTION_GAMMA_PER_LOT * abs(volume) if ("-C-" in instrument_id or "-P-" in instrument_id) else 0.0
 
 
-def aggregate_greeks_exposure(positions: Dict[str, Dict[str, Any]]) -> GreeksExposure:
-    """聚合所有持仓的Greeks等效敞口"""
+def aggregate_greeks_exposure(positions: Dict[str, Dict[str, Any]], position_service=None) -> GreeksExposure:
+    """聚合所有持仓的Greeks等效敞口
+
+    Args:
+        positions: 持仓字典
+        position_service: PositionService实例，用于获取global_lock保护遍历
+    """
     result = GreeksExposure()
+    if position_service is not None and hasattr(position_service, 'global_lock'):
+        with position_service.global_lock:
+            return _aggregate_greeks_exposure_inner(positions, result)
+    return _aggregate_greeks_exposure_inner(positions, result)
+
+
+def _aggregate_greeks_exposure_inner(positions: Dict[str, Dict[str, Any]], result: GreeksExposure) -> GreeksExposure:
     for instrument_id, pos_dict in positions.items():
         if not pos_dict:
             continue

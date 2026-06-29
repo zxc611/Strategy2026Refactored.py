@@ -308,7 +308,7 @@ class TestRound7Ops:
 
 class TestFacadeDelegation:
     def test_subscription_manager_delegates(self):
-        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_service import SubscriptionManager
         sm = SubscriptionManager.__new__(SubscriptionManager)
         sm.__dict__['_core_service'] = type('M', (), {'get_subscription_stats': lambda s: {'total': 42}})()
         assert sm.get_subscription_stats() == {'total': 42}

@@ -1,4 +1,3 @@
-# MODULE_ID: M1-275
 """
 strategy_scheduler.py - 策略定时任务管理
 
@@ -592,7 +591,7 @@ class StrategyScheduler:
                     if not self._can_run_jobs():
                         return
                     # 输出所有产品的期权状态诊断
-                    t_type_service.print_option_status_diagnosis(future_internal_id=None, top_n=5)
+                    t_type_service.print_option_status_diagnosis(future_internal_id=None, top_n=10)
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error(f"[StrategyScheduler] Option status diagnosis failed: {e}", exc_info=True)
             
@@ -684,6 +683,12 @@ class StrategyScheduler:
                             logging.error(f"[StrategyScheduler] Cache restore also failed: {restore_err}, {len(cache_ticks)} ticks lost")
                     retry_info = f", {len(cache_ticks)} ticks pending retry" if cache_ticks else ""
                     logging.error(f"[StrategyScheduler] Cache flush failed: {e}{retry_info}, WAL not truncated", exc_info=True)
+                finally:
+                    try:
+                        if hasattr(data_service, 'release_connection'):
+                            data_service.release_connection()
+                    except Exception:
+                        pass
             
             # 添加定时任务：每5分钟检查一次
             if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):

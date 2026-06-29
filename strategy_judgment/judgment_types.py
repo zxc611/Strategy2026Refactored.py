@@ -1,4 +1,4 @@
-﻿# [M3-02] 评判数据类型与配置常量
+# [M3-02] 评判数据类型与配置常量
 # MODULE_ID: M3-620
 """
 评判数据类型 (Judgment Types) — 从 strategy_judgment_engine.py 拆分
@@ -36,7 +36,7 @@ from .turning_point_analysis import ResonanceTurningPointMarker
 from .market_snapshot_collector import MarketSnapshotCollector, MarketSnapshot, SnapshotTrigger
 
 if TYPE_CHECKING:
-    from ..param_pool.cycle_resonance_module import CycleResonanceOutput
+    from ..param_pool.optimization.cycle_sharpe import CycleResonanceOutput
 
 logger = logging.getLogger(__name__)
 
@@ -243,11 +243,14 @@ class JudgmentReport:
 DIM_RISK_BUDGET_COMPLIANCE = "risk_budget_compliance"
 DIM_EXTREME_SURVIVAL = "extreme_survival"
 DIM_BEHAVIOR_CONSISTENCY = "behavior_consistency"
+# 并列信号源A/B/C评判维度（最终落地方案v2.0 5对齐）
+DIM_THREE_LAYER_DECISION_SOURCE = "signal_source_abc"
 # 中文显示名映射(仅用于报告展示)
 DIM_DISPLAY_NAMES = {
     DIM_RISK_BUDGET_COMPLIANCE: "风险预算遵守",
     DIM_EXTREME_SURVIVAL: "极端生存能力",
     DIM_BEHAVIOR_CONSISTENCY: "行为一致性",
+    DIM_THREE_LAYER_DECISION_SOURCE: "并列信号源A/B/C",
 }
 
 BLOCKING_DIMENSIONS_DEFAULT = frozenset({DIM_RISK_BUDGET_COMPLIANCE, DIM_EXTREME_SURVIVAL, DIM_BEHAVIOR_CONSISTENCY})
@@ -284,11 +287,12 @@ DEFAULT_THRESHOLDS = {
     "drawdown_recovery": 0.50,
     "cross_strategy_correlation": 0.70,
     "realtime_risk_score": 0.50,  # 11维度实时风险评分阈值
+    "signal_source_abc": 0.60,  # 并列信号源A/B/C维度阈值（最终落地方案v2.0）
 }
 
 DEFAULT_WEIGHTS = {
     "profitability": 0.09,
-    "behavior_consistency": 0.18,
+    "behavior_consistency": 0.15,  # 0.18→0.15 为三层决策源让出0.03
     "process_explainability": 0.06,
     "statistical_significance": 0.06,
     "risk_budget_compliance": 0.11,
@@ -299,7 +303,9 @@ DEFAULT_WEIGHTS = {
     "return_source_diversification": 0.06,
     "drawdown_recovery": 0.05,
     "cross_strategy_correlation": 0.07,
-    "realtime_risk_score": 0.10,  # 11维度实时风险评分(桥接生产与评判)
+    "realtime_risk_score": 0.08,  # 0.10→0.08 为信号源评判让出0.02
+    # 并列信号源A/B/C维度权重（最终落地方案v2.0；权重总和=1.00）
+    "signal_source_abc": 0.05,
 }
 
 SCORING_COEFFICIENTS = {
@@ -350,6 +356,12 @@ SCORING_COEFFICIENTS = {
     "state_confirm_bars": 5,
     "contract_multiplier_default": 1.0,
     "absolute_ev_floor": -0.5,
+    # signal_source_abc（最终落地方案v2.0 并列信号源A/B/C评判）
+    "tl_source_consistency_w": 0.40,   # 信号源一致性权重
+    "tl_calmar_w": 0.30,               # Calmar比率权重
+    "tl_dmcv_pvalue_w": 0.30,          # Diebold-Mariano检验p值权重
+    "tl_calmar_full_at": 1.0,           # Calmar满分阈值
+    "tl_dmcv_pvalue_full_at": 0.05,    # p值满分阈值(越小越好)
     "sensitivity_analysis": {
         "db_path": "trades.db",
         "train_period": ("2024-01-01", "2024-06-30"),
@@ -520,12 +532,11 @@ SURVIVED_THRESHOLD_DESCRIPTION = """
 
 定义：
   综合评分低于此阈值的策略被判定为"无法在极端市场环境下存活"，
-  标记为FAIL_不可上线，禁止投入实盘交易。
-
+  标记为FAIL_不可上线，禁止投入实盘交易。'
 取值依据：
   1. 与overall_conditional_threshold对齐（StrategyJudgmentEngine.__init__默认值0.60）
   2. 与DEFAULT_THRESHOLDS['extreme_survival']对齐（极端存活维度阈值0.60）
-  3. 参数池统一执行方案与使用手册_V7.0_工程落地版 §7.4节
+  3. 参数池统一执行方案与使用手册。V7.0_工程落地版 §7.4节
 """
 
 

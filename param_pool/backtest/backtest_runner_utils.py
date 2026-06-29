@@ -1,4 +1,4 @@
-﻿# [M1-99] 回测工具函数
+# [M1-99] 回测工具函数
 # MODULE_ID: M1-157
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 from __future__ import annotations
@@ -44,7 +44,7 @@ except ImportError:
 from ali2026v3_trading.infra.shared_utils import ANNUALIZE_FACTOR_DAILY, ANNUALIZE_FACTOR_MINUTE
 from ali2026v3_trading.infra.shared_utils import get_annualize_factor as _get_annualize_factor
 from ali2026v3_trading.infra.shared_utils import safe_price_check
-from ali2026v3_trading.infra.cross_system import CrossSystemExecutionKernel
+from ali2026v3_trading.infra.trading_utils import CrossSystemExecutionKernel
 from ali2026v3_trading.data.data_access import get_data_access
 from ali2026v3_trading.data.db_adapter import connect_duckdb
 
@@ -706,8 +706,7 @@ from ali2026v3_trading.param_pool.backtest.backtest_runner_validation import val
 
 
 def _resolve_time_stop_hard(params: Dict[str, float], open_reason: str) -> float:
-    """根据开仓原因选择策略专用硬时间止损（分钟）
-
+    """根据开仓原因选择策略专用硬时间止损（分钟）'
     策略分层时间参数：
     - HFT: hft_hard_time_stop_ms → 转换为分钟
     - 弹簧: spring_hard_time_stop_sec → 转换为分钟

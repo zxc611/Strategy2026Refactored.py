@@ -1,0 +1,16 @@
+{
+  "_comment": "三层期权五态排序回滚配置 - 依据最终落地方案第六章 6.2",
+  "sort_layer": 3,
+  "layer1_sort_mode": "lexicographic",
+  "layer2_mode": "veto",
+  "market_floor_mode": "percentile",
+  "decision_source": "auto",
+  "ab_test_enabled": false,
+  "degrade_on_timeout": true,
+  "degrade_timeout_ms": 100,
+  "rollback_triggers": {
+    "new_param_negative_calmar_days": 7,
+    "daily_drawdown_pct": 0.05,
+    "live_calmar_ratio_threshold": 0.50
+  }
+}

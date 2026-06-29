@@ -1,4 +1,4 @@
-﻿# [M1-107] 周期夏普比率
+# [M1-107] 周期夏普比率
 #!/usr/bin/env python3
 # MODULE_ID: M1-171
 """
@@ -140,7 +140,7 @@ CR_PARAMS_DEFAULT = CRParams()
 
 @dataclass(slots=True)
 class CycleResonanceOutput:
-    directional_bias: float  # P1-16修复: 计算中间值(非配置参数)，由_compute_directional_bias()生成
+    directional_bias: float  # P1-16修复: 计算中间值(非配置参数)，由。compute_directional_bias()生成
     resonance_strength: float
     phase: Phase
     state_entropy: float
@@ -179,7 +179,7 @@ class RiskSurfaceAdjustment:
 class CycleResonanceModule:
     """
     周期共振模块：基于HMM状态+多周期趋势评分+五态分布，
-    输出四变量供各策略的风险曲面调节。
+    输出四变量供各策略的风险曲面调节。'
     """
 
     def __init__(
@@ -736,14 +736,15 @@ def run_cr_params_sweep(
 from dataclasses import dataclass
 
 try:
-    from ali2026v3_trading.data_access import get_data_access
-    from ali2026v3_trading.db_adapter import connect, get_duckdb_module
+    # 五唯一性修复：import 路径统一为 ali2026v3_trading.data.data_access / data.db_adapter
+    from ali2026v3_trading.data.data_access import get_data_access
+    from ali2026v3_trading.data.db_adapter import connect, get_duckdb_module
     duckdb = get_duckdb_module()
 except ImportError:
     duckdb = None
 
 try:
-    from ali2026v3_trading.config_params import get_param
+    from ali2026v3_trading.config.config_params import get_param
     SLIPPAGE_BPS = get_param('default_slippage_bps', 3.0)
 except (ImportError, AttributeError):
     try:
@@ -904,7 +905,7 @@ import pandas as pd
 class LiveStrategySelector:
     """实盘策略选择器：根据实时测量的延迟，查询映射表，选择最优时间参数"""
 
-    def __init__(self, mapping_table: Any):
+    def __init__(self, mapping_table: Any = None):
         self.mapping = mapping_table
         self._current_delay_ms = 0.0
         self._ema_delay_alpha = 0.1

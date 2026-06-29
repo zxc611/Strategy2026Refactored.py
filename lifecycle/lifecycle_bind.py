@@ -52,8 +52,8 @@ class LifecycleBind:
             p.unsubscribe = None
         p.get_instrument = getattr(strategy_obj, 'get_instrument', None)
         from ali2026v3_trading.config.params_service import _read_param
-        p._platform_insert_order = _read_param(strategy_obj, 'insert_order') or _read_param(strategy_obj, 'send_order')
-        p._platform_cancel_order = _read_param(strategy_obj, 'cancel_order') or _read_param(strategy_obj, 'cancel_order_ref')
+        p._platform_insert_order = _read_param(strategy_obj, 'insert_order') or _read_param(strategy_obj, 'make_order_req')
+        p._platform_cancel_order = _read_param(strategy_obj, 'cancel_order')
         p._platform_get_position = getattr(strategy_obj, 'get_position', None)
         p._platform_get_orders = getattr(strategy_obj, 'get_orders', None)
         p._runtime_market_center = p._extract_runtime_market_center(strategy_obj) or p._get_fallback_market_center()
@@ -63,11 +63,35 @@ class LifecycleBind:
         p._inject_runtime_context(strategy_obj)
         p._api_ready = callable(p.subscribe) and callable(p.unsubscribe)
         p._kline_ready = callable(p.get_kline)
-        if hasattr(p, 'storage') and p.storage is not None:
-            p.storage.bind_platform_subscribe_api(p.subscribe, p.unsubscribe)
+        _data_service = None
+        try:
+            from ali2026v3_trading.data.data_service import get_data_service
+            _data_service = get_data_service()
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.warning("[bind_platform_apis] get_data_service failed: %s", e)
+        if _data_service is not None and hasattr(p, '_state_store') and p._state_store is not None:
+            p._state_store.set_ref('storage', _data_service)
+            logging.info("[bind_platform_apis] storage injected into state_store")
+        _storage = getattr(p, 'storage', None)
+        if _storage is not None and hasattr(_storage, 'bind_platform_subscribe_api'):
+            _storage.bind_platform_subscribe_api(p.subscribe, p.unsubscribe)
+        if _storage is not None and hasattr(_storage, 'subscription_manager'):
+            _sm = _storage.subscription_manager
+            if _sm is not None:
+                _bind_target = _data_service or _storage
+                _bind_method = getattr(_sm, 'bind_data_manager', None)
+                if callable(_bind_method):
+                    _bind_method(_bind_target)
+                elif hasattr(_sm, 'data_manager'):
+                    _sm.data_manager = _bind_target
+                    if hasattr(_sm, '_core_service'):
+                        _sm._core_service.data_manager = _bind_target
+                logging.info("[bind_platform_apis] SubscriptionManager.data_manager bound to %s", type(_bind_target).__name__)
         try:
             from ali2026v3_trading.data.data_service import DataService
             DataService.bind_subscribe_api(p.subscribe, p.unsubscribe)
+            if _data_service is not None:
+                _data_service.bind_data_manager(_data_service)
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.debug("[StrategyLifecycleMixin] DataService.bind_subscribe_api failed: %s", e)
         if p._platform_insert_order:
@@ -120,7 +144,9 @@ class LifecycleBind:
         params = getattr(p, 'params', None)
         if not params:
             return
-        mc = p._runtime_market_center or p._get_fallback_market_center()
+        mc = p._runtime_market_center
+        if mc is None and getattr(p, '_fallback_market_center', None) is not None:
+            mc = p._fallback_market_center
         try:
             if isinstance(params, dict):
                 params['strategy'] = strategy_obj
@@ -135,7 +161,17 @@ class LifecycleBind:
             else:
                 setattr(params, 'strategy_instance', params.strategy)
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.warning(f"[Context] Inject failed: {e}")
+            logging.error("[Context] Inject failed: %s", e)
+        try:
+            from ali2026v3_trading.config.config_service import update_cached_params
+            update_cached_params({'strategy': strategy_obj}, caller_id='_inject_runtime_context')
+        except Exception as e:
+            logging.error("[Context] update_cached_params failed: %s", e)
+        try:
+            from ali2026v3_trading.infra.health_monitor import set_runtime_strategy_ref
+            set_runtime_strategy_ref(strategy_obj)
+        except Exception as e:
+            logging.error("[Context] set_runtime_strategy_ref failed: %s", e)
 
     def _get_fallback_market_center(self) -> Any:
         p = self.p
@@ -144,15 +180,16 @@ class LifecycleBind:
         try:
             from pythongo.core import MarketCenter
         except ImportError:
-            MarketCenter = None
             logging.warning("[DEP-04] pythongo.core.MarketCenter not available, using None fallback")
-        if MarketCenter is None:
             return None
+        # 平台规范：MarketCenter是K线数据的标准入口，必须创建实例
         try:
-            p._fallback_market_center = MarketCenter()
-            return p._fallback_market_center
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.warning(f"[Fallback] Create failed: {e}")
+            mc = MarketCenter()
+            p._fallback_market_center = mc
+            logging.info("[Fallback] MarketCenter created successfully")
+            return mc
+        except Exception as e:
+            logging.warning(f"[Fallback] MarketCenter creation failed: {e}, using None fallback")
             return None
 
     def _start_platform_subscribe_async(self, instrument_ids: List[str]) -> None:
@@ -245,3 +282,23 @@ class LifecycleBind:
             daemon=True
         ).start()
         logging.info("[KlineLoadAsync] 历史K线加载已调度到后台线程，onStart 不再阻塞")
+
+    def _start_historical_kline_load(self, blocking: bool = False) -> None:
+        p = self.p
+        try:
+            _kline_svc = getattr(p, '_kline_svc', None)
+            if _kline_svc is not None and hasattr(_kline_svc, 'start_historical_kline_load'):
+                _kline_svc.start_historical_kline_load(blocking=blocking)
+            else:
+                logging.info("[KlineLoad] _kline_svc not available, skipping historical kline load")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[KlineLoad] 历史K线加载失败: {e}", exc_info=True)
+
+    def _shutdown_historical_services(self) -> None:
+        p = self.p
+        try:
+            _kline_svc = getattr(p, '_kline_svc', None)
+            if _kline_svc is not None and hasattr(_kline_svc, 'shutdown_historical_services'):
+                _kline_svc.shutdown_historical_services()
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.debug("[KlineShutdown] 历史K线服务关闭异常: %s", e)

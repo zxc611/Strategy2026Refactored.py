@@ -1,4 +1,4 @@
-﻿# [M1-108] 敏感度分析
+# [M1-108] 敏感度分析
 # MODULE_ID: M1-175
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 """
@@ -376,7 +376,7 @@ def validate_hmm_perturbation_sensitivity(iv_series: pd.Series,
                                             random_seed: int = 42) -> Dict[str, Any]:
     """P1-裂缝12：HMM扰动敏感性测试
 
-    对IV序列添加1-2%噪声，重算HMM状态和策略绩效。
+    对IV序列添加1-2%噪声，重算HMM状态和策略绩效。'
     若夏普变异系数 > 0.3，需增加状态平滑或降低HMM依赖。
     """
     if len(iv_series) < 100:
@@ -458,7 +458,7 @@ def get_sensitivity_analyzer(
     train_period: Tuple[str, str] = ("2024-01-01", "2025-06-30"),
     test_period: Tuple[str, str] = ("2025-07-01", "2026-04-30"),
 ) -> SensitivityAnalyzer:
-    from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+    from ali2026v3_trading.infra.registry_service import SingletonRegistry
     with _sensitivity_analyzer_lock:
         _registry = SingletonRegistry.get_registry('sensitivity_analyzer')
         _inst = _registry.get('instance')
@@ -476,7 +476,7 @@ def get_sensitivity_analyzer(
 
 
 def reset_sensitivity_analyzer() -> None:
-    from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+    from ali2026v3_trading.infra.registry_service import SingletonRegistry
     with _sensitivity_analyzer_lock:
         _registry = SingletonRegistry.get_registry('sensitivity_analyzer')
         _registry.remove('instance')
@@ -486,7 +486,7 @@ def reset_sensitivity_analyzer() -> None:
 
 """R3-T-02修复: 试验设计套件 — 策略评判引擎所需验证组件
 
-手册19.7节定义的试验设计验证组件，提供参数扫描全流程的质量保障。
+手册19.7节定义的试验设计验证组件，提供参数扫描全流程的质量保障。'
 """
 
 import logging

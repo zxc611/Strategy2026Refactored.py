@@ -1,4 +1,3 @@
-# MODULE_ID: M1-248
 """
 box_spring_executor.py - 箱体波动率脉冲策略（弹簧策略）- 执行Mixin
 
@@ -16,7 +15,12 @@ from ali2026v3_trading.infra.resilience import safe_float_to_int
 from ali2026v3_trading.strategy._box_spring_types import (
     SpringState, SpringSignal, SpringPosition,
 )
-
+from ali2026v3_trading.strategy.box_spring_executor_helpers import (
+    _compute_hedge_ratio,
+    _check_cross_strategy_risk,
+    _record_spring_trade,
+    _find_straddle_pair,
+)
 
 
 class BoxSpringExecutorService:
@@ -258,7 +262,9 @@ class BoxSpringExecutorService:
 
                 if order_id:
                     # R27-P2-FP-15修复: int()截断→safe_float_to_int()
-                    pos_id = f"SIG_POS_{signal.option_instrument_id}_{safe_float_to_int(time.time()*1000)}"
+                    # FIX-R37-UNIQUE-ID: 增加随机熵，避免同毫秒同合约pos_id冲突导致持仓覆盖
+                    from ali2026v3_trading.infra.shared_utils import generate_prefixed_id as _gen_id
+                    pos_id = f"SIG_POS_{signal.option_instrument_id}_{safe_float_to_int(time.time()*1000)}_{_gen_id('', 8)}"
                     position = SpringPosition(
                         position_id=pos_id,
                         signal_id=signal.signal_id,
@@ -343,8 +349,23 @@ class BoxSpringExecutorService:
         if not put_order_id:
             logging.warning("[BoxSpring] STRADDLE: Put order failed for %s, closing Call leg to avoid single-leg risk",
                             put_instrument)
+            # FIX-R37-UNIQUE-CLOSE(A7): straddle abort close 必须设置 PositionService 持仓 _closing，
+            # 否则止盈止损检查时 _closing=False 会重复触发平仓
             try:
-                osvc.send_order(
+                from ali2026v3_trading.position.position_service import get_position_service
+                _pos_svc = get_position_service()
+                if _pos_svc:
+                    with _pos_svc._get_instrument_lock(call_instrument):
+                        for _rec in _pos_svc.positions.get(call_instrument, {}).values():
+                            if not getattr(_rec, '_closing', False):
+                                _rec._closing = True
+                                _rec.closing_order_id = f"PENDING_SPRING_ABORT_{_rec.position_id}"
+                                _rec.close_method = 'spring_straddle_abort'
+                                _rec.close_reason = 'STRADDLE_ABORT_CLOSE'
+            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                pass
+            try:
+                _spring_close_result = osvc.send_order(
                     instrument_id=call_instrument,
                     volume=signal.lots,
                     price=call_premium,
@@ -352,7 +373,19 @@ class BoxSpringExecutorService:
                     action='CLOSE',
                     open_reason=self.OPEN_REASON,
                     signal_id=getattr(signal, 'signal_id', ''),
+                    ref_price=call_premium,
                 )
+                if _spring_close_result and getattr(_spring_close_result, 'ok', False):
+                    _spring_actual_oid = getattr(_spring_close_result, 'order_id', '')
+                    if _spring_actual_oid:
+                        from ali2026v3_trading.position.position_service import get_position_service
+                        _pos_svc = get_position_service()
+                        if _pos_svc:
+                            with _pos_svc._get_instrument_lock(call_instrument):
+                                for _rec in _pos_svc.positions.get(call_instrument, {}).values():
+                                    if getattr(_rec, 'closing_order_id', '').startswith('PENDING_SPRING_ABORT_'):
+                                        _rec.closing_order_id = _spring_actual_oid
+                                        break
             except (ImportError, AttributeError, RuntimeError) as e:
                 logging.error("[BoxSpring] STRADDLE: failed to close Call leg after Put failure: %s", e)
             return None
@@ -360,7 +393,9 @@ class BoxSpringExecutorService:
         total_entry_premium = call_premium + put_premium
 
         # R27-P2-FP-16修复: int()截断→safe_float_to_int()
-        pos_id = f"SIG_POS_STRADDLE_{signal.instrument_id}_{safe_float_to_int(time.time()*1000)}"
+        # FIX-R37-UNIQUE-ID: 增加随机熵，避免同毫秒同合约pos_id冲突导致持仓覆盖
+        from ali2026v3_trading.infra.shared_utils import generate_prefixed_id as _gen_id
+        pos_id = f"SIG_POS_STRADDLE_{signal.instrument_id}_{safe_float_to_int(time.time()*1000)}_{_gen_id('', 8)}"
         position = SpringPosition(
             position_id=pos_id,
             signal_id=signal.signal_id,
@@ -393,6 +428,8 @@ class BoxSpringExecutorService:
         )
 
         return call_order_id
+
+    _find_straddle_pair = _find_straddle_pair
 
     # ========================================================================
     # 平仓纪律：弹簧松开即走 / 接受归零
@@ -491,15 +528,59 @@ class BoxSpringExecutorService:
                 }
                 close_direction = _CLOSE_DIRECTION_MAP.get(pos.direction, 'SELL')
                 close_lots = pos.lots if hasattr(pos, 'lots') and pos.lots > 0 else 1
+                # FIX-R37-UNIQUE-CLOSE(A5): _execute_close 必须设置 PositionService 持仓 _closing 标志，
+                # 否则止盈止损/时间止损检查时 _closing=False 会重复触发平仓，导致双重平仓。
+                # box_spring 有自己的 _positions(SpringPosition)，但 PositionService.positions
+                # 也可能有对应持仓(通过 instrument_id 关联)，必须同步设置 _closing。
+                # FIX-OPEN-UNIQUE(P1/C1): 策略层并行持仓追踪与 PositionService.positions 不同步，
+                # 且 pos_id 格式不一致(SIG_POS_ vs instrument_group_)。
+                # 通过 signal_id 精确匹配 PositionService 持仓，signal_id 是贯通两层的唯一关联键。
+                _pos_svc = None
+                try:
+                    from ali2026v3_trading.position.position_service import get_position_service
+                    _pos_svc = get_position_service()
+                    _spring_sig_id = getattr(pos, 'signal_id', '')
+                    if _pos_svc:
+                        with _pos_svc._get_instrument_lock(pos.option_instrument_id):
+                            _matched = False
+                            for _rec in _pos_svc.positions.get(pos.option_instrument_id, {}).values():
+                                if not getattr(_rec, '_closing', False):
+                                    # P1/C1: 优先通过 signal_id 精确匹配
+                                    if _spring_sig_id and getattr(_rec, 'signal_id', '') == _spring_sig_id:
+                                        _matched = True
+                                    # 无 signal_id 时回退到 instrument_id 匹配
+                                    elif not _spring_sig_id:
+                                        _matched = True
+                                    if _matched:
+                                        _rec._closing = True
+                                        _rec.closing_order_id = f"PENDING_SPRING_{_rec.position_id}"
+                                        _rec.close_method = f'spring_{reason.lower()}'
+                                        _rec.close_reason = f'SPRING_{reason}'
+                                        break
+                except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _a5_err:
+                    logging.debug("[R37-UNIQUE-CLOSE] A5设置_closing失败: %s", _a5_err)
                 osvc.send_order(
                     instrument_id=pos.option_instrument_id,
                     volume=close_lots,
                     price=pos.current_premium,
                     direction=close_direction,
                     action='CLOSE',
-                    signal_id=getattr(pos, 'signal_id', ''),  # R24-P0-TR-01修复: signal_id链路贯通
+                    signal_id=getattr(pos, 'signal_id', ''),
+                    ref_price=pos.current_premium,
                 )
                 if pos.direction == 'BUY_STRADDLE' and pos.paired_instrument_id:
+                    # FIX-R37-UNIQUE-CLOSE(A5): straddle 配对腿也设置 _closing
+                    if _pos_svc:
+                        try:
+                            with _pos_svc._get_instrument_lock(pos.paired_instrument_id):
+                                for _rec in _pos_svc.positions.get(pos.paired_instrument_id, {}).values():
+                                    if not getattr(_rec, '_closing', False):
+                                        _rec._closing = True
+                                        _rec.closing_order_id = f"PENDING_SPRING_{_rec.position_id}"
+                                        _rec.close_method = f'spring_{reason.lower()}_paired'
+                                        _rec.close_reason = f'SPRING_{reason}'
+                        except (ValueError, KeyError, TypeError, AttributeError):
+                            pass
                     paired_close_dir = _CLOSE_DIRECTION_MAP.get(pos.direction, 'SELL')
                     osvc.send_order(
                         instrument_id=pos.paired_instrument_id,
@@ -507,7 +588,8 @@ class BoxSpringExecutorService:
                         price=pos.paired_current_premium,
                         direction=paired_close_dir,
                         action='CLOSE',
-                        signal_id=getattr(pos, 'signal_id', ''),  # R24-P0-TR-01修复: signal_id链路贯通
+                        signal_id=getattr(pos, 'signal_id', ''),
+                        ref_price=pos.paired_current_premium,
                     )
                 osvc.persist_close_event(
                     order_id=pos.position_id,
@@ -570,138 +652,8 @@ class BoxSpringExecutorService:
             'peak_premium': pos.peak_premium,
         }
 
-    def _compute_hedge_ratio(self, instrument_id: str = '') -> float:
-        """计算delta中性对冲比率
-
-        使用greeks_calculator获取当前持仓的net_delta，
-        计算需要多少期货手数来对冲至delta中性。
-
-        Returns:
-            float: 对冲比率（需要买入/卖出的期货手数，正=买入，负=卖出）
-        """
-        try:
-            from ali2026v3_trading.position.position_service import (
-                aggregate_greeks_exposure,
-                get_position_service,
-            )
-            pos_svc = get_position_service()
-            if pos_svc is None:
-                return 0.0
-            exposure = aggregate_greeks_exposure(pos_svc.positions)
-            net_delta = exposure.net_delta
-            if abs(net_delta) < 1e-6:
-                return 0.0
-            hedge_lots = -net_delta
-            logging.info(
-                "[BoxSpring] R13-P0-BIZ-06: 对冲比率计算 net_delta=%.4f hedge_lots=%.2f",
-                net_delta, hedge_lots,
-            )
-            return hedge_lots
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
-            logging.debug("[BoxSpring] _compute_hedge_ratio failed: %s", e)
-            return 0.0
-
-    def _check_cross_strategy_risk(self, signal: SpringSignal) -> bool:
-        try:
-            from ali2026v3_trading.position.position_service import (
-                aggregate_greeks_exposure,
-                get_cross_strategy_risk_guard,
-                get_position_service,
-            )
-            guard = get_cross_strategy_risk_guard()
-            pos_svc = get_position_service()
-            if pos_svc is None:
-                logging.warning("[BoxSpring._check_cross_strategy_risk] PositionService unavailable, fail-safe阻断")
-                return False
-            exposure = aggregate_greeks_exposure(pos_svc.positions)
-            level, reason, detail = guard.check(exposure)
-            if level in (guard.BLOCK, guard.CIRCUIT_BREAK):
-                return False
-            return True
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
-            import logging
-            logging.warning("[BoxSpring._check_cross_strategy_risk] Error: %s, fail-safe阻断", e)
-            return False
-
-    def _record_spring_trade(self, signal: SpringSignal):
-        try:
-            from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
-            eco = get_strategy_ecosystem()
-            _spring_pnl = getattr(signal, 'pnl', 0.0) if hasattr(signal, 'pnl') else 0.0
-            eco.record_spring_trade(signal.direction, pnl=_spring_pnl)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
-            logging.warning("[BoxSpring] _record_spring_trade failed: %s", e)
-
-    def _find_straddle_pair(self, signal: SpringSignal) -> Tuple[str, float, str]:
-        try:
-            from ali2026v3_trading.data.t_type_service import get_t_type_service
-            t_type = get_t_type_service()
-            try:
-                if not t_type or not t_type._width_cache:
-                    return '', 0.0, ''
-                cache = t_type._width_cache
-            except AttributeError as e:
-                logging.warning(
-                    "[BoxSpring] _find_straddle_pair: failed to access t_type._width_cache "
-                    "(internal API may have changed): %s", e
-                )
-                return '', 0.0, ''
-
-            strike = signal.strike_price
-
-            signal_opt_type = ''
-            try:
-                with cache._lock:
-                    for iid, info in cache._option_info.items():
-                        if info.get('instrument_id') == signal.option_instrument_id:
-                            signal_opt_type = info.get('option_type', '')
-                            break
-            except AttributeError as e:
-                logging.warning(
-                    "[BoxSpring] _find_straddle_pair: failed to access cache._lock or cache._option_info "
-                    "(internal API may have changed): %s", e
-                )
-                return '', 0.0, ''
-
-            if not signal_opt_type:
-                return '', 0.0, ''
-
-            target_type = 'PUT' if signal_opt_type == 'CALL' else 'CALL'
-
-            try:
-                with cache._lock:
-                    for iid, info in cache._option_info.items():
-                        if info.get('underlying_future_id') != signal.instrument_id:
-                            continue
-                        if info.get('strike_price') != strike:
-                            continue
-                        if info.get('option_type') != target_type:
-                            continue
-                        inst_id = info.get('instrument_id', '')
-                        if not inst_id or inst_id == signal.option_instrument_id:
-                            continue
-
-                        premium = 0.0
-                        try:
-                            from ali2026v3_trading.data.data_service import get_data_service
-                            ds = get_data_service()
-                            if ds and ds.realtime_cache:
-                                premium = ds.realtime_cache.get_latest_price(inst_id) or 0.0
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _ds_err:
-                            logging.debug("[R22-EP-04] data_service获取premium失败: %s", _ds_err)
-                        if premium <= 0:
-                            premium = signal.premium_price
-
-                        return inst_id, premium, signal_opt_type
-            except AttributeError as e:
-                logging.warning(
-                    "[BoxSpring] _find_straddle_pair: failed to access cache._lock or cache._option_info "
-                    "(internal API may have changed): %s", e
-                )
-                return '', 0.0, ''
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.warning("[BoxSpring] _find_straddle_pair error: %s", e)
-
-        return '', 0.0, ''
+    _compute_hedge_ratio = _compute_hedge_ratio
+    _check_cross_strategy_risk = _check_cross_strategy_risk
+    _record_spring_trade = _record_spring_trade
 
 BoxSpringExecutorMixin = BoxSpringExecutorService

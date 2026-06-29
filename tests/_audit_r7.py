@@ -62,9 +62,9 @@ except AssertionError as e:
 try:
     assert os.path.exists('infra/_deprecated_reexports.py'), '_deprecated_reexports.py不存在'
     from ali2026v3_trading.infra.commission_utils import compute_commission
-    from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
-    from ali2026v3_trading.infra.risk_rules import resolve_and_check_daily_drawdown
-    print('R7-5 PASS: infra/微文件已合并为_deprecated_reexports.py, shim仍可用')
+    from ali2026v3_trading.infra.registry_service import SingletonRegistry
+    from ali2026v3_trading.infra.security_service import resolve_and_check_daily_drawdown
+    print('R7-5 PASS: infra/微文件已合并为期deprecated_reexports.py, shim仍可用')
     PASS += 1
 except (AssertionError, ImportError) as e:
     print(f'R7-5 FAIL: {e}')

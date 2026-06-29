@@ -66,7 +66,7 @@ class TestR4_2_RiskDashboardServiceIntegrated:
         assert 'def get_dashboard_service' in src, "R4-2失败: RiskService缺少get_dashboard_service()方法"
 
     def test_in_risk_init_all(self):
-        """RiskDashboardService在risk/__init__.py的__all__中"""
+        """RiskDashboardService在risk/__init__.py的指。all__中"""
         src = open(os.path.join(_PROJECT_ROOT, 'risk', '__init__.py'), encoding='utf-8').read()
         assert 'RiskDashboardService' in src, "R4-2失败: RiskDashboardService不在risk/__init__.py"
 
@@ -83,7 +83,7 @@ class TestR4_4_ShadowModulePrivatePrefix:
             assert 'DEPRECATED' in open(shim, encoding='utf-8').read()[:200], "R4-4失败: _shadow_strategy_core.py shim未标记DEPRECATED"
 
     def test_signal_has_underscore_prefix(self):
-        """shadow_strategy_signal.py已重命名为_shadow_strategy_signal.py"""
+        """shadow_strategy_signal.py已重命名为期shadow_strategy_signal.py"""
         assert os.path.exists(os.path.join(_PROJECT_ROOT, 'strategy', '_shadow_strategy_signal.py')), "R4-4失败: _shadow_strategy_signal.py不存在"
 
     def test_pnl_merged_file_exists(self):
@@ -98,11 +98,11 @@ class TestR4_4_ShadowModulePrivatePrefix:
         """facade中的import路径正确（新合并文件无下划线前缀，signal保持下划线前缀）"""
         src = open(os.path.join(_PROJECT_ROOT, 'strategy', 'shadow_strategy_facade.py'), encoding='utf-8').read()
         assert 'from ali2026v3_trading.strategy.shadow_strategy_core import' in src, "R4-4失败: facade未导入shadow_strategy_core(新合并文件)"
-        assert 'from ali2026v3_trading.strategy._shadow_strategy_signal import' in src, "R4-4失败: facade未更新_signal导入路径"
+        assert 'from ali2026v3_trading.strategy._shadow_strategy_signal import' in src, "R4-4失败: facade未更新新signal导入路径"
         assert 'from ali2026v3_trading.strategy.shadow_strategy_pnl import' in src, "R4-4失败: facade未导入shadow_strategy_pnl(新合并文件)"
 
     def test_facade_still_public(self):
-        """facade自身仍为公共模块（无_前缀）"""
+        """facade自身仍为公共模块（无界前缀）"""
         assert os.path.exists(os.path.join(_PROJECT_ROOT, 'strategy', 'shadow_strategy_facade.py')), "R4-4失败: shadow_strategy_facade.py不应重命名"
 
 

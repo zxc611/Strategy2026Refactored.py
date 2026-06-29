@@ -1,4 +1,4 @@
-﻿# [M3-15] 统计有效性扩展
+# [M3-15] 统计有效性扩展
 # MODULE_ID: M3-624
 """Statistical Validity Extensions — R19-P2 统计有效性7项修复
 

@@ -69,5 +69,5 @@ def test_config_logging_no_local_hashlib_import():
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped == 'import hashlib':
-            # 允许模块级import（但不应有）
+            # 允许模块级import（但不应有）'
             assert False, f"config_logging.py第{i+1}行仍有'import hashlib'"

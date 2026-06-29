@@ -10,8 +10,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.serialization_utils import json_dumps
-from ali2026v3_trading.infra.shared_utils import safe_int
+from ali2026v3_trading.infra.serialization_utils import json_dumps
+from ali2026v3_trading.infra.shared_utils import safe_int, compute_content_hash
 
 _param_version_counter: int = 0
 _param_version_hash: str = ""

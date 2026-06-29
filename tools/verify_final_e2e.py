@@ -50,7 +50,7 @@ DELETED_STUBS = [
     'lifecycle_parallel_ops', 'cross_system_execution', 'cross_system_utils',
     'security_config', 'security_hardening', 'event_bus_dataflow',
     'event_bus_events', '_storage_catalog_mixin', '_storage_checks_mixin',
-    '_storage_maintenance', 'health_monitor', 'health_jsonl_logger',
+    '_storage_maintenance', 'health_jsonl_logger',
     'health_check_service', 'health_check_aggregator', 'ui_mixin_creation',
     'config_service_core', 'config_service_query', 'config_json_loader',
     'config_yaml_loader', 'config_option_loader', 'state_param_manager',
@@ -83,7 +83,7 @@ check("已删除存根文件无残留引用", stub_ref_count == 0,
 # 1.2 合并后模块可导入
 MERGED_MODULES = [
     'ali2026v3_trading.infra.shared_utils',
-    'ali2026v3_trading.infra.health',
+    'ali2026v3_trading.infra.health_monitor',
     'ali2026v3_trading.infra.event_bus',
     'ali2026v3_trading.infra.resilience',
     'ali2026v3_trading.config.config_service',

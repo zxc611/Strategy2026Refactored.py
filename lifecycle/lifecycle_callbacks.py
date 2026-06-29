@@ -38,6 +38,9 @@ class LifecycleCallbacks:
                 wc = getattr(p.t_type_service, '_width_cache', None)
                 if wc:
                     spm.bind_width_cache(wc)
+                    logging.info("[on_start] bind_width_cache 成功, wc type=%s", type(wc).__name__)
+                else:
+                    logging.error("[on_start] bind_width_cache 失败! _width_cache=None, 五态分类将无法更新")
             p._state_param_manager = spm
             logging.info("[StrategyCoreService.on_start] StateParamManager initialized, state=%s", spm.get_current_state())
             try:
@@ -45,9 +48,9 @@ class LifecycleCallbacks:
                 eco = get_strategy_ecosystem()
                 spm.register_on_state_switch(eco.on_state_switched)
                 logging.info("[StrategyCoreService.on_start] SPM-Ecosystem联动已绑定")
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as eco_e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as eco_e:
                 logging.warning("[StrategyCoreService.on_start] Ecosystem联动绑定失败: %s", eco_e)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as spm_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as spm_e:
             logging.warning("[StrategyCoreService.on_start] StateParamManager init failed: %s", spm_e)
         try:
             from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
@@ -56,8 +59,24 @@ class LifecycleCallbacks:
             _sid = str(getattr(p, 'strategy_id', '') or 'global')
             p._safety_meta_layer = get_safety_meta_layer(params=ps, strategy_id=_sid)
             logging.info("[StrategyCoreService.on_start] SafetyMetaLayer initialized")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as safety_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as safety_e:
             logging.warning("[StrategyCoreService.on_start] SafetyMetaLayer init failed: %s", safety_e)
+        try:
+            _bl = getattr(p, '_business_layer', None)
+            _ps = getattr(p, '_position_service', None)
+            if _bl is None:
+                logging.info("[StrategyCoreService.on_start] SnapshotCollector注入跳过: _business_layer=None")
+            elif _ps is None:
+                logging.info("[StrategyCoreService.on_start] SnapshotCollector注入跳过: _position_service=None")
+            else:
+                _sc = _bl.get_snapshot_collector()
+                if _sc is None:
+                    logging.info("[StrategyCoreService.on_start] SnapshotCollector注入跳过: snapshot_collector=None")
+                else:
+                    _ps.set_snapshot_collector(_sc)
+                    logging.info("[StrategyCoreService.on_start] SnapshotCollector注入PositionService完成")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _sc_e:
+            logging.debug("[StrategyCoreService.on_start] SnapshotCollector注入跳过: %s", _sc_e)
         try:
             params = getattr(p, 'params', None) or {}
             if params.get('debug_mode', False):
@@ -74,13 +93,13 @@ class LifecycleCallbacks:
                     _stress_sigma = float(getattr(p, '_params', {}).get("stress_test_anomaly_threshold", 1.5)) if hasattr(p, '_params') and p._params else 1.5
                     p._safety_meta_layer.ANOMALY_THRESHOLD_MULTIPLIER = _stress_sigma
                     logging.info("[P2-R8-06] stress_test_mode: 回撤阈值2%%/断路器%.1f sigma", _stress_sigma)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as mode_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as mode_e:
             logging.debug("[P2-R8-06] debug/stress mode处理异常: %s", mode_e)
         try:
             from ali2026v3_trading.data.data_service import get_data_service
             ds = get_data_service()
             logging.info(f"[StrategyCoreService.on_start] DataService预热完成: {ds is not None}")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as ds_e:
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as ds_e:
             logging.warning(f"[StrategyCoreService.on_start] DataService预热失败: {ds_e}")
         with p._lock:
             if p._state not in (StrategyState.INITIALIZING, StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.DEGRADED):
@@ -95,6 +114,13 @@ class LifecycleCallbacks:
             _lm = getattr(p, '_lifecycle_mgr', None)
             if _lm is not None:
                 _lm.is_running = True
+            _ss = getattr(p, '_state_store', None)
+            if _ss is not None:
+                try:
+                    _ss.set('_is_running', True)
+                    _ss.set('_is_paused', False)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
             p.transition_to(StrategyState.RUNNING)
             logging.info(f"[StrategyCoreService.on_start] Started: {p.strategy_id}")
             params = None
@@ -106,6 +132,12 @@ class LifecycleCallbacks:
             selected_futures_list = p._init_instruments_result['futures_list']
             selected_options_dict = p._init_instruments_result['options_dict']
             p._subscribed_instruments = p._init_instruments_result['subscribed_instruments']
+            _ss = getattr(p, '_state_store', None)
+            if _ss is not None:
+                try:
+                    _ss.set('_subscribed_instruments', p._subscribed_instruments)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
             logging.info(
                 f"[Subscribe] 使用on_init结果: "
                 f"{len(selected_futures_list)} 期货, "
@@ -114,83 +146,97 @@ class LifecycleCallbacks:
             )
             if selected_futures_list or selected_options_dict:
                 try:
-                    from ali2026v3_trading.infra.diagnosis import DiagnosisProbeManager
+                    from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
                     DiagnosisProbeManager.start_contract_watch(p._subscribed_instruments)
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as contract_watch_e:
                     logging.warning("[ContractWatch] 启动失败: %s", contract_watch_e)
                 p._e2e_counters['configured_instruments'] = len(p._subscribed_instruments)
                 try:
-                    _ = p.storage
-                    logging.info(f"[Subscribe] storage 已就绪: {p.storage is not None}")
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as storage_e:
+                    _storage = getattr(p, 'storage', None)
+                    logging.info(f"[Subscribe] storage 已就绪: {_storage is not None}")
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as storage_e:
                     logging.error(f"[Subscribe] storage 初始化失败: {storage_e}")
-                if p.storage and hasattr(p.storage, 'subscription_manager'):
-                    db_count = p.storage.subscription_manager.subscribe_all_instruments(
+                    _storage = None
+                _sm = None
+                if _storage is not None:
+                    _sm = getattr(_storage, 'subscription_manager', None)
+                    if callable(_sm):
+                        _sm = _sm()
+                if _sm is None:
+                    try:
+                        from ali2026v3_trading.data.data_service import get_data_service
+                        _ds = get_data_service()
+                        if _ds is not None:
+                            _sm = getattr(_ds, 'subscription_manager', None)
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as sm_fb_err:
+                        logging.warning("[Subscribe] DataService fallback for subscription_manager failed: %s", sm_fb_err)
+                if _sm is not None and hasattr(_sm, 'subscribe_all_instruments'):
+                    db_count = _sm.subscribe_all_instruments(
                         selected_futures_list, selected_options_dict,
                     )
                     logging.info(f"[Subscribe] 数据库登记完成：{db_count} 个合约")
                     p._e2e_counters['preregistered_instruments'] = db_count
-                    if callable(p.subscribe):
-                        p._start_platform_subscribe_async(p._subscribed_instruments)
-                        logging.info("[Subscribe] 平台订阅已在后台启动")
-                        p._e2e_counters['platform_subscribe_called'] = len(p._subscribed_instruments)
-                    else:
-                        logging.warning("[Subscribe] self.subscribe 不可调用，平台API未就绪，安排延迟重试")
-                        p.transition_to(StrategyState.DEGRADED)
-                        import weakref as _weakref
-                        _self_ref = _weakref.ref(p)
-                        def _retry_platform_subscribe():
-                            for attempt in range(1, 4):
-                                time.sleep(5.0 * attempt)
-                                _self = _self_ref()
-                                if _self is None:
-                                    logging.debug("[Subscribe] 策略已销毁(weakref)，终止重试")
-                                    return
-                                if getattr(_self, '_destroyed', False):
-                                    logging.debug("[Subscribe] 策略已销毁，终止重试")
-                                    return
-                                if not getattr(_self, '_api_ready', False):
-                                    _host = getattr(_self, '_runtime_strategy_host', None)
-                                    _bind_fn = getattr(_self, 'bind_platform_apis', None)
-                                    if _host and callable(_bind_fn):
-                                        try:
-                                            _bind_fn(_host)
-                                            logging.info("[Subscribe] 延迟重试bind_platform_apis成功（第%d次）", attempt)
-                                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as bind_e:
-                                            logging.warning("[Subscribe] 延迟重试bind_platform_apis失败: %s", bind_e)
-                                _subscribe_fn = getattr(_self, 'subscribe', None)
-                                if callable(_subscribe_fn):
-                                    _instruments = getattr(_self, '_subscribed_instruments', [])
-                                    _start_fn = getattr(_self, '_start_platform_subscribe_async', None)
-                                    if callable(_start_fn) and _instruments:
-                                        _start_fn(_instruments)
-                                    _e2e = getattr(_self, '_e2e_counters', None)
-                                    if _e2e is not None and _instruments:
-                                        _e2e['platform_subscribe_called'] = len(_instruments)
-                                    logging.info("[Subscribe] 延迟重试平台订阅成功（第%d次）", attempt)
-                                    _cur_state = getattr(_self, '_state', None)
-                                    if _state_is(_cur_state, StrategyState.DEGRADED):
-                                        _transition_fn = getattr(_self, 'transition_to', None)
-                                        if callable(_transition_fn):
-                                            _transition_fn(StrategyState.RUNNING)
-                                        _is_running_attr = getattr(_self, '_is_running', None)
-                                        if _is_running_attr is not None or hasattr(_self, '_is_running'):
-                                            _self._is_running = True
-                                            logging.info("[R23-SM-01-FIX] DEGRADED->RUNNING: _is_running同步为True")
-                                    return
-                                logging.warning("[Subscribe] 第%d次重试失败，API仍未就绪", attempt)
-                            logging.error("[Subscribe] 平台API经3次重试始终未就绪，策略保持DEGRADED状态运行")
-                        threading.Thread(
-                            target=_retry_platform_subscribe,
-                            name=f"subscribe-retry[strategy:{p.strategy_id}]",
-                            daemon=True
-                        ).start()
-                    logging.info(f"[SyncTicks] 跳过初始全量同步，依赖定时任务增量同步")
+                if callable(p.subscribe):
+                    p._start_platform_subscribe_async(p._subscribed_instruments)
+                    logging.info("[Subscribe] 平台订阅已在后台启动")
+                    p._e2e_counters['platform_subscribe_called'] = len(p._subscribed_instruments)
                 else:
+                    logging.warning("[Subscribe] self.subscribe 不可调用，平台API未就绪，安排延迟重试")
+                    p.transition_to(StrategyState.DEGRADED)
+                    import weakref as _weakref
+                    _self_ref = _weakref.ref(p)
+                    def _retry_platform_subscribe():
+                        for attempt in range(1, 4):
+                            time.sleep(5.0 * attempt)
+                            _self = _self_ref()
+                            if _self is None:
+                                logging.debug("[Subscribe] 策略已销毁(weakref)，终止重试")
+                                return
+                            if getattr(_self, '_destroyed', False):
+                                logging.debug("[Subscribe] 策略已销毁，终止重试")
+                                return
+                            if not getattr(_self, '_api_ready', False):
+                                _host = getattr(_self, '_runtime_strategy_host', None)
+                                _bind_fn = getattr(_self, 'bind_platform_apis', None)
+                                if _host and callable(_bind_fn):
+                                    try:
+                                        _bind_fn(_host)
+                                        logging.info("[Subscribe] 延迟重试bind_platform_apis成功（第%d次）", attempt)
+                                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as bind_e:
+                                        logging.warning("[Subscribe] 延迟重试bind_platform_apis失败: %s", bind_e)
+                            _subscribe_fn = getattr(_self, 'subscribe', None)
+                            if callable(_subscribe_fn):
+                                _instruments = getattr(_self, '_subscribed_instruments', [])
+                                _start_fn = getattr(_self, '_start_platform_subscribe_async', None)
+                                if callable(_start_fn) and _instruments:
+                                    _start_fn(_instruments)
+                                _e2e = getattr(_self, '_e2e_counters', None)
+                                if _e2e is not None and _instruments:
+                                    _e2e['platform_subscribe_called'] = len(_instruments)
+                                logging.info("[Subscribe] 延迟重试平台订阅成功（第%d次）", attempt)
+                                _cur_state = getattr(_self, '_state', None)
+                                if _state_is(_cur_state, StrategyState.DEGRADED):
+                                    _transition_fn = getattr(_self, 'transition_to', None)
+                                    if callable(_transition_fn):
+                                        _transition_fn(StrategyState.RUNNING)
+                                    _is_running_attr = getattr(_self, '_is_running', None)
+                                    if _is_running_attr is not None or hasattr(_self, '_is_running'):
+                                        _self._is_running = True
+                                        logging.info("[R23-SM-01-FIX] DEGRADED->RUNNING: _is_running同步为True")
+                                return
+                            logging.warning("[Subscribe] 第%d次重试失败，API仍未就绪", attempt)
+                        logging.error("[Subscribe] 平台API经3次重试始终未就绪，策略保持DEGRADED状态运行")
+                    threading.Thread(
+                        target=_retry_platform_subscribe,
+                        name=f"subscribe-retry[strategy:{p.strategy_id}]",
+                        daemon=True
+                    ).start()
+                logging.info(f"[SyncTicks] 跳过初始全量同步，依赖定时任务增量同步")
+                if _sm is None:
                     logging.warning("[Subscribe] 无 subscription_manager")
             else:
                 logging.warning("[Subscribe] 无合约可订阅")
-            auto_load = bool(get_param_value(params, 'auto_load_history', False))
+            auto_load = bool(get_param_value(params, 'auto_load_history', True))
             if auto_load:
                 logging.info("[StrategyCoreService.on_start] 历史K线加载启动（异步，不阻塞）...")
                 p._start_historical_kline_load_async()
@@ -220,6 +266,13 @@ class LifecycleCallbacks:
             if _lm is not None:
                 _lm.is_running = False
                 _lm.is_paused = True
+            _ss = getattr(p, '_state_store', None)
+            if _ss is not None:
+                try:
+                    _ss.set('_is_running', False)
+                    _ss.set('_is_paused', True)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
         jobs_zero = True
         try:
             if hasattr(p._scheduler_manager, 'pause_scheduler'):
@@ -245,7 +298,7 @@ class LifecycleCallbacks:
             )
             jobs_zero = False
         try:
-            from ali2026v3_trading.infra.diagnosis import DiagnosisProbeManager, reset_diagnosis_grace_period
+            from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager, reset_diagnosis_grace_period
             DiagnosisProbeManager.stop_contract_watch(reason='strategy_stop')
             reset_diagnosis_grace_period()
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as contract_watch_e:
@@ -350,6 +403,12 @@ class LifecycleCallbacks:
             if _lm is not None:
                 _lm.is_paused = True
             p.transition_to(StrategyState.PAUSED)
+            _ss = getattr(p, '_state_store', None)
+            if _ss is not None:
+                try:
+                    _ss.set('_is_paused', True)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
             logging.info(f"[StrategyCoreService] Paused: {p.strategy_id}")
             p._publish_event('StrategyPaused', {'strategy_id': p.strategy_id})
         tick_handler = getattr(p, '_tick_handler', None)
@@ -383,6 +442,13 @@ class LifecycleCallbacks:
                 _lm.is_paused = False
                 _lm.is_running = True
             p.transition_to(StrategyState.RUNNING)
+            _ss = getattr(p, '_state_store', None)
+            if _ss is not None:
+                try:
+                    _ss.set('_is_running', True)
+                    _ss.set('_is_paused', False)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
             logging.info(f"[StrategyCoreService] Resumed: {p.strategy_id} [R23-SM-01-FIX] _is_running同步为True")
             p._publish_event('StrategyResumed', {'strategy_id': p.strategy_id})
             return True
@@ -445,7 +511,7 @@ class LifecycleCallbacks:
         p = self.p
         try:
             if not hasattr(p, '_storage') or not p._storage or not hasattr(p._storage, 'save'):
-                logging.error("[save_state] Storage not available or missing save method")
+                logging.debug("[save_state] Storage not available or missing save method")
                 return False
             state_data = {
                 'strategy_id': p.strategy_id,
@@ -488,7 +554,14 @@ class LifecycleCallbacks:
         import threading as _threading
         _sid = getattr(p, 'strategy_id', None)
         if _sid is None:
-            logging.warning("[P1-R11-17] strategy_id未提供，使用'unknown'作为默认值。")
+            try:
+                from ali2026v3_trading.config.config_service import get_cached_params
+                _cp = get_cached_params() or {}
+                _rs = _cp.get('strategy')
+                _sid = getattr(_rs, 'strategy_id', None) if _rs is not None else None
+            except Exception:
+                pass
+        if _sid is None:
             _sid = 'unknown'
         strategy_id = _sid
         run_id = getattr(p, '_lifecycle_run_id', 'N/A')
@@ -525,21 +598,28 @@ class LifecycleCallbacks:
                     f"[run_id={run_id}][source_type=resource-ownership] Thread alive: {name} (expected: continues after strategy stop)"
                 )
         if strategy_threads:
+            _leaked_log_ts = getattr(self, '_leaked_thread_log_ts', {})
+            _now = __import__('time').time()
             for name in strategy_threads:
-                logging.warning(
-                    f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                    f"[run_id={run_id}][source_type=resource-ownership] LEAKED thread: {name} (expected: should be gone after strategy stop)"
-                )
+                _last_ts = _leaked_log_ts.get(name, 0.0)
+                if _now - _last_ts > 300.0:
+                    _leaked_log_ts[name] = _now
+                    logging.debug(
+                        f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
+                        f"[run_id={run_id}][source_type=resource-ownership] LEAKED thread: {name} (expected: should be gone after strategy stop)"
+                    )
                 for t in _threading.enumerate():
                     if t.name == name and t.is_alive():
                         if hasattr(t, '_stop_requested'):
                             t._stop_requested = True
                         if not t.daemon:
                             t.daemon = True
-                        logging.warning(
-                            "[R33-P2-3] 已为僵尸线程 %s 设置中断标记(_stop_requested=True)和daemon=True", name,
-                        )
+                        if _now - _last_ts > 300.0:
+                            logging.debug(
+                                "[R33-P2-3] 已为僵尸线程 %s 设置中断标记(_stop_requested=True)和daemon=True", name,
+                            )
                         break
+            self._leaked_thread_log_ts = _leaked_log_ts
         else:
             if phase == 'stop':
                 logging.info(
@@ -552,7 +632,7 @@ class LifecycleCallbacks:
                 remaining_jobs = scheduler_mgr.get_jobs_by_owner(strategy_id)
                 if remaining_jobs:
                     job_ids = [j['job_id'] for j in remaining_jobs]
-                    logging.warning(
+                    logging.debug(
                         f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
                         f"[run_id={run_id}][source_type=strategy-job] LEAKED scheduler jobs: {job_ids}"
                     )

@@ -1,4 +1,4 @@
-﻿# [M3-14] PnL归因
+# [M3-14] PnL归因
 # MODULE_ID: M3-623
 """PnL Attribution — R19-ATT-P1 fix: Four-dimensional PnL decomposition.
 

@@ -48,10 +48,9 @@ def test_backtest_state_uses_safe_divide():
 
 
 def test_safe_divide_semantic_equivalence_epsilon():
-    """验证safe_divide(min_denominator=1e-6)与原epsilon逻辑语义等价（正常情况）
-
+    """验证safe_divide(min_denominator=1e-6)与原epsilon逻辑语义等价（正常情况）'
     行为变更说明：当start_cvd=0时，原逻辑产生极大值(end/1e-6)，
-    safe_divide返回0.0更安全，这是有意的改进。
+    safe_divide返回0.0更安全，这是有意的改进。'
     """
     from ali2026v3_trading.infra.resilience import safe_divide
 
@@ -61,7 +60,7 @@ def test_safe_divide_semantic_equivalence_epsilon():
     new = safe_divide(end - start, abs(start), default=0.0, min_denominator=1e-6)
     assert abs(original - new) < 1e-8, f"正常情况不一致: {original} != {new}"
 
-    # start_cvd=0时，safe_divide返回0（更安全的行为）
+    # start_cvd=0时，safe_divide返回0（更安全的行为）'
     start, end = 0.0, 10.0
     new = safe_divide(end - start, abs(start), default=0.0, min_denominator=1e-6)
     assert new == 0.0, f"start_cvd=0时应返回0: {new}"

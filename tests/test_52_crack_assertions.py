@@ -290,7 +290,7 @@ def test_crack_24_state_jitter_real_bar():
         from ali2026v3_trading.param_pool.validation.validation_deep_orchestrator import validate_state_window_boundary_jitter, _compute_state_switches
         import inspect
         src = inspect.getsource(validate_state_window_boundary_jitter)
-        assert "_compute_state_switches" in src, "未调用_compute_state_switches"
+        assert "_compute_state_switches" in src, "未调用例compute_state_switches"
         # 测试真实Bar数据计算
         df = pd.DataFrame({
             "non_other_ratio": [0.7, 0.7, 0.3, 0.3, 0.7, 0.7],
@@ -450,7 +450,7 @@ def test_crack_46_self_trade_ban():
         from ali2026v3_trading.order.order_base import init_order_service_attrs
         import inspect
         src = inspect.getsource(init_order_service_attrs)
-        assert "_self_trade_ban_minutes" in src, "未定义_self_trade_ban_minutes"
+        assert "_self_trade_ban_minutes" in src, "未定义义self_trade_ban_minutes"
         _record("裂缝46(P1)-自成交禁止", True, "_self_trade_ban_minutes存在")
     except Exception as e:
         _record("裂缝46(P1)-自成交禁止", False, str(e))

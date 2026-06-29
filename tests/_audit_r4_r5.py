@@ -43,7 +43,7 @@ except AssertionError as e:
     print(f'R4-3 FAIL: {e}')
     FAIL += 1
 
-# R4-4: RiskDashboardService决策（已从死代码变为被集成）
+# R4-4: RiskDashboardService决策（已从死代码变为被集成）'
 try:
     with open('risk/risk_service.py', 'r', encoding='utf-8') as f:
         src = f.read()

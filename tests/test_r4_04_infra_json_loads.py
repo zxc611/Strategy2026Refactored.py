@@ -27,14 +27,14 @@ class TestInfraJsonLoads:
     ]
 
     def test_disk_monitor_no_json_load(self):
-        """验证_disk_monitor.py不再有json.load(f)"""
+        """验证验disk_monitor.py不再有json.load(f)"""
         path = os.path.join(_project_root, "infra", "storage_service.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()
         assert 'json.load(' not in source, "_disk_monitor.py不应有json.load()"
 
     def test_disk_monitor_imports_json_loads(self):
-        """验证_disk_monitor.py导入了json_loads"""
+        """验证验disk_monitor.py导入了json_loads"""
         path = os.path.join(_project_root, "infra", "storage_service.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()
@@ -55,14 +55,14 @@ class TestInfraJsonLoads:
         assert 'json_loads' in source, "event_bus.py应导入json_loads"
 
     def test_backup_restore_no_json_load(self):
-        """验证_backup_restore.py不再有json.load(f)"""
+        """验证验backup_restore.py不再有json.load(f)"""
         path = os.path.join(_project_root, "infra", "storage_service.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()
         assert 'json.load(' not in source, "_backup_restore.py不应有json.load()"
 
     def test_backup_restore_imports_json_loads(self):
-        """验证_backup_restore.py导入了json_loads"""
+        """验证验backup_restore.py导入了json_loads"""
         path = os.path.join(_project_root, "infra", "storage_service.py")
         with open(path, 'r', encoding='utf-8') as f:
             source = f.read()

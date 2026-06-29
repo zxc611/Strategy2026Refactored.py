@@ -7,7 +7,7 @@ print('=== R8批次断言验证 (R8-1~R8-3) ===')
 PASS = 0
 FAIL = 0
 
-# R8-1: 评判系统Facade模式引入（Facade已存在，验证可实例化）
+# R8-1: 评判系统Facade模式引入（Facade已存在，验证可实例化）'
 try:
     from ali2026v3_trading.strategy_judgment.strategy_judgment_facade import StrategyJudgmentEngine
     assert hasattr(StrategyJudgmentEngine, 'judge'), 'StrategyJudgmentEngine缺少judge方法'

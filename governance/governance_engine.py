@@ -290,7 +290,7 @@ class E8E9E10EliminationChecker:
         """P1-R8-13修复: E9 Minsky时刻检测对齐手册定义
         手册定义: "低波动仓位在模拟波动率跳升2倍时回撤>20%"
         检测步骤:
-          1. 计算滚动波动率（最近N个窗口）
+          1. 计算滚动波动率（最近N个窗口）'
           2. 检测波动率跳升（当前波动率 > 2 × 滚动均值）
           3. 在跳升窗口中检查回撤是否超过阈值
         """
@@ -432,8 +432,7 @@ class E7UnexplainedReturnChecker:
         pnl_series: list,
         alpha: float = 0.05,
     ) -> Dict[str, Any]:
-        """裂缝30修复：统计显著且相对阈值双重条件。
-
+        """裂缝30修复：统计显著且相对阈值双重条件。'
         E7触发条件: t检验p<alpha 且 mean(|residual|) > threshold_pct% * mean(|pnl|)
         """
         import math
@@ -520,7 +519,7 @@ class GovernanceEngine:
     """治理引擎: 聚合所有checker并执行检查/反馈
 
     R4-J-06修复: 检测器参数可配置化 —
-    通过 config 字典传入各检测器的阈值参数，替代硬编码。
+    通过 config 字典传入各检测器的阈值参数，替代硬编码。'
     """
 
     # P1-R9-25修复: 错误码映射表统一映射
@@ -658,7 +657,7 @@ def get_governance_engine(config: Optional[Dict[str, Any]] = None) -> Governance
         _governance_engine_instance.add_checker(MultiStateSwitchBacktestScenario())
         # AP-03: SingletonRegistry注册
         try:
-            from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+            from ali2026v3_trading.infra.registry_service import SingletonRegistry
             registry = SingletonRegistry.get_registry("governance_engine")
             registry.register_singleton("governance_engine.instance", _governance_engine_instance)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:

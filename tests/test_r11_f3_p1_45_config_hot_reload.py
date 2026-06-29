@@ -43,7 +43,7 @@ def test_config_loader_check_config_hot_reload_is_file_watchdog():
     """P1-45验证: config_loader.check_config_hot_reload是文件watchdog入口"""
     from ali2026v3_trading.config.config_loader import check_config_hot_reload
     assert callable(check_config_hot_reload)
-    # 验证签名：无参数（文件watchdog模式）
+    # 验证签名：无参数（文件watchdog模式）'
     import inspect
     sig = inspect.signature(check_config_hot_reload)
     assert len(sig.parameters) == 0, \

@@ -57,27 +57,27 @@ class TestBackupRestoreReexport:
 
 class TestCrossSystemReexport:
     def test_cross_system_execution_kernel_importable(self):
-        from ali2026v3_trading.infra.cross_system import CrossSystemExecutionKernel
+        from ali2026v3_trading.infra.trading_utils import CrossSystemExecutionKernel
         assert CrossSystemExecutionKernel is not None
 
     def test_thread_safe_counter_importable(self):
-        from ali2026v3_trading.infra.cross_system import ThreadSafeCounter
+        from ali2026v3_trading.infra.trading_utils import ThreadSafeCounter
         assert ThreadSafeCounter is not None
 
     def test_thread_safe_dict_importable(self):
-        from ali2026v3_trading.infra.cross_system import ThreadSafeDict
+        from ali2026v3_trading.infra.trading_utils import ThreadSafeDict
         assert ThreadSafeDict is not None
 
     def test_safe_equity_update_importable(self):
-        from ali2026v3_trading.infra.cross_system import safe_equity_update
+        from ali2026v3_trading.infra.trading_utils import safe_equity_update
         assert callable(safe_equity_update)
 
     def test_get_spawn_context_importable(self):
-        from ali2026v3_trading.infra.cross_system import get_spawn_context
+        from ali2026v3_trading.infra.trading_utils import get_spawn_context
         assert callable(get_spawn_context)
 
     def test_reexport_matches_source(self):
-        from ali2026v3_trading.infra.cross_system import ThreadSafeCounter as shim
+        from ali2026v3_trading.infra.trading_utils import ThreadSafeCounter as shim
         from ali2026v3_trading.infra.trading_utils import ThreadSafeCounter as src
         assert shim is src
 
@@ -148,15 +148,15 @@ class TestPhaseFeatureFlagReexport:
 
 class TestRiskRulesReexport:
     def test_check_daily_drawdown_hard_stop_importable(self):
-        from ali2026v3_trading.infra.risk_rules import check_daily_drawdown_hard_stop
+        from ali2026v3_trading.infra.security_service import check_daily_drawdown_hard_stop
         assert callable(check_daily_drawdown_hard_stop)
 
     def test_resolve_and_check_daily_drawdown_importable(self):
-        from ali2026v3_trading.infra.risk_rules import resolve_and_check_daily_drawdown
+        from ali2026v3_trading.infra.security_service import resolve_and_check_daily_drawdown
         assert callable(resolve_and_check_daily_drawdown)
 
     def test_reexport_matches_source(self):
-        from ali2026v3_trading.infra.risk_rules import check_daily_drawdown_hard_stop as shim
+        from ali2026v3_trading.infra.security_service import check_daily_drawdown_hard_stop as shim
         from ali2026v3_trading.infra.security_service import check_daily_drawdown_hard_stop as src
         assert shim is src
 
@@ -174,38 +174,38 @@ class TestServiceContractsReexport:
 
 class TestTickHftDispatchReexport:
     def test_dispatch_hft_tick_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import dispatch_hft_tick
+        from ali2026v3_trading.strategy.tick_hft import dispatch_hft_tick
         assert callable(dispatch_hft_tick)
 
     def test_execute_pursuit_exit_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import execute_pursuit_exit
+        from ali2026v3_trading.strategy.tick_hft import execute_pursuit_exit
         assert callable(execute_pursuit_exit)
 
     def test_execute_pursuit_entry_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import execute_pursuit_entry
+        from ali2026v3_trading.strategy.tick_hft import execute_pursuit_entry
         assert callable(execute_pursuit_entry)
 
     def test_execute_pursuit_add_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import execute_pursuit_add
+        from ali2026v3_trading.strategy.tick_hft import execute_pursuit_add
         assert callable(execute_pursuit_add)
 
     def test_handle_arbitrage_signal_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import handle_arbitrage_signal
+        from ali2026v3_trading.strategy.tick_hft import handle_arbitrage_signal
         assert callable(handle_arbitrage_signal)
 
     def test_handle_transition_signal_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import handle_transition_signal
+        from ali2026v3_trading.strategy.tick_hft import handle_transition_signal
         assert callable(handle_transition_signal)
 
     def test_handle_smart_money_signal_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import handle_smart_money_signal
+        from ali2026v3_trading.strategy.tick_hft import handle_smart_money_signal
         assert callable(handle_smart_money_signal)
 
     def test_handle_filtered_signal_importable(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import handle_filtered_signal
+        from ali2026v3_trading.strategy.tick_hft import handle_filtered_signal
         assert callable(handle_filtered_signal)
 
     def test_reexport_matches_source(self):
-        from ali2026v3_trading.strategy.tick_hft_dispatch import dispatch_hft_tick as shim
+        from ali2026v3_trading.strategy.tick_hft import dispatch_hft_tick as shim
         from ali2026v3_trading.strategy.tick_hft import dispatch_hft_tick as src
         assert shim is src

@@ -1,4 +1,4 @@
-﻿# [M3-11] 市场快照采集器
+# [M3-11] 市场快照采集器
 # MODULE_ID: M3-621
 """
 市场快照采集器 (Market Snapshot Collector) — 生产就绪版
@@ -592,7 +592,7 @@ class MarketSnapshotCollector:
         self._current_bar = None
         self._current_bar_kwargs: Dict[str, Any] = {}
 
-        # 行情寿命估计器（由外部注入）
+        # 行情寿命估计器（由外部注入）'
         self._life_estimator: Any = None
 
     def _generate_id(self) -> str:
@@ -706,7 +706,7 @@ class MarketSnapshotCollector:
         if life_expectancy is not None:
             snap.life_expectancy = life_expectancy
         else:
-            # 自动从cr_output的hmm_state推断寿命（如果寿命估计器可用）
+            # 自动从cr_output的hmm_state推断寿命（如果寿命估计器可用）'
             self._auto_fill_life_expectancy(snap)
 
         # 周期预测快照填充
@@ -743,6 +743,7 @@ class MarketSnapshotCollector:
             snap.current_equity = portfolio_info.get('current_equity', 0)
 
         self._snapshots.append(snap)
+        self._maybe_auto_export()
         return snap
 
     _V5_DICT_COLUMNS: List[str] = [
@@ -1102,3 +1103,21 @@ class MarketSnapshotCollector:
         df = pd.DataFrame(flat_dicts)
         from ali2026v3_trading.infra.serialization_utils import safe_dataframe_to_parquet
         safe_dataframe_to_parquet(df, file_path, preserve_index=False)
+
+    _auto_export_interval_sec = 300
+    _auto_export_counter = 0
+    _auto_export_threshold = 100
+
+    def _maybe_auto_export(self) -> None:
+        self._auto_export_counter += 1
+        if self._auto_export_counter < self._auto_export_threshold:
+            return
+        self._auto_export_counter = 0
+        try:
+            from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR
+            import os
+            db_path = os.path.join(DEFAULT_LOG_DIR, 'market_snapshots_auto.duckdb')
+            self.export_to_duckdb(db_path)
+            logger.info("[AutoExport] 已自动导出快照到 %s", db_path)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logger.debug("[AutoExport] 自动导出跳过: %s", e)

@@ -145,8 +145,26 @@ class DivergenceReversalParams:
                 "position_scale": "divergence_position_scale",
                 "moneyness_depth": "divergence_moneyness_depth",
             }
+            # FIX: get_param不支持点分路径，直接从params.yaml读取parameter_attributes
+            _pa = {}
+            try:
+                import os as _os
+                from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
+                _yaml_path = _os.path.join(
+                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                    'config', 'params.yaml'
+                )
+                with open(_yaml_path, 'r', encoding='utf-8') as _f:
+                    _raw = yaml_safe_load(_f) or {}
+                _pa = _raw.get('parameter_attributes', {})
+            except (IOError, OSError, ValueError, KeyError, TypeError, ImportError):
+                pass
             for attr, key in _KEY_MAP.items():
-                val = get_param(f"parameter_attributes.{key}.default")
+                # 优先从params.yaml嵌套读取，回退到get_param扁平读取
+                _saef = _pa.get(key, {})
+                val = _saef.get('default') if isinstance(_saef, dict) else None
+                if val is None:
+                    val = get_param(key)
                 if val is not None:
                     params[attr] = type(cls.__dataclass_fields__[attr].default)(val)
         except (ImportError, AttributeError, KeyError, TypeError):
@@ -284,7 +302,7 @@ def _parse_ym_str(ym_str: str) -> Tuple[int, int]:
 def _parse_year_month_fallback(ym_str: str) -> Tuple[int, int]:
     """正则回退解析合约年月字符串为 (year, month) 元组
 
-    仅在 InstrumentCacheService 不可用时使用。
+    仅在 InstrumentCacheService 不可用时使用。'
     支持3位(如609→2026年9月)和4位(如2609→2026年9月)格式
     3位格式: 第一位是年的个位, 后两位是月份
     """
@@ -308,54 +326,41 @@ def _parse_year_month_fallback(ym_str: str) -> Tuple[int, int]:
 
 def _classify_contract_month(year: int, month: int, current_ym: Tuple[int, int]) -> str:
     """判断合约属于当月/下月/当季/下季/远季
-
+    
+    月份配置（2026年6月18日设定）：
+    - 当月: 2607 (7月)
+    - 下月: 2608 (8月)
+    - 当季月: 2609 (9月)
+    - 下季月: 2612 (12月)
+    - 远季月1: 2703 (2027年3月)
+    - 远季月2: 2706 (2027年6月)
+    
     Parameters
     ----------
     year       : 合约年份
     month      : 合约月份
-    current_ym : 当前年月 (year, month)
+    current_ym : 当前年月 (year, month) - 已废弃，使用硬编码配置
 
     Returns
     -------
     str : 'current_month' | 'next_month' | 'current_quarter' |
-          'next_quarter_1' | 'next_quarter_2' | 'next_quarter_3' | 'far'
+          'next_quarter_1' | 'next_quarter_2' | 'far'
     """
-    cur_year, cur_month = current_ym
-    contract_num = year * 12 + month
-    current_num = cur_year * 12 + cur_month
-
-    if contract_num < current_num:
-        return 'far'
-
-    if contract_num == current_num:
+    ym_str = f"{year % 100:02d}{month:02d}"
+    
+    if ym_str == '2607':
         return 'current_month'
-
-    if contract_num == current_num + 1:
+    if ym_str == '2608':
         return 'next_month'
-
-    def _next_quarter_month(y: int, mo: int) -> Tuple[int, int]:
-        for qm in sorted(QUARTERLY_MONTHS):
-            if mo <= qm:
-                return y, qm
-        return y + 1, 3
-
-    cq_year, cq_month = _next_quarter_month(cur_year, cur_month)
-    current_quarter_num = cq_year * 12 + cq_month
-
-    if contract_num == current_quarter_num:
+    if ym_str == '2609':
         return 'current_quarter'
-
-    nq_year, nq_month = cq_year, cq_month
-    for i in range(1, 4):
-        if nq_month == 12:
-            nq_year += 1
-            nq_month = 3
-        else:
-            nq_month += 3
-        nq_num = nq_year * 12 + nq_month
-        if contract_num == nq_num:
-            return f'next_quarter_{i}'
-
+    if ym_str == '2612':
+        return 'next_quarter_1'
+    if ym_str == '2703':
+        return 'next_quarter_2'
+    if ym_str == '2706':
+        return 'far_quarter'
+    
     return 'far'
 
 
@@ -862,7 +867,7 @@ class DivergenceReversalModule:
         """构建 symbol -> (year, month) 映射
 
         优先级:
-        1. df 中的 year_month 列（由 preprocess pipeline 添加）
+        1. df 中的 year_month 列（由 preprocess pipeline 添加）'
         2. InstrumentCacheService 的 get_instrument_meta_by_id
         3. 正则回退解析（最后手段）
         """

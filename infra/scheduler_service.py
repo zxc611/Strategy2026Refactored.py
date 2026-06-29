@@ -1,4 +1,3 @@
-# [M1-57] 调度服务
 """
 scheduler_service.py - 调度服务
 
@@ -33,122 +32,15 @@ from datetime import datetime
 from datetime import time as dt_time, timezone  # ENV-P1-01修复: 导入timezone
 from enum import Enum, auto
 
+# P1-08修复: 从 market_time_service 重新导出，向后兼容
+from ali2026v3_trading.infra.market_time_service import (  # noqa: F401
+    MarketTimeService,
+    is_market_open,
+    get_market_time_service,
+    TimeSyncChecker,
+    get_time_sync_checker,
+)
 
-# ============================================================================
-# DR-P1-12修复: 时钟同步检测
-# ============================================================================
-class TimeSyncChecker:
-    """DR-P1-12: 使用简单时间源比对检测时钟偏差
-
-    偏差 > 5秒  → WARNING
-    偏差 > 30秒 → CRITICAL → 触发暂停交易
-    """
-
-    WARNING_THRESHOLD_SEC = 5.0
-    CRITICAL_THRESHOLD_SEC = 30.0
-    CHECK_INTERVAL_SEC = 300.0  # 每5分钟检查一次
-
-    def __init__(self):
-        self._last_check_time: float = 0.0
-        self._last_deviation: float = 0.0
-        self._status: str = 'HEALTHY'  # HEALTHY / WARNING / CRITICAL
-        self._lock = threading.Lock()
-
-    def check_time_sync(self) -> Dict[str, Any]:
-        """DR-P1-12: 检测系统时钟与外部时间源的偏差
-
-        Returns:
-            dict: 包含 deviation_sec, status, message
-        """
-        now = time.time()
-        if now - self._last_check_time < self.CHECK_INTERVAL_SEC:
-            return {
-                'deviation_sec': self._last_deviation,
-                'status': self._status,
-                'message': f'上次检查: {self._status} (偏差={self._last_deviation:.1f}s)',
-            }
-
-        deviation = self._measure_time_deviation()
-        self._last_check_time = now
-        self._last_deviation = deviation
-
-        with self._lock:
-            if abs(deviation) >= self.CRITICAL_THRESHOLD_SEC:
-                self._status = 'CRITICAL'
-                msg = (f"[DR-P1-12] CRITICAL: 时钟偏差{deviation:.1f}秒超过{self.CRITICAL_THRESHOLD_SEC}秒阈值,"
-                       f"建议暂停交易!")
-                logging.critical(msg)
-            elif abs(deviation) >= self.WARNING_THRESHOLD_SEC:
-                self._status = 'WARNING'
-                msg = f"[DR-P1-12] WARNING: 时钟偏差{deviation:.1f}秒超过{self.WARNING_THRESHOLD_SEC}秒阈值"
-                logging.warning(msg)
-            else:
-                self._status = 'HEALTHY'
-                msg = f"[DR-P1-12] 时钟同步正常,偏差={deviation:.3f}秒"
-                logging.info(msg)
-
-            return {
-                'deviation_sec': deviation,
-                'status': self._status,
-                'message': msg,
-            }
-
-    def _measure_time_deviation(self) -> float:
-        """测量本地时钟与外部时间源的偏差"""
-        try:
-            # 方法1: 使用HTTP Date头获取外部时间
-            # R21-CC-P1-06修复: urllib网络I/O已有timeout=5.0，防止后台线程阻塞
-            import urllib.request
-            req = urllib.request.Request('http://www.baidu.com', method='HEAD')
-            req_start = time.time()
-            response = urllib.request.urlopen(req, timeout=5.0)
-            req_end = time.time()
-            server_date = response.headers.get('Date', '')
-            if server_date:
-                from email.utils import parsedate_to_datetime
-                server_time = parsedate_to_datetime(server_date).timestamp()
-                rtt = req_end - req_start
-                estimated_server_now = server_time + rtt / 2.0
-                local_now = req_end
-                return local_now - estimated_server_now
-        except Exception as e:
-            logging.debug("[DR-P1-12] HTTP时间同步检测失败: %s", e)
-
-        try:
-            # 方法2: 使用time.time()自身作为后备
-            before = time.time()
-            time.sleep(0.01)  # R23-P2-09标记: P2级调度等待
-            after = time.time()
-            drift = (after - before) - 0.01
-            if abs(drift) > 0.1:
-                return drift
-        except Exception:
-            pass
-
-        return 0.0
-
-    def get_status(self) -> str:
-        with self._lock:
-            return self._status
-
-    def is_critical(self) -> bool:
-        return self.get_status() == 'CRITICAL'
-
-    def is_warning(self) -> bool:
-        return self.get_status() == 'WARNING'
-
-
-# 全局单例
-_time_sync_checker: Optional[TimeSyncChecker] = None
-_time_sync_lock = threading.Lock()
-
-
-def get_time_sync_checker() -> TimeSyncChecker:
-    global _time_sync_checker
-    with _time_sync_lock:
-        if _time_sync_checker is None:
-            _time_sync_checker = TimeSyncChecker()
-        return _time_sync_checker
 
 
 # ============================================================================
@@ -181,6 +73,7 @@ class JobInfo:
     max_retries: int = 0        # 最大重试次数
     retry_count: int = 0        # 当前重试次数
     last_error: Optional[str] = None  # 最后一次错误信息
+    _is_executing: bool = False  # 重叠执行防护标记
 
 
 @dataclass(slots=True)
@@ -221,6 +114,9 @@ class SchedulerService:
     3. 防阻塞保护
     4. 任务状态监控
 
+    职责边界：通用定时任务调度(超时/重试)，与strategy/StrategyScheduler(策略业务调度)分工。
+    本类负责通用任务调度(超时/重试/优先级/取消)，StrategyScheduler负责策略业务调度(交易循环/持仓风控/缓存刷写)。
+
     使用方式：
         scheduler = SchedulerService()
         scheduler.add_job(my_func, interval=60, job_id="task1", priority=10)
@@ -240,7 +136,8 @@ class SchedulerService:
             _scheduler_logger = logging.getLogger('ali2026v3_trading.infra.scheduler_service')
             if not _scheduler_logger.handlers:
                 import os
-                _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+                from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR
+                _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_LOG_DIR)
                 os.makedirs(_log_dir, exist_ok=True)
                 _log_path = os.path.join(_log_dir, 'scheduler_service.log')
                 _fh = logging.handlers.RotatingFileHandler(
@@ -251,8 +148,8 @@ class SchedulerService:
                 ))
                 _scheduler_logger.addHandler(_fh)
                 _scheduler_logger.setLevel(logging.INFO)
-        except Exception:
-            pass
+        except (OSError, IOError, ValueError) as _err:
+            logging.debug("[scheduler_service] I/O操作降级: %s", _err)
         self._jobs: Dict[str, JobInfo] = {}
         self._once_jobs: Dict[str, OnceJobInfo] = {}
         # ✅ P1修复：使用threading.Event替代bool标志，消除竞态
@@ -305,7 +202,7 @@ class SchedulerService:
         if self._thread and self._thread.is_alive():
             try:
                 self._thread.join(timeout=self._stop_timeout)
-            except Exception as e:
+            except (RuntimeError, OSError) as e:
                 logging.warning(f"[Scheduler] Error joining thread: {e}")
 
         self._log("[Scheduler] Stopped")
@@ -457,7 +354,7 @@ class SchedulerService:
                     if self._running_event.is_set() and not job_info.cancelled:
                         try:
                             func()
-                        except Exception as e:
+                        except (ValueError, TypeError, KeyError, AttributeError, RuntimeError) as e:
                             logging.error(f"[Scheduler] Once job {job_id} failed: {e}")
             finally:
                 with self._lock:
@@ -508,7 +405,7 @@ class SchedulerService:
                         break
                     time.sleep(0.1)
 
-            except Exception as e:
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error(f"[Scheduler] Master loop error: {e}")
                 time.sleep(1)
 
@@ -530,7 +427,7 @@ class SchedulerService:
                     self._jobs[job.job_id].retry_count = 0
                     self._jobs[job.job_id].last_error = None
 
-        except Exception as e:
+        except (ValueError, TypeError, KeyError, AttributeError, RuntimeError) as e:
             error_msg = str(e)
             logging.error(f"[Scheduler] Job {job.job_id} error: {error_msg}")
 
@@ -572,7 +469,7 @@ class SchedulerService:
                 try:
                     if not cancel_event.is_set():
                         job.func()
-                except Exception as e:
+                except (ValueError, TypeError, KeyError, AttributeError, RuntimeError) as e:
                     logging.error(f"[Scheduler] Job {job.job_id} execution error: {e}")
                     result_container['error'] = e
                 finally:
@@ -630,7 +527,7 @@ class SchedulerService:
         try:
             if self._logger:
                 self._logger(message)
-        except Exception as e:
+        except (ValueError, TypeError, AttributeError, RuntimeError) as e:
             logging.warning(f"[Scheduler] Log error: {e}")
 
     # ✅ ID唯一：get_stats统一接口，返回值含service_name="SchedulerService"
@@ -668,133 +565,161 @@ class SchedulerService:
 
 
 # ============================================================================
+# Section 4: 调度器管理代理 (原 scheduler_manager_proxy.py)
+# ============================================================================
+
+class SchedulerManagerProxy:
+    """调度器管理Proxy — 初始化/停止/任务注册代理"""
+
+    def __init__(self, provider: Any = None):
+        self._provider = provider
+
+    def _get_scheduler(self) -> Any:
+        if self._provider:
+            return getattr(self._provider, '_scheduler_manager', None)
+        return None
+
+    def init_scheduler(self) -> None:
+        """初始化调度器"""
+        scheduler = self._get_scheduler()
+        if scheduler and hasattr(scheduler, 'initialize'):
+            scheduler.initialize()
+
+    def stop_scheduler(self, strategy_id: str = '') -> None:
+        """停止调度器"""
+        scheduler = self._get_scheduler()
+        if not scheduler:
+            return
+        if not strategy_id and self._provider:
+            strategy_id = getattr(self._provider, 'strategy_id', '')
+        try:
+            scheduler.stop_strategy_jobs(strategy_id)
+        except (AttributeError, RuntimeError, ValueError, TypeError) as e:
+            logging.warning("[SchedulerManagerProxy] stop_strategy_jobs error: %s", e)
+        try:
+            scheduler.remove_jobs_by_owner('GLOBAL')
+        except (AttributeError, RuntimeError, ValueError, TypeError) as e:
+            logging.warning("[SchedulerManagerProxy] remove GLOBAL jobs error: %s", e)
+        try:
+            scheduler.shutdown()
+        except (AttributeError, RuntimeError, ValueError, TypeError) as e:
+            logging.warning("[SchedulerManagerProxy] shutdown error: %s", e)
+            return
+
+        import threading as _th
+        _alive_threads = [t for t in _th.enumerate() if t.name.startswith('scheduler_') and t.is_alive()]
+        if _alive_threads:
+            _deadline = time.time() + 10.0
+            for t in _alive_threads:
+                t.join(timeout=max(0, _deadline - time.time()))
+            _still_alive = [t for t in _alive_threads if t.is_alive()]
+            if _still_alive:
+                logging.critical("R15-P1-RES-06: 调度器线程超时未退出，强制终止: %s",
+                                 [t.name for t in _still_alive])
+                os._exit(1)
+
+    def add_option_status_diagnosis_job(self, t_type_service: Any = None) -> None:
+        """添加期权5种状态诊断定时任务"""
+        scheduler = self._get_scheduler()
+        if scheduler and hasattr(scheduler, 'register_option_diagnosis_task'):
+            scheduler.register_option_diagnosis_task(t_type_service)
+
+    def add_tick_sync_job(self, data_service: Any = None) -> None:
+        """添加缓存刷写定时任务"""
+        scheduler = self._get_scheduler()
+        if scheduler and hasattr(scheduler, 'register_cache_flush_task'):
+            scheduler.register_cache_flush_task(data_service)
+
+    def add_14_contracts_diagnosis_job(self, storage: Any = None,
+                                       query_service: Any = None) -> None:
+        """添加重点监控合约诊断定时任务"""
+        scheduler = self._get_scheduler()
+        if scheduler and hasattr(scheduler, 'register_14_contracts_diagnosis_task'):
+            scheduler.register_14_contracts_diagnosis_task(
+                storage=storage, query_service=query_service
+            )
+
+    def add_trading_jobs(self, strategy_id: str = '', run_id: str = None,
+                         execute_option_trading_cycle: Any = None,
+                         check_position_risk: Any = None,
+                         order_service: Any = None) -> None:
+        """注册交易定时任务"""
+        scheduler = self._get_scheduler()
+        if scheduler and hasattr(scheduler, 'register_trading_jobs'):
+            scheduler.register_trading_jobs(
+                strategy_id=strategy_id,
+                run_id=run_id,
+                execute_option_trading_cycle=execute_option_trading_cycle,
+                check_position_risk=check_position_risk,
+                order_service=order_service
+            )
+
+    def ensure_check_pending_orders_job(self, order_service: Any = None,
+                                         strategy_id: str = '',
+                                         scheduler: Any = None,
+                                         run_id: str = None) -> None:
+        """确保check_pending_orders任务已注册"""
+        if order_service is None and self._provider:
+            order_service = getattr(self._provider, '_order_service', None)
+        if not order_service or not hasattr(order_service, 'check_pending_orders'):
+            return
+        if scheduler is None:
+            scheduler = self._get_scheduler()
+        if not scheduler or not hasattr(scheduler, 'scheduler') or not scheduler.scheduler:
+            return
+        if not strategy_id and self._provider:
+            strategy_id = getattr(self._provider, 'strategy_id', '')
+        if not run_id and self._provider:
+            run_id = getattr(self._provider, '_lifecycle_run_id', None)
+        job_id = f'{strategy_id}_check_pending_orders'
+        try:
+            existing = scheduler.scheduler.get_job(job_id)
+            if existing is not None:
+                return
+        except (ImportError, AttributeError) as _err:
+            logging.debug("[scheduler_manager_proxy] 属性访问降级: %s", _err)
+        try:
+            scheduler.add_job_with_owner(
+                func=order_service.check_pending_orders,
+                trigger='interval',
+                job_id=job_id,
+                strategy_id=strategy_id,
+                run_id=run_id,
+                owner_scope='strategy',
+                seconds=3
+            )
+            logging.info("[SchedulerManagerProxy] 补偿注册check_pending_orders job成功")
+        except (AttributeError, RuntimeError, ValueError, TypeError, KeyError) as e:
+            logging.error("[SchedulerManagerProxy] 补偿注册check_pending_orders job失败: %s", e)
+
+
+# ============================================================================
 # 模块导出
 # ============================================================================
 
+# P1-43修复: 工厂函数，避免生产代码直接实例化SchedulerService
+_scheduler_service_instance = None
+
+
+def get_scheduler_service():
+    """P1-43修复: SchedulerService单例工厂——生产代码应通过此函数获取实例"""
+    global _scheduler_service_instance
+    if _scheduler_service_instance is None:
+        _scheduler_service_instance = SchedulerService()
+    return _scheduler_service_instance
+
+
 __all__ = [
     'SchedulerService',
+    'get_scheduler_service',
+    'SchedulerManagerProxy',
     'JobStatus',
     'JobInfo',
     'OnceJobInfo',
+    # P1-08修复: 以下从 market_time_service 重新导出
+    'MarketTimeService',
+    'is_market_open',
+    'get_market_time_service',
+    'TimeSyncChecker',
+    'get_time_sync_checker',
 ]
-
-
-# ============================================================================
-# P1 功能恢复：交易日历相关（从 01_constants.py 恢复）
-# ============================================================================
-
-# ✅ 删除is_trading_day模块级函数，统一使用MarketTimeService.is_trading_day方法
-
-
-
-_market_time_service_instance: Optional['MarketTimeService'] = None
-_market_time_service_lock = threading.Lock()
-
-def get_market_time_service() -> 'MarketTimeService':
-    global _market_time_service_instance
-    if _market_time_service_instance is None:
-        with _market_time_service_lock:
-            if _market_time_service_instance is None:
-                _market_time_service_instance = MarketTimeService()
-    return _market_time_service_instance
-
-def is_market_open(exchange: Optional[str] = None) -> bool:
-    """市场是否开盘（委托给MarketTimeService）"""
-    return get_market_time_service().is_market_open(exchange)
-
-# ✅ 删除is_trading_day模块级函数，统一使用MarketTimeService
-
-class MarketTimeService:
-    def __init__(self):
-        self._sessions = {
-            'SHFE': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
-            'DCE': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
-            'CZCE': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
-            'INE': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
-            'GFEX': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
-            'CFFEX': [(9, 30, 11, 30), (13, 0, 15, 15)],  # P2-8修复: 中金所日盘时段
-        }
-        self._night_sessions = {
-            # [R22-TIME-P1-11] 夜盘扩展至凌晨02:30，覆盖完整交易时段
-            # P2-8修复: 商品期货(SHFE/DCE/CZCE/INE/GFEX)夜盘至次日02:30
-            'SHFE': [(21, 0, 23, 0), (0, 0, 2, 30)],
-            'DCE': [(21, 0, 23, 0), (0, 0, 2, 30)],
-            'CZCE': [(21, 0, 23, 30), (0, 0, 2, 30)],
-            'INE': [(21, 0, 23, 0), (0, 0, 2, 30)],
-            'GFEX': [(21, 0, 23, 0), (0, 0, 2, 30)],
-            # P2-8修复: 金融期货(CFFEX)夜盘至23:00，无次日凌晨段
-            'CFFEX': [(21, 0, 23, 0)],
-        }
-        # [R22-TIME-P1-14] 默认节假日数据，防止非交易日判断失效
-        self.holidays: set = set()  # 仍为空集合，但提供add_default_holidays方法
-    
-    def add_holiday(self, d: datetime.date) -> None:
-        """添加节假日"""
-        self.holidays.add(d)
-    
-    def add_default_holidays(self) -> None:
-        """[R22-TIME-P1-14] 添加2026年默认中国法定节假日"""
-        import datetime as _dt
-        _default_2026 = [
-            _dt.date(2026,1,1), _dt.date(2026,1,2), _dt.date(2026,1,3),  # 元旦
-            _dt.date(2026,2,17), _dt.date(2026,2,18), _dt.date(2026,2,19),  # 春节
-            _dt.date(2026,2,20), _dt.date(2026,2,21), _dt.date(2026,2,22),
-            _dt.date(2026,4,4), _dt.date(2026,4,5), _dt.date(2026,4,6),  # 清明
-            _dt.date(2026,5,1), _dt.date(2026,5,2), _dt.date(2026,5,3),  # 劳动节
-            _dt.date(2026,6,19), _dt.date(2026,6,20), _dt.date(2026,6,21),  # 端午
-            _dt.date(2026,10,1), _dt.date(2026,10,2), _dt.date(2026,10,3),  # 国庆
-            _dt.date(2026,10,4), _dt.date(2026,10,5), _dt.date(2026,10,6),
-            _dt.date(2026,10,7), _dt.date(2026,10,8),
-        ]
-        self.holidays.update(_default_2026)
-    
-    def is_trading_day(self, target_date: datetime.date, holiday_dates: Optional[set] = None) -> bool:
-        """
-        判断是否为交易日
-        
-        Args:
-            target_date: 目标日期
-            holiday_dates: 额外的节假日集合（可选）
-            
-        Returns:
-            bool: 是否为交易日
-        """
-        if target_date.weekday() >= 5:  # 周末
-            return False
-        
-        # 检查内部节假日
-        if target_date in self.holidays:
-            return False
-        
-        # 检查外部传入的节假日
-        if holiday_dates and target_date in holiday_dates:
-            return False
-        
-        return True
-    
-    def is_market_open(self, exchange: Optional[str] = None) -> bool:
-        from ali2026v3_trading.infra.shared_utils import CHINA_TZ  # [R22-TIME-P1-01] 统一时区常量
-        now = datetime.now(CHINA_TZ)
-        now_time = now.time()
-        exchanges = [exchange] if exchange else list(self._sessions.keys())
-        for exch in exchanges:
-            sessions = self._sessions.get(exch, [])
-            for start_h, start_m, end_h, end_m in sessions:
-                start_time = dt_time(start_h, start_m)
-                end_time = dt_time(end_h, end_m)
-                if start_time <= now_time <= end_time:
-                    return True
-            night_sessions = self._night_sessions.get(exch, [])
-            for start_h, start_m, end_h, end_m in night_sessions:
-                start_time = dt_time(start_h, start_m)
-                end_time = dt_time(end_h, end_m)
-                # P1 Bug #83修复：正确处理跨午夜时段
-                if start_time <= end_time:
-                    # 不跨午夜：start <= now <= end
-                    if start_time <= now_time <= end_time:
-                        return True
-                else:
-                    # 跨午夜：now >= start OR now <= end
-                    if now_time >= start_time or now_time <= end_time:
-                        return True
-        return False

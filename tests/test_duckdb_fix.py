@@ -21,7 +21,7 @@ def verify_database_rebuild():
     
     db_path = os.path.join(project_root, 'data', 'ticks.duckdb')
     
-    # 检查数据库是否存在（旧文件应已删除）
+    # 检查数据库是否存在（旧文件应已删除）'
     if os.path.exists(db_path):
         print(f"[WARN] 旧数据库文件仍存在: {db_path}")
         print("   请手动删除后重启策略")

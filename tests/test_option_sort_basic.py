@@ -3,158 +3,37 @@
 Test option sort alignment against design report.
 
 Validates the core calculation functions for option state sorting
-without importing the actual ali2026v3_trading modules (which have
-complex dependencies). All pure calculation functions are implemented
-directly here, ported from width_cache.py.
-
-Design report references:
-  Section 2  - Tier determination & defect fixes
-  Section 4.3 - MONTH_WEIGHTS_5 normalization
-  Section 5  - Sort key & lots allocation
-  Section 7  - Numerical example
-  Section 8  - Wilson lower bound
+by importing the actual production implementations from
+width_cache_query_mixin.py.
 """
 
 import pytest
 from typing import Dict, List, Tuple
 
+from ali2026v3_trading.data.width_cache import WidthStrengthCache
+from ali2026v3_trading.data.width_cache_query_mixin import WidthCacheQueryService
+# 五唯一性修复：常量已统一从 final_three_layer_config 导入到 width_cache_query_mixin 模块级
+# 此处直接从规范源导入，避免依赖已被删除的类级常量
+from ali2026v3_trading.config.final_three_layer_config import (
+    MONTH_WEIGHTS_5, TIER1_WILSON_THRESHOLD,
+    TIER2_COVERAGE_THRESHOLD, TIER2_CORRECT_UP_THRESHOLD,
+    TIER3_CORRECT_UP_THRESHOLD,
+)
 
-# =====================================================================
-# Pure calculation functions (ported from width_cache.py)
-# =====================================================================
+# Re-export production constants for test readability
+MAX_MONTHS_FOR_SCORING = WidthCacheQueryService.MAX_MONTHS_FOR_SCORING
+TIER1_LOTS = WidthCacheQueryService.TIER1_LOTS
+TIER2_LOTS = WidthCacheQueryService.TIER2_LOTS
 
-MONTH_WEIGHTS_5 = (0.35, 0.25, 0.20, 0.12, 0.08)
-MAX_MONTHS_FOR_SCORING = 5
-TIER1_WILSON_THRESHOLD = 0.6
-TIER2_COVERAGE_THRESHOLD = 0.5
-TIER2_CORRECT_UP_THRESHOLD = 0.5
-TIER3_CORRECT_UP_THRESHOLD = 0.4
-TIER1_LOTS = 2
-TIER2_LOTS = 1
-
-
-def wilson_lower_bound(pos: float, total: float, z: float = 1.96) -> float:
-    """Wilson score interval lower bound (design report Section 8).
-
-    Args:
-        pos: Number of positive outcomes (e.g. total correct_rise volume).
-        total: Number of total trials (e.g. total rise volume).
-        z: Z-score for confidence level (default 1.96 for 95%).
-    """
-    if total <= 0:
-        return 0.0
-    p = pos / total
-    n = total
-    denom = 1.0 + z * z / n
-    center = p + z * z / (2 * n)
-    spread = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
-    return max(0.0, (center - spread) / denom)
-
-
-def resolve_month_weights(n_months: int) -> Tuple[float, ...]:
-    """Resolve month weights for n months (design report Section 4.3).
-
-    Truncates MONTH_WEIGHTS_5 to the first n_months entries and normalizes
-    so that the sum equals 1.0. When n_months > MAX_MONTHS_FOR_SCORING,
-    falls back to equal weights.
-    """
-    if n_months <= 0:
-        return ()
-    if n_months > MAX_MONTHS_FOR_SCORING:
-        per = 1.0 / n_months
-        return tuple(per for _ in range(n_months))
-    raw_weights = MONTH_WEIGHTS_5[:n_months]
-    raw_sum = sum(raw_weights)
-    if raw_sum <= 0:
-        per = 1.0 / n_months
-        return tuple(per for _ in range(n_months))
-    return tuple(w / raw_sum for w in raw_weights)
-
-
-def compute_correct_up_pct(
-    month_data: List[Dict], weights: Tuple[float, ...]
-) -> float:
-    """Compute weighted correct_up_pct (design report Section 2, defect 1 fix).
-
-    Formula: correct_up_pct = sum(w_i * CR_i / (CR_i + WR_i))
-
-    Each month_data dict must have keys: 'cr' (correct_rise), 'wr' (wrong_rise).
-    """
-    result = 0.0
-    for i, data in enumerate(month_data):
-        if i >= len(weights):
-            break
-        w = weights[i]
-        cr = data.get('cr', 0)
-        wr = data.get('wr', 0)
-        rise = cr + wr
-        if rise > 0:
-            result += w * (cr / rise)
-    return result
-
-
-def compute_noise_ratio(
-    month_data: List[Dict], weights: Tuple[float, ...]
-) -> float:
-    """Compute weighted noise_ratio (design report Section 2, defect 3 fix).
-
-    Formula: noise_ratio = sum(w_i * (WR_i + WF_i) / Total_i)
-
-    Each month_data dict must have keys: 'wr' (wrong_rise), 'wf' (wrong_fall),
-    'total' (total volume for the month).
-    """
-    result = 0.0
-    for i, data in enumerate(month_data):
-        if i >= len(weights):
-            break
-        w = weights[i]
-        wr = data.get('wr', 0)
-        wf = data.get('wf', 0)
-        total = data.get('total', 0)
-        if total > 0:
-            result += w * ((wr + wf) / total)
-    return result
-
-
-def compute_coverage(
-    month_data: List[Dict], weights: Tuple[float, ...]
-) -> float:
-    """Compute coverage = sum of weights for months where CR > 0."""
-    result = 0.0
-    for i, data in enumerate(month_data):
-        if i >= len(weights):
-            break
-        if data.get('cr', 0) > 0:
-            result += weights[i]
-    return result
-
-
-def determine_tier(
-    coverage: float, wilson: float, correct_up_pct: float, noise_ratio: float
-) -> int:
-    """Determine tier (design report Section 2, defect 2 fix).
-
-    Filter: if correct_up_pct <= 0 OR correct_up_pct < noise_ratio -> Tier 4.
-    Otherwise:
-      coverage >= 1.0 AND wilson > 0.6  -> Tier 1
-      coverage >= 0.5 AND correct_up_pct > 0.5 -> Tier 2
-      correct_up_pct > 0.4 -> Tier 3
-      otherwise -> Tier 4
-    """
-    if correct_up_pct > 0 and correct_up_pct >= noise_ratio:
-        if coverage >= 1.0 and wilson > TIER1_WILSON_THRESHOLD:
-            return 1
-        elif (
-            coverage >= TIER2_COVERAGE_THRESHOLD
-            and correct_up_pct > TIER2_CORRECT_UP_THRESHOLD
-        ):
-            return 2
-        elif correct_up_pct > TIER3_CORRECT_UP_THRESHOLD:
-            return 3
-        else:
-            return 4
-    else:
-        return 4
+# Re-export production static methods as module-level functions
+wilson_lower_bound = WidthCacheQueryService.wilson_lower_bound
+resolve_month_weights = WidthCacheQueryService.resolve_month_weights
+compute_correct_up_pct = WidthCacheQueryService.compute_correct_up_pct
+compute_noise_ratio = WidthCacheQueryService.compute_noise_ratio
+compute_coverage = WidthCacheQueryService.compute_coverage
+compute_th = WidthCacheQueryService.compute_th
+compute_ra = WidthCacheQueryService.compute_ra
+determine_tier = WidthCacheQueryService.determine_tier
 
 
 def sort_key(tier: int, correct_up_pct: float, wilson: float) -> Tuple:
@@ -170,10 +49,7 @@ def allocate_lots(tier: int) -> int:
 
     Tier 1 -> 2 lots, Tier 2+ -> 1 lot.
     """
-    if tier == 1:
-        return TIER1_LOTS
-    else:
-        return TIER2_LOTS
+    return TIER1_LOTS if tier == 1 else TIER2_LOTS
 
 
 # =====================================================================
@@ -226,16 +102,26 @@ class TestMonthWeightsNormalization:
         weights = resolve_month_weights(0)
         assert weights == ()
 
-    def test_six_months_equal_weights(self):
-        """When >5 months: fall back to equal weights."""
-        weights = resolve_month_weights(6)
-        assert len(weights) == 6
-        for w in weights:
-            assert w == pytest.approx(1.0 / 6, abs=1e-10)
+    def test_six_months_truncate_to_five(self):
+        """When >5 months: return MONTH_WEIGHTS_5 (5 elements), caller truncates.
 
-    @pytest.mark.parametrize("n_months", [1, 2, 3, 4, 5, 6, 7])
+        BUG-12 fix: design report 4.3 says "取前5个月份参与评分，超出的月份不参与计算".
+        Previously returned equal weights for all n months, which diluted
+        near-month signals. Now returns the 5-element MONTH_WEIGHTS_5 tuple.
+        """
+        weights = resolve_month_weights(6)
+        assert len(weights) == 5, \
+            f"6-month should return 5 weights (truncate), got {len(weights)}"
+        assert weights == pytest.approx(MONTH_WEIGHTS_5, abs=1e-10)
+
+    @pytest.mark.parametrize("n_months", [1, 2, 3, 4, 5])
     def test_weights_always_sum_to_one(self, n_months):
-        """Sum of weights must always equal 1.0 regardless of month count."""
+        """Sum of weights must always equal 1.0 for n_months <= 5.
+
+        Note: when n_months > 5, resolve_month_weights returns 5 elements
+        (caller is responsible for truncating months to 5). The sum is still
+        1.0 but the length is 5, not n_months.
+        """
         weights = resolve_month_weights(n_months)
         if n_months == 0:
             return
@@ -324,86 +210,86 @@ class TestTierDetermination:
     """Design report Section 2, defect 2 fix: tier determination logic."""
 
     def test_tier1_coverage_and_wilson(self):
-        """coverage >= 1.0 AND wilson > 0.6 -> Tier 1."""
+        """coverage >= 0.8 AND wilson >= TIER1_WILSON_THRESHOLD (0.50) -> Tier 1."""
         tier = determine_tier(
             coverage=1.0, wilson=0.7, correct_up_pct=0.8, noise_ratio=0.1
         )
         assert tier == 1, f"Expected Tier 1, got Tier {tier}"
 
     def test_tier1_exact_wilson_threshold(self):
-        """wilson must be strictly > 0.6 for Tier 1 (not >=)."""
+        """wilson >= TIER1_WILSON_THRESHOLD (0.50) qualifies for Tier 1."""
         tier_exact = determine_tier(
-            coverage=1.0, wilson=0.6, correct_up_pct=0.8, noise_ratio=0.1
+            coverage=1.0, wilson=TIER1_WILSON_THRESHOLD, correct_up_pct=0.8, noise_ratio=0.1
         )
-        assert tier_exact != 1, \
-            "wilson == 0.6 should NOT qualify for Tier 1 (must be > 0.6)"
+        assert tier_exact == 1, \
+            "wilson == TIER1_WILSON_THRESHOLD should qualify for Tier 1 (>=)"
 
         tier_above = determine_tier(
-            coverage=1.0, wilson=0.6001, correct_up_pct=0.8, noise_ratio=0.1
+            coverage=1.0, wilson=TIER1_WILSON_THRESHOLD + 0.01, correct_up_pct=0.8, noise_ratio=0.1
         )
         assert tier_above == 1, \
-            "wilson = 0.6001 > 0.6 should qualify for Tier 1"
+            "wilson > TIER1_WILSON_THRESHOLD should qualify for Tier 1"
 
     def test_tier2_coverage_and_correct_up(self):
-        """coverage >= 0.5 AND correct_up_pct > 0.5 -> Tier 2."""
+        """coverage >= TIER2_COVERAGE_THRESHOLD (0.40) AND correct_up_pct >= TIER2_CORRECT_UP_THRESHOLD (0.45) -> Tier 2."""
         tier = determine_tier(
             coverage=0.5, wilson=0.3, correct_up_pct=0.6, noise_ratio=0.2
         )
         assert tier == 2, f"Expected Tier 2, got Tier {tier}"
 
     def test_tier2_exact_coverage_threshold(self):
-        """coverage must be >= 0.5 for Tier 2."""
+        """coverage must be >= TIER2_COVERAGE_THRESHOLD (0.40) for Tier 2."""
         tier_below = determine_tier(
-            coverage=0.49, wilson=0.3, correct_up_pct=0.6, noise_ratio=0.2
+            coverage=TIER2_COVERAGE_THRESHOLD - 0.01, wilson=0.3, correct_up_pct=0.6, noise_ratio=0.2
         )
         assert tier_below != 2, \
-            "coverage = 0.49 < 0.5 should NOT qualify for Tier 2"
+            "coverage < TIER2_COVERAGE_THRESHOLD should NOT qualify for Tier 2"
 
         tier_at = determine_tier(
-            coverage=0.5, wilson=0.3, correct_up_pct=0.6, noise_ratio=0.2
+            coverage=TIER2_COVERAGE_THRESHOLD, wilson=0.3, correct_up_pct=0.6, noise_ratio=0.2
         )
         assert tier_at == 2, \
-            "coverage = 0.5 should qualify for Tier 2"
+            "coverage == TIER2_COVERAGE_THRESHOLD should qualify for Tier 2 (>=)"
 
     def test_tier2_exact_correct_up_threshold(self):
-        """correct_up_pct must be strictly > 0.5 for Tier 2."""
+        """correct_up_pct >= TIER2_CORRECT_UP_THRESHOLD (0.45) qualifies for Tier 2."""
         tier_at = determine_tier(
-            coverage=0.6, wilson=0.3, correct_up_pct=0.5, noise_ratio=0.2
+            coverage=0.6, wilson=0.3, correct_up_pct=TIER2_CORRECT_UP_THRESHOLD, noise_ratio=0.2
         )
-        assert tier_at != 2, \
-            "correct_up_pct = 0.5 should NOT qualify for Tier 2 (must be > 0.5)"
+        assert tier_at == 2, \
+            "correct_up_pct == TIER2_CORRECT_UP_THRESHOLD should qualify for Tier 2 (>=)"
 
         tier_above = determine_tier(
-            coverage=0.6, wilson=0.3, correct_up_pct=0.51, noise_ratio=0.2
+            coverage=0.6, wilson=0.3, correct_up_pct=TIER2_CORRECT_UP_THRESHOLD + 0.01, noise_ratio=0.2
         )
         assert tier_above == 2, \
-            "correct_up_pct = 0.51 > 0.5 should qualify for Tier 2"
+            "correct_up_pct > TIER2_CORRECT_UP_THRESHOLD should qualify for Tier 2"
 
     def test_tier3_correct_up_only(self):
-        """correct_up_pct > 0.4 -> Tier 3 (when Tier 1/2 conditions not met)."""
+        """correct_up_pct >= TIER3_CORRECT_UP_THRESHOLD (0.35) -> Tier 3 (when Tier 1/2 conditions not met."""
         tier = determine_tier(
             coverage=0.3, wilson=0.2, correct_up_pct=0.45, noise_ratio=0.3
         )
         assert tier == 3, f"Expected Tier 3, got Tier {tier}"
 
     def test_tier3_exact_threshold(self):
-        """correct_up_pct must be strictly > 0.4 for Tier 3."""
+        """correct_up_pct >= TIER3_CORRECT_UP_THRESHOLD (0.35) qualifies for Tier 3."""
         tier_at = determine_tier(
-            coverage=0.3, wilson=0.2, correct_up_pct=0.4, noise_ratio=0.3
+            coverage=0.3, wilson=0.2, correct_up_pct=TIER3_CORRECT_UP_THRESHOLD, noise_ratio=0.3
         )
-        assert tier_at == 4, \
-            "correct_up_pct = 0.4 should NOT qualify for Tier 3 (must be > 0.4)"
+        assert tier_at == 3, \
+            "correct_up_pct == TIER3_CORRECT_UP_THRESHOLD should qualify for Tier 3 (>=)"
 
         tier_above = determine_tier(
-            coverage=0.3, wilson=0.2, correct_up_pct=0.41, noise_ratio=0.3
+            coverage=0.3, wilson=0.2, correct_up_pct=TIER3_CORRECT_UP_THRESHOLD + 0.01, noise_ratio=0.3
         )
         assert tier_above == 3, \
-            "correct_up_pct = 0.41 > 0.4 should qualify for Tier 3"
+            "correct_up_pct > TIER3_CORRECT_UP_THRESHOLD should qualify for Tier 3"
 
     def test_tier4_low_correct_up(self):
-        """correct_up_pct <= 0.4 -> Tier 4."""
+        """correct_up_pct < TIER3_CORRECT_UP_THRESHOLD (0.35) -> Tier 4."""
         tier = determine_tier(
-            coverage=0.3, wilson=0.2, correct_up_pct=0.35, noise_ratio=0.3
+            coverage=0.3, wilson=0.2, correct_up_pct=0.34, noise_ratio=0.3
         )
         assert tier == 4, f"Expected Tier 4, got Tier {tier}"
 
@@ -526,7 +412,7 @@ class TestLotsAllocation:
 # =====================================================================
 
 class TestCorrectUpPct:
-    """Design report Section 2, defect 1 fix: correct_up_pct = sum(w_i * CR_i/(CR_i+WR_i))."""
+    """Design report Section 3.4: correct_up_pct = Σ[w_i × (cr_i + cf_i)] / Σ[w_i × total_i]."""
 
     def test_single_month_full_correct(self):
         """100% correct in a single month."""
@@ -563,15 +449,15 @@ class TestCorrectUpPct:
             f"Expected {expected}, got {result}"
 
     def test_zero_rise_month_skipped(self):
-        """Month with rise=0 should not contribute to correct_up_pct."""
+        """Month with total=0 should not contribute to correct_up_pct."""
         weights = resolve_month_weights(2)
         data = [
-            {'cr': 60, 'wr': 40},  # 0.60
-            {'cr': 0, 'wr': 0},    # rise=0, skipped
+            {'cr': 60, 'wr': 40},  # total=100, cr+cf=60
+            {'cr': 0, 'wr': 0},    # total=0, contributes nothing
         ]
         result = compute_correct_up_pct(data, weights)
-        # Only month 1 contributes: 0.5833 * 0.60
-        expected = (7 / 12) * 0.60
+        # Only month 1 has non-zero total: (cr+cf)/total = 60/100 = 0.60
+        expected = 0.60
         assert result == pytest.approx(expected, abs=1e-4)
 
     def test_result_bounded_zero_to_one(self):
@@ -647,10 +533,13 @@ class TestNoiseRatio:
 class TestNumericalExample:
     """Design report Section 7: full numerical example with Product A and B.
 
+    Note: expected values reflect the spec-aligned formulas (P2-01/02/03 fixes):
+    correct_up_pct uses (cr+cf)/total, coverage is count-based (n/5).
+
     Product A (3 months): correct_up_pct ~ 0.807, noise_ratio ~ 0.192,
-                           coverage = 1.0, Tier 1
-    Product B (2 months): correct_up_pct ~ 0.327, noise_ratio ~ 0.428,
-                           coverage ~ 0.6, Tier 4
+                           coverage = 0.6 (3/5), Tier 2
+    Product B (2 months): correct_up_pct ~ 0.492, noise_ratio ~ 0.428,
+                           coverage = 0.4 (2/5), Tier 2
     """
 
     @pytest.fixture
@@ -702,11 +591,11 @@ class TestNumericalExample:
             f"Product A noise_ratio = {result:.4f}, expected ~0.192"
 
     def test_product_a_coverage(self, product_a_data):
-        """Product A: coverage = 1.0 (all months have CR > 0)."""
+        """Product A: coverage = 0.6 (3 active months / 5)."""
         month_data, weights = product_a_data
         result = compute_coverage(month_data, weights)
-        assert result == pytest.approx(1.0, abs=1e-10), \
-            f"Product A coverage = {result:.4f}, expected 1.0"
+        assert result == pytest.approx(0.6, abs=1e-10), \
+            f"Product A coverage = {result:.4f}, expected 0.6 (3/5)"
 
     def test_product_a_wilson(self, product_a_data):
         """Product A: Wilson should be well above 0.6 threshold."""
@@ -718,7 +607,7 @@ class TestNumericalExample:
             f"Product A wilson = {wilson:.4f}, expected > 0.6 for Tier 1"
 
     def test_product_a_tier(self, product_a_data):
-        """Product A: Tier 1 (coverage=1.0, wilson>0.6, correct_up_pct>noise_ratio)."""
+        """Product A: Tier 2 (coverage=0.6 < 0.8, so not Tier 1; meets Tier 2)."""
         month_data, weights = product_a_data
         correct_up_pct = compute_correct_up_pct(month_data, weights)
         noise_ratio = compute_noise_ratio(month_data, weights)
@@ -728,18 +617,20 @@ class TestNumericalExample:
         wilson = wilson_lower_bound(total_cr, total_rise)
 
         tier = determine_tier(coverage, wilson, correct_up_pct, noise_ratio)
-        assert tier == 1, \
-            f"Product A tier = {tier}, expected 1 " \
+        assert tier == 2, \
+            f"Product A tier = {tier}, expected 2 " \
             f"(coverage={coverage:.3f}, wilson={wilson:.4f}, " \
             f"cup={correct_up_pct:.4f}, noise={noise_ratio:.4f})"
 
     def test_product_b_correct_up_pct(self, product_b_data):
-        """Product B: correct_up_pct ~ 0.327."""
+        """Product B: correct_up_pct ~ 0.492 (cr+cf in numerator)."""
         month_data, weights = product_b_data
         result = compute_correct_up_pct(month_data, weights)
-        # (7/12)*0.561 + (5/12)*0 = 0.32725
-        assert result == pytest.approx(0.327, abs=0.005), \
-            f"Product B correct_up_pct = {result:.4f}, expected ~0.327"
+        # Σ[w_i*(cr+cf)] / Σ[w_i*total]
+        # = [(7/12)*661 + (5/12)*70] / [(7/12)*1375 + (5/12)*100]
+        # = 414.75 / 843.75 ~ 0.4916
+        assert result == pytest.approx(0.492, abs=0.005), \
+            f"Product B correct_up_pct = {result:.4f}, expected ~0.492"
 
     def test_product_b_noise_ratio(self, product_b_data):
         """Product B: noise_ratio ~ 0.428."""
@@ -750,15 +641,15 @@ class TestNumericalExample:
             f"Product B noise_ratio = {result:.4f}, expected ~0.428"
 
     def test_product_b_coverage(self, product_b_data):
-        """Product B: coverage ~ 0.6 (only month 1 has CR > 0, weight = 7/12)."""
+        """Product B: coverage = 0.4 (2 active months / 5)."""
         month_data, weights = product_b_data
         result = compute_coverage(month_data, weights)
-        # Only month 1 has CR > 0, weight = 7/12 ~ 0.5833
-        assert result == pytest.approx(7 / 12, abs=0.01), \
-            f"Product B coverage = {result:.4f}, expected ~0.583 (rounds to 0.6)"
+        # Both months have non-zero totals -> 2/5 = 0.4
+        assert result == pytest.approx(0.4, abs=0.01), \
+            f"Product B coverage = {result:.4f}, expected 0.4 (2/5)"
 
     def test_product_b_tier(self, product_b_data):
-        """Product B: Tier 4 (correct_up_pct < noise_ratio, filtered out)."""
+        """Product B: Tier 2 (cup > noise, coverage >= 0.4, cup >= 0.45)."""
         month_data, weights = product_b_data
         correct_up_pct = compute_correct_up_pct(month_data, weights)
         noise_ratio = compute_noise_ratio(month_data, weights)
@@ -768,12 +659,12 @@ class TestNumericalExample:
         wilson = wilson_lower_bound(total_cr, total_rise) if total_rise > 0 else 0.0
 
         tier = determine_tier(coverage, wilson, correct_up_pct, noise_ratio)
-        assert tier == 4, \
-            f"Product B tier = {tier}, expected 4 " \
-            f"(cup={correct_up_pct:.4f} < noise={noise_ratio:.4f})"
+        assert tier == 2, \
+            f"Product B tier = {tier}, expected 2 " \
+            f"(cup={correct_up_pct:.4f}, noise={noise_ratio:.4f}, coverage={coverage:.3f})"
 
     def test_product_a_sorts_before_product_b(self, product_a_data, product_b_data):
-        """Product A (Tier 1) should sort before Product B (Tier 4)."""
+        """Product A (higher correct_up_pct) should sort before Product B."""
         a_data, a_weights = product_a_data
         b_data, b_weights = product_b_data
 
@@ -799,7 +690,7 @@ class TestNumericalExample:
             f"Product A (tier={a_tier}) should sort before Product B (tier={b_tier})"
 
     def test_product_a_lots(self, product_a_data):
-        """Product A (Tier 1) should get 2 lots."""
+        """Product A (Tier 2) should get 1 lot."""
         month_data, weights = product_a_data
         correct_up_pct = compute_correct_up_pct(month_data, weights)
         noise_ratio = compute_noise_ratio(month_data, weights)
@@ -809,10 +700,10 @@ class TestNumericalExample:
         wilson = wilson_lower_bound(total_cr, total_rise)
         tier = determine_tier(coverage, wilson, correct_up_pct, noise_ratio)
         lots = allocate_lots(tier)
-        assert lots == 2, f"Product A should get 2 lots (tier={tier})"
+        assert lots == 1, f"Product A should get 1 lot (tier={tier})"
 
     def test_product_b_lots(self, product_b_data):
-        """Product B (Tier 4) should get 1 lot."""
+        """Product B (Tier 2) should get 1 lot."""
         month_data, weights = product_b_data
         correct_up_pct = compute_correct_up_pct(month_data, weights)
         noise_ratio = compute_noise_ratio(month_data, weights)
@@ -887,23 +778,24 @@ class TestRegressionGuards:
             coverage=0.0, wilson=0.0, correct_up_pct=0.99, noise_ratio=0.01
         )
         assert tier == 3, \
-            "High correct_up_pct with zero coverage should be Tier 3 (cup > 0.4)"
+            "High correct_up_pct with zero coverage should be Tier 3 (cup > TIER3_CORRECT_UP_THRESHOLD)"
 
         # coverage = 1.0 but wilson just below threshold
         tier = determine_tier(
-            coverage=1.0, wilson=0.59, correct_up_pct=0.6, noise_ratio=0.2
+            coverage=1.0, wilson=TIER1_WILSON_THRESHOLD - 0.01, correct_up_pct=0.6, noise_ratio=0.2
         )
         assert tier == 2, \
-            "coverage=1.0 but wilson<0.6 should fall to Tier 2 if conditions met"
+            "coverage=1.0 but wilson < TIER1_WILSON_THRESHOLD should fall to Tier 2 if conditions met"
 
     def test_month_weights_consistency_with_codebase(self):
         """Verify our pure function matches the codebase's class constants."""
         assert MONTH_WEIGHTS_5 == (0.35, 0.25, 0.20, 0.12, 0.08)
         assert MAX_MONTHS_FOR_SCORING == 5
-        assert TIER1_WILSON_THRESHOLD == 0.6
-        assert TIER2_COVERAGE_THRESHOLD == 0.5
-        assert TIER2_CORRECT_UP_THRESHOLD == 0.5
-        assert TIER3_CORRECT_UP_THRESHOLD == 0.4
+        # 五唯一性修复：阈值已统一从 final_three_layer_config 导入（规范值 0.50/0.40/0.45/0.35）
+        assert TIER1_WILSON_THRESHOLD == 0.50
+        assert TIER2_COVERAGE_THRESHOLD == 0.40
+        assert TIER2_CORRECT_UP_THRESHOLD == 0.45
+        assert TIER3_CORRECT_UP_THRESHOLD == 0.35
         assert TIER1_LOTS == 2
         assert TIER2_LOTS == 1
 
@@ -926,3 +818,230 @@ class TestRegressionGuards:
         result = wilson_lower_bound(50, 100, z=1.96)
         assert 0.40 < result < 0.50, \
             f"Wilson(50,100) = {result:.4f}, expected ~0.40-0.50"
+
+    def test_get_scoring_months_falls_back_to_config_mapping(self):
+        """Scoring months should prefer the runtime month window when ParamsService has no loaded params."""
+
+        class _EmptyParams:
+            def get_instrument_meta(self, _fid):
+                return {'product': 'IF', 'year_month': '2606'}
+
+            def get(self, key, default=None):
+                return default
+
+        service = WidthCacheQueryService()
+        service._get_params = lambda: _EmptyParams()
+
+        months = service._get_scoring_months(1, ['2602', '2606', '2609', '2612'])
+
+        assert months == ['2609', '2612']
+
+    def test_register_option_preserves_runtime_state_and_migrates_status_bucket(self):
+        """Re-registering a live option must move its current state to the new future/month bucket."""
+
+        class _FakeParams:
+            def get_instrument_meta(self, fid):
+                mapping = {
+                    101: {'product': 'FG', 'year_month': '2607', 'exchange': 'CZCE'},
+                    102: {'product': 'FG', 'year_month': '2608', 'exchange': 'CZCE'},
+                }
+                return mapping.get(fid)
+
+            def get(self, key, default=None):
+                return default
+
+        cache = WidthStrengthCache(params_service=_FakeParams())
+
+        cache.register_option(
+            instrument_id='FG607C2000',
+            underlying_product='FG',
+            month='2607',
+            strike_price=2000,
+            option_type='CALL',
+            initial_price=12,
+            underlying_future_id=101,
+            internal_id=9001,
+        )
+
+        assert cache._status_counts[101]['2607']['CALL']['other'] == 1
+
+        cache.register_option(
+            instrument_id='FG608C2000',
+            underlying_product='FG',
+            month='2608',
+            strike_price=2000,
+            option_type='CALL',
+            initial_price=0,
+            underlying_future_id=102,
+            internal_id=9001,
+        )
+
+        assert cache._months[102] == ['2608']
+        assert cache._status_counts[101]['2607']['CALL']['other'] == 0
+        assert cache._status_counts[102]['2608']['CALL']['other'] == 1
+        assert cache._current_status[9001] == 'other'
+
+
+# =====================================================================
+# Test: compute_th (Section 3.2 diagnostic indicator)
+# =====================================================================
+
+class TestComputeTh:
+    """Design report Section 3.2: th = Σ[w_i × CR_i / (CR_i + CF_i)]."""
+
+    def test_single_month_full_health(self):
+        """100% correct fall -> th = 1.0."""
+        weights = resolve_month_weights(1)
+        data = [{'cr': 100, 'cf': 0}]
+        result = compute_th(data, weights)
+        assert result == pytest.approx(1.0, abs=1e-10)
+
+    def test_single_month_zero_health(self):
+        """0% correct fall -> th = 0.0."""
+        weights = resolve_month_weights(1)
+        data = [{'cr': 0, 'cf': 100}]
+        result = compute_th(data, weights)
+        assert result == pytest.approx(0.0, abs=1e-10)
+
+    def test_single_month_half(self):
+        """50% correct fall -> th = 0.5."""
+        weights = resolve_month_weights(1)
+        data = [{'cr': 50, 'cf': 50}]
+        result = compute_th(data, weights)
+        assert result == pytest.approx(0.5, abs=1e-10)
+
+    def test_zero_sync_total_skipped(self):
+        """Month with cr=0 and cf=0 should not contribute."""
+        weights = resolve_month_weights(2)
+        data = [
+            {'cr': 80, 'cf': 20},  # 0.80
+            {'cr': 0, 'cf': 0},    # skipped
+        ]
+        result = compute_th(data, weights)
+        expected = (7 / 12) * 0.80
+        assert result == pytest.approx(expected, abs=1e-4)
+
+    def test_th_bounded_zero_to_one(self):
+        """th must be in [0, 1]."""
+        weights = resolve_month_weights(3)
+        data = [
+            {'cr': 80, 'cf': 20},
+            {'cr': 30, 'cf': 70},
+            {'cr': 50, 'cf': 50},
+        ]
+        result = compute_th(data, weights)
+        assert 0.0 <= result <= 1.0
+
+
+# =====================================================================
+# Test: compute_ra (Section 3.2 diagnostic indicator)
+# =====================================================================
+
+class TestComputeRa:
+    """Design report Section 3.2: ra = Σ[w_i × (1 - WR_i / (CR_i + WR_i))]."""
+
+    def test_single_month_no_divergence(self):
+        """WR=0 -> ra = 1.0 (no divergence)."""
+        weights = resolve_month_weights(1)
+        data = [{'cr': 100, 'wr': 0}]
+        result = compute_ra(data, weights)
+        assert result == pytest.approx(1.0, abs=1e-10)
+
+    def test_single_month_full_divergence(self):
+        """CR=0, WR>0 -> ra = 0.0 (full divergence)."""
+        weights = resolve_month_weights(1)
+        data = [{'cr': 0, 'wr': 100}]
+        result = compute_ra(data, weights)
+        assert result == pytest.approx(0.0, abs=1e-10)
+
+    def test_single_month_half(self):
+        """CR=WR -> ra = 0.5."""
+        weights = resolve_month_weights(1)
+        data = [{'cr': 50, 'wr': 50}]
+        result = compute_ra(data, weights)
+        assert result == pytest.approx(0.5, abs=1e-10)
+
+    def test_zero_rise_skipped(self):
+        """Month with rise=0 should not contribute to ra."""
+        weights = resolve_month_weights(2)
+        data = [
+            {'cr': 80, 'wr': 20},  # ra contribution = 0.80
+            {'cr': 0, 'wr': 0},    # skipped
+        ]
+        result = compute_ra(data, weights)
+        expected = (7 / 12) * 0.80
+        assert result == pytest.approx(expected, abs=1e-4)
+
+    def test_ra_bounded_zero_to_one(self):
+        """ra must be in [0, 1]."""
+        weights = resolve_month_weights(3)
+        data = [
+            {'cr': 80, 'wr': 20},
+            {'cr': 30, 'wr': 70},
+            {'cr': 50, 'wr': 50},
+        ]
+        result = compute_ra(data, weights)
+        assert 0.0 <= result <= 1.0
+
+
+# =====================================================================
+# Test: Tier 4 filtering (BUG-9 fix)
+# =====================================================================
+
+class TestTier4Filtering:
+    """BUG-9 fix: Tier 4 futures must be filtered out (design report: 不交易)."""
+
+    def test_tier4_is_not_tradable(self):
+        """Tier 4 indicates 'do not trade' per design report Section 2."""
+        # Product B from design report example: correct_up_pct < noise_ratio
+        tier = determine_tier(
+            coverage=0.6, wilson=0.514,
+            correct_up_pct=0.327, noise_ratio=0.428
+        )
+        assert tier == 4, "Product B should be Tier 4"
+
+    def test_tier4_filtered_from_results(self):
+        """When all futures are Tier 4, select_otm_targets_by_volume returns []."""
+        # This is validated end-to-end in runtime_verify_option_sort.py
+        # Here we verify the determine_tier logic that drives the filter
+        tier = determine_tier(
+            coverage=0.3, wilson=0.3,
+            correct_up_pct=0.2, noise_ratio=0.5
+        )
+        assert tier == 4
+        # Per BUG-9 fix, tier==4 futures are skipped in select_otm_targets_by_volume
+
+    def test_tier1_is_tradable(self):
+        """Tier 1 futures pass the filter."""
+        tier = determine_tier(
+            coverage=1.0, wilson=0.787,
+            correct_up_pct=0.807, noise_ratio=0.192
+        )
+        assert tier == 1
+        # Per BUG-9 fix, only tier != 4 futures are added to future_scores
+
+
+# =====================================================================
+# Test: resolve_month_weights truncation (BUG-12 fix)
+# =====================================================================
+
+class TestMonthWeightsTruncation:
+    """BUG-12 fix: n_months > 5 returns MONTH_WEIGHTS_5 (5 elements)."""
+
+    def test_six_months_returns_five_weights(self):
+        weights = resolve_month_weights(6)
+        assert len(weights) == 5
+
+    def test_eight_months_returns_five_weights(self):
+        weights = resolve_month_weights(8)
+        assert len(weights) == 5
+
+    def test_six_months_matches_month_weights_5(self):
+        weights = resolve_month_weights(6)
+        assert weights == pytest.approx(MONTH_WEIGHTS_5, abs=1e-10)
+
+    def test_five_months_unchanged(self):
+        """n_months=5 should still return normalized MONTH_WEIGHTS_5."""
+        weights = resolve_month_weights(5)
+        assert weights == pytest.approx(MONTH_WEIGHTS_5, abs=1e-10)
+

@@ -375,7 +375,7 @@ class TestDownstreamCompatibility:
         assert callable(run_backtest_box_extreme)
 
     def test_backtest_runner_base_getattr(self):
-        """验证backtest_runner_base的__getattr__仍能路由到策略函数"""
+        """验证backtest_runner_base的指。getattr__仍能路由到策略函数"""
         from ali2026v3_trading.param_pool.backtest.backtest_runner_base import __getattr__ as _ga
         fn = _ga("run_backtest_box_extreme")
         assert callable(fn)

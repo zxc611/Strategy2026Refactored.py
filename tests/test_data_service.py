@@ -74,8 +74,23 @@ class TestDataServiceMethods:
         assert svc.request_realtime("IF2606") is True
         ds.DataService._subscribe_fn = None
 
+    def test_subscription_manager_lazy_create(self):
+        svc = self._make_svc()
+        sm = svc.subscription_manager
+        assert sm is not None
+        assert sm.data_manager is svc
+        assert svc.subscription_manager is sm
+
+    def test_bind_data_manager_replays_to_subscription_manager(self):
+        svc = self._make_svc()
+        mock_sm = svc.subscription_manager
+        mock_sm.bind_data_manager = MagicMock()
+        svc.bind_data_manager(svc)
+        mock_sm.bind_data_manager.assert_called_once_with(svc)
+
     def test_check_data_source_ready_no_conn(self):
         svc = self._make_svc()
+        svc._get_connection = MagicMock(return_value=None)
         ready, msg = svc.check_data_source_ready()
         assert ready is False
         assert "DuckDB" in msg or "数据源" in msg
@@ -83,7 +98,8 @@ class TestDataServiceMethods:
     def test_check_data_source_ready_with_conn(self):
         svc = self._make_svc()
         mock_conn = MagicMock()
-        svc._duckdb_conn = mock_conn
+        svc._get_connection = MagicMock(return_value=mock_conn)
+        svc._return_connection = MagicMock()
         svc.realtime_cache = MagicMock()
         ready, msg = svc.check_data_source_ready()
         assert ready is True

@@ -13,6 +13,8 @@ PARENT_DIR = os.path.dirname(BASE_DIR)
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ  # 五唯一性修复：统一 CHINA_TZ
+
 # 审计维度定义
 AUDIT_DIMENSIONS = {
     'import_chain': {
@@ -52,7 +54,7 @@ def _check_import_chain():
     critical_modules = [
         'ali2026v3_trading.infra.shared_utils',
         'ali2026v3_trading.infra.resilience',
-        'ali2026v3_trading.infra.health',
+        'ali2026v3_trading.infra.health_monitor',
         'ali2026v3_trading.infra.event_bus',
         'ali2026v3_trading.config.config_service',
         'ali2026v3_trading.evaluation.cascade_judge',
@@ -187,7 +189,7 @@ def run_audit(dimensions=None, severity=None, output_format='text'):
     # Text format
     lines = [
         "=" * 60,
-        f"审计报告 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"审计报告 — {datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         "=" * 60,
     ]
 

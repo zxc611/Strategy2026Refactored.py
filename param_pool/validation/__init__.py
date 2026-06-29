@@ -1,5 +1,7 @@
-# MODULE_ID: M1-162
-"""param_pool.validation sub-package"""
+"""param_pool.validation sub-package
+
+五唯一性修复：包级 __init__.py 不需要独立 MODULE_ID，已删除原 M1-162（与 backtest_orchestrator.py 重复）。
+"""
 from __future__ import annotations
 
 _SUBMODULES = [

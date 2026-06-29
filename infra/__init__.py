@@ -8,6 +8,7 @@ def __getattr__(name: str):
         "_disk_monitor": ".storage_service",
         "_helpers": ".storage_service",
         "_ops_framework": ".ops_service",
+        "callback_registry": ".registry_service",
         "commission_utils": ".trading_utils",
         "cross_system": ".trading_utils",
         "event_publisher": ".event_bus",

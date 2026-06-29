@@ -98,16 +98,52 @@ class LifecycleResource:
         self._scheduler = scheduler
         self.register_resource('scheduler', scheduler)
 
-    def stop_scheduler(self) -> None:
-        if self._scheduler is not None:
-            stop = getattr(self._scheduler, 'stop', None) or getattr(self._scheduler, 'shutdown', None)
-            if callable(stop):
-                try:
-                    stop()
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                    logging.warning("[LifecycleResource] 调度器停止失败: %s", e)
-            self._scheduler = None
 
-    def get_resource(self, name: str) -> Optional[Any]:
-        with self._resource_lock:
-            return self._owned_resources.get(name)
+# 模块级函数（用于向后兼容）
+_default_resource_manager: Optional[LifecycleResource] = None
+
+
+def register_thread_pool(name: str, pool: Any) -> None:
+    """注册线程池（模块级函数，用于向后兼容）
+    
+    Args:
+        name: 线程池名称
+        pool: 线程池实例
+    """
+    global _default_resource_manager
+    if _default_resource_manager is None:
+        logging.info("[lifecycle_resource] register_thread_pool called but no default manager set")
+        return
+    _default_resource_manager.register_thread_pool(name, pool)
+
+
+def set_default_resource_manager(manager: LifecycleResource) -> None:
+    """设置默认资源管理器
+    
+    Args:
+        manager: LifecycleResource实例
+    """
+    global _default_resource_manager
+    _default_resource_manager = manager
+
+
+__all__ = [
+    'LifecycleResource',
+    'register_thread_pool',
+    'set_default_resource_manager',
+]
+
+
+def stop_scheduler(self) -> None:
+    if self._scheduler is not None:
+        stop = getattr(self._scheduler, 'stop', None) or getattr(self._scheduler, 'shutdown', None)
+        if callable(stop):
+            try:
+                stop()
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                logging.warning("[LifecycleResource] 调度器停止失败: %s", e)
+        self._scheduler = None
+
+def get_resource(self, name: str) -> Optional[Any]:
+    with self._resource_lock:
+        return self._owned_resources.get(name)

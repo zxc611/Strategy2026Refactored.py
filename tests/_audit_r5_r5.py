@@ -7,7 +7,7 @@ print('=== 第5组端到端断言验证 (R5-1~R5-4) ===')
 PASS = 0
 FAIL = 0
 
-# R5-1: 全量测试套件执行（检查测试文件数量和存在性）
+# R5-1: 全量测试套件执行（检查测试文件数量和存在性）'
 try:
     test_files = []
     for root, dirs, files in os.walk('tests'):
@@ -73,7 +73,7 @@ except AssertionError as e:
     print(f'R5-3 FAIL: {e}')
     FAIL += 1
 
-# R5-4: 评级复核（基于修复后数据重新计算评级）
+# R5-4: 评级复核（基于修复后数据重新计算评级）'
 try:
     M1_scores = {
         'call_chain': 90,

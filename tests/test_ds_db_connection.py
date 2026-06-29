@@ -121,7 +121,7 @@ class TestTimedDuckDBConnection:
             _ = timed._private_attr
 
     def test_last_used_time_updated(self):
-        """查询更新_last_used_time"""
+        """查询更新新last_used_time"""
         from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_conn.execute = MagicMock(return_value=None)
@@ -203,7 +203,7 @@ class TestDBConnectionMixin:
         conn.close()
 
     def test_connect_with_timeout_returns_timed_conn(self):
-        """_connect_with_timeout返回_TimedDuckDBConnection"""
+        """_connect_with_timeout返回滚TimedDuckDBConnection"""
         try:
             import duckdb
         except ImportError:

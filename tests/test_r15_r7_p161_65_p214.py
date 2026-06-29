@@ -22,14 +22,14 @@ def test_p1_62_calculate_risk_metrics_delegates():
     """P1-62: RiskService.calculate_risk_metrics 委托到 _compute_service"""
     from ali2026v3_trading.risk.risk_service import RiskService
     src = inspect.getsource(RiskService.calculate_risk_metrics)
-    assert '_compute_service' in src, "calculate_risk_metrics未委托到_compute_service"
+    assert '_compute_service' in src, "calculate_risk_metrics未委托到。compute_service"
 
 
 def test_p1_63_compute_decision_score_delegates():
     """P1-63: RiskService.compute_decision_score 委托到 _compute_service"""
     from ali2026v3_trading.risk.risk_service import RiskService
     src = inspect.getsource(RiskService.compute_decision_score)
-    assert '_compute_service' in src, "compute_decision_score未委托到_compute_service"
+    assert '_compute_service' in src, "compute_decision_score未委托到。compute_service"
 
 
 def test_p1_63_safe_normalize_weights_single_source():

@@ -161,7 +161,7 @@ class TestEnsureRegisteredInstruments:
 
 class TestDeriveUnderlyingFutures:
     def test_derive(self):
-        with patch('ali2026v3_trading.infra.subscription_manager.SubscriptionManager') as mock_sm:
+        with patch('ali2026v3_trading.infra.subscription_service.SubscriptionManager') as mock_sm:
             mock_sm.parse_option.return_value = {'product': 'IO', 'year_month': '2606'}
             result = InstrumentQueryService._derive_underlying_futures({'IO': ['IO2606-C-3500']})
             assert isinstance(result, list)

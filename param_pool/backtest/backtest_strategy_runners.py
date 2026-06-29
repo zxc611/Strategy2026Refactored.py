@@ -1,4 +1,4 @@
-﻿# [M1-98] 合并策略入口
+# [M1-98] 合并策略入口
 # MODULE_ID: M1-160
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 #!/usr/bin/env python3
@@ -366,10 +366,10 @@ def run_backtest_box_extreme(
     - 箱顶极值（价格触及箱体上沿）→ 做空
 
     影子策略：
-    - shadow_reverse: 方向强制反转（箱底→做空，箱顶→做多）
+    - shadow_reverse: 方向强制反转（箱底→做空，箱顶→做多）'
     - shadow_random: 随机方向（50/50）
 
-    V7.1决策频率机制：决策频率由K线周期 × state_confirm_bars自然决定，每Bar都执行。
+    V7.1决策频率机制：决策频率由K线周期 × state_confirm_bars自然决定，每Bar都执行。'
     NOTE: decision_interval_minutes仍用于回测跳帧逻辑(与state_confirm_bars互补，控制决策频率)。
     """
     if bar_data.empty:
@@ -507,7 +507,7 @@ def run_backtest_box_spring(
     """箱体弹簧策略回测
 
     条件：
-    - IV极低（低于阈值）
+    - IV极低（低于阈值）'
     - 近月期权
     - 价格在箱体内部
     → 预期波动率回归，买入期权做多波动率
@@ -724,7 +724,7 @@ def run_backtest_arbitrage(
                     tp_mult, sl_mult = _resolve_tp_sl(params, "ARBITRAGE")
                     tp_price = bar_price * (1 + tp_mult * 0.01) if arb_direction == 1 else bar_price * (1 - tp_mult * 0.01)
                     sl_price = bar_price * (1 - sl_mult * 0.01) if arb_direction == 1 else bar_price * (1 + sl_mult * 0.01)
-                    # R30-ARCH-01修复: S5开仓使用_BacktestPosition替代嵌套dict
+                    # R30-ARCH-01修复: S5开仓使用例BacktestPosition替代嵌套dict
                     arb_lots = params.get("lots_min", 1)
                     # P0-R11-05修复: arbitrage开仓路径调用RiskService.check_before_trade()
                     if not _check_risk_service_before_trade(symbol, arb_direction, bar_price, arb_lots, "BT_ARBITRAGE", bar_time):
@@ -995,7 +995,7 @@ def run_backtest_divergence(
       5. 信号方向决定多空，position_scale缩放仓位
       6. take_profit_ratio/stop_loss_ratio/hard_time_stop_min管理持仓
 
-    特点：收益来源集中(背离→反转)、持仓时间中等(60min硬止损)、方向取决于背离类型。
+    特点：收益来源集中(背离→反转)、持仓时间中等(60min硬止损)、方向取决于背离类型。'
     """
     if bar_data.empty:
         return {"error": "无数据", "params": params, "strategy_type": strategy_type}

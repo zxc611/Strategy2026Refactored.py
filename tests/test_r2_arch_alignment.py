@@ -24,9 +24,9 @@ class TestR2_1_FacadePureComposition:
         assert 'class ShadowStrategyEngine:' in src, "R2-1失败: 未使用纯组合class定义"
 
     def test_core_service_composition(self):
-        """通过组合持有_core_service"""
+        """通过组合持有界core_service"""
         src = open(os.path.join(_PROJECT_ROOT, 'strategy', 'shadow_strategy_facade.py'), encoding='utf-8').read()
-        assert 'self._core_service = ShadowStrategyCoreService' in src, "R2-1失败: 未通过组合持有_core_service"
+        assert 'self._core_service = ShadowStrategyCoreService' in src, "R2-1失败: 未通过组合持有界core_service"
 
     def test_explicit_delegation_validate(self):
         """显式委托validate_dependencies方法"""
@@ -92,19 +92,19 @@ class TestR2_3_RiskDelegationUnification:
     """R2-3: 风控委托链统一（消除全局单例绕路）"""
 
     def test_check_regulatory_uses_check_service(self):
-        """check_regulatory_compliance走_check_service而非全局单例"""
+        """check_regulatory_compliance走。check_service而非全局单例"""
         src = open(os.path.join(_PROJECT_ROOT, 'risk', 'risk_service.py'), encoding='utf-8').read()
-        assert 'self._check_service.check_regulatory_compliance' in src, "R2-3失败: check_regulatory_compliance未走_check_service"
+        assert 'self._check_service.check_regulatory_compliance' in src, "R2-3失败: check_regulatory_compliance未走。check_service"
 
     def test_check_capital_uses_check_service(self):
-        """check_capital_sufficiency走_check_service而非全局单例"""
+        """check_capital_sufficiency走。check_service而非全局单例"""
         src = open(os.path.join(_PROJECT_ROOT, 'risk', 'risk_service.py'), encoding='utf-8').read()
-        assert 'self._check_service.check_capital_sufficiency' in src, "R2-3失败: check_capital_sufficiency未走_check_service"
+        assert 'self._check_service.check_capital_sufficiency' in src, "R2-3失败: check_capital_sufficiency未走。check_service"
 
     def test_check_exchange_uses_check_service(self):
-        """check_exchange_status走_check_service而非全局单例"""
+        """check_exchange_status走。check_service而非全局单例"""
         src = open(os.path.join(_PROJECT_ROOT, 'risk', 'risk_service.py'), encoding='utf-8').read()
-        assert 'self._check_service.check_exchange_status' in src, "R2-3失败: check_exchange_status未走_check_service"
+        assert 'self._check_service.check_exchange_status' in src, "R2-3失败: check_exchange_status未走。check_service"
 
     def test_no_get_safety_meta_layer_in_three_methods(self):
         """三个方法不再直接调用get_safety_meta_layer()"""
@@ -135,7 +135,7 @@ class TestR2_4_ParamTripleSourceAudit:
     def test_no_hardcoded_fallback(self):
         """禁止硬编码fallback"""
         src = open(os.path.join(_PROJECT_ROOT, 'strategy', 'shadow_strategy_core.py'), encoding='utf-8').read()
-        # 在_load_absolute_ev_floor中不应有 self._absolute_ev_floor = self.ABSOLUTE_EV_FLOOR 的fallback
+        # 在。load_absolute_ev_floor中不应有 self._absolute_ev_floor = self.ABSOLUTE_EV_FLOOR 的fallback
         lines = src.split('\n')
         in_load_method = False
         for i, line in enumerate(lines, 1):

@@ -1,4 +1,3 @@
-# MODULE_ID: M1-273
 """
 历史K线加载Mixin模块
 
@@ -17,6 +16,7 @@
 """
 
 import logging
+import os
 import re
 import threading
 import time
@@ -78,6 +78,8 @@ def load_historical_klines_with_stop(
     normalized_period = storage._normalize_kline_period(kline_style)
     effective_batch_size = max(1, int(batch_size or len(instruments) or 1))
     total_batches = (len(instruments) + effective_batch_size - 1) // effective_batch_size if instruments else 0
+    empty_batch_limit = max(0, safe_int(os.getenv('ALI2026_HISTORICAL_EMPTY_BATCH_LIMIT', '5')))
+    consecutive_empty_batches = 0
 
     for batch_index, start in enumerate(range(0, len(instruments), effective_batch_size), start=1):
         if _should_stop():
@@ -86,6 +88,8 @@ def load_historical_klines_with_stop(
 
         batch_instruments = instruments[start:start + effective_batch_size]
         batch_enqueued_klines = 0
+        success_before_batch = success_count
+        fetched_before_batch = fetched_klines
         logging.info(
             "[Storage] 历史K线批次 %d/%d 开始: batch_size=%d, max_workers=%d, request_delay=%.3fs, inter_batch_delay=%.3fs",
             batch_index, total_batches, len(batch_instruments), max_workers, request_delay_sec, inter_batch_delay_sec,
@@ -128,25 +132,39 @@ def load_historical_klines_with_stop(
 
                 if kline_data and len(kline_data) > 0:
                     normalized_klines = []
+                    _kline_ts_warn_count = 0
                     for kline in kline_data:
                         try:
-                            ts = storage._to_timestamp(getattr(kline, 'timestamp', getattr(kline, 'ts', time.time())))
+                            raw_dt = getattr(kline, 'datetime', None)
+                            if raw_dt is None:
+                                raw_dt = getattr(kline, 'date', None) or getattr(kline, 'time', None) or getattr(kline, 'timestamp', None)
+                            ts = storage._to_timestamp(raw_dt)
                             if ts is None:
-                                raise ValueError('invalid historical kline timestamp')
+                                _kline_ts_warn_count += 1
+                                if _kline_ts_warn_count <= 3:
+                                    # FIX-R37-KLINE-NOISE: K线timestamp为None降为DEBUG，summary已记录WARNING
+                                    logging.debug("[Storage] K线timestamp为None: %s kline_type=%s raw_dt=%s attrs=%s",
+                                                    instrument_id, type(kline).__name__, raw_dt,
+                                                    [a for a in dir(kline) if not a.startswith('_')][:10])
+                                continue
                             normalized_klines.append({
                                 'ts': ts,
                                 'instrument_id': instrument_id,
                                 'exchange': exchange,
-                                'open': getattr(kline, 'open', getattr(kline, 'Open', 0.0)),
-                                'high': getattr(kline, 'high', getattr(kline, 'High', 0.0)),
-                                'low': getattr(kline, 'low', getattr(kline, 'Low', 0.0)),
-                                'close': getattr(kline, 'close', getattr(kline, 'Close', 0.0)),
-                                'volume': getattr(kline, 'volume', getattr(kline, 'Volume', 0)),
-                                'open_interest': getattr(kline, 'open_interest', getattr(kline, 'OpenInterest', 0)),
+                                'open': getattr(kline, 'open', 0.0),
+                                'high': getattr(kline, 'high', 0.0),
+                                'low': getattr(kline, 'low', 0.0),
+                                'close': getattr(kline, 'close', 0.0),
+                                'volume': getattr(kline, 'volume', 0),
+                                'open_interest': getattr(kline, 'open_interest', 0),
                                 'period': normalized_period,
                             })
                         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
                             logging.warning(f"[Storage] 保存K线失败 {instrument_id}: {exc}")
+
+                    if _kline_ts_warn_count > 0:
+                        # FIX-R37-KLINE-NOISE: summary降为DEBUG，数据已跳过不影响运行
+                        logging.debug("[Storage] %s: %d/%d K线timestamp为None(已跳过)", instrument_id, _kline_ts_warn_count, len(kline_data))
 
                     if not normalized_klines:
                         return {'failed': True, 'instrument_id': instrument_id}
@@ -238,6 +256,12 @@ def load_historical_klines_with_stop(
             "[Storage] 历史K线批次 %d/%d 完成: success=%d, failed=%d, fetched_klines=%d, enqueued_klines=%d",
             batch_index, total_batches, success_count, failed_count, fetched_klines, batch_enqueued_klines,
         )
+        batch_success_count = success_count - success_before_batch
+        batch_fetched_klines = fetched_klines - fetched_before_batch
+        if batch_success_count == 0 and batch_fetched_klines == 0 and batch_enqueued_klines == 0:
+            consecutive_empty_batches += 1
+        else:
+            consecutive_empty_batches = 0
 
         if progress_callback:
             try:
@@ -253,12 +277,20 @@ def load_historical_klines_with_stop(
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
                 logging.debug(f"[Storage] 历史K线进度回调失败: {exc}")
 
+        if empty_batch_limit and consecutive_empty_batches >= empty_batch_limit:
+            logging.info(
+                "[Storage] 历史K线连续 %d 个批次无数据，提前结束本轮加载: batch=%d/%d, success=%d, failed=%d",
+                consecutive_empty_batches, batch_index, total_batches, success_count, failed_count,
+            )
+            break
+
         if inter_batch_delay_sec > 0 and batch_index < total_batches:
             if _should_stop() or storage._stop_event.wait(inter_batch_delay_sec):
                 logging.info("[Storage] 历史K线加载在批次间隔中断")
                 break
 
-    queue_stats_after = storage.get_queue_stats()
+    # FIX-R24: storage可能没有get_queue_stats方法，使用getattr安全调用
+    queue_stats_after = getattr(storage, 'get_queue_stats', lambda: {})() or {}
     queue_received_delta = queue_stats_after.get('total_received', 0)
     queue_written_delta = queue_stats_after.get('total_written', 0)
     drops_delta = queue_stats_after.get('drops_count', 0)
@@ -365,10 +397,10 @@ class HistoricalKlineMixin:
 
         subscribed, removed_by_month, min_year_month = self._filter_historical_month_scope(subscribed)
         if removed_by_month > 0:
-            logging.warning(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] Filtered by month: min={min_year_month}, removed={removed_by_month}")
+            logging.info(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] Filtered by month: min={min_year_month}, removed={removed_by_month}")
 
         include_options = bool(_get_param_value(self.params, 'load_history_options', True))
-        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_service import SubscriptionManager
         future_count = 0
         option_count = 0
         instruments: List[str] = []
@@ -534,11 +566,21 @@ class HistoricalKlineMixin:
         # 记录收到K线的合约（分子）
         kline_instruments = result.get('kline_instruments', []) if result else []
         if kline_instruments:
-            if hasattr(self, 'storage') and self.storage and hasattr(self.storage, 'subscription_manager'):
-                sm = self.storage.subscription_manager
-                if sm and hasattr(sm, 'record_kline_received'):
-                    for inst_id in kline_instruments:
-                        sm.record_kline_received(inst_id)
+            sm = None
+            _storage = getattr(self, 'storage', None)
+            if _storage is not None and hasattr(_storage, 'subscription_manager'):
+                sm = _storage.subscription_manager
+            if sm is None:
+                try:
+                    from ali2026v3_trading.data.data_service import get_data_service
+                    _ds = get_data_service()
+                    if _ds is not None:
+                        sm = getattr(_ds, 'subscription_manager', None)
+                except Exception:
+                    sm = None
+            if sm and hasattr(sm, 'record_kline_received'):
+                for inst_id in kline_instruments:
+                    sm.record_kline_received(inst_id)
         
         with self._historical_loader_lock:
             self._stats['total_klines'] = self._stats.get('total_klines', 0) + enqueued
@@ -600,18 +642,12 @@ class HistoricalKlineMixin:
     def _start_historical_kline_load(self, blocking: bool = False) -> None:
         """启动历史K线加载
         
-        检查配置和条件，决定是否启动加载任务。
-        支持异步和阻塞两种模式。
+        注意: auto_load_history 检查已在调用方 lifecycle_callbacks.on_start() 中完成，
+        此处不再重复检查，避免因 params 对象差异导致误判为 False。
         
         Args:
             blocking: 若为True，启动加载线程后阻塞等待完成。
-                     用于 on_start 初始化阶段，确保历史数据就绪后才继续。
         """
-        auto_load = bool(_get_param_value(self.params, 'auto_load_history', False))
-        if not auto_load:
-            logging.info(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] auto_load_history=False, skip")
-            return
-
         instruments = self._build_historical_instruments()
         if not instruments:
             logging.info(f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]" f"[source_type=historical-loader] No subscribed instruments, skip")
@@ -626,7 +662,7 @@ class HistoricalKlineMixin:
                     ]
                     self._historical_load_retry_count += 1
                     retry_remaining = self._historical_load_max_retries - self._historical_load_retry_count
-                    logging.warning(
+                    logging.info(
                         f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
                         f"[source_type=historical-loader] Provider not ready, scheduling retry "
                         f"{self._historical_load_retry_count}/{self._historical_load_max_retries} "
@@ -665,9 +701,10 @@ class HistoricalKlineMixin:
         def _runner() -> None:
             _instruments = instruments
             try:
-                if hasattr(self, 'storage') and self.storage:
-                    with self.storage._ext_kline_lock:
-                        self.storage._ext_kline_load_in_progress = True
+                _storage_ref = getattr(self, 'storage', None)
+                if _storage_ref is not None:
+                    with _storage_ref._ext_kline_lock:
+                        _storage_ref._ext_kline_load_in_progress = True
                 # 预注册已在on_init步骤2中同步完成（_load_and_preregister_instruments），
                 # 失败则初始化终止，on_start和历史K线加载不会执行。
                 # 此处只做信任性日志，不重复注册。
@@ -693,13 +730,14 @@ class HistoricalKlineMixin:
                 with self._historical_loader_lock:
                     self._historical_load_in_progress = False
                     self._historical_kline_progress = None
-                if hasattr(self, 'storage') and self.storage:
-                    with self.storage._ext_kline_lock:
-                        self.storage._ext_kline_load_in_progress = False
+                _storage_ref2 = getattr(self, 'storage', None)
+                if _storage_ref2 is not None:
+                    with _storage_ref2._ext_kline_lock:
+                        _storage_ref2._ext_kline_load_in_progress = False
                     try:
-                        self.storage.close_connection()
+                        _storage_ref2.close_connection()
                     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                        logger.warning(f"[{self.strategy_id}] Failed to close connection: {e}")
+                        logger.debug(f"[{self.strategy_id}] Failed to close connection: {e}")
 
         thread = threading.Thread(target=_runner, name=f"hkl-{self.strategy_id}", daemon=True)
         self._historical_loader_thread = thread

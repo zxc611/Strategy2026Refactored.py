@@ -2,7 +2,7 @@
 """R2-F3: P1-08 双调度器边界明确化 断言测试
 
 验证运行时行为:
-1. StrategyScheduler拥有_try_delegate_to_scheduler_service方法
+1. StrategyScheduler拥有界try_delegate_to_scheduler_service方法
 2. 委托成功时job元数据标记delegated_to='SchedulerService'
 3. SchedulerService不可用时回退到APScheduler
 4. _delegated_jobs映射正确记录委托关系
@@ -17,11 +17,11 @@ if _project_root not in sys.path:
 
 
 def test_strategy_scheduler_has_delegate_method():
-    """P1-08验证: StrategyScheduler拥有_try_delegate_to_scheduler_service方法"""
+    """P1-08验证: StrategyScheduler拥有界try_delegate_to_scheduler_service方法"""
     from ali2026v3_trading.strategy.strategy_scheduler import StrategyScheduler
     ss = StrategyScheduler()
     assert hasattr(ss, '_try_delegate_to_scheduler_service'), \
-        "StrategyScheduler应拥有_try_delegate_to_scheduler_service方法"
+        "StrategyScheduler应拥有界try_delegate_to_scheduler_service方法"
     assert callable(getattr(ss, '_try_delegate_to_scheduler_service')), \
         "_try_delegate_to_scheduler_service应为可调用方法"
 
@@ -45,7 +45,7 @@ def test_delegated_jobs_dict_exists():
     from ali2026v3_trading.strategy.strategy_scheduler import StrategyScheduler
     ss = StrategyScheduler()
     assert hasattr(ss, '_delegated_jobs'), \
-        "StrategyScheduler应拥有_delegated_jobs属性"
+        "StrategyScheduler应拥有界delegated_jobs属性"
     assert isinstance(ss._delegated_jobs, dict), \
         "_delegated_jobs应为dict类型"
 
@@ -74,7 +74,7 @@ def test_add_job_with_owner_marks_delegated_when_service_available():
 
         # 验证元数据标记
         assert 'test_job_1' in ss._delegated_jobs, \
-            "test_job_1应在_delegated_jobs中"
+            "test_job_1应在。delegated_jobs中"
         assert ss._delegated_jobs['test_job_1'] == 'SchedulerService', \
             f"委托目标应为'SchedulerService'，实际为'{ss._delegated_jobs['test_job_1']}'"
         assert ss._job_owners['test_job_1']['delegated_to'] == 'SchedulerService', \

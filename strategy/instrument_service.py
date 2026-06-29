@@ -1,4 +1,3 @@
-# MODULE_ID: M1-254
 """
 instrument_service.py — InstrumentService
 独立品种服务，替代 _InstrumentHelperMixin，以组合替代继承。
@@ -16,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import logging
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+from ali2026v3_trading.infra.subscription_service import SubscriptionManager
 
 
 class InstrumentManager:

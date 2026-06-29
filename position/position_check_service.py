@@ -146,11 +146,17 @@ class PositionCheckService:
         except ImportError:
             _cyclic_guard = None
         if _cyclic_guard and not _cyclic_guard.enter("position_check_all"):
-            logging.warning("[CC-04/CC-11] Cyclic call detected in check_all_positions, skipping")
+
             return
         try:
             with self._ps._cross_shard_lock:
                 now = datetime.now(_CHINA_TZ)
+                # FIX-READ-UNIQUE-10: 收集需要检查的record快照在global_lock内，
+                # 但实际_check_time_stop/_check_two_stage_stop(可能触发_trigger_close_position)
+                # 移到global_lock外执行，避免在global_lock内触发平仓导致死锁
+                # (_trigger_close_position需要instrument_lock，若另一线程持有instrument_lock
+                # 并等待global_lock则形成死锁)
+                _records_to_check = []
                 with self._ps.global_lock:
                     for inst_id in list(self._ps.positions):
                         pos_dict = self._ps.positions.get(inst_id)
@@ -162,8 +168,15 @@ class PositionCheckService:
                                 continue
                             if record.volume == 0:
                                 continue
-                            self._ps._check_time_stop(record, now)
-                            self._ps._check_two_stage_stop(record, now)
+                            _records_to_check.append((inst_id, pid, record))
+                # 在global_lock外执行可能触发平仓的检查
+                for _inst_id, _pid, _record in _records_to_check:
+                    try:
+                        self._ps._check_time_stop(_record, now)
+                        self._ps._check_two_stage_stop(_record, now)
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _check_err:
+                        logging.warning("[READ-UNIQUE-10] 持仓检查异常 inst=%s pid=%s: %s",
+                                        _inst_id, _pid, _check_err)
                 self._ps._check_eod_close(now)
         finally:
             if _cyclic_guard:
@@ -201,7 +214,9 @@ class PositionCheckService:
                         guard.set_daily_drawdown(drawdown_pct)
                 except (ImportError, AttributeError, ZeroDivisionError) as e:
                     logging.debug("[PositionService] drawdown update failed: %s", e)
-        except (ImportError, AttributeError) as e:
+        # FIX-R32-EXCEPT: 扩大异常捕获范围，防止equity update中的任何异常
+        # (如TypeError)阻断整个check_all_positions，导致后续PnL校验和下一轮持仓检查无法运行
+        except (ImportError, AttributeError, TypeError, ValueError, RuntimeError) as e:
             logging.debug("[PositionService] equity update failed: %s", e)
 
         self._validate_pnl_equity_consistency()
@@ -222,13 +237,23 @@ class PositionCheckService:
             if initial_capital is None or initial_capital <= 0:
                 return
             realized_pnl = 0.0
-            with self._ps.global_lock:
-                for _inst_id, pos_dict in self._ps.positions.items():
+            _has_active_position = False
+            # FIX-READ-UNIQUE-11: 使用instrument_lock逐合约加锁而非global_lock，
+            # 避免长时间持有global_lock阻塞其他需要global_lock的操作(如check_all_positions)
+            for _inst_id in list(self._ps.positions.keys()):
+                with self._ps._get_instrument_lock(_inst_id):
+                    pos_dict = self._ps.positions.get(_inst_id, {})
                     for _pid, rec in pos_dict.items():
                         if rec.volume == 0 and rec.open_price > 0:
                             if hasattr(rec, 'realized_pnl'):
                                 realized_pnl += getattr(rec, 'realized_pnl', 0.0)
+                        elif rec.volume != 0 and rec.open_price > 0:
+                            _has_active_position = True
+            # FIX-R37-REALIZED-PNL: 合并服务级累加器，覆盖已删除持仓记录的realized_pnl
+            realized_pnl += getattr(self._ps, '_total_realized_pnl', 0.0)
             expected_pnl = equity - initial_capital
+            if _has_active_position:
+                return
             if abs(expected_pnl) > 0 and abs(realized_pnl - expected_pnl) / max(abs(expected_pnl), 1.0) > 0.005:
                 logging.error(
                     "[PositionService] INV-P1-01: PnL与权益不一致! "

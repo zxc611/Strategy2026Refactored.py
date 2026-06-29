@@ -21,9 +21,9 @@ class TestFacadePureComposition:
             "ShadowStrategyEngine should not inherit from ShadowStrategyCoreService"
 
     def test_has_core_service_attribute(self):
-        """Facade持有_core_service组合属性"""
+        """Facade持有界core_service组合属性"""
         from ali2026v3_trading.strategy.shadow_strategy_facade import ShadowStrategyEngine
-        # 检查__init__中是否设置了_core_service
+        # 检查链链init__中是否设置了。core_service
         import inspect
         source = inspect.getsource(ShadowStrategyEngine.__init__)
         assert '_core_service' in source, "Facade should set _core_service in __init__"
@@ -40,7 +40,7 @@ class TestFacadePureComposition:
     def test_unknown_attribute_raises(self):
         """访问不存在的属性应抛出AttributeError"""
         from ali2026v3_trading.strategy.shadow_strategy_facade import ShadowStrategyEngine
-        # 不实例化（避免触发完整初始化），仅检查__getattr__逻辑
+        # 不实例化（避免触发完整初始化），仅检查链链getattr__逻辑
         import inspect
         source = inspect.getsource(ShadowStrategyEngine.__getattr__)
         assert 'AttributeError' in source, "__getattr__ should raise AttributeError for unknown attrs"
@@ -65,7 +65,7 @@ class TestFacadeImports:
         assert 'shadow_strategy_core' in source, "Facade should import shadow_strategy_core (merged file)"
 
     def test_imports_underscore_signal(self):
-        """Facade导入_shadow_strategy_signal"""
+        """Facade导入口shadow_strategy_signal"""
         import ali2026v3_trading.strategy.shadow_strategy_facade as facade_module
         source = open(facade_module.__file__, 'r', encoding='utf-8').read()
         assert '_shadow_strategy_signal' in source, "Facade should import _shadow_strategy_signal"

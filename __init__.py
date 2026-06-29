@@ -7,7 +7,7 @@ from ali2026v3_trading.data import quant_infra, quant_cointegration, quant_hmm, 
 from ali2026v3_trading.data import storage_query, storage_query_base, storage_query_history, storage_query_instrument, storage_wal_mixin
 from ali2026v3_trading.infra import concurrent_utils, operations_api, shared_providers
 from ali2026v3_trading.param_pool import backtest_orchestrator, ts_result_executor
-from ali2026v3_trading.param_pool.l1_quantification import meta_audit_passport
+from ali2026v3_trading.precompute import meta_audit_passport
 from ali2026v3_trading.param_pool.optimization import optuna_multiobjective_search, phase_scan
 from ali2026v3_trading.param_pool.validation import _validator_protocol
 from ali2026v3_trading.risk import risk_service, risk_check_service, risk_check_engine, risk_priority_matrix, safety_meta_layer

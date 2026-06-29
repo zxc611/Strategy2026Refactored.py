@@ -589,21 +589,7 @@ _REASON_TIME_STOP_SOURCE = {
     "MANUAL": ("resonance_hard_time_stop_min", "min", 5.0),
 }
 
-SHADOW_PARAM_MAP = {
-    "main": None,
-    "shadow_reverse": "shadow_a",
-    "shadow_random": "shadow_b",
-}
-
-# P0-R11-07修复: 使用deepcopy创建独立副本，防止修改影子参数污染原始默认值
-STRATEGY_SHADOW_DEFAULTS = {
-    "hft":             {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_HFT_SHADOW_A),          "shadow_b": copy.deepcopy(PARAM_DEFAULTS_HFT_SHADOW_B)},
-    "main":            {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_SHADOW_A),              "shadow_b": copy.deepcopy(PARAM_DEFAULTS_SHADOW_B)},
-    "box_extreme":     {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_BOX_EXTREME_SHADOW_A),  "shadow_b": copy.deepcopy(PARAM_DEFAULTS_BOX_EXTREME_SHADOW_B)},
-    "box_spring":      {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_BOX_SPRING_SHADOW_A),   "shadow_b": copy.deepcopy(PARAM_DEFAULTS_BOX_SPRING_SHADOW_B)},
-    "arbitrage":       {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_ARBITRAGE_SHADOW_A),    "shadow_b": copy.deepcopy(PARAM_DEFAULTS_ARBITRAGE_SHADOW_B)},
-    "market_making":   {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_MARKET_MAKING_SHADOW_A),"shadow_b": copy.deepcopy(PARAM_DEFAULTS_MARKET_MAKING_SHADOW_B)},
-}
+from ali2026v3_trading.param_pool._param_defaults import SHADOW_PARAM_MAP, STRATEGY_SHADOW_DEFAULTS  # 五唯一性修复：统一从 _param_defaults 导入（STRATEGY_SHADOW_DEFAULTS含divergence项，修复此前缺失BUG）
 
 ROUND1_TOP_K = 10
 
@@ -624,8 +610,8 @@ PARAM_SORT_METRIC_OVERRIDE = {
     'close_take_profit_ratio': 'profit_loss_ratio',  # 止盈参数按盈亏比排序
     # P0-R9-验收标准7修复: 补齐PARAM_GRID_ROUND1中3个缺失排序映射的参数
     'lots_min': 'total_return',  # 仓位参数按总收益排序
-    'signal_cooldown_sec': 'win_rate',  # 冷却参数按胜率排序（signal_quality不存在，使用win_rate替代）
-    'non_other_ratio_threshold': 'sharpe',  # 状态阈值按夏普比率排序（state_accuracy不存在，使用sharpe替代）
+    'signal_cooldown_sec': 'win_rate',  # 冷却参数按胜率排序（signal_quality不存在，使用win_rate替代）'
+    'non_other_ratio_threshold': 'sharpe',  # 状态阈值按夏普比率排序（state_accuracy不存在，使用sharpe替代）'
 }
 
 OBJECTIVE_FUNCTIONS = {

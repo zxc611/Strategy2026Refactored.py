@@ -51,7 +51,7 @@ def test_rollback_all_services_stopped():
     sc._services['svc2'] = MockService('svc2')
     sc._services['svc3'] = MockService('svc3')
 
-    # 调用回滚，应停止所有3个服务（即使svc2抛异常）
+    # 调用回滚，应停止所有3个服务（即使svc2抛异常）'
     try:
         sc._rollback_started_services(['svc1', 'svc2', 'svc3'])
         # 如果没有错误，svc2的stop()没有抛异常的情况

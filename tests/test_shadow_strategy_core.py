@@ -11,7 +11,7 @@ class TestValidateShadowParamIndependence:
     """_validate_shadow_param_independence: 参数独立性验证"""
 
     def _make_service(self):
-        """创建一个可测试的ShadowStrategyCoreService实例(不调用__init__)"""
+        """创建一个可测试的ShadowStrategyCoreService实例(不调用例例init__)"""
         from ali2026v3_trading.strategy.shadow_strategy_core import ShadowStrategyCoreService
         svc = object.__new__(ShadowStrategyCoreService)
         return svc

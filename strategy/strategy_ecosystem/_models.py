@@ -116,7 +116,7 @@ class StrategySlot:
 
     strategy_id: str
     strategy_type: str
-    state: 'SlotState' = None  # 默认值在__post_init__中设置
+    state: 'SlotState' = None  # 默认值在。_post_init__中设置
     capital_allocation: float = 0.0
     position_count: int = 0
     total_pnl: float = 0.0
@@ -194,7 +194,7 @@ class CapitalRoute:
     """资金路由配置
 
     P1-R10-02修复: 字段修改需通过update_from_dict()方法，
-    确保所有修改经过ecosystem锁保护。
+    确保所有修改经过ecosystem锁保护。'
     """
     master_base: float = 0.60
     reverse_base: float = 0.25

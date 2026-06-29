@@ -699,8 +699,8 @@ PARAM_SORT_METRIC_OVERRIDE = {
     'close_take_profit_ratio': 'profit_loss_ratio',  # 止盈参数按盈亏比排序
     # P0-R9-验收标准7修复: 补齐PARAM_GRID_ROUND1中3个缺失排序映射的参数
     'lots_min': 'total_return',  # 仓位参数按总收益排序
-    'signal_cooldown_sec': 'win_rate',  # 冷却参数按胜率排序（signal_quality不存在，使用win_rate替代）
-    'non_other_ratio_threshold': 'sharpe',  # 状态阈值按夏普比率排序（state_accuracy不存在，使用sharpe替代）
+    'signal_cooldown_sec': 'win_rate',  # 冷却参数按胜率排序（signal_quality不存在，使用win_rate替代）'
+    'non_other_ratio_threshold': 'sharpe',  # 状态阈值按夏普比率排序（state_accuracy不存在，使用sharpe替代）'
 }
 
 OBJECTIVE_FUNCTIONS = {
@@ -917,3 +917,118 @@ PULLBACK_DEFAULTS_DISABLED = {
 TRAIN_START = "2023-01-01"
 TEST_START = "2025-01-01"
 TEST_END = "2026-12-31"
+
+
+# =========================================================================
+# 三层期权五态排序参数（最终落地方案第七章 7.3 参数校准优先级）
+# =========================================================================
+
+# Phase 1: 核心9参数（4 Tier阈值 + 5个月份权重）
+THREE_LAYER_CORE_DEFAULTS = {
+    "tl_tier1_wilson_threshold": 0.50,        # 范围 (0.50, 0.70)
+    "tl_tier2_coverage_threshold": 0.40,      # 范围 (0.40, 0.70)
+    "tl_tier2_correct_up_threshold": 0.45,    # 范围 (0.45, 0.60)
+    "tl_tier3_correct_up_threshold": 0.35,    # 范围 (0.35, 0.50)
+    "tl_month_weight_1": 0.35,
+    "tl_month_weight_2": 0.25,
+    "tl_month_weight_3": 0.20,
+    "tl_month_weight_4": 0.12,
+    "tl_month_weight_5": 0.08,
+}
+
+THREE_LAYER_CORE_GRID = {
+    "tl_tier1_wilson_threshold": [0.50, 0.55, 0.60, 0.65, 0.70],
+    "tl_tier2_coverage_threshold": [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
+    "tl_tier2_correct_up_threshold": [0.45, 0.50, 0.55, 0.60],
+    "tl_tier3_correct_up_threshold": [0.35, 0.40, 0.45, 0.50],
+    "tl_month_weight_1": [0.25, 0.30, 0.35, 0.40, 0.45],
+    "tl_month_weight_2": [0.20, 0.25, 0.30, 0.35],
+    "tl_month_weight_3": [0.15, 0.20, 0.25, 0.30],
+    "tl_month_weight_4": [0.08, 0.10, 0.12, 0.15],
+    "tl_month_weight_5": [0.05, 0.08, 0.10, 0.12],
+}
+
+# Phase 2: 扩展参数（Greeks修正）
+THREE_LAYER_EXTENSION_DEFAULTS = {
+    "tl_delta_min": 0.15,                     # 范围 (0.10, 0.25)
+    "tl_delta_max": 0.85,                     # 范围 (0.75, 0.90)
+    "tl_gamma_boost_factor": 1.2,             # 范围 (1.0, 1.5)
+    "tl_vega_penalty_factor": 0.8,            # 范围 (0.6, 0.9)
+    "tl_theta_penalty_max": 0.15,             # 范围 (0.05, 0.25)
+    "tl_gamma_max_front_month": 0.08,
+    "tl_theta_max_front_month_pct": 0.015,
+}
+
+THREE_LAYER_EXTENSION_GRID = {
+    "tl_delta_min": [0.10, 0.15, 0.20, 0.25],
+    "tl_delta_max": [0.75, 0.80, 0.85, 0.90],
+    "tl_gamma_boost_factor": [1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+    "tl_vega_penalty_factor": [0.6, 0.7, 0.8, 0.9],
+    "tl_theta_penalty_max": [0.05, 0.10, 0.15, 0.20, 0.25],
+    "tl_gamma_max_front_month": [0.05, 0.06, 0.08, 0.10],
+    "tl_theta_max_front_month_pct": [0.010, 0.015, 0.020, 0.025],
+}
+
+# Phase 3: 全局参数（Layer 2/3）
+THREE_LAYER_GLOBAL_DEFAULTS = {
+    "tl_cluster_dispersion_threshold": 0.15,  # 范围 (0.10, 0.25)
+    "tl_correlation_threshold": 0.80,        # 范围 (0.70, 0.90)
+    "tl_layer2_weight_score1": 0.70,         # 范围 (0.60, 0.80)
+    "tl_layer3_weight_score2": 0.65,          # 范围 (0.55, 0.75)
+    "tl_market_accuracy_floor_percentile": 20,  # 范围 (10, 30)
+    "tl_resonance_veto_threshold": 0.80,
+    "tl_cluster_confidence_threshold": 0.60,
+    "tl_max_single_product_pct": 0.15,
+    "tl_max_single_cluster_pct": 0.40,
+    "tl_circuit_breaker_consecutive_min": 5,
+    "tl_circuit_breaker_position_mult": 0.5,
+}
+
+THREE_LAYER_GLOBAL_GRID = {
+    "tl_cluster_dispersion_threshold": [0.10, 0.15, 0.20, 0.25],
+    "tl_correlation_threshold": [0.70, 0.75, 0.80, 0.85, 0.90],
+    "tl_layer2_weight_score1": [0.60, 0.65, 0.70, 0.75, 0.80],
+    "tl_layer3_weight_score2": [0.55, 0.60, 0.65, 0.70, 0.75],
+    "tl_market_accuracy_floor_percentile": [10, 15, 20, 25, 30],
+    "tl_resonance_veto_threshold": [0.70, 0.75, 0.80, 0.85, 0.90],
+    "tl_cluster_confidence_threshold": [0.50, 0.55, 0.60, 0.65, 0.70],
+    "tl_max_single_product_pct": [0.10, 0.12, 0.15, 0.18, 0.20],
+    "tl_max_single_cluster_pct": [0.30, 0.35, 0.40, 0.45, 0.50],
+    "tl_circuit_breaker_consecutive_min": [3, 5, 7, 10],
+    "tl_circuit_breaker_position_mult": [0.3, 0.4, 0.5, 0.6, 0.7],
+}
+
+# 三层排序完整默认值（合并所有Phase）
+# v2.0重构：串行三层→并列信号源A/B/C
+THREE_LAYER_PARAM_DEFAULTS = {
+    **THREE_LAYER_CORE_DEFAULTS,
+    **THREE_LAYER_EXTENSION_DEFAULTS,
+    **THREE_LAYER_GLOBAL_DEFAULTS,
+    "tl_signal_source": "C",             # A=单品种月份, B=联动品种簇, C=全域品种, auto=自动选择
+    "tl_layer1_sort_mode": "lexicographic",  # lexicographic | weighted
+    "tl_layer2_mode": "veto",          # veto | weighted
+    "tl_enable_resonance_weighting": False,
+    "tl_enable_resonance_veto": False,
+    "tl_enable_global_percentile": True,
+    "tl_hard_filter_enabled": False,
+    "tl_pure_mode": False,
+    "tl_market_floor_mode": "percentile",  # percentile | fixed
+    "tl_ab_test_enabled": False,
+}
+
+# 三层排序完整网格（合并所有Phase）
+THREE_LAYER_PARAM_GRID = {
+    **THREE_LAYER_CORE_GRID,
+    **THREE_LAYER_EXTENSION_GRID,
+    **THREE_LAYER_GLOBAL_GRID,
+    "tl_signal_source": ["A", "B", "C", "auto"],
+    "tl_layer1_sort_mode": ["lexicographic", "weighted"],
+    "tl_layer2_mode": ["veto", "weighted"],
+    "tl_enable_resonance_weighting": [True, False],
+    "tl_enable_resonance_veto": [True, False],
+    "tl_enable_global_percentile": [True, False],
+    "tl_hard_filter_enabled": [True, False],
+    "tl_pure_mode": [True, False],
+    "tl_market_floor_mode": ["percentile", "fixed"],
+    "tl_ab_test_enabled": [True, False],
+}

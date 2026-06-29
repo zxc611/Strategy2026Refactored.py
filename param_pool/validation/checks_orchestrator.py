@@ -1,6 +1,6 @@
-﻿# [M1-128] 检查编排器
+# [M1-128] 检查编排器
 # MODULE_ID: M1-196
-"""checks_orchestrator.py - _run_final_checks编排函数与__all__导出"""
+"""checks_orchestrator.py - _run_final_checks编排函数与审。all__导出"""
 
 from __future__ import annotations
 
@@ -273,7 +273,7 @@ def validate_logic_reversal_no_future(bar_data: pd.DataFrame = None,
                                        n_check_bars: int = 100) -> Dict[str, Any]:
     """P0-裂缝28：验证逻辑反转平仓的wrong_pct不使用未来数据
 
-    检查_check_logic_reversal中调用wrong_pct时传入的bar是否已完全形成。
+    检查链check_logic_reversal中调用wrong_pct时传入的bar是否已完全形成。'
     逻辑反转触发时刻，所使用的wrong_pct不应包含该时刻之后的任何数据。
     """
     if bar_data is None or bar_data.empty:
@@ -292,18 +292,18 @@ def validate_logic_reversal_no_future(bar_data: pd.DataFrame = None,
     n_check = min(n_check_bars, len(bar_data))
 
     # R21-MEM-P2-13修复: 循环中重复调用imread/load — 本项目无图像加载场景，不涉及此问题
-    # 检查1：wrong_pct在同一Bar内不应有回溯修正（NaN后填充）
+    # 检查1：wrong_pct在同一Bar内不应有回溯修正（NaN后填充）'
     for col in wrong_cols:
         vals = pd.to_numeric(bar_data[col], errors='coerce').values[:n_check]
         nan_count = sum(1 for v in vals if pd.isna(v))
         if nan_count > 0:
             issues.append(f"列{col}有{nan_count}个NaN值（可能存在数据不完整）")
 
-    # 检查2：wrong_pct值不应随时间回溯变化（前向填充检测）
+    # 检查2：wrong_pct值不应随时间回溯变化（前向填充检测）'
     # 如果Bar[i]的wrong_pct在后续Bar中发生了变化，说明存在未来数据修正
     for col in wrong_cols:
         vals = pd.to_numeric(bar_data[col], errors='coerce').values[:n_check]
-        # 检查是否存在值突然从0变为非0（可能表示延迟到达的数据修正了历史值）
+        # 检查是否存在值突然从0变为非0（可能表示延迟到达的数据修正了历史值）'
         zero_to_nonzero = 0
         for i in range(1, min(len(vals), n_check)):
             if vals[i-1] == 0 and vals[i] != 0 and abs(vals[i]) > 0.01:

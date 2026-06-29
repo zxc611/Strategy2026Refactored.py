@@ -10,7 +10,7 @@ if PARENT_DIR not in sys.path:
 CRITICAL_MODULES = [
     'ali2026v3_trading.infra.shared_utils',
     'ali2026v3_trading.infra.resilience',
-    'ali2026v3_trading.infra.health',
+    'ali2026v3_trading.infra.health_monitor',
     'ali2026v3_trading.infra.event_bus',
     'ali2026v3_trading.config.config_service',
     'ali2026v3_trading.lifecycle.lifecycle_state_machine',

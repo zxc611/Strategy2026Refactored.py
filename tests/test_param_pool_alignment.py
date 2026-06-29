@@ -167,8 +167,7 @@ class TestDelayTimeSharpe3D(unittest.TestCase):
     EXPECTED_TIERS = [0, 25, 50, 80, 120, 200]  # P-10修复: 6核心延迟档位(手册4.2节)
 
     def test_delay_tiers_count(self):
-        self.assertEqual(len(DELAY_TIERS), 6)  # C-17修复: DELAY_TIERS已从20档收缩为6核心档位（手册4.2节）
-
+        self.assertEqual(len(DELAY_TIERS), 6)  # C-17修复: DELAY_TIERS已从20档收缩为6核心档位（手册4.2节）'
     def test_delay_tiers_values(self):
         self.assertEqual(DELAY_TIERS, self.EXPECTED_TIERS)
 

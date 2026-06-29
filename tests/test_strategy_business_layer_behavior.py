@@ -89,7 +89,7 @@ class TestEnsureOrderServiceBehavior:
             mock_get.return_value = mock_svc
             bl2.ensure_order_service()
             assert provider2._order_service is mock_svc, \
-                "首次调用后_order_service应被初始化"
+                "首次调用后。order_service应被初始化"
 
     def test_already_initialized_skips_reinit(self):
         """已初始化 → 不重复初始化"""
@@ -101,7 +101,7 @@ class TestEnsureOrderServiceBehavior:
             bl.ensure_order_service()
             mock_get.assert_not_called(), "已初始化时不应再次调用get_order_service"
         assert provider._order_service is existing_svc, \
-            "已初始化时_order_service应保持不变"
+            "已初始化时常order_service应保持不变"
 
     def test_init_failure_sets_none(self):
         """初始化失败 → _order_service 保持None"""
@@ -111,7 +111,7 @@ class TestEnsureOrderServiceBehavior:
                    side_effect=ImportError("module not found")):
             bl.ensure_order_service()
         assert provider._order_service is None, \
-            "初始化失败后_order_service应为None"
+            "初始化失败后。order_service应为None"
 
     def test_state_store_set_ref_called(self):
         """初始化成功 → _state_store.set_ref 被调用"""
@@ -136,7 +136,7 @@ class TestEnsurePositionServiceBehavior:
             mock_pos.return_value = MagicMock()
             bl.ensure_position_service()
             assert provider._position_service is not None, \
-                "首次调用后_position_service应被初始化"
+                "首次调用后。position_service应被初始化"
 
     def test_already_initialized_skips_reinit(self):
         """已初始化 → 不重复初始化"""

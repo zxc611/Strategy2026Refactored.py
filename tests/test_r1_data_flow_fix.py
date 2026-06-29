@@ -47,9 +47,9 @@ class TestR1_1_CheckerRealData:
         assert '_psr = parameter_stability_result' in src, "R1-1失败: checker未从parameter_stability_result提取数据"
 
     def test_e7_uses_real_pnl(self):
-        """E7使用_pm.get('total_pnl')而非硬编码0.0"""
+        """E7使用例pm.get('total_pnl')而非硬编码0.0"""
         src = open(os.path.join(_PROJECT_ROOT, 'strategy_judgment', '_judgment_services.py'), encoding='utf-8').read()
-        assert "_pm.get(\"total_pnl\", 0.0)" in src, "R1-1失败: E7未使用_pm.get提取真实PnL"
+        assert "_pm.get(\"total_pnl\", 0.0)" in src, "R1-1失败: E7未使用例pm.get提取真实PnL"
 
     def test_governance_except_not_bare(self):
         """governance checker的except不再是bare Exception"""
@@ -92,17 +92,17 @@ class TestR1_3_HardBlockCriticalPaths:
     def test_governance_engine_failure_policy(self):
         """governance_engine集成异常时有ComponentFailurePolicy处理"""
         src = open(os.path.join(_PROJECT_ROOT, 'strategy_judgment', 'judgment_scoring_helpers.py'), encoding='utf-8').read()
-        assert '_handle_component_failure("E-04_governance"' in src, "R1-3失败: E-04未使用_handle_component_failure"
+        assert '_handle_component_failure("E-04_governance"' in src, "R1-3失败: E-04未使用例handle_component_failure"
 
     def test_chicory_eviction_failure_policy(self):
         """ChicoryEvictionPolicy集成异常时有ComponentFailurePolicy处理"""
         src = open(os.path.join(_PROJECT_ROOT, 'strategy_judgment', 'judgment_scoring_helpers.py'), encoding='utf-8').read()
-        assert '_handle_component_failure("E-09_chicory_eviction"' in src, "R1-3失败: E-09未使用_handle_component_failure"
+        assert '_handle_component_failure("E-09_chicory_eviction"' in src, "R1-3失败: E-09未使用例handle_component_failure"
 
     def test_marquee_threshold_failure_policy(self):
         """MarqueeThreshold集成异常时有ComponentFailurePolicy处理"""
         src = open(os.path.join(_PROJECT_ROOT, 'strategy_judgment', 'judgment_scoring_helpers.py'), encoding='utf-8').read()
-        assert '_handle_component_failure("E-10_marquee_threshold"' in src, "R1-3失败: E-10未使用_handle_component_failure"
+        assert '_handle_component_failure("E-10_marquee_threshold"' in src, "R1-3失败: E-10未使用例handle_component_failure"
 
     def test_component_failure_policy_exists(self):
         """ComponentFailurePolicy枚举和CRITICAL_COMPONENTS配置存在"""

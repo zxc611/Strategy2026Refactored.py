@@ -59,7 +59,7 @@ def test_config_facade_delegates_to_config_service():
     """ConfigQueryFacade委托到ConfigService"""
     content = _read_file('config/config_service.py')
     assert 'ConfigService' in content, "ConfigQueryFacade未委托到ConfigService"
-    assert 'self._service' in content, "ConfigQueryFacade未持有_service引用"
+    assert 'self._service' in content, "ConfigQueryFacade未持有界service引用"
 
 
 def test_config_service_delegates_to_config_params():

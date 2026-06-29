@@ -42,7 +42,7 @@ class SixDimPositionAdjustmentFactor:
         gamma_risk: float = 0.0,
         theta_decay: float = 0.0,
         vega_exposure: float = 0.0,
-        market_state: str = "",  # P-28补全修复: 传递市场状态到_sigmoid_adjust
+        market_state: str = "",  # P-28补全修复: 传递市场状态到。sigmoid_adjust
     ) -> float:
         """计算六维仓位调整因子 [0, 1]"""
         if not config.tvf_enabled:

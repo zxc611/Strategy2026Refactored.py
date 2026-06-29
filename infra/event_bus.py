@@ -24,17 +24,17 @@ from typing import Dict, List, Callable, Any, Optional, Set, TypeVar, Generic, T
 import copy
 from datetime import datetime
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.serialization_utils import json_dumps, safe_json_dumps
+from ali2026v3_trading.infra.serialization_utils import json_dumps, safe_json_dumps
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, Future
 import time
 from functools import wraps
 
 # R27-P1修复: 导入回调异常隔离和订阅者快照守卫
-from ali2026v3_trading.resilience_utils import safe_callback_wrapper, SubscriberSnapshotGuard
+from ali2026v3_trading.infra.resilience import safe_callback_wrapper, SubscriberSnapshotGuard
 
 __all__ = [
-    'EventBus', 'RateLimiter', 'BaseEvent', 'TickEvent', 'KLineEvent',
+    'EventBus', 'RateLimiter', 'BaseEvent', 'TickEvent', 'MarketEvent', 'BarCompletedEvent', 'KLineEvent',
     'SignalEvent', 'OrderEvent', 'PositionEvent', 'RiskEvent', 'SystemEvent',
     'SubscriptionCompletedEvent', 'DataFormatChangedEvent', 'HealthStatusEvent',
     'ParamChangedEvent', 'CircuitBreakerTriggeredEvent', 'DailyDrawdownHaltEvent',
@@ -66,7 +66,7 @@ class EventBus:
     
     特性：
     - 支持多订阅者
-    - 异步事件分发（带线程池管理）
+    - 异步事件分发（带线程池管理）'
     - 异常隔离（单个订阅者错误不影响其他订阅者）
     - 线程安全
     - 背压机制（防止内存溢出）
@@ -117,7 +117,7 @@ class EventBus:
         # 优化 3: 添加背压机制
         self._backpressure_limit: int = backpressure_limit or self.DEFAULT_BACKPRESSURE_LIMIT
         self._pending_events: int = 0
-        self._pending_events_lock = threading.Lock()  # P1 Bug #57修复：保护_pending_events的原子操作
+        self._pending_events_lock = threading.Lock()  # P1 Bug #57修复：保护。pending_events的原子操作
         self._dropped_events_count: int = 0
         self._count_lock = threading.Lock()
         # R15-P1-RES-15修复: 背压丢弃计数器和告警
@@ -155,7 +155,7 @@ class EventBus:
         # 统计信息
         self._published_count: int = 0
         self._failed_count: int = 0
-        self._publish_lock = threading.Lock()  # P1 Bug #58修复：保护_published_count的原子自增
+        self._publish_lock = threading.Lock()  # P1 Bug #58修复：保护。published_count的原子自增
 
         # P1-3: 线程池监控属性
         self._executor_monitor_enabled: bool = True
@@ -167,19 +167,18 @@ class EventBus:
                   filter_func: Optional[Callable[[Any], bool]] = None,
                   replay_last: int = 0) -> None:
         """
-        P2 Bug #115修复：订阅事件（支持优先级和可选过滤器，检查shutdown状态）
-
+        P2 Bug #115修复：订阅事件（支持优先级和可选过滤器，检查shutdown状态）'
         # R13-P2-API-06修复: 文档化shutdown行为
         # [R14-P1-API-17] 更新: shutdown后subscribe改为warning+return(不抛RuntimeError)
         **行为变更说明**：
-        - 当EventBus已调用shutdown()后，subscribe()将logging.warning并静默返回。
+        - 当EventBus已调用shutdown()后，subscribe()将logging.warning并静默返回。'
           这是为了避免shutdown后注册回调导致调用方崩溃（R14-P1-API-17修复）。
         - 如果需要在shutdown后仍能注册（如测试场景），请先调用reset_global_event_bus()。
 
         Args:
             event_type: 事件类型名称
             callback: 回调函数，接收一个事件对象参数
-            priority: 优先级（0=普通，>0=更高优先级，数字越大优先级越高）
+            priority: 优先级（0=普通，>0=更高优先级，数字越大优先级越高）'
             filter_func: 可选过滤器函数，返回True时才执行回调
             replay_last: R5-T-02修复: 订阅后重播最近N个历史事件（默认0不重播）
             
@@ -187,7 +186,7 @@ class EventBus:
             # 普通订阅
             event_bus.subscribe('SignalEvent', lambda e: print(f'收到信号：{e}'))
             
-            # 高优先级订阅（优先执行）
+            # 高优先级订阅（优先执行）'
             event_bus.subscribe('RiskEvent', handle_risk, priority=10)
             
             # 带过滤器订阅
@@ -247,14 +246,13 @@ class EventBus:
 
     # R21-MEM-P1-02修复: 弱引用订阅，当回调对象被GC时自动清理
     def subscribe_weak(self, event_type: str, callback: Callable, priority: int = 0) -> None:
-        """弱引用订阅。当回调所属对象被GC回收时自动取消订阅，防止内存泄漏。
-
+        """弱引用订阅。当回调所属对象被GC回收时自动取消订阅，防止内存泄漏。'
         仅适用于绑定方法（bound method）和可弱引用的对象方法。
         普通函数，lambda不支持weakref，请使用普通subscribe()。
 
         Args:
             event_type: 事件类型名称
-            callback: 回调函数（必须是绑定方法，即有__self__属性的方法）
+            callback: 回调函数（必须是绑定方法，即有界。self__属性的方法）'
             priority: 优先级
         """
         if not event_type or not callable(callback):
@@ -287,8 +285,7 @@ class EventBus:
                 func(obj, event)
             elif func is not None:
                 func(event)
-            # 对象已被GC，静默跳过（将在下次清理时移除）
-
+            # 对象已被GC，静默跳过（将在下次清理时移除）'
         # 保存映射以便清理
         with self._lock:
             if not hasattr(self, '_weak_refs'):
@@ -318,8 +315,7 @@ class EventBus:
     
     def unsubscribe(self, event_type: str, callback: Callable) -> None:
         """
-        P1 Bug #59修复：取消订阅（支持subscribe_with_filter注册的回调）
-        
+        P1 Bug #59修复：取消订阅（支持subscribe_with_filter注册的回调）'
         Args:
             event_type: 事件类型名称
             callback: 要移除的回调函数
@@ -363,8 +359,7 @@ class EventBus:
     def publish(self, event: Any, async_mode: bool = True, force: bool = False, 
                 priority: Optional[int] = None) -> bool:
         """
-        P2 Bug #115修复：发布事件（检查shutdown状态）
-        
+        P2 Bug #115修复：发布事件（检查shutdown状态）'
         Args:
             event: 事件对象
             async_mode: True=异步分发 False=同步分发
@@ -392,12 +387,13 @@ class EventBus:
             if not self._rate_limiter.acquire():
                 with self._count_lock:
                     self._dropped_events_count += 1
-                logging.warning(
-                    f"[EventBus][owner_scope=shared-service][source_type=event-tail] "
-                    f"Rate limit exceeded ({self._rate_limit}/s), "
-                    f"dropping event: {type(event).__name__} (total dropped: {self._dropped_events_count})"
-                )
-                # #139/#309: 通知回调
+                    _dropped = self._dropped_events_count
+                if _dropped <= 3 or _dropped % 100000 == 0:
+                    logging.debug(
+                        f"[EventBus][owner_scope=shared-service][source_type=event-tail] "
+                        f"Rate limit exceeded ({self._rate_limit}/s), "
+                        f"dropping event: {type(event).__name__} (total dropped: {_dropped})"
+                    )
                 self._notify_publish_callbacks(type(event).__name__, event, False)
                 return False
         
@@ -527,7 +523,7 @@ class EventBus:
     def _invoke_all_callbacks(self, callbacks: List[tuple], event: Any, event_type: str) -> bool:
         # R15-P1-PERF-09修复: 按priority降序排序，高优先级先执行
         sorted_callbacks = sorted(callbacks, key=lambda cb: cb[1], reverse=True)
-        # R5-E-06/R5-T-06修复: 单个订阅者异常不影响其他订阅者（已有try/except隔离）；事件不丢失（all_success标记但不中断）
+        # R5-E-06/R5-T-06修复: 单个订阅者异常不影响其他订阅者（已有try/except隔离）；事件不丢失（all_success标记但不中断）'
         all_success = True
         for callback, priority in sorted_callbacks:
             try:
@@ -596,8 +592,7 @@ class EventBus:
             self._notify_publish_callbacks(event_type, event, False)
     
     def _send_nack(self, event_type: str, event: Any, reason: str, _nack_depth: int = 0) -> None:
-        """#311: 发送否定确认（处理失败通知）
-
+        """#311: 发送否定确认（处理失败通知）'
         Args:
             event_type: 事件类型
             event: 事件对象
@@ -625,8 +620,7 @@ class EventBus:
             logging.error(f"[EventBus] Failed to publish NACK event: {e}")
     
     def _invoke_callback(self, callback: Callable, event: Any, event_type: str) -> None:
-        """调用回调函数（带异常处理）
-        
+        """调用回调函数（带异常处理）'
         Args:
             callback: 回调函数
             event: 事件对象
@@ -644,8 +638,7 @@ class EventBus:
             )
     
     def _record_event(self, event_type: str, event: Any) -> None:
-        """记录事件历史（优化版）
-        
+        """记录事件历史（优化版）'
         Args:
             event_type: 事件类型
             event: 事件对象
@@ -695,8 +688,7 @@ class EventBus:
             logging.error(f"[EventBus] Failed to persist event: {e}")
     
     def warmup_cache(self) -> None:
-        """#358: 缓存预热（从持久化存储恢复关键事件）
-        
+        """#358: 缓存预热（从持久化存储恢复关键事件）'
         Example:
             event_bus.warmup_cache()  # 启动时调用
         """
@@ -732,7 +724,7 @@ class EventBus:
         """获取事件历史
         
         Args:
-            event_type: 事件类型（可选，不指定则返回所有类型）
+            event_type: 事件类型（可选，不指定则返回所有类型）'
             limit: 返回数量限制
             
         Returns:
@@ -757,8 +749,7 @@ class EventBus:
         """获取订阅者数量
         
         Args:
-            event_type: 事件类型（可选，不指定则返回总数）
-            
+            event_type: 事件类型（可选，不指定则返回总数）'
         Returns:
             订阅者数量
         """
@@ -861,8 +852,7 @@ class EventBus:
             return {'queue_size': -1, 'error': str(e)}
 
     def on_publish(self, callback: Callable[[str, Any, bool], None]) -> None:
-        """#139: 注册发布回调（监听所有事件发布结果）
-
+        """#139: 注册发布回调（监听所有事件发布结果）'
         # R13-P2-API-09修复: 回调签名校验
         回调签名必须为callback(event_type: str, event: Any, success: bool) -> None
 
@@ -1007,8 +997,7 @@ class EventBus:
                           consumer_version: str) -> Dict[str, Any]:
         """P2-1修复: 数据格式变更时的版本协商
 
-        当生产者和消费者版本不一致时，协商出兼容的格式版本。
-
+        当生产者和消费者版本不一致时，协商出兼容的格式版本。'
         Args:
             producer_version: 生产者数据格式版本
             consumer_version: 消费者支持的格式版本
@@ -1041,10 +1030,9 @@ class EventBus:
                        limit: int = 100) -> List[Dict[str, Any]]:
         """P2-13修复: 重放历史事件
 
-        从事件历史中筛选指定条件的事件并重放给当前订阅者。
-
+        从事件历史中筛选指定条件的事件并重放给当前订阅者。'
         Args:
-            event_type: 事件类型过滤（None=所有类型）
+            event_type: 事件类型过滤（None=所有类型）'
             start_time: 起始时间ISO格式（None=不限制）
             end_time: 结束时间ISO格式（None=不限制）
             limit: 最大重放数量
@@ -1104,7 +1092,7 @@ class RateLimiter:
     
     特性：
     - 平滑限流
-    - 支持突发流量（有令牌时）
+    - 支持突发流量（有令牌时）'
     - 线程安全
     """
     
@@ -1156,7 +1144,7 @@ class RateLimiter:
 # 基础事件类
 # ============================================================================
 
-# 当前策略的主运行链路不依赖pythongo的事件类接口。
+# 当前策略的主运行链路不依赖pythongo的事件类接口。'
 # 为避免不同pythongo版本造成误导性告警，这里统一使用本地事件定义。
 _USING_PYTHONGO = False
 
@@ -1181,6 +1169,29 @@ class TickEvent(BaseEvent):
 
     def __str__(self) -> str:
         return f"TickEvent(instrument={self.instrument_id}, time={self.timestamp})"
+
+
+class MarketEvent(BaseEvent):
+    """市场事件基类 - 统一实盘Tick和回测Bar事件抽象"""
+
+    def __init__(self, instrument_id: str, event_type: str = None):
+        super().__init__(event_type or 'MarketEvent')
+        self.instrument_id = instrument_id
+
+    def __str__(self) -> str:
+        return f"MarketEvent(instrument={self.instrument_id}, time={self.timestamp})"
+
+
+class BarCompletedEvent(MarketEvent):
+    """Bar完成事件 - 回测场景"""
+
+    def __init__(self, instrument_id: str, bar_data: Any, period: str = '1m'):
+        super().__init__(instrument_id, 'BarCompletedEvent')
+        self.bar_data = bar_data
+        self.period = period
+
+    def __str__(self) -> str:
+        return f"BarCompletedEvent(instrument={self.instrument_id}, period={self.period}, time={self.timestamp})"
 
 
 class KLineEvent(BaseEvent):
@@ -1287,7 +1298,7 @@ class SubscriptionCompletedEvent(BaseEvent):
 class DataFormatChangedEvent(BaseEvent):
     """UPG-P1-10修复: 数据格式变更事件
 
-    当数据格式（schema版本、列定义等）发生变更时发布此事件。
+    当数据格式（schema版本、列定义等）发生变更时发布此事件。'
     通知订阅者刷新缓存或重新加载数据。
     """
 
@@ -1311,7 +1322,7 @@ class DataFormatChangedEvent(BaseEvent):
 class HealthStatusEvent(BaseEvent):
     """OPS-P1-02修复: 健康状态主动推送事件
 
-    定时通过EventBus发布健康状态，替代仅被动查询的模式。
+    定时通过EventBus发布健康状态，替代仅被动查询的模式。'
     """
 
     def __init__(self, overall_status: str = "", component_status: Optional[Dict[str, str]] = None,
@@ -1329,7 +1340,7 @@ class HealthStatusEvent(BaseEvent):
 class ParamChangedEvent(BaseEvent):
     """OPS-P1-03修复: 参数变更通知事件
 
-    参数变更时通过EventBus发布通知，替代仅日志记录的模式。
+    参数变更时通过EventBus发布通知，替代仅日志记录的模式。'
     """
 
     def __init__(self, key: str = "", old_value: Any = None, new_value: Any = None,
@@ -1349,7 +1360,7 @@ class ParamChangedEvent(BaseEvent):
 class CircuitBreakerTriggeredEvent(BaseEvent):
     """OPS-P1-04修复: 断路器触发告警事件
 
-    断路器触发时通过EventBus发布告警，替代仅日志记录的模式。
+    断路器触发时通过EventBus发布告警，替代仅日志记录的模式。'
     """
 
     def __init__(self, reason: str = "", drop_pct: float = 0.0,
@@ -1370,7 +1381,7 @@ class CircuitBreakerTriggeredEvent(BaseEvent):
 class DailyDrawdownHaltEvent(BaseEvent):
     """OPS-P1-05修复: 日回撤硬停止告警事件
 
-    日回撤硬停止触发时通过EventBus发布告警，替代仅日志记录的模式。
+    日回撤硬停止触发时通过EventBus发布告警，替代仅日志记录的模式。'
     """
 
     def __init__(self, drawdown_pct: float = 0.0, threshold_pct: float = 0.0,
@@ -1391,7 +1402,7 @@ class DailyDrawdownHaltEvent(BaseEvent):
 class OpsOperationEvent(BaseEvent):
     """OPS-P1-06~19修复: 运维操作生命周期事件
 
-    运维操作开始、完成/失败/回滚时通过EventBus发布通知。
+    运维操作开始、完成/失败/回滚时通过EventBus发布通知。'
     """
 
     def __init__(self, operation_id: str = "", operation_type: str = "",
@@ -1410,7 +1421,7 @@ class OpsOperationEvent(BaseEvent):
 
 
 # ============================================================================
-# 全局事件总线实例（可选）
+# 全局事件总线实例（可选）'
 # ============================================================================
 
 # 全局事件总线单例
@@ -1616,7 +1627,7 @@ def get_dataflow_perf_stats() -> Dict[str, Dict[str, Any]]:
 _dataflow_anomaly_config: Dict[str, Any] = {
     'max_latency_ms': 5000.0,  # 单次延迟超过5秒视为异常
     'max_drop_rate': 0.1,      # 丢弃率超过10%视为异常
-    'min_throughput_per_min': 1,  # 每分钟至少1个事件（关键路径）
+    'min_throughput_per_min': 1,  # 每分钟至少1个事件（关键路径）'
 }
 _dataflow_anomaly_events: deque = deque(maxlen=1000)
 _dataflow_anomaly_lock = threading.Lock()

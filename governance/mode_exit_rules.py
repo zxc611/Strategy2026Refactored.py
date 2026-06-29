@@ -65,11 +65,9 @@ class ExitRuleEngine:
 # [P2-07-DM] 职责: 退出规则驱动的回撤决策(VaR/ATR升级+仓位缩减/暂停/全停阈值)
 # 与risk/safety_meta_equity.py的DrawdownMonitorService分工: DM=规则决策, DMS=权益监控+日回撤检测
 class DrawdownManager:
-    """回撤管理器 — 含VaR/ATR动态升级机制（R7-M-01修复）
-
+    """回撤管理器 — 含VaR/ATR动态升级机制（R7-M-01修复）'
     手册第268行要求："动态升级采用历史滚动VaR(95%)或ATR为基准"
-    当VaR或ATR超过阈值时，自动收紧仓位缩减/暂停/停止条件。
-
+    当VaR或ATR超过阈值时，自动收紧仓位缩减/暂停/停止条件。'
     P2-12 优先级规则:
         风控层硬停止（DrawdownMonitorService）优先级高于治理层策略性回撤管理（DrawdownManager）。
         DrawdownManager 的决策应先检查 DrawdownMonitorService 的硬停止状态，
@@ -203,7 +201,7 @@ class DrawdownManager:
     def should_reduce_size(self) -> bool:
         """R7-M-01修复: VaR/ATR升级时阈值更敏感
 
-        P2-12: 若风控层硬停止已触发，直接返回True（最保守）
+        P2-12: 若风控层硬停止已触发，直接返回True（最保守）'
         """
         if self._daily_hard_stop_triggered:
             return True

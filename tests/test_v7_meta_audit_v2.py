@@ -15,13 +15,13 @@ import inspect
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-from ali2026v3_trading.param_pool.quantification.meta_audit_passport import (
+from ali2026v3_trading.precompute.meta_audit_passport import (
     AuditPassport, MetaAuditEngine, SandboxExecutionAuditor,
     AutoFieldLineageTracker, AuditIssue, VulnerabilityType, Severity,
     FutureLeakException, _norm_cdf, DETERMINISTIC_PATTERNS,
     RestrictedExecLoader, CertifiedResult,
 )
-from ali2026v3_trading.param_pool.quantification.meta_audit_engine import (
+from ali2026v3_trading.precompute.meta_audit_engine import (
     SmartSignificanceFilter,
     HistoricalUniverseRestorer,
     SignalReadinessAligner,

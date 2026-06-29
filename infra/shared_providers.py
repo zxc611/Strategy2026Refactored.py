@@ -15,7 +15,10 @@ for Phase 2 composition refactoring.
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
+
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ  # 五唯一性修复：统一 CHINA_TZ
 
 
 @runtime_checkable
@@ -141,11 +144,9 @@ class DefaultStatsProvider:
             self._stats['total_signals'] += 1
 
     def record_error(self, error_message: str) -> None:
-        from datetime import datetime, timezone, timedelta
-        _CHINA_TZ = timezone(timedelta(hours=8))
         with self._lock:
             self._stats['errors_count'] += 1
-            self._stats['last_error_time'] = datetime.now(_CHINA_TZ)
+            self._stats['last_error_time'] = datetime.now(CHINA_TZ)
             self._stats['last_error_message'] = error_message
 
 

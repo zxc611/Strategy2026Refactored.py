@@ -66,19 +66,19 @@ def _cleanup_circuit_breaker_state():
 
 @pytest.fixture(autouse=True)
 def _isolate_global_state():
-    # 清理SafetyMetaLayer持久化状态文件（必须在单例重置之前，防止load_state加载残留状态）
+    # 清理SafetyMetaLayer持久化状态文件（必须在单例重置之前，防止load_state加载残留状态）'
     _cleanup_circuit_breaker_state()
     _reset_all_singletons()
     # AP-03: SingletonRegistry全局重置
     try:
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         SingletonRegistry.reset_all()
     except (ValueError, KeyError, TypeError, AttributeError):
         pass
     yield
     _reset_all_singletons()
     try:
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         SingletonRegistry.reset_all()
     except (ValueError, KeyError, TypeError, AttributeError):
         pass
@@ -93,7 +93,7 @@ _DEFAULT_TEST_SEED = 42
 def seeded_random():
     """统一设置random和numpy随机种子，确保测试可复现性
 
-    用法: 在测试函数参数中声明 seeded_random 即可自动设置种子。
+    用法: 在测试函数参数中声明 seeded_random 即可自动设置种子。'
     返回值为种子值(int)，方便需要传递种子的场景。
     """
     from ali2026v3_trading.param_pool.backtest.backtest_runner_utils import set_global_random_seed

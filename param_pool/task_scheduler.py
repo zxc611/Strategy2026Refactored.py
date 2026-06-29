@@ -1,5 +1,5 @@
 # MODULE_ID: M1-190
-﻿# [M1-96] 任务调度器
+# [M1-96] 任务调度器
 # DEPRECATED: merged into backtest_config (2026-06-12)
 # Lazy imports to avoid circular dependency
 
@@ -11,7 +11,7 @@ __all__ = [
     'optimize_l2_params_step1', 'DEEP_VALIDATION_TIERS',
 ]
 
-# DEEP_VALIDATION_TIERS 常量内联（避免从validation_deep_orchestrator触发循环导入）
+# DEEP_VALIDATION_TIERS 常量内联（避免从validation_deep_orchestrator触发循环导入）'
 DEEP_VALIDATION_TIERS = {
     "must_run": {
         "description": "每次参数重检必跑（P0级别，约10秒）",

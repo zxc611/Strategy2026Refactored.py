@@ -137,7 +137,7 @@ class TestBuildInstrumentGroups:
         li = LifecycleInit(provider)
         mock_storage = MagicMock()
         mock_storage.get_registered_instrument_ids.return_value = ['IF2606']
-        with patch('ali2026v3_trading.infra.subscription_manager.SubscriptionManager') as mock_sm:
+        with patch('ali2026v3_trading.infra.subscription_service.SubscriptionManager') as mock_sm:
             mock_sm.is_option.return_value = False
             result = li._build_instrument_groups(mock_storage)
             assert 'IF2606' in result[0]
@@ -164,6 +164,34 @@ class TestInitAnalyticsServices:
         with patch.object(li, '_build_instrument_groups', side_effect=RuntimeError("fail")):
             li._init_analytics_services(MagicMock())
             assert provider.analytics_service is None
+
+
+class TestInitTTypeServiceAndPreload:
+    def test_fallback_to_data_service_subscription_manager(self):
+        provider = MagicMock()
+        provider.storage = MagicMock()
+        provider.storage.subscription_manager = None
+        provider._init_instruments_result = {
+            'futures_metadata': {'IF2606': {'internal_id': 1, 'year_month': '2606'}},
+            'options_metadata': {},
+            'futures_list': ['IF2606'],
+            'options_dict': {},
+        }
+        provider._extract_contract_year_month = MagicMock(return_value='2606')
+        li = LifecycleInit(provider)
+
+        t_type_service = MagicMock()
+        t_type_service._width_cache = MagicMock()
+        sm = MagicMock()
+        ds = MagicMock()
+        ds.subscription_manager = sm
+
+        with patch('ali2026v3_trading.data.t_type_service.get_t_type_service', return_value=t_type_service):
+            with patch('ali2026v3_trading.data.data_service.get_data_service', return_value=ds):
+                with patch('ali2026v3_trading.data.data_service.get_latest_price', return_value=100.0):
+                    li._init_t_type_service_and_preload(provider.storage)
+
+        sm.set_t_type_service.assert_called_once_with(t_type_service)
 
 
 class TestEnsureAnalyticsReady:

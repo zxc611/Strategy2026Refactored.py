@@ -16,7 +16,7 @@ def test_preprocess_ticks_no_raw_to_parquet():
     import ali2026v3_trading.param_pool._preprocess as mod
     # process_symbol was removed during merge; check the module source instead
     source = inspect.getsource(mod)
-    # 不应有 .to_parquet( 调用（排除注释行）
+    # 不应有 .to_parquet( 调用（排除注释行）'
     code_lines = [l for l in source.splitlines() if not l.strip().startswith('#')]
     code_text = '\n'.join(code_lines)
     assert '.to_parquet(' not in code_text, \

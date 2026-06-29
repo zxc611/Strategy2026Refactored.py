@@ -10,13 +10,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 
 def test_no_independent_retry_tracking():
-    """NetworkRetryManager不应有独立的_retry_counts/_last_retry_time"""
+    """NetworkRetryManager不应有独立的指retry_counts/_last_retry_time"""
     from ali2026v3_trading.order.order_persistence import NetworkRetryManager
     nrm = NetworkRetryManager(max_retries=3, base_interval_sec=1.0)
     assert not hasattr(nrm, '_retry_counts'), \
-        "NetworkRetryManager不应有独立的_retry_counts"
+        "NetworkRetryManager不应有独立的指retry_counts"
     assert not hasattr(nrm, '_last_retry_time'), \
-        "NetworkRetryManager不应有独立的_last_retry_time"
+        "NetworkRetryManager不应有独立的指last_retry_time"
     print("  OK: NetworkRetryManager无独立重试跟踪状态")
 
 

@@ -5,7 +5,7 @@
 1. _try_greeks_calculator 统一委托函数存在且可调用
 2. GreeksCalculator可用时，估算函数返回精确值
 3. GreeksCalculator不可用时，降级到常量且记录日志
-4. 三个估算函数都通过_try_greeks_calculator委托
+4. 三个估算函数都通过滤try_greeks_calculator委托
 """
 import os
 import sys
@@ -24,7 +24,7 @@ def test_try_greeks_calculator_exists_and_callable():
 
 
 def test_estimate_functions_delegate_to_try_greeks_calculator():
-    """P1-03验证: 三个估算函数通过_try_greeks_calculator委托，GreeksCalculator可用时返回精确值"""
+    """P1-03验证: 三个估算函数通过滤try_greeks_calculator委托，GreeksCalculator可用时返回精确值"""
     from ali2026v3_trading.position import position_greeks as pg
 
     # Mock _try_greeks_calculator 返回精确值
@@ -59,9 +59,9 @@ def test_estimate_functions_delegate_to_try_greeks_calculator():
         assert gamma == pytest.approx(0.02 * 10, abs=1e-6), \
             f"gamma应为0.2，实际为{gamma}"
 
-        # 验证三个函数都调用了_try_greeks_calculator
+        # 验证三个函数都调用了。try_greeks_calculator
         assert len(captured_calls) == 3, \
-            f"应调用_try_greeks_calculator 3次，实际{len(captured_calls)}次"
+            f"应调用例try_greeks_calculator 3次，实际{len(captured_calls)}次"
         greek_names = [c['greek_name'] for c in captured_calls]
         assert 'delta' in greek_names, "应委托delta"
         assert 'vega' in greek_names, "应委托vega"
@@ -110,7 +110,7 @@ def test_fallback_logs_debug_message(caplog):
         pg._try_greeks_calculator = _mock_unavailable
         with caplog.at_level(logging.DEBUG, logger='ali2026v3_trading.position.position_greeks'):
             pg._estimate_option_vega('IO2506-C-4000', 10)
-        # 检查是否有降级日志（可能被其他handler过滤，只验证不抛异常）
+        # 检查是否有降级日志（可能被其他handler过滤，只验证不抛异常）'
         assert True  # 如果执行到这里说明降级路径无异常
     finally:
         pg._try_greeks_calculator = _original

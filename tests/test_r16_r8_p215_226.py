@@ -20,24 +20,24 @@ def test_p2_15_resilience_delegates_to_config_params():
 
 
 def test_p2_18_tick_count_method_exists():
-    """P2-18: DuckDBTickStorage有_get_tick_count方法"""
+    """P2-18: DuckDBTickStorage有界get_tick_count方法"""
     from ali2026v3_trading.param_pool.quantification._data_validation import DuckDBTickStorage
-    assert hasattr(DuckDBTickStorage, '_get_tick_count'), "缺少_get_tick_count方法"
+    assert hasattr(DuckDBTickStorage, '_get_tick_count'), "缺少。get_tick_count方法"
 
 
 def test_p2_18_no_duplicate_count_in_storage():
-    """P2-18: duckdb_tick_storage.py中SELECT COUNT(*) FROM tick_data仅剩_get_tick_count内1处"""
+    """P2-18: duckdb_tick_storage.py中SELECT COUNT(*) FROM tick_data仅剩。get_tick_count内1处"""
     import ali2026v3_trading.param_pool.l1_quantification._data_validation as dts
     src = inspect.getsource(dts)
     count = src.count("SELECT COUNT(*) FROM tick_data")
-    assert count == 1, f"SELECT COUNT(*) FROM tick_data应仅剩1处(在_get_tick_count内)，实际{count}处"
+    assert count == 1, f"SELECT COUNT(*) FROM tick_data应仅剩1处(在。get_tick_count内)，实际{count}处"
 
 
 def test_p2_20_validate_finite_extracted():
-    """P2-20: position_command_service中NaN/Inf检查使用_validate_finite辅助"""
+    """P2-20: position_command_service中NaN/Inf检查使用例validate_finite辅助"""
     from ali2026v3_trading.position.position_command_service import PositionCommandService
     src = inspect.getsource(PositionCommandService._add_position)
-    assert '_validate_finite' in src, "_add_position未使用_validate_finite辅助函数"
+    assert '_validate_finite' in src, "_add_position未使用例validate_finite辅助函数"
 
 
 def test_p2_23_greeks_calculator_uses_set_global_seed():
@@ -56,10 +56,10 @@ def test_p2_23_triple_truth_uses_set_global_seed():
 
 
 def test_p2_26_param_changed_delegates():
-    """P2-26: _on_param_changed_event委托到_on_config_param_change"""
+    """P2-26: _on_param_changed_event委托到。on_config_param_change"""
     from ali2026v3_trading.position.position_service import PositionService
     src = inspect.getsource(PositionService._on_param_changed_event)
-    assert '_on_config_param_change' in src, "_on_param_changed_event未委托到_on_config_param_change"
+    assert '_on_config_param_change' in src, "_on_param_changed_event未委托到。on_config_param_change"
 
 
 if __name__ == '__main__':

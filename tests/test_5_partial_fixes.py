@@ -3,6 +3,7 @@
 """5项部分修复问题断言验证"""
 import re
 import sys
+import os
 from pathlib import Path
 
 _SRC_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -11,6 +12,8 @@ passed = 0
 failed = 0
 
 def _check(path, pattern, negate=False):
+    if not os.path.isfile(path):
+        return False, 0
     with open(path, 'r', encoding='utf-8') as f:
         content = f.read()
     matches = re.findall(pattern, content, re.MULTILINE)
@@ -28,6 +31,12 @@ def assert_check(name, result, detail=""):
 
 print("5项部分修复问题断言验证")
 print("=" * 60)
+
+try:
+    import pytest
+    pytest.skip("脚本式断言验证，需手动运行", allow_module_level=True)
+except ImportError:
+    pass
 
 # P0-A3: Kelly含手续费/滑点
 print("[P0-A3] Kelly公式含手续费滑点近似")

@@ -9,8 +9,13 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 
-def _compute_hedge_ratio(signal: Dict[str, Any]) -> float:
-    """计算对冲比率（默认1.0，即全额对冲）"""
+def _compute_hedge_ratio(self_or_signal, signal=None) -> float:
+    """计算对冲比率（默认1.0，即全额对冲）
+
+    支持两种调用方式:
+    - 作为模块函数: _compute_hedge_ratio(signal)
+    - 作为实例方法: self._compute_hedge_ratio(signal)
+    """
     return 1.0
 
 

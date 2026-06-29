@@ -9,26 +9,26 @@ class TestTypesMigration:
     """BacktestStateEnum / _STATE_REASON_MAP 迁移到 backtest_config.py"""
 
     def test_backtest_state_enum_defined_in_config(self):
-        from ali2026v3_trading.param_pool.backtest_config import BacktestStateEnum
+        from ali2026v3_trading.param_pool.backtest.backtest_config import BacktestStateEnum
         assert BacktestStateEnum is not None
 
     def test_state_reason_map_defined_in_config(self):
-        from ali2026v3_trading.param_pool.backtest_config import _STATE_REASON_MAP
+        from ali2026v3_trading.param_pool.backtest.backtest_config import _STATE_REASON_MAP
         assert isinstance(_STATE_REASON_MAP, dict)
         assert 'correct_trending' in _STATE_REASON_MAP
 
     def test_types_removed_import_from_config(self):
-        from ali2026v3_trading.param_pool.backtest_config import BacktestStateEnum as BSE_config
+        from ali2026v3_trading.param_pool.backtest.backtest_config import BacktestStateEnum as BSE_config
         from ali2026v3_trading.param_pool.backtest.backtest_runner_base import BacktestStateEnum as BSE_base
         assert BSE_config is BSE_base, "runner_base should re-export same object as config"
 
     def test_state_reason_map_same_identity(self):
-        from ali2026v3_trading.param_pool.backtest_config import _STATE_REASON_MAP as MAP_config
+        from ali2026v3_trading.param_pool.backtest.backtest_config import _STATE_REASON_MAP as MAP_config
         from ali2026v3_trading.param_pool.backtest.backtest_runner_base import _STATE_REASON_MAP as MAP_base
         assert MAP_config is MAP_base, "runner_base should re-export same dict as config"
 
     def test_enum_values(self):
-        from ali2026v3_trading.param_pool.backtest_config import BacktestStateEnum
+        from ali2026v3_trading.param_pool.backtest.backtest_config import BacktestStateEnum
         assert hasattr(BacktestStateEnum, 'INIT')
         assert hasattr(BacktestStateEnum, 'RUNNING')
         assert hasattr(BacktestStateEnum, 'PAUSED')
@@ -36,11 +36,11 @@ class TestTypesMigration:
         assert hasattr(BacktestStateEnum, 'COMPLETED')
 
     def test_downstream_base_imports_from_config(self):
-        from ali2026v3_trading.param_pool.backtest_config import BacktestStateEnum
+        from ali2026v3_trading.param_pool.backtest.backtest_config import BacktestStateEnum
         assert BacktestStateEnum is not None
 
     def test_downstream_utils_imports_from_config(self):
-        from ali2026v3_trading.param_pool.backtest_config import _STATE_REASON_MAP
+        from ali2026v3_trading.param_pool.backtest.backtest_config import _STATE_REASON_MAP
         assert isinstance(_STATE_REASON_MAP, dict)
 
 

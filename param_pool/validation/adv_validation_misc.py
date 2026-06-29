@@ -1,4 +1,4 @@
-﻿# [M1-129] 高级验证杂项
+# [M1-129] 高级验证杂项
 # MODULE_ID: M1-195
 """其余小验证器类 + P0验证函数 + generate_hft_fidelity_warning"""
 import json  # R5-2: 保留用于json.JSONDecodeError
@@ -295,7 +295,7 @@ class MultiPeriodCrossValidator:
     def _calc_sharpe(equity: np.ndarray, risk_free_rate: float = DEFAULT_RISK_FREE_RATE) -> float:
         """P1-47修复: 委托给 infra/resilience_numeric.compute_sharpe_stable
 
-        保留原签名以兼容调用点，内部委托给权威实现。
+        保留原签名以兼容调用点，内部委托给权威实现。'
         """
         from ali2026v3_trading.infra.resilience import compute_sharpe_stable
         if len(equity) < 2:

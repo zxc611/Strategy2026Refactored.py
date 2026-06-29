@@ -78,7 +78,7 @@ def test_register_alert_callback_subscribes_to_eventbus():
     def _test_cb(event_type, detail):
         callback_calls.append({'event_type': event_type, 'detail': detail})
 
-    # 清理RiskService类级别的_alert_callbacks
+    # 清理RiskService类级别的指alert_callbacks
     from ali2026v3_trading.risk.risk_service import RiskService
     original_callbacks = RiskService._alert_callbacks[:]
     RiskService._alert_callbacks.clear()

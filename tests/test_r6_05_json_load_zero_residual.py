@@ -46,7 +46,7 @@ def test_global_no_json_load_in_active_code():
         if not os.path.isdir(dirpath):
             continue
         for root, dirs, files in os.walk(dirpath):
-            # 排除backup和__pycache__
+            # 排除backup和。_pycache__
             dirs[:] = [d for d in dirs if not d.startswith('_backup_') and d != '__pycache__']
             for fname in files:
                 if not fname.endswith('.py'):

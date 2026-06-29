@@ -18,7 +18,7 @@ def _reset_singleton():
     from ali2026v3_trading.config.tvf_param_loader import TVFParamLoader
     TVFParamLoader.reset()
     try:
-        from ali2026v3_trading.infra.singleton_registry import SingletonRegistry
+        from ali2026v3_trading.infra.registry_service import SingletonRegistry
         SingletonRegistry.reset_all()
     except Exception:
         pass
@@ -67,18 +67,18 @@ class TestTVFParamLoaderSingleton:
         assert old is not new
 
     def test_reset_clears_loaded_flag(self):
-        """reset清除_loaded标志"""
+        """reset清除。loaded标志"""
         from ali2026v3_trading.config.tvf_param_loader import TVFParamLoader
         loader = TVFParamLoader.get_instance()
         loader.load('/nonexistent.yaml')
         assert loader._loaded is True
         TVFParamLoader.reset()
-        # reset后新实例的_loaded应为False
+        # reset后新实例的指loaded应为False
         new_loader = TVFParamLoader.get_instance()
         assert new_loader._loaded is False
 
     def test_reset_clears_params(self):
-        """reset清除_params"""
+        """reset清除。params"""
         from ali2026v3_trading.config.tvf_param_loader import TVFParamLoader
         loader = TVFParamLoader.get_instance()
         loader.load('/nonexistent.yaml')
@@ -351,7 +351,7 @@ class TestTVFParamLoading:
         assert loader._loaded is True
 
     def test_load_sets_loaded_flag(self):
-        """load设置_loaded标志"""
+        """load设置。loaded标志"""
         from ali2026v3_trading.config.tvf_param_loader import TVFParamLoader
         loader = TVFParamLoader.get_instance()
         assert loader._loaded is False

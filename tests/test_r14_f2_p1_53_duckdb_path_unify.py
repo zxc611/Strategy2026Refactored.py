@@ -38,7 +38,7 @@ def test_config_dataclasses_uses_constant():
     """config_dataclasses 中 strategy.duckdb 路径使用模块级常量"""
     import ali2026v3_trading.config.config_dataclasses as cd
     # _DEFAULT_STRATEGY_DB_PATH 存在
-    assert hasattr(cd, '_DEFAULT_STRATEGY_DB_PATH'), "缺少_DEFAULT_STRATEGY_DB_PATH常量"
+    assert hasattr(cd, '_DEFAULT_STRATEGY_DB_PATH'), "缺少。DEFAULT_STRATEGY_DB_PATH常量"
     db_path = cd._DEFAULT_STRATEGY_DB_PATH
     assert db_path.endswith("strategy.duckdb"), f"路径应以strategy.duckdb结尾: {db_path}"
     # PathConfig.db_path 默认值与常量一致
