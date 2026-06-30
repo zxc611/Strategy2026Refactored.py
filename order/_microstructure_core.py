@@ -3,9 +3,9 @@
 _microstructure_core.py - 核心微观结构分析
 
 拆分自 order_flow_analyzer.py (2026-06-30)
-职责：CVD/OFI/VWAP/Footprint分析，ProductMicroData数据管理
+职责：MicrostructureConfig/FootprintBar配置类 + MicrostructureAnalyzer分析器
 
-委托给原order_flow_analyzer.py实现，确保功能无缺失
+注意：ProductMicroData已拆分为3个子模块（M1-144/145/146）
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from __future__ import annotations
 __all__ = [
     'MicrostructureConfig',
     'FootprintBar',
-    'ProductMicroData',
     'MicrostructureAnalyzer',
 ]
 
