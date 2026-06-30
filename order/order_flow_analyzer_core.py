@@ -1,9 +1,16 @@
 ﻿# [M1-44-02] 订单流分析器-核心
 
+import threading
+from typing import Any, Dict, List, Optional, Tuple
+
 from ali2026v3_trading.order.order_flow_data_structures import MicrostructureConfig, FootprintBar, ProductMicroData
 
 
-
+try:
+    from ali2026v3_trading.infra.shared_utils import extract_product_code
+    _HAS_EXTRACT_PRODUCT = True
+except ImportError:
+    _HAS_EXTRACT_PRODUCT = False
 
 
 class MicrostructureAnalyzer:

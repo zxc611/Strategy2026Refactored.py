@@ -3,8 +3,12 @@
 from ali2026v3_trading.order.order_executor_validation import OrderContext, OrderExecutor
 
 
+# 继续OrderExecutor的方法（在order_executor_validation.py中已定义类）
+# 此文件包含OrderExecutor的后续方法
 
-
+class _OrderExecutorPlatformMethods:
+    """OrderExecutor平台交互方法（混入类）"""
+    
     def _execute_platform_insert(self, ctx: OrderContext) -> OrderContext:
 
         """阶段2: 平台下单 _构建参数+超时调用+结果归一）"""
