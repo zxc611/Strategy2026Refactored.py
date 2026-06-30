@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ali2026v3_trading.infra.serialization_utils import json_dumps
 from ali2026v3_trading.infra.shared_utils import safe_float, normalize_instrument_id, CHINA_TZ
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 # 跨平台文件锁支持
 
@@ -160,166 +160,46 @@ class SubscriptionConfig:
 """订阅管理器- 合约解析 (_SubscriptionInstrumentMixin)"""
 
 class SubscriptionInstrumentService:
+    """合约解析服务门面 - 委托给 instrument_parser 模块
+    
+    保留此类以向后兼容，实际逻辑已迁移至 infra/instrument_parser.py
+    """
+    
     @staticmethod
     def _strip_exchange_prefix(instrument_id: str) -> str:
-        """剥离交易所前缀（统一使用正则）'
-        Args:
-            instrument_id: 合约ID（可能带交易所前缀，如 'CFFEX.IF2603'_
-        Returns:
-            str: 纯净的合约ID（如 'IF2603'_
-        """
-
-        # 直接使用正则提取合约ID，避免二次标准化
-        import re
-        match = re.search(r'([A-Za-z]+\d+.*?)$', instrument_id)
-        return match.group(1) if match else instrument_id
-
+        from ali2026v3_trading.infra.instrument_parser import strip_exchange_prefix
+        return strip_exchange_prefix(instrument_id)
+    
     @staticmethod
     def _normalize_product_code(product: str) -> str:
-        """标准化产品代码，用于内部比较和分析
-        Args:
-            product: 产品代码字符串
-        Returns:
-            str: 标准化的产品代码（SHFE品种小写，其他大写）'
-        """
-        if not product:
-            return ''
-
-        return str(product)
-
+        from ali2026v3_trading.infra.instrument_parser import normalize_product_code
+        return normalize_product_code(product)
+    
     @staticmethod
     def parse_future(instrument_id: str) -> Dict[str, Any]:
-        """解析期货合约"""
-        clean_id = SubscriptionInstrumentService._strip_exchange_prefix(instrument_id)
-        match = re.match(r'^([A-Za-z]+)(\d{3,4})$', clean_id)
-        if not match:
-            raise ValueError(f"无法解析期货：{instrument_id}")
-
-        raw_product = match.group(1)
-        year_month = match.group(2)
-        if len(year_month) == 3:
-            year_month = '2' + year_month
-
-        # 使用标准化函数
-        product = SubscriptionInstrumentService._normalize_product_code(raw_product)
-        return {'product': product, 'year_month': year_month}
-
+        from ali2026v3_trading.infra.instrument_parser import parse_future
+        return parse_future(instrument_id)
+    
     @staticmethod
     def is_option(instrument_id: str) -> bool:
-        """判断是否为期期"""
-        try:
-            SubscriptionInstrumentService.parse_option(normalize_instrument_id(instrument_id))
-            return True
-
-        except (ValueError, Exception):
-            return False
-
+        from ali2026v3_trading.infra.instrument_parser import is_option
+        return is_option(instrument_id)
+    
     @staticmethod
     def parse_option(instrument_id: str) -> Dict[str, Any]:
-        r"""
-        解析期权合约(支持标准格式、连字符格式、紧凑格式、MS迷你格式)
-        支持格式:
-        - 标准: CU2603C5000, IO2606C4000
-        - 连字符: CU2603-C-5000
-        - CZCE迷你: SR607MSC4700, SR607MSP4700 (MSC=Mini Call, MSP=Mini Put)
-        - DCE迷你: c2607-MS-C-2040, m2607-MS-P-2400
-        """
-        clean_id = SubscriptionInstrumentService._strip_exchange_prefix(instrument_id)
-
-        ms_compact = re.match(r'^([A-Za-z]+)(\d{3,4})MS([CP])(\d+)$', clean_id)
-        if ms_compact:
-            product = ms_compact.group(1)
-            year_month_raw = ms_compact.group(2)
-            option_type = ms_compact.group(3)
-            strike_price = float(ms_compact.group(4))
-            year_month = SubscriptionInstrumentService._normalize_option_year_month(year_month_raw)
-            return {
-                'product': product,
-                'year_month': year_month,
-                'option_type': option_type,
-                'strike_price': strike_price,
-                'format': 'ms_compact',
-            }
-
-        ms_dash = re.match(r'^([A-Za-z]+)(\d{3,4})-MS-([CP])-?(\d+(?:\.\d+)?)$', clean_id)
-        if ms_dash:
-            product = ms_dash.group(1)
-            year_month_raw = ms_dash.group(2)
-            option_type = ms_dash.group(3)
-            strike_price = float(ms_dash.group(4))
-            year_month = SubscriptionInstrumentService._normalize_option_year_month(year_month_raw)
-            return {
-                'product': product,
-                'year_month': year_month,
-                'option_type': option_type,
-                'strike_price': strike_price,
-                'format': 'ms_dash',
-            }
-
-        match = re.match(r'^([A-Za-z]+)(\d{3,4})-?([CP])-?(\d+(?:\.\d+)?)$', clean_id)
-        if match:
-            product = match.group(1)
-            year_month_raw = match.group(2)
-            option_type = match.group(3)
-            strike_price = float(match.group(4))
-            year_month = SubscriptionInstrumentService._normalize_option_year_month(year_month_raw)
-            fmt = 'dash' if '-' in clean_id else 'compact'
-            return {
-                'product': product,
-                'year_month': year_month,
-                'option_type': option_type,
-                'strike_price': strike_price,
-                'format': fmt,
-            }
-        raise ValueError(f"无法解析期权: {instrument_id}")
-
+        from ali2026v3_trading.infra.instrument_parser import parse_option
+        return parse_option(instrument_id)
+    
     @staticmethod
     def _normalize_option_year_month(year_month_raw: str) -> str:
-        """归一化期权年）"""
-        normalized = normalize_instrument_id(year_month_raw)
-        if len(normalized) == 4:
-            return normalized
-
-        if len(normalized) != 3 or not normalized.isdigit():
-            raise ValueError(f"非法期权月份编码：{year_month_raw}")
-
-        current_year = datetime.now(CHINA_TZ).year % 100
-        year_digit = int(normalized[0])
-        month_digits = normalized[1:]
-        current_decade = (current_year // 10) * 10
-        candidate_years = []
-        for decade_offset in (-10, 0, 10):
-            candidate_year = current_decade + decade_offset + year_digit
-            if 0 <= candidate_year <= 99:
-                candidate_years.append(candidate_year)
-        resolved_year = min(candidate_years, key=lambda year: (abs(year - current_year), -year))
-        return f"{resolved_year:02d}{month_digits}"
-
-    # _接口唯一：classify_instruments唯一实现，query_service两处已委托此。'
+        from ali2026v3_trading.infra.instrument_parser import normalize_option_year_month
+        return normalize_option_year_month(year_month_raw)
+    
     @staticmethod
     def classify_instruments(instrument_ids: List[str]) -> Tuple[List[str], Dict[str, List[str]]]:
-        """分类合约
-        options_dict _key 统一。canonical underlying 标识 (product+year_month)_
-        _'IO2605', 'al2605'，与 ParamsService._extract_canonical_underlying 输出一致。'
-        """
-        futures_list = []
-        options_dict = {}
-        for inst_id in instrument_ids:
-            try:
-                parsed = SubscriptionInstrumentService.parse_option(inst_id)
+        from ali2026v3_trading.infra.instrument_parser import classify_instruments
+        return classify_instruments(instrument_ids)
 
-                # 统一 key 语义。product+year_month
-                underlying = f"{parsed['product']}{parsed['year_month']}"
-                if underlying not in options_dict:
-                    options_dict[underlying] = []
-                options_dict[underlying].append(inst_id)
-            except ValueError:
-                futures_list.append(inst_id)
-        return futures_list, options_dict
-
-    # ========================================================================
-    # 订阅核心逻辑 (增强强
-    # ========================================================================
 _SubscriptionInstrumentMixin = SubscriptionInstrumentService
 
 """订阅管理器- WAL管理 (_SubscriptionWALMixin)"""

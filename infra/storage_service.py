@@ -35,7 +35,7 @@ from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads  
 
 from ali2026v3_trading.infra.shared_utils import sanitize_sql_identifier, sanitize_sql_value, CHINA_TZ as _CHINA_TZ, atomic_replace_file  # P2-13: 统一CHINA_TZ
 
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 from ali2026v3_trading.infra._backup_restore import get_backup_service, DuckDBBackupService  # P2-04: 备份服务去重，规范版本位于 _backup_restore.py
 
@@ -71,7 +71,7 @@ __all__ = [
 
     'DuckDBRestoreService', 'get_restore_service',
 
-    # Section 4: storage
+    # Section 4: storage (迁移至data层，保留向后兼容别名)
 
     'StorageCatalogService', 'StorageCatalogMixin',
 
@@ -80,6 +80,31 @@ __all__ = [
     'StorageMaintenanceService',
 
 ]
+
+
+
+
+# ============================================================================
+# 向后兼容导入（从data层导入Service）
+# ============================================================================
+
+try:
+    from ali2026v3_trading.data.storage_catalog_service import (
+        StorageCatalogService as _DataStorageCatalogService,
+        StorageCatalogMixin as _DataStorageCatalogMixin,
+    )
+    from ali2026v3_trading.data.storage_checks_service import (
+        StorageChecksService as _DataStorageChecksService,
+        StorageChecksMixin as _DataStorageChecksMixin,
+    )
+    
+    StorageCatalogService = _DataStorageCatalogService
+    StorageCatalogMixin = _DataStorageCatalogMixin
+    StorageChecksService = _DataStorageChecksService
+    StorageChecksMixin = _DataStorageChecksMixin
+    
+except ImportError as e:
+    logger.warning("[storage_service] data层Service导入失败，使用infra层实现: %s", e)
 
 
 
