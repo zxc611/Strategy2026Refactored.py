@@ -22,7 +22,7 @@ from ali2026v3_trading.infra.shared_utils import RingBuffer
 
 from ali2026v3_trading.infra.resilience import safe_divide  # R4-2: 统一安全除法
 
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 
 
