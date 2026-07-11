@@ -20,7 +20,7 @@ from ali2026v3_trading.risk.risk_check_engine import RiskCheckEngine
 
 from ali2026v3_trading.risk.risk_circuit_breaker import get_safety_meta_layer
 
-from ali2026v3_trading.risk._utils import safe_get_float as _safe_get_float, safe_get_int as _safe_get_int
+from ali2026v3_trading.risk.risk_support import safe_get_float as _safe_get_float, safe_get_int as _safe_get_int
 
 
 
@@ -182,7 +182,15 @@ class RiskCheckService:
 
         """交易前风控检查链引擎优先，安全回退"""
 
-        from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
+        # NEW-02修复(FIX-20260706-HARDSTOP-BYPASS): SafetyMetaLayer的hard_stop/new_open_blocked
+        # 检查必须在RiskCheckEngine之前执行，因为默认规则引擎未注册SafetyMetaLayerRule
+        # 旧代码仅依赖USE_RISK_CHECK_ENGINE分支，但rule chain不含hard_stop检查，导致
+        # hard_stop=True时OPEN订单仍能通过→平台下单失败result=-1(实盘日志2026-07-06 21:04证实)
+        _safety_result = self._check_safety_meta_layer(signal)
+        if _safety_result is not None and getattr(_safety_result, 'is_block', False):
+            return _safety_result
+
+        from ali2026v3_trading.infra.metrics_registry import PhaseFeatureFlag
 
         if PhaseFeatureFlag.is_enabled('USE_RISK_CHECK_ENGINE'):
 
@@ -293,7 +301,16 @@ class RiskCheckService:
 
     def _check_safety_meta_layer(self, signal: Dict[str, Any]):
 
-        """检查SafetyMetaLayer的hard_stop和new_open_blocked状态"""
+        """检查SafetyMetaLayer的hard_stop和new_open_blocked状态
+
+        FIX-20260709-DRY-RUN-PASS: dry_run模式下不阻断开仓，但在快照中如实记录风控状态。
+        根因: dry_run模式只记录快照不实际交易，风控阻断开仓导致:
+        - 6策略0开仓/0平仓，无法验证策略逻辑
+        - 无法诊断策略信号质量和交易行为
+        - 快照中无风控阻断记录，失去诊断价值
+        修复: dry_run模式下跳过风控阻断(不return block)，但在信号中注入_risk_block_reason
+        供快照记录，确保风控状态可见但不阻断策略运行。
+        """
 
         try:
 
@@ -305,14 +322,51 @@ class RiskCheckService:
 
             action = signal.get('action', '').upper() if signal else ''
 
-            # P0-裂缝25修复: hard_stop期间允许平仓(CLOSE)保护性操作豁。'
-            if safety.is_hard_stop_triggered() and action != 'CLOSE':
+            # 检测风控阻断原因
+            _hard_stop = safety.is_hard_stop_triggered()
+            _new_open_blocked = safety.is_new_open_blocked()
+            _block_reason = None
+            if _hard_stop and action != 'CLOSE':
+                _block_reason = "hard_stop_triggered: 日回撤硬停止已触发，禁止新开仓"
+            elif _new_open_blocked and action == 'OPEN':
+                _block_reason = "new_open_blocked: 新开仓被阻断"
 
-                return self._block(reason="hard_stop_triggered: 日回撤硬停止已触发，禁止新开仓")
-
-            if safety.is_new_open_blocked() and action == 'OPEN':
-
-                return self._block(reason="new_open_blocked: 新开仓被阻断")
+            if _block_reason:
+                # FIX-20260709-DRY-RUN-PASS: dry_run模式下不阻断，但记录风控状态
+                _dry_run = False
+                try:
+                    from ali2026v3_trading.config.params_service import get_params_service
+                    _dry_run = get_params_service().get_bool('dry_run_mode', False) or False
+                except Exception:
+                    pass
+                if not _dry_run:
+                    try:
+                        _dry_run = bool(getattr(self._rs, '_dry_run_active', False)) if hasattr(self, '_rs') else False
+                    except Exception:
+                        pass
+                # FIX-20260709-DRY-RUN-PASS-V2: 第三级fallback — 从OrderService获取_dry_run_mode
+                # 根因: _dry_run_active设置在策略对象(provider)上，risk_check_service无法直接访问
+                # 但lifecycle_callbacks.py已将_dry_run_mode同步到OrderService
+                if not _dry_run:
+                    try:
+                        from ali2026v3_trading.order.order_base import get_order_service
+                        _osvc = get_order_service()
+                        if _osvc is not None:
+                            _dry_run = bool(getattr(_osvc, '_dry_run_mode', False))
+                    except Exception:
+                        pass
+                if _dry_run:
+                    # dry_run模式: 不阻断开仓，但在信号中注入风控阻断原因供快照记录
+                    if isinstance(signal, dict):
+                        signal['_risk_block_reason'] = _block_reason
+                    logging.info(
+                        "[FIX-20260709-DRY-RUN-PASS] dry_run模式跳过风控阻断(快照中记录): "
+                        "action=%s reason=%s instrument=%s",
+                        action, _block_reason, signal.get('symbol', '') if isinstance(signal, dict) else '',
+                    )
+                    return self._pass()
+                # 实盘模式: 正常阻断
+                return self._block(reason=_block_reason)
 
             return self._pass()
 

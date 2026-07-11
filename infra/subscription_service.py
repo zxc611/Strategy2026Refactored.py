@@ -63,10 +63,17 @@ def classify_registered_instruments(storage) -> Tuple[List[str], Dict[int, List[
     registered_ids = storage.get_registered_instrument_ids() or []
     logger.info("[InitServices] 已注册合约数据 %d", len(registered_ids))
     params_service = get_params_service()
+    # FIX-20260710-SUB-META-v3: 多级fallback获取instrument metadata
+    _ics = params_service.__dict__.get('_instrument_cache_service') if params_service else None
     for inst_id in registered_ids:
         if SubscriptionInstrumentService.is_option(inst_id):
             try:
-                meta = params_service.get_instrument_meta_by_id(inst_id) if params_service else None
+                if _ics is not None:
+                    meta = _ics.get_instrument_meta_by_id(inst_id)
+                elif params_service is not None:
+                    meta = params_service.get_instrument_meta_by_id(inst_id)
+                else:
+                    meta = None
                 underlying_future_id = meta.get('underlying_future_id') if meta else None
                 if not underlying_future_id:
                     logger.warning("[InitServices] 跳过缺少 underlying_future_id 的期权 %s", inst_id)
@@ -931,6 +938,24 @@ class SubscriptionCoreService:
         self._total_failures = 0
         # t_type_service 引用（由外部注入或通过facade委托）
         self.t_type_service = None
+        # CP-01~05：全链路守恒审计计数器
+        self._tick_route_audit = {
+            'total_ticks': 0,
+            'normalize_success': 0,
+            'normalize_fail': 0,
+            'meta_found': 0,
+            'meta_not_found': 0,
+            'meta_not_found_ids': set(),
+            'routed_option': 0,
+            'routed_future': 0,
+            'not_routed': 0,
+            'last_audit_time': 0.0,
+        }
+        # 订阅-收到差异审计
+        self._tick_received_contracts = set()
+        self._last_subscribe_tick_audit = 0.0
+        # 启动时间戳：用于审计宽限期，避免订阅刚建立、tick未大量到达时误报CRITICAL
+        self._service_start_ts = time.time()
 
     def _get_shard_lock(self, instrument_id: str) -> threading.Lock:
         """获取分片锁（按 instrument_id 哈希分片，减少锁争用）"""
@@ -961,32 +986,43 @@ class SubscriptionCoreService:
         finally:
             self.__dict__.pop('__getattr__recursing', None)
 
-    def _do_subscribe(self, instrument_id: str, data_type: str) -> None:
+    def _do_subscribe(self, instrument_id: str, data_type: str) -> bool:
         """
         统一订阅方法（内部使用）'
         _序号122修复：统一为data_manager.subscribe，删除除platform_subscribe回退
+        FIX-20260707-SUB-RET: 返回 bool 表示订阅是否成功, 供 _subscribe_single_with_retry 校验
         Args:
             instrument_id: 合约ID
             data_type: 数据类型 ('tick', 'kline'_
+        Returns:
+            bool: True=订阅调用成功, False=失败/入队等待
         """
 
         # R13-P1-API-02修复: data_manager为None时入队等待，避免bind_platform_apis()前崩溃
         if self.data_manager is None:
             logger.warning("[SubscriptionManagerV2] data_manager未绑定，订阅请求入队等待: %s", instrument_id)
             self._enqueue_pending_subscription(instrument_id, data_type)
-            return
+            return False
 
         if not self._is_subscribe_ready():
             logger.warning("[SubscriptionManagerV2] subscribe API未就绪，订阅请求入队等待: %s", instrument_id)
             self._enqueue_pending_subscription(instrument_id, data_type)
-            return
+            return False
 
         subscribe_method = getattr(self.data_manager, 'subscribe', None)
         if subscribe_method and callable(subscribe_method):
             result = subscribe_method(instrument_id, data_type)
-            if result is None and not self._is_subscribe_ready():
-                logger.warning("[SubscriptionManagerV2] subscribe API调用未生效，订阅请求回队等待: %s", instrument_id)
+            # FIX-M9-02: DataService.subscribe 现在返回 True/False 或 raise
+            #   - True: 订阅调用成功
+            #   - False: subscribe_fn 未绑定 (已通过 _is_subscribe_ready 预检, 此处为二次防护)
+            #   - raise: 平台调用失败, 由 _subscribe_single_with_retry 捕获入重试队列
+            # 原实现 `if result is None` 无法区分失败与无返回值, 现改为显式 False 检查
+            # FIX-20260707-SUB-RET: C++ sub_market_data 返回失败码时 DataService.subscribe 返回 False
+            if result is False or (result is None and not self._is_subscribe_ready()):
+                logger.warning("[SubscriptionManagerV2] subscribe API调用未生效 (result=%s)，订阅请求回队等待: %s", result, instrument_id)
                 self._enqueue_pending_subscription(instrument_id, data_type)
+                return False
+            return True
         else:
             raise AttributeError("InstrumentDataManager 缺少 subscribe 方法")
 
@@ -1096,11 +1132,21 @@ class SubscriptionCoreService:
         """
 
         # RES-P2-09: 合约订阅容量检查（告警不阻断，确保全量订阅）
+        # FIX-20260704-CAPACITY-WARN: 分级别提示，避免5000建议上限在16287大规模配置下误报
+        # 根因: 策略设计就是全量订阅16288个合约(期货390+期权15898)，5000上限会固定触发WARNING污染日志；
+        # 超过5000属已知设计(用INFO)，超过DLL硬上限16287才需要WARNING。
         from ali2026v3_trading.config.config_params import CAPACITY_LIMITS
         _max_instruments = CAPACITY_LIMITS.get('max_instruments', 5000)
         _total_instruments = len(futures_list) + sum(len(opts) for opts in options_dict.values())
-        if _total_instruments >= _max_instruments:
-            logging.warning("[RES-P2-09] 合约订阅超过建议上限: %d/%d，继续订阅但需关注性能", _total_instruments, _max_instruments)
+        _DLL_HARD_LIMIT = 16287
+        if _total_instruments > _DLL_HARD_LIMIT:
+            logging.warning(
+                "[RES-P2-09] 合约订阅超过DLL硬上限: %d/%d，已触发分区逻辑，仅注册前%d个合约",
+                _total_instruments, _DLL_HARD_LIMIT, _DLL_HARD_LIMIT)
+        elif _total_instruments >= _max_instruments:
+            logging.info(
+                "[RES-P2-09] 合约订阅达到大批量配置: %d/%d(建议上限)，未超过DLL硬上限%d，继续全量订阅",
+                _total_instruments, _max_instruments, _DLL_HARD_LIMIT)
 
         # 空列表检查：无合约时直接返回0，避免后续空转
         if not futures_list and not options_dict:
@@ -1112,23 +1158,44 @@ class SubscriptionCoreService:
         self._total_subscriptions = total_count
         self.ensure_background_threads()
 
+        _BATCH_SIZE = 500
+        _BATCH_PAUSE_SEC = 0.3
+
         logger.info(
             "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
-            "Starting bulk subscription: %d instruments", total_count
+            "Starting bulk subscription: %d instruments (batch_size=%d, batch_pause=%.1fs)",
+            total_count, _BATCH_SIZE, _BATCH_PAUSE_SEC,
         )
         success_count = 0
         failed_tasks = []
+        _sub_batch_idx = 0
+        _macro_batch_idx = 0
 
-        # 订阅期货
         for inst_id in futures_list:
             try:
-                self._subscribe_single_with_retry(inst_id, 'tick')
-                self._subscribe_single_with_retry(inst_id, 'kline_1min')
-                success_count += 1
+                _sub_ok = self._subscribe_single_with_retry(inst_id, 'tick')
+                _sub_batch_idx += 1
+                _macro_batch_idx += 1
+                if _macro_batch_idx % _BATCH_SIZE == 0:
+                    logger.info(
+                        "[SubscriptionManagerV2] DB subscribe batch pause: %d/%d instruments processed",
+                        _macro_batch_idx, total_count,
+                    )
+                    time.sleep(_BATCH_PAUSE_SEC)
 
-                # _环节1: 订阅成功探针
-                from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
-                DiagnosisProbeManager.on_subscribe(inst_id, 'future', True)
+                if _sub_ok:
+                    success_count += 1
+                    from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                    DiagnosisProbeManager.on_subscribe(inst_id, 'future', True)
+                else:
+                    failed_tasks.append({
+                        'type': 'subscribe',
+                        'instrument_id': inst_id,
+                        'data_type': 'tick',
+                        'error': 'subscribe_returned_false (enqueued_for_retry)'
+                    })
+                    from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                    DiagnosisProbeManager.on_subscribe(inst_id, 'future', False, 'subscribe_returned_false')
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                 logger.error("[SubscriptionManagerV2] Subscribe failed: %s - %s", inst_id, e)
                 failed_tasks.append({
@@ -1137,28 +1204,39 @@ class SubscriptionCoreService:
                     'data_type': 'tick',
                     'error': str(e)
                 })
-
-                # _环节1: 订阅失败探针
                 from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
                 DiagnosisProbeManager.on_subscribe(inst_id, 'future', False, str(e))
 
-        # 订阅期权
         for underlying, option_ids in options_dict.items():
             try:
-                # 握手
                 if option_ids:
                     logger.debug("[SubscriptionManagerV2] Handshake removed: all subscriptions via _do_subscribe only")
 
-                # 订阅期权合约
                 for opt_id in option_ids:
                     try:
-                        self._subscribe_single_with_retry(opt_id, 'tick')
-                        self._subscribe_single_with_retry(opt_id, 'kline_1min')
-                        success_count += 1
+                        _sub_ok = self._subscribe_single_with_retry(opt_id, 'tick')
+                        _sub_batch_idx += 1
+                        _macro_batch_idx += 1
+                        if _macro_batch_idx % _BATCH_SIZE == 0:
+                            logger.info(
+                                "[SubscriptionManagerV2] DB subscribe batch pause: %d/%d instruments processed",
+                                _macro_batch_idx, total_count,
+                            )
+                            time.sleep(_BATCH_PAUSE_SEC)
 
-                        # _环节1: 期权订阅成功探针
-                        from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
-                        DiagnosisProbeManager.on_subscribe(opt_id, 'option', True)
+                        if _sub_ok:
+                            success_count += 1
+                            from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                            DiagnosisProbeManager.on_subscribe(opt_id, 'option', True)
+                        else:
+                            failed_tasks.append({
+                                'type': 'subscribe',
+                                'instrument_id': opt_id,
+                                'data_type': 'tick',
+                                'error': 'subscribe_returned_false (enqueued_for_retry)'
+                            })
+                            from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                            DiagnosisProbeManager.on_subscribe(opt_id, 'option', False, 'subscribe_returned_false')
                     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                         logger.error("[SubscriptionManagerV2] Option subscribe failed: %s - %s", opt_id, e)
                         failed_tasks.append({
@@ -1167,12 +1245,9 @@ class SubscriptionCoreService:
                             'data_type': 'tick',
                             'error': str(e)
                         })
-
-                        # _环节1: 期权订阅失败探针
                         from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
                         DiagnosisProbeManager.on_subscribe(opt_id, 'option', False, str(e))
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
-                # R13-P1-API-05修复: 期权批次订阅失败时返回False阻断，而非仅log
                 logger.error("[SubscriptionManagerV2] Option batch failed: %s - %s", underlying, e)
                 return False
 
@@ -1185,6 +1260,7 @@ class SubscriptionCoreService:
             _all_instrument_ids.extend(_opt_ids)
         if _all_instrument_ids:
             self.record_subscription(_all_instrument_ids)
+            self.audit_subscription_tick_gap(reason='bulk_subscription_completed')
 
         # 发布完成事件
         if _HAS_EVENT_BUS and get_global_event_bus and success_count > 0:
@@ -1202,9 +1278,18 @@ class SubscriptionCoreService:
         )
         return total_count
 
-    def _subscribe_single_with_retry(self, instrument_id: str, data_type: str):
+    def _subscribe_single_with_retry(self, instrument_id: str, data_type: str) -> bool:
+        # FIX-M9-03: 返回 bool 表示订阅是否成功, 供 subscribe_all_instruments 校验
+        # 原实现无返回值, 调用方无条件 success_count += 1, 导致失败也被计为成功
+        # 现在返回 True=成功, False=失败(已入重试队列)
+        # FIX-20260707-SUB-RET: 检查 _do_subscribe 返回值, C++ 失败不再被计为成功
         try:
-            self._do_subscribe(instrument_id, data_type)
+            _ok = self._do_subscribe(instrument_id, data_type)
+            if _ok is False:
+                # _do_subscribe 已将失败订阅入 pending 队列, 此处仅返回 False
+                # 不再重复入队 (避免 _enqueue_for_retry 与 _pending_subscriptions 双队列混乱)
+                return False
+            return True
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             # 加入重试队列
             self._enqueue_for_retry({
@@ -1212,7 +1297,8 @@ class SubscriptionCoreService:
                 'instrument_id': instrument_id,
                 'data_type': data_type
             })
-            logger.warning("[SubscriptionManagerV2] 订阅失败已入重试队列: %s (%s)", instrument_id, data_type)
+            logger.warning("[SubscriptionManagerV2] 订阅失败已入重试队列: %s (%s) - %s", instrument_id, data_type, e)
+            return False
 
     # ========================================================================
     # 查询接口
@@ -1258,6 +1344,276 @@ class SubscriptionCoreService:
                 'failure_rate': self._total_failures / max(self._total_subscriptions, 1)
             }
 
+    # FIX-20260707-WATCHDOG-RESUB: tick watchdog 重订阅机制
+    # 根因: C++ sub_market_data 对所有合约(无论是否成功)均返回 None,
+    # 无法通过返回值区分订阅成功/失败。约36%期权在订阅后一小时仍无tick。
+    # 方案: 订阅后等待一段时间, 检查哪些合约未收到tick, 对其重新调用 C++ sub_market_data
+    def resubscribe_no_tick_instruments(self, delay_sec: float = 120.0,
+                                        max_rounds: int = 3,
+                                        batch_size: int = 500,
+                                        batch_pause_sec: float = 0.3) -> Dict[str, int]:
+        """对未收到tick的已订阅合约进行重新订阅
+
+        Args:
+            delay_sec: 首次重订阅前的等待秒数（允许tick到达）
+            max_rounds: 最大重订阅轮数
+            batch_size: 每批重订阅合约数（避免DLL并发）
+            batch_pause_sec: 批次间暂停秒数
+
+        Returns:
+            Dict: {total_subscribed, no_tick_count, resubscribed, tick_received_after}
+        """
+        import logging as _logging
+        result = {
+            'total_subscribed': 0,
+            'no_tick_count': 0,
+            'resubscribed': 0,
+            'tick_received_after': 0,
+            'rounds_executed': 0,
+        }
+        try:
+            with self._subscription_success_lock:
+                _all_sub_ids = list(self._subscription_success.get('subscribe_time', {}).keys())
+            result['total_subscribed'] = len(_all_sub_ids)
+            if not _all_sub_ids:
+                _logging.warning("[WatchdogResub] 无已订阅合约, 跳过重订阅")
+                return result
+
+            # 等待tick到达
+            _logging.info("[WatchdogResub] 等待 %.0fs 后检查未收到tick的合约 (total_subscribed=%d)", delay_sec, len(_all_sub_ids))
+            time.sleep(delay_sec)
+
+            for _round in range(1, max_rounds + 1):
+                # 找出仍未收到tick的合约
+                _no_tick_ids = []
+                with self._lock:
+                    _received = set(self._tick_received_contracts)
+                for _id in _all_sub_ids:
+                    _norm_id = self._strip_exchange_prefix(str(_id).strip())
+                    if _norm_id and _norm_id not in _received:
+                        _no_tick_ids.append(_id)
+
+                _no_tick_count = len(_no_tick_ids)
+                if _round == 1:
+                    result['no_tick_count'] = _no_tick_count
+                    # FIX-20260707-WATCHDOG-DIAG: 按品种分析无tick合约分布
+                    try:
+                        from collections import Counter as _Counter
+                        _prod_dist = _Counter()
+                        for _nid in _no_tick_ids:
+                            _m = re.match(r'^([A-Za-z]+)', str(_nid))
+                            _prod_dist[_m.group(1).upper() if _m else 'UNKNOWN'] += 1
+                        _top = _prod_dist.most_common(30)
+                        _logging.info(
+                            "[WatchdogResub] 无tick合约品种分布(top30): %s",
+                            ', '.join(f'{p}={c}' for p, c in _top),
+                        )
+                        # 按交易所分组
+                        from ali2026v3_trading.config.config_exchange import build_exchange_mapping
+                        _exch_map = build_exchange_mapping()
+                        _exch_dist = _Counter()
+                        for _prod, _cnt in _prod_dist.items():
+                            _exch = _exch_map.get(_prod.upper(), 'UNKNOWN')
+                            _exch_dist[_exch] += _cnt
+                        _logging.info(
+                            "[WatchdogResub] 无tick合约交易所分布: %s",
+                            ', '.join(f'{e}={c}' for e, c in _exch_dist.most_common()),
+                        )
+                    except Exception as _diag_err:
+                        _logging.debug("[WatchdogResub] 品种分布分析异常: %s", _diag_err)
+                _logging.info(
+                    "[WatchdogResub] 轮次#%d: %d/%d 合约未收到tick (%.1f%%)",
+                    _round, _no_tick_count, len(_all_sub_ids),
+                    (_no_tick_count * 100.0 / len(_all_sub_ids)) if _all_sub_ids else 0,
+                )
+
+                if _no_tick_count == 0:
+                    _logging.info("[WatchdogResub] 所有合约已收到tick, 无需重订阅")
+                    break
+
+                # 对未收到tick的合约重新订阅
+                _resub_ok = 0
+                _resub_fail = 0
+                for _batch_start in range(0, len(_no_tick_ids), batch_size):
+                    _batch = _no_tick_ids[_batch_start:_batch_start + batch_size]
+                    for _id in _batch:
+                        try:
+                            # 强制重订阅: 清除dedup后重新调用 C++ sub_market_data
+                            self._force_resubscribe(_id, 'tick')
+                            _resub_ok += 1
+                        except Exception as _e:
+                            _resub_fail += 1
+                            if _resub_fail <= 5:
+                                _logging.debug("[WatchdogResub] 重订阅失败: %s - %s", _id, _e)
+                    if _batch_start + batch_size < len(_no_tick_ids):
+                        time.sleep(batch_pause_sec)
+
+                result['resubscribed'] += _resub_ok
+                result['rounds_executed'] = _round
+                _logging.info(
+                    "[WatchdogResub] 轮次#%d完成: 重订阅=%d 失败=%d 等待验证...",
+                    _round, _resub_ok, _resub_fail,
+                )
+
+                # 等待重订阅后的tick到达（最后一轮不等待）
+                if _round < max_rounds and _no_tick_count > 0:
+                    _wait_sec = min(60.0, delay_sec * 0.5)
+                    _logging.info("[WatchdogResub] 等待 %.0fs 验证重订阅效果", _wait_sec)
+                    time.sleep(_wait_sec)
+
+            # 最终统计
+            with self._lock:
+                _final_received = set(self._tick_received_contracts)
+            _still_no_tick = sum(1 for _id in _all_sub_ids
+                                 if self._strip_exchange_prefix(str(_id).strip()) not in _final_received)
+            result['tick_received_after'] = len(_all_sub_ids) - _still_no_tick
+            _logging.info(
+                "[WatchdogResub] 完成: total=%d tick_received=%d still_no_tick=%d coverage=%.1f%% rounds=%d",
+                len(_all_sub_ids), result['tick_received_after'], _still_no_tick,
+                (result['tick_received_after'] * 100.0 / len(_all_sub_ids)) if _all_sub_ids else 0,
+                result['rounds_executed'],
+            )
+        except Exception as _e:
+            _logging.error("[WatchdogResub] 重订阅异常: %s", _e, exc_info=True)
+        return result
+
+    def _force_resubscribe(self, instrument_id: str, data_type: str = 'tick') -> None:
+        """强制重新订阅单个合约（绕过dedup检查）
+
+        旧 _subscribe 包装器中的 dedup 机制会跳过已订阅合约,
+        此方法直接调用 C++ sub_market_data 绕过 dedup。
+        """
+        import logging as _logging
+        try:
+            # 调用 DataService.subscribe → _subscribe 包装器
+            # 但 _subscribe 有 dedup 检查, 需要先清除
+            from ali2026v3_trading.data.data_service import DataService
+            _sub_fn = DataService._subscribe_fn
+            if _sub_fn is None:
+                _logging.debug("[WatchdogResub] subscribe_fn 未绑定, 跳过: %s", instrument_id)
+                return
+            # 直接调用 _subscribe_fn (即 lifecycle_bind._subscribe 包装器)
+            # _subscribe 包装器有 dedup 检查, 需要传 force=True 绕过
+            # 但当前 _subscribe 不支持 force 参数, 所以直接调用底层 sub
+            from ali2026v3_trading.config.config_service import resolve_product_exchange
+            _exchange = resolve_product_exchange(instrument_id)
+            # 获取原始 C++ sub_market_data 方法
+            try:
+                from ali2026v3_trading.infra.health_monitor import get_runtime_strategy_ref
+                _strategy = get_runtime_strategy_ref()
+                if _strategy and hasattr(_strategy, 'sub_market_data'):
+                    _cpp_sub = _strategy.sub_market_data
+                    # 探测签名: 2-arg(exchange, id) 或 3-arg(exchange, id, data_type)
+                    import inspect as _insp
+                    try:
+                        _sig = _insp.signature(_cpp_sub)
+                        if len(_sig.parameters) >= 3:
+                            _cpp_sub(_exchange, instrument_id, data_type)
+                        else:
+                            _cpp_sub(_exchange, instrument_id)
+                    except (ValueError, TypeError):
+                        _cpp_sub(_exchange, instrument_id)
+                    return
+            except (ImportError, AttributeError) as _e:
+                _logging.debug("[WatchdogResub] 获取原始C++方法失败, 退回DataService: %s", _e)
+
+            # 退回方案: 使用 DataService.subscribe (可能被dedup跳过)
+            _sub_fn(instrument_id, data_type)
+        except Exception as _e:
+            _logging.debug("[WatchdogResub] _force_resubscribe 异常: %s - %s", instrument_id, _e)
+            raise
+
+    def audit_subscription_tick_gap(self, reason: str = 'periodic') -> Dict[str, int]:
+        """审计本地订阅调用数与实际收到 tick 的合约数差异。
+
+        这里的分母只能表示 local subscription calls，不代表平台订阅 ack。
+        """
+        subscribed_count = 0
+        source = 'unknown'
+        try:
+            stats = self.get_subscription_stats()
+            subscribed_count = int(stats.get('total_subscribed', 0) or 0)
+            if subscribed_count > 0:
+                source = 'subscription_stats.total_subscribed(local_calls)'
+        except Exception as exc:
+            logging.debug("[SubscribeTickGapAudit] get_subscription_stats 失败: %s", exc)
+
+        if subscribed_count == 0:
+            try:
+                with self._subscription_success_lock:
+                    subscribed_count = int(self._subscription_success.get('total_subscribed', 0) or 0)
+                if subscribed_count > 0:
+                    source = 'subscription_success.total_subscribed(local_calls)'
+            except Exception as exc:
+                logging.debug("[SubscribeTickGapAudit] subscription_success 取订阅数失败: %s", exc)
+
+        if subscribed_count == 0:
+            try:
+                # FIX-20260707: 反转查询优先级，优先查futures_instruments+option_instruments
+                from ali2026v3_trading.data.data_service import get_data_service
+                ds = get_data_service()
+                subscribed_count = int(ds.query(
+                    "SELECT (SELECT COUNT(*) FROM futures_instruments) + (SELECT COUNT(*) FROM option_instruments) AS cnt",
+                    arrow=False
+                ).iloc[0]['cnt'] or 0)
+                if subscribed_count > 0:
+                    source = 'futures+option_instruments(local_config_fallback)'
+            except Exception as exc:
+                try:
+                    subscribed_count = int(ds.query(
+                        "SELECT COUNT(*) AS cnt FROM instruments_registry",
+                        arrow=False
+                    ).iloc[0]['cnt'] or 0)
+                    if subscribed_count > 0:
+                        source = 'instruments_registry(local_config_fallback)'
+                except Exception as exc2:
+                    logging.debug("[SubscribeTickGapAudit] 品种表取数均失败: %s, %s", exc, exc2)
+
+        received_count = len(self._tick_received_contracts)
+        gap = subscribed_count - received_count
+        gap_pct = (gap * 100 // subscribed_count) if subscribed_count > 0 else -1
+        # 启动宽限期：订阅刚建立时 tick 尚未大量到达，gap 必然很高，属正常现象
+        # 启动后 90 秒内不报 CRITICAL，避免误报（如 bulk_subscription_completed 调用点）
+        _warmup_secs = 90
+        _in_warmup = (time.time() - self._service_start_ts) < _warmup_secs
+        if subscribed_count > 0:
+            logging.info(
+                "[SubscribeTickGapAudit] reason=%s source=%s local_subscription_calls=%d received_tick=%d gap=%d(%d%%) platform_ack_unobservable=true warmup=%s",
+                reason, source, subscribed_count, received_count, gap, gap_pct, _in_warmup,
+            )
+            if gap_pct >= 90:
+                from datetime import datetime as _dt_gap
+                _now_hm = _dt_gap.now().strftime('%H%M')
+                _is_night_session = _now_hm >= '2100' or _now_hm <= '0230'
+                _is_trading_hours = ('0900' <= _now_hm <= '1515') or _is_night_session
+                if _in_warmup:
+                    logging.info(
+                        "[SubscribeTickGapAudit] tick覆盖率低但处于启动宽限期(<%ds)，订阅建立中，降级为info: local_subscription_calls=%d received=%d gap=%d%%",
+                        _warmup_secs, subscribed_count, received_count, gap_pct,
+                    )
+                elif _is_trading_hours:
+                    logging.error(
+                        "[SubscribeTickGapAudit][CRITICAL] tick覆盖率<10%%! local_subscription_calls=%d received=%d gap=%d%% source=%s "
+                        "→ 排查方向: 1)订阅是否只是本地调用成功 2)平台ack是否可观测 3)行情读取队列是否消费 4)on_tick前是否丢弃",
+                        subscribed_count, received_count, gap_pct, source,
+                    )
+                else:
+                    logging.debug(
+                        "[SubscribeTickGapAudit] tick覆盖率低但非交易时段(当前%s)，降级为debug: local_subscription_calls=%d received=%d gap=%d%%",
+                        _now_hm, subscribed_count, received_count, gap_pct,
+                    )
+        else:
+            logging.error(
+                "[SubscribeTickGapAudit][FATAL] 无法取得本地订阅调用分母，received_tick=%d reason=%s",
+                received_count, reason,
+            )
+        return {
+            'local_subscription_calls': subscribed_count,
+            'received_tick': received_count,
+            'gap': gap,
+            'gap_pct': gap_pct,
+        }
+
     def on_tick(self, instrument_id: str, last_price: float, volume: float = 0,
                 is_replay: bool = False) -> None:
         """Tick 路由入口：先。metadata 决定期权/期货，再转发送TTypeService_
@@ -1270,29 +1626,70 @@ class SubscriptionCoreService:
             self._tick_dedup_drop_count += 1
             return
 
+        # FIX-M5: _tick_received_contracts 必须在任何过滤之前记录，否则
+        # "Tick未收到合约"测量混入"策略主动丢弃last_price<=0"的合约，
+        # 无法区分 "平台未推送" vs "策略丢弃" (H1 vs H3)
+        if instrument_id:
+            try:
+                _rc_norm = self._strip_exchange_prefix(str(instrument_id).strip())
+                if _rc_norm:
+                    self._tick_received_contracts.add(_rc_norm)
+            except Exception:
+                pass
+
         # R24-P0-IV-02修复: volume NaN/Inf/负值过滤
         import math as _math
         if not isinstance(volume, (int, float)) or _math.isnan(volume) or _math.isinf(volume) or volume < 0:
             volume = 0
 
-        # R25-P2-IV-ext修复: last_price NaN/Inf/负值过滤（防止绕过滤process_tick直接调用时源头污染）'
-        if (not isinstance(last_price, (int, float))
-                or _math.isnan(last_price) or _math.isinf(last_price) or last_price <= 0):
+        # R25-P2-IV-ext修复: last_price NaN/Inf过滤
+        # FIX-20260701: price<=0不再丢弃（仅影响TType路由），NaN/Inf仍丢弃
+        _price_nan_inf = (not isinstance(last_price, (int, float))
+                          or _math.isnan(last_price) or _math.isinf(last_price))
+        if _price_nan_inf:
+            # FIX-P2-NEW-16: NaN/Inf price 静默丢弃，添加可观测性日志
+            if not hasattr(self, '_price_nan_inf_drop'):
+                self._price_nan_inf_drop = 0
+            self._price_nan_inf_drop += 1
+            if self._price_nan_inf_drop <= 10 or self._price_nan_inf_drop % 10000 == 1:
+                logger.warning("[FIX-P2-NEW-16] NaN/Inf price 丢弃: inst=%s price=%r total=%d",
+                               instrument_id, last_price, self._price_nan_inf_drop)
             return
+        # FIX-M1-06: price<=0不再return丢弃整个tick，改为标记跳过TType路由但继续写入DB
+        # 根因: 期权深度虚值合约last_price常为0，return导致这些tick完全丢失
+        # 注释已声明"仅影响TType路由"，但代码实际执行return，注释与代码不一致
+        _skip_ttype_route = False
+        if last_price is not None and last_price <= 0:
+            _skip_ttype_route = True
+            if not hasattr(self, '_price_zero_route_skip'):
+                self._price_zero_route_skip = 0
+            self._price_zero_route_skip += 1
+            if self._price_zero_route_skip <= 10 or self._price_zero_route_skip % 10000 == 1:
+                logger.debug("[FIX-M1-06] SM.on_tick price<=0 skip(TType only): inst=%s price=%s total=%d",
+                             instrument_id, last_price, self._price_zero_route_skip)
 
+        # FIX-P2-NEW-17: 空 instrument_id / None price 静默丢弃，添加可观测性日志
         if not instrument_id or last_price in (None, ''):
+            if not hasattr(self, '_empty_inst_or_price_drop'):
+                self._empty_inst_or_price_drop = 0
+            self._empty_inst_or_price_drop += 1
+            if self._empty_inst_or_price_drop <= 10 or self._empty_inst_or_price_drop % 10000 == 1:
+                logger.warning("[FIX-P2-NEW-17] 空 instrument_id 或 None price 丢弃: inst=%r price=%r total=%d",
+                               instrument_id, last_price, self._empty_inst_or_price_drop)
             return
 
         # R15-P0-PERF-01修复: 使用分片锁替代全局。tick_lock
         with self._get_shard_lock(instrument_id):
             # R15-P0-DATA-03修复: tick去重，基于(instrument_id, last_price, volume)三元组
             # 修复: 原逻辑用volume当序列号做去重，导致相同volume的tick被误判为重复而丢弃
-            # 修复: 三元组去重在盘口静止时仍会误判，增加时间维度（5秒内相同三元组才丢弃）
+            # 修复: 三元组去重在盘口静止时仍会误判，增加时间维度
+            # FIX-P0-07: 1秒窗口对高频合约过宽，盘口静止时大量合法tick被误杀(br2609丢弃10001个tick)
+            # 缩短为100ms窗口，仅过滤真正的重复推送（同一tick在100ms内到达两次）
             _now = time.monotonic()
             tick_dedup_key = (instrument_id, last_price, volume)
             last_dedup = self._last_tick_seq.get(instrument_id)
             _last_dedup_ts = self._last_tick_seq_ts.get(instrument_id, 0.0)
-            if last_dedup == tick_dedup_key and (_now - _last_dedup_ts) < 1.0:
+            if last_dedup == tick_dedup_key and (_now - _last_dedup_ts) < 0.1:
                 self._tick_dedup_drop_count += 1
                 if self._tick_dedup_drop_count % 10000 == 1:
                     logger.warning("[R15-P0-DATA-03] tick去重丢弃: instrument_id=%s total_dropped=%d",
@@ -1303,11 +1700,26 @@ class SubscriptionCoreService:
             self._last_tick_seq_ts[instrument_id] = _now
             if not self._bg_threads_started:
                 self._start_background_threads()
-            return self._on_tick_impl(instrument_id, last_price, volume)
+            return self._on_tick_impl(instrument_id, last_price, volume, skip_ttype_route=_skip_ttype_route)
 
-    def _on_tick_impl(self, instrument_id: str, last_price: float, volume: float = 0) -> None:
+    def _on_tick_impl(self, instrument_id: str, last_price: float, volume: float = 0, skip_ttype_route: bool = False) -> None:
         """on_tick内部实现（在。tick_lock内执行）"""
+        # CP-01：tick入口计数
+        self._tick_route_audit['total_ticks'] += 1
+        
+        # FIX-M5: _tick_received_contracts 已在 on_tick 入口(任何过滤之前)添加，此处不再重复
         normalized_id = self._strip_exchange_prefix(str(instrument_id).strip())
+        
+        _now_subscribe_audit = time.time()
+        if _now_subscribe_audit - self._last_subscribe_tick_audit >= 300:
+            self._last_subscribe_tick_audit = _now_subscribe_audit
+            self.audit_subscription_tick_gap(reason='periodic_tick')
+        
+        # CP-02：标准化统计
+        if normalized_id != instrument_id:
+            self._tick_route_audit['normalize_success'] += 1
+        else:
+            self._tick_route_audit['normalize_fail'] += 1
         diag_on = False
         try:
             from ali2026v3_trading.infra.health_monitor import is_monitored_contract
@@ -1332,10 +1744,69 @@ class SubscriptionCoreService:
                 from ali2026v3_trading.config.params_service import get_params_service
                 ps = get_params_service()
 
-                # _Group A收口：优先使用规范化ID查找，仅当两ID不同时才回退
-                meta = ps.get_instrument_meta_by_id(normalized_id)
-                if not meta and normalized_id != instrument_id:
-                    meta = ps.get_instrument_meta_by_id(instrument_id)
+                # FIX-20260710-SUB-META-v3: 多级fallback获取instrument metadata
+                # v2问题: ps.__dict__.get('_instrument_cache_service')在某些场景返回None
+                # v3方案: 1.直接__dict__访问 2.__getattr__委托 3.直接调用ps.get_instrument_meta_by_id
+                meta = None
+                _ics = None
+                if ps is not None:
+                    # 方式1: 直接从__dict__获取
+                    _ics = ps.__dict__.get('_instrument_cache_service')
+                    if _ics is not None:
+                        _id_map = getattr(_ics, '_instrument_id_to_internal_id', None)
+                        if isinstance(_id_map, dict) and len(_id_map) == 0:
+                            _ics._lazy_load_from_db()
+                        meta = _ics.get_instrument_meta_by_id(normalized_id)
+                        if not meta and normalized_id != instrument_id:
+                            meta = _ics.get_instrument_meta_by_id(instrument_id)
+                    else:
+                        # 方式2: 通过__getattr__委托调用
+                        try:
+                            meta = ps.get_instrument_meta_by_id(normalized_id)
+                            if not meta and normalized_id != instrument_id:
+                                meta = ps.get_instrument_meta_by_id(instrument_id)
+                        except (AttributeError, RuntimeError) as _meta_err:
+                            if not getattr(self, '_ics_none_logged', False):
+                                self._ics_none_logged = True
+                                logging.error(
+                                    "[FIX-0710-SUB-META-v3] _instrument_cache_service unavailable! "
+                                    "ps_id=%s ps_type=%s dict_keys=%s error=%s",
+                                    id(ps), type(ps).__name__,
+                                    list(ps.__dict__.keys())[:10], _meta_err
+                                )
+                
+                # CP-03：metadata查找统计
+                if meta:
+                    self._tick_route_audit['meta_found'] += 1
+                else:
+                    self._tick_route_audit['meta_not_found'] += 1
+                    self._tick_route_audit['meta_not_found_ids'].add(normalized_id)
+                    # FIX-20260710-DIAG-v3: 周期性诊断meta_found=0%根因（每5分钟一次）
+                    _diag_ts = getattr(self, '_diag_meta_miss_ts', 0.0)
+                    _now_diag = time.time()
+                    if _now_diag - _diag_ts >= 300:
+                        self._diag_meta_miss_ts = _now_diag
+                        try:
+                            _ps_id = id(ps) if ps is not None else None
+                            _ps_type = type(ps).__name__ if ps is not None else 'None'
+                            _ps_dict_keys = list(ps.__dict__.keys())[:10] if ps is not None else []
+                            _ics_id = id(_ics) if _ics else None
+                            _cache_size = 'N/A'
+                            _sample_keys = 'N/A'
+                            if _ics is not None:
+                                _id_map = getattr(_ics, '_instrument_id_to_internal_id', None)
+                                if isinstance(_id_map, dict):
+                                    _cache_size = str(len(_id_map))
+                                    _sample_keys = str(list(_id_map.keys())[:5])
+                            logging.error(
+                                "[DIAG-META-MISS] ps_id=%s ps_type=%s ps_dict_keys=%s "
+                                "_ics_id=%s cache_size=%s sample_keys=%s lookup_id=%s",
+                                _ps_id, _ps_type, _ps_dict_keys,
+                                _ics_id, _cache_size, _sample_keys, normalized_id
+                            )
+                        except Exception as _diag_e:
+                            logging.error("[DIAG-META-MISS] diagnostic failed: %s", _diag_e)
+                
                 if meta:
                     inst_type = meta.get('type', '')
                     internal_id = meta.get('internal_id')
@@ -1351,14 +1822,33 @@ class SubscriptionCoreService:
                         except Exception:
                             pass
                     if inst_type == 'option' and tts:
+                        # FIX-P0-14: price<=0的期权tick也路由到TTypeService
+                        # on_option_tick已能正确处理price<=0(P0-10保留方向/P0-05期货方向推断/P0-09方向已知时计算sync_flag)
+                        # 原skip_ttype_route逻辑导致深度虚值期权tick完全无法更新WidthStrengthCache
                         tts.on_option_tick(normalized_id, float(last_price), volume)
                         routed = True
+                        self._tick_route_audit['routed_option'] += 1  # CP-04
                     elif inst_type == 'future' and tts:
-                        # _两ID原则：传。internal_id 而非 instrument_id
-                        if internal_id is not None:
-                            tts.on_future_instrument_tick(int(internal_id), float(last_price))
+                        # FIX-P0-21: 期货price<=0的tick也路由到TTypeService
+                        # 根因: 原skip_ttype_route保护导致盘前/无成交时段期货tick无法路由
+                        #   → on_future_instrument_tick从不被调用 → _future_initialized永远为False
+                        #   → initialized_futures=0 → 所有期货被select_otm_targets跳过 → targets为空
+                        # 对称性: 期权已有FIX-P0-14(price<=0仍路由)，期货应保持一致
+                        # 安全性: on_future_instrument_tick内部已有price<=0守卫(state_mixin.py:639)
+                        #         会安全拒绝无效价格但允许未来有效价格到达时初始化
+                        if not skip_ttype_route:
+                            # _两ID原则：传。internal_id 而非 instrument_id
+                            if internal_id is not None:
+                                tts.on_future_instrument_tick(int(internal_id), float(last_price))
+                            else:
+                                logging.warning("[SubMgr] Missing internal_id for future %s", normalized_id)  # R13-P2-LOG-01修复
+                            self._tick_route_audit['routed_future'] += 1  # CP-05
                         else:
-                            logging.warning("[SubMgr] Missing internal_id for future %s", normalized_id)  # R13-P2-LOG-01修复
+                            # FIX-P0-21: price<=0时也调用，让on_future_instrument_tick内部决定是否初始化
+                            # on_future_instrument_tick会记录FutureZeroPrice警告但不崩溃
+                            if internal_id is not None:
+                                tts.on_future_instrument_tick(int(internal_id), float(last_price))
+                            self._tick_route_audit['routed_future_price_zero'] = self._tick_route_audit.get('routed_future_price_zero', 0) + 1
                         routed = True
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 err_key = str(e)
@@ -1378,6 +1868,27 @@ class SubscriptionCoreService:
             # metadata miss：配置文件未覆盖的合约tick，记录告警，不做回退路由
             # 设计约束：合约配置文件是订阅唯一来源，无增量注册/降级路由回退
             if not routed:
+                self._tick_route_audit['not_routed'] += 1
+            
+            # 每5分钟输出审计报告（无论是否routed）
+            _now_audit = time.time()
+            if _now_audit - self._tick_route_audit['last_audit_time'] >= 300:
+                self._tick_route_audit['last_audit_time'] = _now_audit
+                audit = self._tick_route_audit
+                _total = max(audit['total_ticks'], 1)
+                logging.info(
+                    "[TickRouteAudit] total=%d meta_found=%d(%d%%) meta_not_found=%d(%d%%) "
+                    "routed_option=%d routed_future=%d not_routed=%d unique_miss=%d",
+                    audit['total_ticks'],
+                    audit['meta_found'], audit['meta_found'] * 100 // _total,
+                    audit['meta_not_found'], audit['meta_not_found'] * 100 // _total,
+                    audit['routed_option'], audit['routed_future'], audit['not_routed'],
+                    len(audit['meta_not_found_ids'])
+                )
+                if audit['meta_not_found_ids']:
+                    miss_samples = list(audit['meta_not_found_ids'])[:10]
+                    logging.info("[TickRouteAudit] miss_samples=%s", miss_samples)
+                
                 should_warn = False
                 with self._lock:
                     already_warned = False
@@ -1535,59 +2046,11 @@ class SubscriptionCoreService:
             stats['tick_products'], stats['total_products'], stats['tick_product_rate'] * 100
         )
 
-        # 未收到数据的品种
-        # FIX-P1-1: 夜盘品种过滤 — 夜盘仅SHFE/DCE/CZCE/INE/GFEX有交易，其余品种Tick/K线缺失属正常
-        _night_session_exchanges = {'SHFE', 'DCE', 'CZCE', 'INE', 'GFEX'}
-        _night_session_products = set()
-        try:
-            from ali2026v3_trading.config.params_service import get_params_service
-            _ps = get_params_service()
-            if _ps:
-                for _pid in (stats.get('tick_missing_products', []) + stats.get('kline_missing_products', [])):
-                    _meta = _ps.get_instrument_meta_by_id(_pid + '2609') if _ps else None
-                    if not _meta:
-                        _meta = _ps.get_instrument_meta_by_id(_pid + '2607') if _ps else None
-                    if _meta and _meta.get('exchange') in _night_session_exchanges:
-                        _night_session_products.add(_pid)
-        except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-            pass
-        _is_night_session = False
-        try:
-            from ali2026v3_trading.infra.market_time_service import MarketTimeService
-            _mts = MarketTimeService()
-            _is_night_session = _mts.is_night_session()
-        except (ImportError, ValueError, KeyError, TypeError, AttributeError):
-            try:
-                _now_hour = datetime.now().hour
-                _is_night_session = _now_hour >= 21 or _now_hour < 3
-            except (ValueError, TypeError):
-                pass
+        # 未收到数据的品种：实盘以平台实际推送为准，不再按夜盘品种名单过滤分母。
         if stats['tick_missing_products']:
-            _filtered_tick_missing = stats['tick_missing_products']
-            if _is_night_session and _night_session_products:
-                _filtered_tick_missing = [
-                    p for p in stats['tick_missing_products']
-                    if p in _night_session_products
-                ]
-            elif _is_night_session:
-                _filtered_tick_missing = stats['tick_missing_products'][:5]
-            if _filtered_tick_missing:
-                logger.warning("[Tick未收到品种] %s%s",
-                               ', '.join(_filtered_tick_missing[:20]),
-                               f' (夜盘过滤: {len(stats["tick_missing_products"])-len(_filtered_tick_missing)}个非夜盘品种已忽略)' if _is_night_session and len(_filtered_tick_missing) < len(stats['tick_missing_products']) else '')
+            logger.warning("[Tick未收到品种] %s", ', '.join(stats['tick_missing_products'][:20]))
         if stats['kline_missing_products']:
-            _filtered_kline_missing = stats['kline_missing_products']
-            if _is_night_session and _night_session_products:
-                _filtered_kline_missing = [
-                    p for p in stats['kline_missing_products']
-                    if p in _night_session_products
-                ]
-            elif _is_night_session:
-                _filtered_kline_missing = stats['kline_missing_products'][:5]
-            if _filtered_kline_missing:
-                logger.warning("[K线未收到品种] %s%s",
-                               ', '.join(_filtered_kline_missing[:20]),
-                               f' (夜盘过滤: {len(stats["kline_missing_products"])-len(_filtered_kline_missing)}个非夜盘品种已忽略)' if _is_night_session and len(_filtered_kline_missing) < len(stats['kline_missing_products']) else '')
+            logger.warning("[K线未收到品种] %s", ', '.join(stats['kline_missing_products'][:20]))
 
         # 未收到数据的合约样例
         if stats['tick_missing_count'] > 0 and stats['tick_missing']:

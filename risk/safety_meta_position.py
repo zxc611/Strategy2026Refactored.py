@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ali2026v3_trading.infra.shared_utils import safe_int, safe_float, CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
-from ali2026v3_trading.risk.safety_meta_audit import safe_get_float, api_version, _get_tz_aware_now, CircuitBreakerStateStore
+from ali2026v3_trading.risk.risk_support import safe_get_float, api_version, _get_tz_aware_now, CircuitBreakerStateStore
 
 from ali2026v3_trading.position.margin_manager import MarginManager
 
@@ -79,6 +79,9 @@ class HardTimeStopAndComplianceService:
         'box': {'stage1_minutes': 120.0, 'stage2_minutes': 360.0, 'stage1_profit_threshold': 0.001},
         'arbitrage': {'stage1_minutes': 60.0, 'stage2_minutes': 180.0, 'stage1_profit_threshold': 0.005},
         'market_making': {'stage1_minutes': 30.0, 'stage2_minutes': 120.0, 'stage1_profit_threshold': 0.01},
+        'high_freq': {'stage1_minutes': 20.0, 'stage2_minutes': 45.0, 'stage1_profit_threshold': 0.003},
+        'resonance': {'stage1_minutes': 3.0, 'stage2_minutes': 5.0, 'stage1_profit_threshold': 0.005},
+        'divergence': {'stage1_minutes': 45.0, 'stage2_minutes': 90.0, 'stage1_profit_threshold': 0.003},
     }
 
     def check_position_hard_time_stop(self, position_id: str, open_time,
@@ -341,7 +344,7 @@ class HardTimeStopAndComplianceService:
 
         try:
 
-            from ali2026v3_trading.infra.shared_trading_constants import detect_rollover_gaps, compute_rollover_cost
+            from ali2026v3_trading.infra.commission_utils import detect_rollover_gaps, compute_rollover_cost
 
             rollover_points = detect_rollover_gaps(bar_data)
 
@@ -536,6 +539,10 @@ class HardTimeStopAndComplianceService:
 
 
     def _get_hard_time_stop_minutes(self) -> float:
+        """DEPRECATED: 旧的单值硬止损方法，按固定优先级hft→spring→resonance→box。
+        新代码应使用 _get_stage1_minutes(strategy_group) / _get_stage2_minutes(strategy_group)，
+        它们通过 _STRATEGY_HARD_STOP_OVERRIDES 实现策略分层。
+        本方法保留仅为 risk_circuit_breaker 向后兼容。"""
 
         hft_ms = safe_get_float(self.params, "hft_hard_time_stop_ms", 0)
 

@@ -7,13 +7,13 @@ import os
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
 from ali2026v3_trading.infra.resilience import deterministic_round
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.infra.serialization_utils import safe_jsonl_append_line
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 from ali2026v3_trading.infra.event_bus import RateLimiter
 
 logger = get_logger(__name__)  # R9-5
@@ -31,6 +31,14 @@ from ali2026v3_trading.infra.shared_utils import normalize_instrument_id, CHINA_
 # ============================================================
 # Section 1: 探针诊断 (原 diagnosis_probe.py)
 # ============================================================
+
+def _current_trade_date_for_coverage() -> date:
+    try:
+        from ali2026v3_trading.data.quant_infra import ExchangeTime
+        return datetime.strptime(ExchangeTime().get_trade_date(), '%Y-%m-%d').date()
+    except Exception:
+        return datetime.now(CHINA_TZ).date()
+
 
 
 
@@ -1233,29 +1241,42 @@ def _find_config_dir() -> Optional[str]:
     return None
 
 
+def _resolve_diagnosis_duckdb_file() -> str:
+    try:
+        from ali2026v3_trading.data.ds_realtime_cache import _resolve_duckdb_file
+        resolved = _resolve_duckdb_file()
+        if resolved and str(resolved).strip():
+            return os.path.normpath(str(resolved).strip())
+    except Exception as exc:
+        logging.warning("[%s] 运行时DuckDB路径解析失败: %s", MONITORED_DIAG_LABEL if 'MONITORED_DIAG_LABEL' in globals() else '合约诊断', exc)
+    return ''
+
+
 def _rank_option_candidates_by_duckdb_activity(option_candidates: List[Tuple[str, Dict]]) -> List[Tuple[str, Dict]]:
     if not option_candidates:
         return option_candidates
     try:
-        import duckdb
-        db_path = os.path.normpath(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'strategy.duckdb')
-        )
+        # FIX-20260702: 诊断函数不再裸连 DuckDB，统一走 DataService.query
+        from ali2026v3_trading.data.data_service import get_data_service
+        ds = get_data_service()
+        db_path = _resolve_diagnosis_duckdb_file()
         if not os.path.exists(db_path):
             return option_candidates
         candidate_set = {inst_id for inst_id, _ in option_candidates}
         activity = {}
-        with duckdb.connect(db_path) as con:
-            rows = con.execute("""
-                SELECT instrument_id, COUNT(*) AS cnt, MAX(timestamp) AS max_ts
-                FROM ticks_raw
-                WHERE regexp_matches(instrument_id, '^[A-Za-z]+[0-9]{3,4}[-]?[CP][-]?[0-9]')
-                GROUP BY instrument_id
-                ORDER BY max_ts DESC NULLS LAST, cnt DESC
-                LIMIT 5000
-            """).fetchall()
-        for rank, (inst_id, cnt, max_ts) in enumerate(rows):
+        arrow = ds.query("""
+            SELECT instrument_id, COUNT(*) AS cnt, MAX(timestamp) AS max_ts
+            FROM ticks_raw
+            WHERE regexp_matches(instrument_id, '^[A-Za-z]+[0-9]{3,4}[-]?[CP][-]?[0-9]')
+            GROUP BY instrument_id
+            ORDER BY max_ts DESC NULLS LAST, cnt DESC
+            LIMIT 5000
+        """, arrow=True)
+        for rank, row in enumerate(arrow.to_pylist()):
+            inst_id = row.get('instrument_id')
             if inst_id in candidate_set:
+                max_ts = row.get('max_ts')
+                cnt = row.get('cnt')
                 try:
                     max_ts_value = max_ts.timestamp() if max_ts is not None and hasattr(max_ts, 'timestamp') else 0.0
                 except (ValueError, TypeError, AttributeError, OSError):
@@ -1273,20 +1294,19 @@ def _rank_option_candidates_by_duckdb_activity(option_candidates: List[Tuple[str
 
 def _load_tick_activity_by_instrument() -> Dict[str, int]:
     try:
-        import duckdb
-        db_path = os.path.normpath(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'strategy.duckdb')
-        )
+        # FIX-20260702: 诊断函数不再裸连 DuckDB，统一走 DataService.query
+        from ali2026v3_trading.data.data_service import get_data_service
+        ds = get_data_service()
+        db_path = _resolve_diagnosis_duckdb_file()
         if not os.path.exists(db_path):
             return {}
-        with duckdb.connect(db_path) as con:
-            rows = con.execute("""
-                SELECT instrument_id, COUNT(*) AS cnt
-                FROM ticks_raw
-                WHERE COALESCE(sync_status, '') <> 'simulated_coverage'
-                GROUP BY instrument_id
-            """).fetchall()
-        return {inst_id: int(cnt or 0) for inst_id, cnt in rows}
+        arrow = ds.query("""
+            SELECT instrument_id, COUNT(*) AS cnt
+            FROM ticks_raw
+            WHERE COALESCE(sync_status, '') <> 'simulated_coverage'
+            GROUP BY instrument_id
+        """, arrow=True)
+        return {row['instrument_id']: int(row['cnt'] or 0) for row in arrow.to_pylist()}
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError, OSError) as e:
         logging.debug("[%s] tick活跃度读取失败: %s", MONITORED_DIAG_LABEL if 'MONITORED_DIAG_LABEL' in globals() else '合约诊断', e)
         return {}
@@ -1294,32 +1314,54 @@ def _load_tick_activity_by_instrument() -> Dict[str, int]:
 
 def _load_full_chain_entry_counts() -> Dict[str, int]:
     try:
-        import duckdb
-        db_path = os.path.normpath(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'strategy.duckdb')
-        )
+        # FIX-20260702: 诊断函数不再裸连 DuckDB，统一走 DataService.query
+        from ali2026v3_trading.data.data_service import get_data_service
+        ds = get_data_service()
+        db_path = _resolve_diagnosis_duckdb_file()
         if not os.path.exists(db_path):
             return {}
-        with duckdb.connect(db_path) as con:
-            row = con.execute("""
-                SELECT
-                    (SELECT COUNT(*) FROM instruments_registry),
-                    (SELECT COUNT(*) FROM futures_instruments),
-                    (SELECT COUNT(*) FROM option_instruments),
-                    (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date = CURRENT_DATE),
-                    (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date = CURRENT_DATE AND COALESCE(sync_status, '') <> 'simulated_coverage'),
-                    (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date = CURRENT_DATE AND sync_status = 'simulated_coverage'),
-                    (SELECT COUNT(DISTINCT internal_id) FROM klines_raw WHERE trade_date = CURRENT_DATE),
-                    (SELECT COUNT(*) FROM chain_coverage_audit)
-            """).fetchone()
-            latest = con.execute("""
-                SELECT config_count, subscription_confirmed_count, tick_return_count,
-                       tick_buffer_count, ticks_raw_count, klines_raw_count,
-                       simulated_coverage_tick_count, simulated_coverage_kline_count
-                FROM chain_coverage_audit
-                ORDER BY audit_time DESC
-                LIMIT 1
-            """).fetchone()
+        target_date = _current_trade_date_for_coverage()
+        # FIX-M1-01: 兼容旧数据(date=UTC日历日期)和新数据(date=trade_date)
+        # 夜盘21:00 CST: trade_date=次日, UTC日历日期=当日
+        # 旧数据date=当日(UTC), 新数据date=次日(trade_date), 需同时查两个
+        _prev_date = target_date - __import__('datetime').timedelta(days=1)
+        audit_columns = {
+            str(item['name']) for item in ds.query("PRAGMA table_info(chain_coverage_audit)", arrow=True).to_pylist()
+        }
+        audit_date_filter = "trade_date = ?" if 'trade_date' in audit_columns else "CAST(audit_time AS DATE) = ?"
+        try:
+            # FIX-20260707: 反转查询优先级，优先查futures_instruments+option_instruments
+            _reg_count = ds.query("SELECT (SELECT COUNT(*) FROM futures_instruments) + (SELECT COUNT(*) FROM option_instruments) AS cnt", arrow=False).iloc[0, 0]
+        except Exception:
+            try:
+                _reg_count = ds.query("SELECT COUNT(*) AS cnt FROM instruments_registry", arrow=False).iloc[0, 0]
+            except Exception:
+                _reg_count = 0
+        row_df = ds.query(f"""
+            SELECT
+                {_reg_count if isinstance(_reg_count, int) else int(_reg_count or 0)},
+                (SELECT COUNT(*) FROM futures_instruments),
+                (SELECT COUNT(*) FROM option_instruments),
+                (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date IN (?, ?)),
+                (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date IN (?, ?) AND COALESCE(sync_status, '') <> 'simulated_coverage'),
+                (SELECT COUNT(DISTINCT instrument_id) FROM ticks_raw WHERE date IN (?, ?) AND sync_status = 'simulated_coverage'),
+                (SELECT COUNT(DISTINCT internal_id) FROM klines_raw WHERE trade_date = ?),
+                (SELECT COUNT(*) FROM chain_coverage_audit WHERE {audit_date_filter})
+        """, params=[target_date, _prev_date, target_date, _prev_date, target_date, _prev_date, target_date, target_date], arrow=False)
+        if len(row_df) == 0:
+            logging.debug("[%s] 全链路入口统计查询返回空结果", MONITORED_DIAG_LABEL if 'MONITORED_DIAG_LABEL' in globals() else '合约诊断')
+            return {}
+        latest_df = ds.query(f"""
+            SELECT config_count, subscription_confirmed_count, tick_return_count,
+                   tick_buffer_count, ticks_raw_count, klines_raw_count,
+                   simulated_coverage_tick_count, simulated_coverage_kline_count
+            FROM chain_coverage_audit
+            WHERE {audit_date_filter}
+            ORDER BY audit_time DESC
+            LIMIT 1
+        """, params=[target_date], arrow=False)
+        row = row_df.iloc[0].tolist()
+        latest = latest_df.iloc[0].tolist() if len(latest_df) > 0 else None
         result = {
             'registry_count': int(row[0] or 0),
             'future_count': int(row[1] or 0),
@@ -1342,7 +1384,7 @@ def _load_full_chain_entry_counts() -> Dict[str, int]:
                 'audit_simulated_kline_count': int(latest[7] or 0),
             })
         return result
-    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError, OSError) as e:
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError, OSError, IndexError) as e:
         logging.debug("[%s] 全链路入口统计读取失败: %s", MONITORED_DIAG_LABEL if 'MONITORED_DIAG_LABEL' in globals() else '合约诊断', e)
         return {}
 
@@ -1794,6 +1836,7 @@ class DiagnosisProbeManager:
     """12环节诊断探针统一管理器"""
 
     _shard_enqueue_lock = threading.Lock()
+    _shard_enqueue_counts: Dict[int, int] = {}
 
     def __init__(self):
         self._shard_enqueue_counts: Dict[int, int] = {}
@@ -1828,11 +1871,12 @@ class DiagnosisProbeManager:
         diagnose_tick_entry(instrument_id, price, volume, open_interest, contract_type)
         DiagnosisProbeManager.record_contract_tick(instrument_id, price, volume, open_interest, contract_type)
 
-    def on_storage_enqueue(self, instrument_id: str, success: bool, reason: str = None, shard_idx: int = -1):
+    @staticmethod
+    def on_storage_enqueue(instrument_id: str, success: bool, reason: str = None, shard_idx: int = -1):
         diagnose_storage_enqueue(instrument_id, success, reason)
         if shard_idx >= 0:
             with DiagnosisProbeManager._shard_enqueue_lock:
-                self._shard_enqueue_counts[shard_idx] = self._shard_enqueue_counts.get(shard_idx, 0) + 1
+                DiagnosisProbeManager._shard_enqueue_counts[shard_idx] = DiagnosisProbeManager._shard_enqueue_counts.get(shard_idx, 0) + 1
 
     @staticmethod
     def on_async_write(instrument_id: str, func_name: str, data_count: int):
@@ -2217,20 +2261,38 @@ def _get_runtime_state():
             from ali2026v3_trading.config.config_service import get_cached_params
             cached_params = get_cached_params() or {}
             runtime_strategy = cached_params.get('strategy')
+            logging.info(f"[{MONITORED_DIAG_LABEL}] get_cached_params returned {len(cached_params)} keys, strategy={'found' if runtime_strategy else 'None'}")
         if runtime_strategy is None:
             try:
                 from ali2026v3_trading.config.config_params import _param_table_cache
                 if _param_table_cache is not None:
                     runtime_strategy = _param_table_cache.get('strategy')
+                    logging.info(f"[{MONITORED_DIAG_LABEL}] _param_table_cache has {len(_param_table_cache)} keys, strategy={'found' if runtime_strategy else 'None'}")
             except (ValueError, KeyError, TypeError, AttributeError, ImportError):
                 pass
         runtime_core = getattr(runtime_strategy, 'strategy_core', None) if runtime_strategy is not None else None
+        logging.info(f"[{MONITORED_DIAG_LABEL}] _get_runtime_state: strategy={type(runtime_strategy).__name__ if runtime_strategy else 'None'}, core={type(runtime_core).__name__ if runtime_core else 'None'}")
         _raw_subscribed = None
         for _src in [runtime_strategy, getattr(runtime_strategy, 'params', None), runtime_core]:
             if _src is not None:
                 _raw_subscribed = getattr(_src, '_subscribed_instruments', None)
                 if _raw_subscribed:
                     break
+        # 修复：检查_lifecycle_platform（实际订阅列表维护在此处）
+        if not _raw_subscribed and runtime_core is not None:
+            _lp = getattr(runtime_core, '_lifecycle_platform', None)
+            if _lp is None:
+                _lifecycle_svc = getattr(runtime_core, '_lifecycle_svc', None)
+                if _lifecycle_svc is not None:
+                    _lp = getattr(_lifecycle_svc, '_lifecycle_platform', None)
+                    logging.info(f"[{MONITORED_DIAG_LABEL}] Found _lifecycle_platform via _lifecycle_svc")
+            if _lp is not None:
+                _raw_subscribed = getattr(_lp, '_subscribed_instruments', None)
+                logging.info(f"[{MONITORED_DIAG_LABEL}] _lifecycle_platform._subscribed_instruments={len(_raw_subscribed) if _raw_subscribed else 0}")
+            else:
+                logging.info(f"[{MONITORED_DIAG_LABEL}] _lifecycle_platform is None, runtime_core has attr={hasattr(runtime_core, '_lifecycle_platform')}, has_svc={hasattr(runtime_core, '_lifecycle_svc')}")
+        elif not _raw_subscribed and runtime_core is None:
+            logging.info(f"[{MONITORED_DIAG_LABEL}] runtime_core is None, cannot check _lifecycle_platform")
         runtime_subscribed = set(_raw_subscribed) if _raw_subscribed else set()
         _historical_src = runtime_strategy if runtime_strategy is not None else runtime_core
         historical_in_progress = bool(getattr(_historical_src, '_historical_load_in_progress', False))
@@ -2283,6 +2345,26 @@ def run_14_contracts_periodic_diagnostic(storage=None, query_service=None) -> No
     logging.info("="*100)
 
     runtime_strategy, runtime_core, runtime_subscribed, historical_in_progress, startup_ready = _get_runtime_state()
+    # FIX-M1: 周期性刷新 chain_coverage_audit 表，避免 tick_return_count 永远冻结在启动快照
+    try:
+        _ds_for_refresh = storage if storage is not None else None
+        if _ds_for_refresh is None and runtime_core is not None:
+            _ds_for_refresh = getattr(runtime_core, 'storage', None) or getattr(runtime_core, '_storage', None)
+        if _ds_for_refresh is None:
+            from ali2026v3_trading.data.data_service import get_data_service
+            _ds_for_refresh = get_data_service()
+        if _ds_for_refresh is not None and hasattr(_ds_for_refresh, 'refresh_chain_coverage_audit'):
+            _refresh_result = _ds_for_refresh.refresh_chain_coverage_audit()
+            if _refresh_result:
+                logging.info(
+                    "[FIX-M1][%s] chain_coverage_audit 已刷新: tick_return=%d(实时) klines_real=%d ticks_raw=%d",
+                    MONITORED_DIAG_LABEL,
+                    _refresh_result.get('tick_return_count', -1),
+                    _refresh_result.get('real_kline_count', -1),
+                    _refresh_result.get('ticks_raw_count', -1),
+                )
+    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _m1_err:
+        logging.debug("[FIX-M1] refresh_chain_coverage_audit 调用失败(非致命): %s", _m1_err)
     _log_full_chain_entry_counts(len(runtime_subscribed))
 
     if historical_in_progress:
@@ -2692,7 +2774,7 @@ class ResourceOwnershipScanner:
                 shared_threads.append(name)
             elif any(name.startswith(p) for p in ALLOWED_PREFIXES):
                 system_threads.append(name)
-            elif 'strategy' in name.lower() or strategy_id in name:
+            elif 'strategy' in name.lower() or str(strategy_id) in name:
                 strategy_threads.append(name)
             elif name and not name.startswith('Main'):
                 system_threads.append(name)
@@ -2729,11 +2811,18 @@ class ResourceOwnershipScanner:
                 remaining_jobs = scheduler_mgr.get_jobs_by_owner(strategy_id)
                 if remaining_jobs:
                     job_ids = [j['job_id'] for j in remaining_jobs]
-                    logging.warning(
-                        f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
-                        f"[run_id={run_id}][source_type=strategy-job] "
-                        f"⚠️ LEAKED scheduler jobs: {job_ids}"
-                    )
+                    if phase == 'stop':
+                        logging.warning(
+                            f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
+                            f"[run_id={run_id}][source_type=strategy-job] "
+                            f"LEAKED scheduler jobs: {job_ids}"
+                        )
+                    else:
+                        logging.debug(
+                            f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
+                            f"[run_id={run_id}][source_type=strategy-job] "
+                            f"scheduler jobs active (normal during runtime): {job_ids}"
+                        )
                 else:
                     if phase == 'stop':
                         logging.info(
@@ -3544,12 +3633,42 @@ def required_import(func):
 
 
 # Tick探针管理
-_tick_probe_stats = {
-    'entry': {'count': 0, 'last_log': 0},
-    'dispatched': {'count': 0, 'last_log': 0},
-    'saved': {'count': 0, 'last_log': 0},
-    'error': {'count': 0, 'last_log': 0, 'errors': []}
-}
+_TICK_PIPELINE_STAGES = [
+    'entry',
+    'validate_pass',
+    'validate_drop',
+    'price_jump_warn',
+    'kline_age_warn',
+    'submgr_route',
+    'submgr_miss',
+    'hist_degraded',
+    'dispatch_normal',
+    'stor_ref_ok',
+    'stor_ref_none',
+    'shard_buffer',
+    'shard_flush',
+    'arrow_build_ok',
+    'arrow_build_fail',
+    'db_insert_ok',
+    'db_insert_fail',
+    'db_insert_zero',
+    'conflict_skip',
+    'saved',
+    'error',
+]
+
+_tick_probe_stats = {s: {'count': 0, 'last_log': 0} for s in _TICK_PIPELINE_STAGES}
+_tick_probe_stats['error']['errors'] = []
+_tick_probe_stats['validate_drop']['samples'] = []
+_tick_probe_stats['price_jump_warn']['samples'] = []
+_tick_probe_stats['kline_age_warn']['samples'] = []
+_tick_probe_stats['stor_ref_none']['samples'] = []
+_tick_probe_stats['arrow_build_ok']['samples'] = []
+_tick_probe_stats['arrow_build_fail']['samples'] = []
+_tick_probe_stats['db_insert_ok']['samples'] = []
+_tick_probe_stats['db_insert_fail']['samples'] = []
+_tick_probe_stats['db_insert_zero']['samples'] = []
+_tick_probe_stats['conflict_skip']['samples'] = []
 
 _tick_probe_interval = 30.0
 _tick_probe_lock = threading.Lock()
@@ -3568,7 +3687,11 @@ def record_tick_probe(stage: str, instrument_id: str, price: float, error_msg: O
             stats['errors'].append({'time': now, 'instrument_id': instrument_id, 'price': price, 'error': error_msg})
             if len(stats['errors']) > 100:
                 stats['errors'] = stats['errors'][-50:]
-            logging.error(f"[PROBE_TICK_ERROR] {instrument_id} @ {price}: {error_msg}")
+            logging.error("[PROBE_TICK_ERROR] %s @ %s: %s", instrument_id, price, error_msg)
+
+        if 'samples' in stats and instrument_id:
+            if len(stats['samples']) < 10:
+                stats['samples'].append({'inst': instrument_id, 'price': price, 'msg': error_msg})
 
         if now - stats.get('last_log', 0) >= _tick_probe_interval:
             count = stats['count']
@@ -3577,13 +3700,72 @@ def record_tick_probe(stage: str, instrument_id: str, price: float, error_msg: O
                     errors = stats['errors']
                     if errors:
                         for err in errors[-5:]:
-                            logging.error(f"[PROBE_TICK_SUMMARY] ERROR | {err['instrument_id']} @ {err['price']} | {err['error']}")
-                        logging.error(f"[PROBE_TICK_SUMMARY] Total errors in last 30s: {len(errors)} (showing last 5)")
+                            logging.error("[PROBE_TICK_SUMMARY] ERROR | %s @ %s | %s", err['instrument_id'], err['price'], err['error'])
+                        logging.error("[PROBE_TICK_SUMMARY] Total errors in last 30s: %d (showing last 5)", len(errors))
                 else:
-                    names = {'entry': 'Entry', 'dispatched': 'Dispatched', 'saved': 'Saved'}
-                    logging.info(f"[PROBE_TICK_SUMMARY] {names.get(stage, stage)} | Count: {count} ticks in last 30s")
+                    logging.info("[PROBE_TICK_SUMMARY] %s | Count: %d ticks in last 30s", stage, count)
+                    if 'samples' in stats and stats['samples']:
+                        logging.info("[PROBE_TICK_SUMMARY] %s | Samples: %s", stage, stats['samples'][:5])
             stats['count'] = 0
             stats['last_log'] = now
+            if 'samples' in stats:
+                stats['samples'] = []
+            if 'errors' in stats:
+                stats['errors'] = []
+
+# region debug-point optcov-entry
+# [OPTCOV] 期权coverage诊断探针 — 在 strategy_2026.onTick 绝对入口调用（任何过滤前）
+# 目的: 区分 H1(策略 last_price<=0 过滤丢期权) vs H3(平台只推~340个活跃期权)
+# 判据: entry_unique_options>>340 且 price_le0>0 → H1(策略bug,报告错误归因)
+#       entry_unique_options≈340 且 price_le0=0 → H3(平台行为,报告结论正确)
+_option_entry_probe_state = {
+    'unique_options': set(),
+    'price_le0': set(),
+    'price_gt0': set(),
+    'total': 0,
+    'last_log': 0.0,
+}
+_option_entry_probe_lock = threading.Lock()
+_OPTION_ID_RE = re.compile(r'^([A-Za-z]+\d+)([CP])(\d+)$')
+
+
+def record_option_entry_probe(instrument_id: str, last_price: Any) -> None:
+    """[OPTCOV_PROBE] onTick 绝对入口期权 coverage 诊断（任何过滤前调用）。
+
+    仅统计期权合约：唯一合约数 + last_price 分布。非期权合约直接返回。
+    每60秒输出一次汇总日志 `[OPTCOV_PROBE]`。
+    """
+    if not instrument_id:
+        return
+    _id = str(instrument_id)
+    _u = _id.upper()
+    _is_opt = (('-C' in _u) or ('-P' in _u) or ('_C' in _u) or ('_P' in _u)
+               or ('CALL' in _u) or ('PUT' in _u)
+               or bool(_OPTION_ID_RE.match(_id)))
+    if not _is_opt:
+        return
+    try:
+        _p = float(last_price)
+    except (TypeError, ValueError):
+        _p = 0.0
+    with _option_entry_probe_lock:
+        _st = _option_entry_probe_state
+        _st['total'] += 1
+        _st['unique_options'].add(_id)
+        if _p <= 0:
+            _st['price_le0'].add(_id)
+        else:
+            _st['price_gt0'].add(_id)
+        _now = time.time()
+        if _now - _st['last_log'] >= 60.0:
+            _st['last_log'] = _now
+            logging.info(
+                "[OPTCOV_PROBE] entry_unique_options=%d price_le0=%d price_gt0=%d total_option_ticks=%d "
+                "|| 判据: unique>>340且le0>0→H1策略bug; unique≈340且le0=0→H3平台行为",
+                len(_st['unique_options']), len(_st['price_le0']),
+                len(_st['price_gt0']), _st['total'],
+            )
+# endregion
 
 # ============================================================================
 # Unified __all__
@@ -3614,6 +3796,7 @@ __all__ = [
     'get_contract_info',
     'validate_contract_format',
     'record_tick_probe',
+    'record_option_entry_probe',
     'ControlActionLogger',
     'ResourceOwnershipScanner',
     'MONITORED_CONTRACTS',

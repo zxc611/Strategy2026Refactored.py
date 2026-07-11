@@ -185,6 +185,42 @@ class StrategyScheduler:
             logging.error(f"[StrategyScheduler] pause_scheduler error: {e}")
             return False
         return True
+
+    def resume_scheduler(self) -> bool:
+        """恢复调度器（从暂停状态恢复，允许任务继续执行）
+        
+        FIX-20260711-PAUSE-ACTION: 对称于pause_scheduler()，恢复时解冻调度器
+        
+        Returns:
+            bool: 是否成功恢复
+        """
+        if not self._scheduler:
+            return True
+        
+        try:
+            if hasattr(self._scheduler, 'resume'):
+                self._scheduler.resume()
+                logging.info("[StrategyScheduler] Scheduler resumed (jobs will run again)")
+                return True
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler] resume_scheduler error: {e}")
+            return False
+        return True
+
+    def ensure_trading_jobs(self) -> None:
+        """确保交易定时任务已注册（恢复时调用）
+        
+        FIX-20260711-PAUSE-ACTION: 暂停时scheduler被冻结可能导致job丢失，
+        恢复时检查并重新注册关键交易定时任务。
+        注意: 本类无provider引用，仅检查job数量；实际重新注册由LifecycleCallbacks.resume()完成。
+        """
+        try:
+            job_count = len(self._scheduler.get_jobs()) if self._scheduler else 0
+            logging.info("[StrategyScheduler] ensure_trading_jobs: 当前%d个定时任务", job_count)
+            return job_count
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[StrategyScheduler] ensure_trading_jobs error: %s", e)
+            return 0
     
     def get_running_job_count(self) -> int:
         if not self._scheduler:
@@ -446,18 +482,31 @@ class StrategyScheduler:
         run_id: Optional[str],
         execute_option_trading_cycle: Callable,
         check_position_risk: Callable,
-        order_service: Any
+        order_service: Any,
+        trading_interval_sec: Optional[int] = None,
     ) -> None:
         """
         注册交易定时任务（封装 P0-3 owner metadata）
-        
+
         Args:
             strategy_id: 策略ID
             run_id: 运行ID
             execute_option_trading_cycle: 期权交易周期函数
             check_position_risk: 持仓风控函数
             order_service: 订单服务对象
+            trading_interval_sec: 交易周期间隔（秒），None=从SORTER_CONFIG按K线倍数换算
         """
+        # v2.8: 从SORTER_CONFIG读取K线倍数参数，换算为秒数
+        _interval = trading_interval_sec
+        if _interval is None:
+            try:
+                from ali2026v3_trading.config.tvf_param_loader import SORTER_CONFIG, kline_bars_to_seconds
+                _bars = SORTER_CONFIG.get('sort_trigger_bars', 1)
+                _kline_style = SORTER_CONFIG.get('kline_style', 'M1')
+                _interval = kline_bars_to_seconds(_bars, _kline_style)
+            except ImportError:
+                _interval = self.DEFAULT_TRADING_INTERVAL_SEC
+        _interval = max(5, min(86400, int(_interval)))  # 安全边界: 5s~86400s(1天)
         try:
             # P0-3修复：job_id 加入 strategy_id 前缀，避免多实例场景下互相覆盖
             # 注册 3 个核心交易 job
@@ -465,7 +514,12 @@ class StrategyScheduler:
             # P1-05: 包装交易循环job，补充EventBus事件发布
             _orig_trading_cycle = execute_option_trading_cycle
             def _trading_loop_job_with_event():
+                # FIX-P0-23: 原代码绕过_can_run_jobs()状态检查，与其他job不一致
+                # 对比_virtual_pos_eod_job(line 528)等job均有此检查
+                # 影响: 策略暂停/停止时交易周期仍继续执行
                 try:
+                    if not self._can_run_jobs():
+                        return
                     _orig_trading_cycle()
                 finally:
                     self._publish_scheduler_event('trading_cycle', {
@@ -479,13 +533,16 @@ class StrategyScheduler:
                 strategy_id=strategy_id,
                 run_id=run_id,
                 owner_scope='strategy',
-                seconds=self.DEFAULT_TRADING_INTERVAL_SEC
+                seconds=_interval
             )
             
             # P1-05: 包装风控检查job，补充EventBus事件发布
             _orig_risk_check = check_position_risk
             def _risk_check_job_with_event():
+                # FIX-P0-23: 与trading_cycle job保持一致，添加_can_run_jobs()检查
                 try:
+                    if not self._can_run_jobs():
+                        return
                     _orig_risk_check()
                 finally:
                     self._publish_scheduler_event('risk_check', {
@@ -506,7 +563,10 @@ class StrategyScheduler:
             if order_service and hasattr(order_service, 'check_pending_orders'):
                 _orig_pending_check = order_service.check_pending_orders
                 def _pending_order_job_with_event():
+                    # FIX-P0-23: 与trading_cycle job保持一致，添加_can_run_jobs()检查
                     try:
+                        if not self._can_run_jobs():
+                            return
                         _orig_pending_check()
                     finally:
                         self._publish_scheduler_event('pending_order_check', {
@@ -545,7 +605,7 @@ class StrategyScheduler:
             
             logging.info(
                 f"[StrategyScheduler] ✅ Registered 3 trading jobs (strategy={strategy_id}, run_id={run_id}): "
-                f"option_trading_cycle(30s)/position_risk(5s)/pending_orders(3s)"
+                f"option_trading_cycle({_interval}s)/position_risk(5s)/pending_orders(3s)"
             )
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[StrategyScheduler] Failed to register trading jobs: {e}")

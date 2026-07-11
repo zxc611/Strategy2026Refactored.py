@@ -1,14 +1,28 @@
+"""
+infra/commission_utils.py — 交易费用+共享交易常量 合并模块
+
+合并自:
+  - commission_utils.py (交易费用计算)
+  - shared_trading_constants.py (共享交易常量 R27-CP-01-FIX)
+"""
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+import threading
+import time
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
-from ali2026v3_trading.infra.shared_utils import is_same_day  # 五唯一性修复：统一同日比较逻辑
+from ali2026v3_trading.infra._helpers import get_logger
+from ali2026v3_trading.infra.shared_utils import is_same_day
 
-logger = get_logger(__name__)  # R9-5
+logger = get_logger(__name__)
+
+
+# ============================================================
+# Section 1: 交易费用计算 (原 commission_utils.py)
+# ============================================================
 
 FEE_STRUCTURE = {
     "50ETF_OPTION": {"open": 3.0, "close_today": 0.0, "close_overnight": 3.0, "unit": "per_lot"},
@@ -106,6 +120,29 @@ def compute_commission(symbol: str, lots: int, open_time=None, close_time=None,
                        trade_value: float = 0.0, is_open: bool = True,
                        exchange_id: str = None, order_type: str = "taker",
                        exchange: str = None) -> float:
+    _t0 = time.monotonic()
+    try:
+        result = _compute_commission_impl(symbol, lots, open_time, close_time,
+                                          trade_value, is_open, exchange_id, order_type, exchange)
+        return result
+    finally:
+        _elapsed_us = (time.monotonic() - _t0) * 1_000_000
+        with _commission_perf_lock:
+            _commission_perf['count'] += 1
+            _commission_perf['total_us'] += _elapsed_us
+            _commission_perf['max_us'] = max(_commission_perf['max_us'], _elapsed_us)
+            if _commission_perf['count'] % 1000 == 0:
+                avg_us = _commission_perf['total_us'] / _commission_perf['count']
+                logger.info("[Observability] compute_commission每千次统计: count=%d avg=%.1fus max=%.1fus",
+                            _commission_perf['count'], avg_us, _commission_perf['max_us'])
+
+
+_commission_perf: Dict[str, float] = {'count': 0, 'total_us': 0.0, 'max_us': 0.0}
+_commission_perf_lock = threading.Lock()
+
+
+def _compute_commission_impl(symbol, lots, open_time, close_time,
+                              trade_value, is_open, exchange_id, order_type, exchange):
     contract_type = _infer_contract_type(symbol)
     if exchange is not None:
         exchange_fees = FEE_STRUCTURE_V2.get(exchange, FEE_STRUCTURE_V2.get("DEFAULT", {}))
@@ -183,9 +220,130 @@ def get_commission_per_lot(symbol: str, exchange: str = None) -> float:
     return 15.0
 
 
+# ============================================================
+# Section 2: 共享交易常量 (原 shared_trading_constants.py)
+# ============================================================
+
+CONTRACT_MULTIPLIER_MAP = {
+    'IF': 300.0,
+    'IC': 200.0,
+    'IH': 300.0,
+    'TS': 200.0,
+    'TF': 10000.0,
+    'T': 10000.0,
+    'AU': 1000.0,
+    'AG': 15.0,
+    'CU': 5.0,
+    'RB': 10.0,
+}
+
+OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
+
+REASON_MULTIPLIERS = {
+    "CORRECT_RESONANCE":    {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
+    "HIGH_FREQ":            {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
+    "DIVERGENCE_REVERSAL":  {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.67},  # FIX-20260711-P2: tp_mult/sl_mult从0.83/1.0修正为1.0（TP_SL_REASON_DEFAULTS已提供1.3/0.50）
+    "BOX_SPRING":           {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.8},  # FIX-20260711-P2: sl_mult从0.8修正为1.0（TP_SL_REASON_DEFAULTS已提供2.0/0.40）；time_mult=0.8保持
+    "OTHER_SCALP":          {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.33},  # FIX-20260711-P2: tp_mult/sl_mult从0.73/0.6修正为1.0（TP_SL_REASON_DEFAULTS已提供1.1/0.30）
+    "BOX_EXTREME":          {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.33},  # FIX-20260711-P2: tp_mult/sl_mult从0.73/0.6修正为1.0（TP_SL_REASON_DEFAULTS已提供1.2/0.40）
+    "ARBITRAGE":            {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.25},  # FIX-20260711-P2: tp_mult/sl_mult从0.5/0.5修正为1.0（TP_SL_REASON_DEFAULTS已提供1.2/0.30；S5不开仓但保持一致性）
+    "MARKET_MAKING":        {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},  # FIX-20260711-P2: sl_mult从0.8修正为1.0（TP_SL_REASON_DEFAULTS已提供1.1/0.20；S6不开仓但保持一致性）
+    "MANUAL":               {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
+}
+
+P0_IRON_RULES = {
+    "max_oos_decay": -0.30,
+    "oos_decay_warn": -0.20,
+    "min_train_sharpe": 0.5,
+    "min_test_sharpe": 0.3,
+    "min_lr_threshold": 0.8,
+    "lr_threshold_warn": 1.0,
+    "max_drawdown_limit": -0.50,
+    "min_signal_count": 30,
+    "max_daily_trigger": 2.0,
+    "max_loss_hit_rate": 0.20,
+    "min_two_x_recovery_rate": 0.30,
+    "min_oos_retention": 0.50,
+    "alpha_threshold_hft": 0.5,
+    "alpha_threshold_minute": 0.5,
+    "alpha_threshold_box_extreme": 0.3,
+    "alpha_threshold_box_spring": 0.4,
+    "alpha_threshold_arbitrage": 0.3,
+    "alpha_threshold_market_making": 0.2,
+    "alpha_pct_threshold": 30,
+}
+
+
+def detect_rollover_gaps(bar_data: pd.DataFrame,
+                          contract_col: str = "symbol",
+                          price_col: str = "close",
+                          gap_threshold: float = 0.02) -> List[Dict[str, Any]]:
+    if bar_data.empty or contract_col not in bar_data.columns:
+        return []
+
+    rollover_points = []
+    contract_series = bar_data[contract_col].values
+    price_series = bar_data[price_col].values if price_col in bar_data.columns else None
+
+    for i in range(1, len(contract_series)):
+        if contract_series[i] != contract_series[i - 1]:
+            point = {
+                "index": i,
+                "prev_contract": str(contract_series[i - 1]),
+                "new_contract": str(contract_series[i]),
+                "gap_pct": 0.0,
+                "is_significant": False,
+            }
+            if price_series is not None and price_series[i - 1] > 0:
+                gap = (price_series[i] - price_series[i - 1]) / price_series[i - 1]
+                point["gap_pct"] = round(gap * 100, 2)
+                point["is_significant"] = abs(gap) > gap_threshold
+            rollover_points.append(point)
+
+    return rollover_points
+
+
+def compute_rollover_cost(rollover_points: List[Dict[str, Any]],
+                           bar_data: pd.DataFrame,
+                           params: Dict[str, float],
+                           calendar_basis_bps: float = 5.0,
+                           rollover_slippage_bps: float = 3.0) -> Dict[str, Any]:
+    if not rollover_points:
+        return {"total_rollover_cost_bps": 0.0, "rollover_count": 0}
+
+    total_gap_bps = 0.0
+    for rp in rollover_points:
+        total_gap_bps += abs(rp.get("gap_pct", 0.0)) * 100
+
+    n_rollovers = len(rollover_points)
+    calendar_basis_total = calendar_basis_bps * n_rollovers
+    slippage_total = rollover_slippage_bps * n_rollovers * 2
+
+    total_cost_bps = total_gap_bps + calendar_basis_total + slippage_total
+
+    logger.info(
+        "[裂缝5-换月成本] gap=%.1fbps calendar_basis=%.1fbps slippage=%.1fbps total=%.1fbps (n=%d)",
+        total_gap_bps, calendar_basis_total, slippage_total, total_cost_bps, n_rollovers,
+    )
+
+    return {
+        "total_rollover_cost_bps": round(total_cost_bps, 2),
+        "gap_cost_bps": round(total_gap_bps, 2),
+        "calendar_basis_bps": round(calendar_basis_total, 2),
+        "calendar_basis_per_rollover_bps": calendar_basis_bps,
+        "slippage_bps": round(slippage_total, 2),
+        "slippage_per_rollover_bps": rollover_slippage_bps,
+        "rollover_count": n_rollovers,
+        "annualized_cost_bps": round(total_cost_bps * 12 / max(1, n_rollovers), 2),
+    }
+
+
 __all__ = [
     "FEE_STRUCTURE", "FEE_STRUCTURE_V2", "EXCHANGE_COMMISSION_RATES",
     "DEFAULT_COMMISSION_RATE",
     "_infer_contract_type", "_infer_exchange_id", "_infer_exchange_from_id", "_infer_instrument_type",
     "compute_commission", "calc_trade_fee", "estimate_commission_simple", "get_commission_per_lot",
+    "CONTRACT_MULTIPLIER_MAP", "OPTION_TO_FUTURE_MAP",
+    "REASON_MULTIPLIERS", "P0_IRON_RULES",
+    "detect_rollover_gaps", "compute_rollover_cost",
 ]

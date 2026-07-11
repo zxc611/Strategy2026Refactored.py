@@ -33,19 +33,91 @@ class LifecycleBind:
         unsub = getattr(strategy_obj, 'unsub_market_data', None)
         if callable(sub):
             _sub_call_counter = [0]
+            _sub_seen = set()
+            _sub_skip_counter = [0]
+            _sub_rate_lock = threading.Lock()
+            _sub_last_call_at = [0.0]
+            _sub_min_interval_sec = 0.0
+            _STACK_PRESSURE_BATCH = 500
+            _STACK_PRESSURE_PAUSE_SEC = 0.3
+            # FIX-M4: _subscribe 包装器接受 data_type 但不传递 → 'kline_1min' 订阅退化为 tick 订阅
+            # 修复:
+            #   1) 探测平台 sub() 是否接受 data_type 参数(签名长度>=3)
+            #   2) 接受则透传, 不接受则按 data_type 走 fallback (直接调用 sub(exchange, instrument_id))
+            #   3) 始终记录 data_type 到日志, 便于追踪订阅类型丢失问题
+            import inspect as _inspect_m4
+            try:
+                _sub_sig = _inspect_m4.signature(sub)
+                _sub_accepts_data_type = len(_sub_sig.parameters) >= 3
+            except (ValueError, TypeError):
+                _sub_accepts_data_type = False
+            # FIX-20260704-OPTION-ID: 使用 instrument_parser.is_option 替代局部正则
+            # 根因: r'[CP]\d{4,5}$' 会把期货 IC2609/IC2607 误判为期权(C+数字结尾)
+            # 同时漏认 FG608P900(行权价3位)、HO2609-C-2900(带横杠)等真实期权
+            from ali2026v3_trading.infra.instrument_parser import is_option as _is_option_id
             def _subscribe(instrument_id: str, data_type: str = 'tick') -> None:
                 exchange = resolve_product_exchange(instrument_id)
-                _sub_call_counter[0] += 1
-                suffix = instrument_id[6:] if len(instrument_id) > 6 else ''
-                if _sub_call_counter[0] <= 10 or (exchange == 'SHFE' and ('C' in suffix or 'P' in suffix)):
-                    logging.info(f"[PROBE_SUB] #{_sub_call_counter[0]} exchange={exchange} instrument_id={instrument_id}")
-                sub(exchange, instrument_id)
+                dedupe_key = (str(instrument_id).strip(), str(data_type or 'tick').strip())
+                with _sub_rate_lock:
+                    if dedupe_key in _sub_seen:
+                        _sub_skip_counter[0] += 1
+                        if _sub_skip_counter[0] <= 20 or _sub_skip_counter[0] % 1000 == 0:
+                            logging.debug(
+                                "[PROBE_SUB_DEDUP_SKIP] #%d exchange=%s instrument_id=%s data_type=%s reason=duplicate_local_subscribe_call",
+                                _sub_skip_counter[0], exchange, instrument_id, data_type,
+                            )
+                        return
+                    _sub_seen.add(dedupe_key)
+                    import time as _sub_time
+                    elapsed = _sub_time.monotonic() - _sub_last_call_at[0]
+                    if _sub_last_call_at[0] > 0 and elapsed < _sub_min_interval_sec:
+                        _sub_time.sleep(_sub_min_interval_sec - elapsed)
+                    _sub_call_counter[0] += 1
+                    _sub_last_call_at[0] = _sub_time.monotonic()
+                    _call_no = _sub_call_counter[0]
+                    if _call_no % _STACK_PRESSURE_BATCH == 0:
+                        _sub_time.sleep(_STACK_PRESSURE_PAUSE_SEC)
+                _is_opt = _is_option_id(instrument_id)
+                if _call_no <= 20 or (_is_opt and _call_no % 1000 == 0):
+                    logging.debug(f"[PROBE_SUB] #{_call_no} exchange={exchange} instrument_id={instrument_id} data_type={data_type} is_option={_is_opt} platform_accepts_data_type={_sub_accepts_data_type}")
+                # FIX-M4: 透传 data_type (如果平台支持), 否则退化调用并显式 warning
+                try:
+                    if _sub_accepts_data_type:
+                        try:
+                            sub(exchange, instrument_id, data_type)
+                            return
+                        except TypeError:
+                            # 平台签名探测失败, 退化为 2-arg 调用
+                            pass
+                    if data_type != 'tick':
+                        logging.warning(
+                            "[FIX-M4] platform sub() 不支持 data_type 参数, 订阅 %s 退化为 tick 订阅: inst=%s data_type=%s",
+                            instrument_id, instrument_id, data_type,
+                        )
+                    sub(exchange, instrument_id)
+                except Exception:
+                    with _sub_rate_lock:
+                        _sub_seen.discard(dedupe_key)
+                    raise
             p.subscribe = _subscribe
         else:
             p.subscribe = None
         if callable(unsub):
+            # FIX-M4: 同步处理 unsub 的 data_type
+            import inspect as _inspect_m4_un
+            try:
+                _unsub_sig = _inspect_m4_un.signature(unsub)
+                _unsub_accepts_data_type = len(_unsub_sig.parameters) >= 3
+            except (ValueError, TypeError):
+                _unsub_accepts_data_type = False
             def _unsubscribe(instrument_id: str, data_type: str = 'tick') -> None:
                 exchange = resolve_product_exchange(instrument_id)
+                if _unsub_accepts_data_type:
+                    try:
+                        unsub(exchange, instrument_id, data_type)
+                        return
+                    except TypeError:
+                        pass
                 unsub(exchange, instrument_id)
             p.unsubscribe = _unsubscribe
         else:
@@ -59,7 +131,18 @@ class LifecycleBind:
         p._runtime_market_center = p._extract_runtime_market_center(strategy_obj) or p._get_fallback_market_center()
         p.get_kline = None
         if p._runtime_market_center and callable(getattr(p._runtime_market_center, 'get_kline_data', None)):
-            p.get_kline = p._runtime_market_center.get_kline_data
+            _raw_get_kline_data = p._runtime_market_center.get_kline_data
+
+            def _compat_get_kline_data(exchange, instrument_id=None, instrument=None, style="M1", count=-1440, start_time=None, end_time=None, **kwargs):
+                inst = instrument_id or instrument
+                try:
+                    return _raw_get_kline_data(exchange=exchange, instrument_id=inst, style=style, count=count, start_time=start_time, end_time=end_time, **kwargs)
+                except (TypeError, Exception) as _e:
+                    if 'Date Err' in str(_e) or 'Parsing' in str(_e) or isinstance(_e, TypeError):
+                        return _raw_get_kline_data(exchange=exchange, instrument=inst, style=style, count=count)
+                    raise
+
+            p.get_kline = _compat_get_kline_data
         p._inject_runtime_context(strategy_obj)
         p._api_ready = callable(p.subscribe) and callable(p.unsubscribe)
         p._kline_ready = callable(p.get_kline)
@@ -139,10 +222,13 @@ class LifecycleBind:
 
     def _inject_runtime_context(self, strategy_obj: Any) -> None:
         p = self.p
+        logging.info(f"[LifecycleBind._inject_runtime_context] called with strategy_obj={type(strategy_obj).__name__ if strategy_obj else 'None'}")
         if not strategy_obj:
+            logging.warning("[LifecycleBind._inject_runtime_context] strategy_obj is None, returning")
             return
         params = getattr(p, 'params', None)
         if not params:
+            logging.warning("[LifecycleBind._inject_runtime_context] params is None, returning")
             return
         mc = p._runtime_market_center
         if mc is None and getattr(p, '_fallback_market_center', None) is not None:
@@ -165,11 +251,13 @@ class LifecycleBind:
         try:
             from ali2026v3_trading.config.config_service import update_cached_params
             update_cached_params({'strategy': strategy_obj}, caller_id='_inject_runtime_context')
+            logging.info(f"[LifecycleBind._inject_runtime_context] update_cached_params called with strategy={type(strategy_obj).__name__}")
         except Exception as e:
             logging.error("[Context] update_cached_params failed: %s", e)
         try:
             from ali2026v3_trading.infra.health_monitor import set_runtime_strategy_ref
             set_runtime_strategy_ref(strategy_obj)
+            logging.info(f"[LifecycleBind._inject_runtime_context] set_runtime_strategy_ref called with strategy={type(strategy_obj).__name__}")
         except Exception as e:
             logging.error("[Context] set_runtime_strategy_ref failed: %s", e)
 
@@ -197,6 +285,11 @@ class LifecycleBind:
         targets = [str(x).strip() for x in (instrument_ids or []) if str(x).strip()]
         if not targets:
             return
+        try:
+            _lp_diag = p._lifecycle_platform
+            logging.debug("[Subscribe] R-04 DIAG: p._lifecycle_platform accessible, type=%s, subscribed_count=%d", type(_lp_diag).__name__, len(_lp_diag.subscribed_instruments))
+        except Exception as _diag_err:
+            logging.error("[Subscribe] R-04 DIAG: p._lifecycle_platform NOT accessible! err_type=%s err=%s p_type=%s", type(_diag_err).__name__, _diag_err, type(p).__name__, exc_info=True)
         with p._platform_subscribe_lock:
             if p._platform_subscribe_thread and p._platform_subscribe_thread.is_alive():
                 return
@@ -211,38 +304,70 @@ class LifecycleBind:
             thread.start()
 
     def _platform_subscribe_worker(self, instrument_ids: List[str]) -> None:
+        import time as _sub_time
         p = self.p
-        success = failed = 0
+        logging.debug("[Subscribe] R-04 DIAG: worker started, p_type=%s, p_has_lifecycle_svc=%s, p_has_lifecycle_platform=%s",
+                     type(p).__name__,
+                     hasattr(p, '_lifecycle_svc'),
+                     hasattr(p, '_lifecycle_platform'))
+        try:
+            _lp_pre = p._lifecycle_platform
+            logging.debug("[Subscribe] R-04 DIAG: p._lifecycle_platform pre-check OK, type=%s", type(_lp_pre).__name__)
+        except Exception as _pre_err:
+            logging.error("[Subscribe] R-04 DIAG: p._lifecycle_platform pre-check FAILED! err_type=%s err=%s", type(_pre_err).__name__, _pre_err, exc_info=True)
+        registered = failed = 0
         total = len(instrument_ids)
-        subscribe_fn = None
-        if callable(getattr(p, 'subscribe', None)):
-            subscribe_fn = p.subscribe
-        else:
-            logging.error("[Subscribe] self.subscribe不可用，无法订阅")
-        for i, inst in enumerate(instrument_ids, 1):
+        _batch_start = _sub_time.monotonic()
+        _first_error_logged = False
+        _BATCH_SIZE = 500
+        _BATCH_PAUSE_SEC = 0.5
+        _batch_num = 0
+        for batch_start_idx in range(0, total, _BATCH_SIZE):
             if p._platform_subscribe_stop.is_set():
                 break
-            try:
-                if subscribe_fn:
-                    subscribe_fn(inst)
-                    success += 1
-                else:
+            _batch_end_idx = min(batch_start_idx + _BATCH_SIZE, total)
+            _batch_num += 1
+            for i in range(batch_start_idx + 1, _batch_end_idx + 1):
+                inst = instrument_ids[i - 1]
+                if p._platform_subscribe_stop.is_set():
+                    break
+                try:
+                    _lp = p._lifecycle_platform
+                except Exception as _lp_attr_err:
                     failed += 1
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                failed += 1
-                logging.warning(f"[Subscribe] Failed {inst}: {e}")
-            if i % 500 == 0 or i == total:
-                logging.info(f"[Subscribe] Progress {i}/{total}, ok={success}, fail={failed}")
-        logging.info(f"[Subscribe] Done: ok={success}, fail={failed}, total={total}")
+                    if not _first_error_logged:
+                        _first_error_logged = True
+                        logging.error("[Subscribe] R-04 DIAG: p._lifecycle_platform attr access failed #%d inst=%s err_type=%s err=%s p_type=%s p_dict_keys=%s", failed, inst, type(_lp_attr_err).__name__, _lp_attr_err, type(p).__name__, list(p.__dict__.keys())[:20] if hasattr(p, "__dict__") else "N/A", exc_info=True)
+                    elif failed <= 5 or failed % 1000 == 0:
+                        logging.warning("[Subscribe] p._lifecycle_platform attr access failed #%d %s: %s", failed, inst, _lp_attr_err)
+                    continue
+                try:
+                    _lp.subscribe_instrument(inst)
+                    registered += 1
+                except Exception as _lp_err:
+                    failed += 1
+                    if not _first_error_logged:
+                        _first_error_logged = True
+                        logging.error("[Subscribe] R-04 DIAG: subscribe_instrument failed #%d inst=%s err_type=%s err=%s _lp_type=%s", failed, inst, type(_lp_err).__name__, _lp_err, type(_lp).__name__, exc_info=True)
+                    elif failed <= 5 or failed % 1000 == 0:
+                        logging.warning("[Subscribe] lifecycle_platform.register failed #%d %s: %s", failed, inst, _lp_err)
+            logging.info(f"[Subscribe] Batch {_batch_num}: instruments {batch_start_idx+1}-{_batch_end_idx}/{total}, registered={registered}, failed={failed}")
+            # FIX-20260704-SUBSCRIBE-HEARTBEAT: 每10批输出一次线程状态心跳，便于定位卡住位置
+            if _batch_num % 10 == 0:
+                import threading as _hb_thread
+                _current_tid = _hb_thread.get_ident()
+                _active_threads = sum(1 for t in _hb_thread.enumerate() if t.is_alive() and not t.daemon)
+                _all_threads = len(_hb_thread.enumerate())
+                logging.info("[Subscribe] HEARTBEAT batch=%d progress=%d/%d(%.1f%%) thread_id=%d active_threads=%d/%d elapsed=%.1fs",
+                             _batch_num, _batch_end_idx, total, 100.0*_batch_end_idx/total, _current_tid, _active_threads, _all_threads, _sub_time.monotonic() - _batch_start)
+            if _batch_end_idx < total:
+                _sub_time.sleep(_BATCH_PAUSE_SEC)
+        _elapsed = _sub_time.monotonic() - _batch_start
+        logging.info(f"[Subscribe] Done: registered={registered}, failed={failed}, total={total}, batches={_batch_num}, elapsed={_elapsed:.1f}s")
         p._platform_subscribe_completed.set()
-        try:
-            for inst in instrument_ids:
-                p._lifecycle_platform.subscribe_instrument(inst)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lp_err:
-            logging.debug("[LifecyclePlatform] subscribe_instrument 委托失败: %s", _lp_err)
         if failed > 0 and failed == total:
-            logging.error("[Subscribe] 全部订阅失败，策略进入DEGRADED状态")
-            p.transition_to(StrategyState.DEGRADED)
+            logging.error("[Subscribe] 全部lifecycle登记失败(failed=%d)，但lifecycle登记仅为内部记录，不触发DEGRADED(平台订阅已在数据库登记阶段完成)", failed)
+            logging.error("[Subscribe] R-04 ROOT CAUSE: p._lifecycle_platform属性访问或subscribe_instrument调用异常，详见上方R-04 DIAG日志")
 
     def _unsubscribe_all_instruments(self) -> None:
         p = self.p
@@ -271,11 +396,50 @@ class LifecycleBind:
         p = self.p
         def _kline_worker():
             try:
+                # FIX-20260703-CRASH: 等待所有订阅线程完成后再加载历史K线，避免并发C++ API调用导致StrategyLib.dll崩溃
+                # 根因：sub_market_data(订阅线程)和get_kline_data(K线线程max_workers=4)并发调用
+                #       触发STATUS_STACK_BUFFER_OVERRUN(0xc0000409) at offset 0xfa9db
+                #
+                # FIX-20260703-REGRESSION: 22:41崩溃退步根因
+                #   旧fix仅检查 _bulk_subscribe_thread(DB登记线程)，但实际C++订阅发生在
+                #   _platform_subscribe_thread(_platform_subscribe_worker调用sub_market_data)。
+                #   且 getattr(p,'_bulk_subscribe_thread') 在StrategyCoreService的__getattr__下
+                #   可能返回None(属性未在__dict__中)，导致join被跳过→kline与sub_market_data并发→崩溃。
+                #   修复：同时检查两个订阅线程，任一存活即join；增加诊断日志。
+                _JOIN_TIMEOUT = 600.0  # 16288合约×0.5s/batch≈16s，含重试余量取600s
+                _threads_to_join = []
+                for _attr_name in ('_bulk_subscribe_thread', '_platform_subscribe_thread'):
+                    _t = getattr(p, _attr_name, None)
+                    if _t is not None and _t.is_alive():
+                        _threads_to_join.append((_attr_name, _t))
+                        logging.info("[KlineLoadAsync] 检测到存活订阅线程: %s (alive=True)", _attr_name)
+                    else:
+                        logging.info("[KlineLoadAsync] 订阅线程状态: %s thread=%s alive=%s",
+                                     _attr_name, _t is not None, _t.is_alive() if _t is not None else False)
+                if _threads_to_join:
+                    logging.info("[KlineLoadAsync] 等待 %d 个订阅线程完成，避免并发C++ API调用导致DLL崩溃...",
+                                 len(_threads_to_join))
+                    for _name, _t in _threads_to_join:
+                        _t.join(timeout=_JOIN_TIMEOUT)
+                        if _t.is_alive():
+                            logging.warning("[KlineLoadAsync] %s join超时(%.0fs)，继续（风险：可能触发DLL崩溃）",
+                                            _name, _JOIN_TIMEOUT)
+                        else:
+                            logging.info("[KlineLoadAsync] %s 已完成", _name)
+                else:
+                    logging.warning("[KlineLoadAsync] 未检测到存活订阅线程，直接加载K线（可能已快速完成或未启动）")
                 logging.info("[KlineLoadAsync] 后台历史K线加载开始...")
                 p._start_historical_kline_load()
                 logging.info("[KlineLoadAsync] 后台历史K线加载完成")
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error(f"[KlineLoadAsync] 后台历史K线加载失败: {e}", exc_info=True)
+                _stor = getattr(p, 'storage', None)
+                if _stor is not None:
+                    try:
+                        with _stor._ext_kline_lock:
+                            _stor._ext_kline_load_in_progress = False
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError):
+                        pass
         threading.Thread(
             target=_kline_worker,
             name=f"kline-load-async[strategy:{p.strategy_id}]",
@@ -293,6 +457,13 @@ class LifecycleBind:
                 logging.info("[KlineLoad] _kline_svc not available, skipping historical kline load")
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error(f"[KlineLoad] 历史K线加载失败: {e}", exc_info=True)
+            _stor = getattr(p, 'storage', None)
+            if _stor is not None:
+                try:
+                    with _stor._ext_kline_lock:
+                        _stor._ext_kline_load_in_progress = False
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError):
+                    pass
 
     def _shutdown_historical_services(self) -> None:
         p = self.p

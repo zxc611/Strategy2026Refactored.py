@@ -157,6 +157,10 @@ def is_market_open(exchange: Optional[str] = None) -> bool:
     """市场是否开盘（委托给MarketTimeService）"""
     return get_market_time_service().is_market_open(exchange)
 
+def get_market_status(exchange: str) -> str:
+    """获取交易所市场状态: 'OPEN'/'PRE_MARKET'/'CLOSED'（委托给MarketTimeService）"""
+    return get_market_time_service().get_market_status(exchange)
+
 # ✅ 删除is_trading_day模块级函数，统一使用MarketTimeService
 
 class MarketTimeService:
@@ -167,7 +171,7 @@ class MarketTimeService:
             'CZCE': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
             'INE': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
             'GFEX': [(9, 0, 10, 15), (10, 30, 11, 30), (13, 30, 15, 0)],
-            'CFFEX': [(9, 30, 11, 30), (13, 0, 15, 15)],  # P2-8修复: 中金所日盘时段
+            'CFFEX': [(9, 30, 11, 30), (13, 0, 15, 0)],  # FIX-20260709-CFFEX: 中金所股指期货/期权收盘15:00(非15:15)
         }
         self._night_sessions = {
             # [R22-TIME-P1-11] 夜盘扩展至凌晨02:30，覆盖完整交易时段
@@ -177,8 +181,8 @@ class MarketTimeService:
             'CZCE': [(21, 0, 23, 30), (0, 0, 2, 30)],
             'INE': [(21, 0, 23, 0), (0, 0, 2, 30)],
             'GFEX': [(21, 0, 23, 0), (0, 0, 2, 30)],
-            # P2-8修复: 金融期货(CFFEX)夜盘至23:00，无次日凌晨段
-            'CFFEX': [(21, 0, 23, 0)],
+            # FIX-20260709-CFFEX: 中金所(股指期货/期权/国债期货)无夜盘，删除错误配置
+            # 原配置'CFFEX': [(21, 0, 23, 0)]导致21:00-23:00被误判为开盘
         }
         # [R22-TIME-P1-14] 默认节假日数据，防止非交易日判断失效
         self.holidays: set = set()  # 仍为空集合，但提供add_default_holidays方法
@@ -227,32 +231,91 @@ class MarketTimeService:
 
         return True
 
+    def get_market_status(self, exchange: str) -> str:
+        """返回交易所当前状态: 'OPEN'(交易中), 'PRE_MARKET'(尚未开盘), 'CLOSED'(已收盘)
+
+        FIX-20260709: 区分PRE_MARKET和CLOSED，避免9:29:57被误判为"已收盘"。
+        PRE_MARKET状态下策略应短暂等待而非延后重试。
+        """
+        from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+        now = datetime.now(CHINA_TZ)
+        now_time = now.time()
+        # 收集该交易所所有时段的起止时间
+        all_sessions = list(self._sessions.get(exchange, []))
+        all_sessions.extend(self._night_sessions.get(exch, []) for exch in [exchange] if exchange in self._night_sessions)
+        # 展平夜盘
+        night_sessions = self._night_sessions.get(exchange, [])
+        all_sessions = list(self._sessions.get(exchange, [])) + list(night_sessions)
+        # 判断当前是否在某个交易时段内
+        for start_h, start_m, end_h, end_m in all_sessions:
+            start_time = dt_time(start_h, start_m)
+            end_time = dt_time(end_h, end_m)
+            if start_time <= end_time:
+                if start_time <= now_time <= end_time:
+                    return 'OPEN'
+            else:
+                # 跨午夜时段(如21:00-次日02:30)
+                if now_time >= start_time or now_time <= end_time:
+                    return 'OPEN'
+        # 不在任何交易时段内，判断是PRE_MARKET还是CLOSED
+        # PRE_MARKET: 当前时间 < 今天第一个交易时段的开始时间
+        if all_sessions:
+            first_start = min(dt_time(s[0], s[1]) for s in all_sessions
+                              if dt_time(s[0], s[1]) <= dt_time(s[2], s[3]))  # 排除跨午夜
+            # 夜盘21:00开始的也应纳入比较
+            night_starts = [dt_time(s[0], s[1]) for s in night_sessions
+                           if dt_time(s[0], s[1]) > dt_time(s[2], s[3])]
+            # 日盘开盘前的时段（如9:00或9:30之前）算PRE_MARKET
+            day_starts = [dt_time(s[0], s[1]) for s in self._sessions.get(exchange, [])]
+            earliest_day = min(day_starts) if day_starts else first_start
+            if now_time < earliest_day:
+                return 'PRE_MARKET'
+        return 'CLOSED'
+
     def is_market_open(self, exchange: Optional[str] = None) -> bool:
-        from ali2026v3_trading.infra.shared_utils import CHINA_TZ  # [R22-TIME-P1-01] 统一时区常量
+        from ali2026v3_trading.infra.shared_utils import CHINA_TZ
         now = datetime.now(CHINA_TZ)
         now_time = now.time()
         exchanges = [exchange] if exchange else list(self._sessions.keys())
+        result = False
         for exch in exchanges:
             sessions = self._sessions.get(exch, [])
             for start_h, start_m, end_h, end_m in sessions:
                 start_time = dt_time(start_h, start_m)
                 end_time = dt_time(end_h, end_m)
                 if start_time <= now_time <= end_time:
-                    return True
+                    result = True
+                    break
+            if result:
+                break
             night_sessions = self._night_sessions.get(exch, [])
             for start_h, start_m, end_h, end_m in night_sessions:
                 start_time = dt_time(start_h, start_m)
                 end_time = dt_time(end_h, end_m)
-                # P1 Bug #83修复：正确处理跨午夜时段
                 if start_time <= end_time:
-                    # 不跨午夜：start <= now <= end
                     if start_time <= now_time <= end_time:
-                        return True
+                        result = True
+                        break
                 else:
-                    # 跨午夜：now >= start OR now <= end
                     if now_time >= start_time or now_time <= end_time:
-                        return True
-        return False
+                        result = True
+                        break
+            if result:
+                break
+        self._maybe_report_market_status(exchange, result)
+        return result
+
+    _last_market_status_time = 0.0
+    _MARKET_STATUS_INTERVAL_SEC = 3600.0
+
+    def _maybe_report_market_status(self, exchange: Optional[str], is_open: bool) -> None:
+        now = time.time()
+        if now - self._last_market_status_time < self._MARKET_STATUS_INTERVAL_SEC:
+            return
+        self.__class__._last_market_status_time = now
+        exch_name = exchange or 'ALL'
+        status_str = 'OPEN' if is_open else 'CLOSED'
+        logging.info("[Observability] 市场状态(每小时): exchange=%s status=%s", exch_name, status_str)
 
 
 # ============================================================================
@@ -262,6 +325,7 @@ class MarketTimeService:
 __all__ = [
     'MarketTimeService',
     'is_market_open',
+    'get_market_status',
     'get_market_time_service',
     'TimeSyncChecker',
     'get_time_sync_checker',

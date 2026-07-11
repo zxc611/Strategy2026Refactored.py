@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from ali2026v3_trading.infra.logging_utils import get_logger
+from ali2026v3_trading.infra._helpers import get_logger
 from ali2026v3_trading.precompute._schema import (
     SCHEMA_REQUIRED_COLUMNS_V5,
     sync_db_schema_v5,

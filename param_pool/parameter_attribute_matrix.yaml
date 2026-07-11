@@ -2542,3 +2542,437 @@ divergence_moneyness_depth:
   source: backtest_grid
   evidence: "Round1: moneyness_depth=0.06(=2*0.03)在训练集期权分类准确率最优"
   last_validated: "2026-06-16"
+
+# =============================================================================
+# 次系统8 并列信号源A/B/C参数 (signal_source_a/b/c.py)
+# v2.0重构：串行三层→并列信号源A/B/C
+# =============================================================================
+
+tl_signal_source:
+  type: str
+  default: "C"
+  range: ["A", "B", "C", "auto"]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源选择(A=单品种月份IntraProduct, B=联动品种簇InterProduct, C=全域品种Global, auto=自动选择)
+  source: design
+  evidence: "v2.0重构: C=全域排序为默认，A/B为精细化场景备选"
+  last_validated: "2026-06-27"
+
+tl_tier1_wilson_threshold:
+  type: float
+  default: 0.50
+  range: [0.50, 0.70]
+  grid: [0.50, 0.55, 0.60, 0.65, 0.70]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Tier1 Wilson置信区间下限阈值
+  source: backtest_grid
+  evidence: "Wilson CI>0.50=统计显著优于随机，Tier1为高置信品种"
+  last_validated: "2026-06-27"
+
+tl_tier2_coverage_threshold:
+  type: float
+  default: 0.40
+  range: [0.40, 0.70]
+  grid: [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Tier2覆盖率阈值
+  source: backtest_grid
+  evidence: "Tier2覆盖>=40%=中等置信品种池"
+  last_validated: "2026-06-27"
+
+tl_tier2_correct_up_threshold:
+  type: float
+  default: 0.45
+  range: [0.45, 0.60]
+  grid: [0.45, 0.50, 0.55, 0.60]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Tier2正确率上升阈值
+  source: backtest_grid
+  evidence: "Tier2正确率>=45%=中等正确率品种"
+  last_validated: "2026-06-27"
+
+tl_tier3_correct_up_threshold:
+  type: float
+  default: 0.35
+  range: [0.35, 0.50]
+  grid: [0.35, 0.40, 0.45, 0.50]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Tier3正确率上升阈值
+  source: backtest_grid
+  evidence: "Tier3正确率>=35%=低置信品种兜底"
+  last_validated: "2026-06-27"
+
+tl_month_weight_1:
+  type: float
+  default: 0.35
+  range: [0.25, 0.45]
+  grid: [0.25, 0.30, 0.35, 0.40, 0.45]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A第1近月权重
+  source: backtest_grid
+  evidence: "近月流动性最好，权重最高"
+  last_validated: "2026-06-27"
+  constraint: "month_weight_1+2+3+4+5=1.0"
+
+tl_month_weight_2:
+  type: float
+  default: 0.25
+  range: [0.20, 0.35]
+  grid: [0.20, 0.25, 0.30, 0.35]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A第2近月权重
+  source: backtest_grid
+  evidence: "次近月权重次高"
+  last_validated: "2026-06-27"
+
+tl_month_weight_3:
+  type: float
+  default: 0.20
+  range: [0.15, 0.30]
+  grid: [0.15, 0.20, 0.25, 0.30]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A第3近月权重
+  source: backtest_grid
+  evidence: "第3月权重递减"
+  last_validated: "2026-06-27"
+
+tl_month_weight_4:
+  type: float
+  default: 0.12
+  range: [0.08, 0.15]
+  grid: [0.08, 0.10, 0.12, 0.15]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A第4近月权重
+  source: backtest_grid
+  evidence: "远月权重较低"
+  last_validated: "2026-06-27"
+
+tl_month_weight_5:
+  type: float
+  default: 0.08
+  range: [0.05, 0.12]
+  grid: [0.05, 0.08, 0.10, 0.12]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A第5近月权重
+  source: backtest_grid
+  evidence: "最远月权重最低"
+  last_validated: "2026-06-27"
+
+tl_delta_min:
+  type: float
+  default: 0.15
+  range: [0.10, 0.25]
+  grid: [0.10, 0.15, 0.20, 0.25]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Greeks硬过滤Delta下限
+  source: backtest_grid
+  evidence: "Delta<0.15=深度虚值，流动性不足"
+  last_validated: "2026-06-27"
+
+tl_delta_max:
+  type: float
+  default: 0.85
+  range: [0.75, 0.90]
+  grid: [0.75, 0.80, 0.85, 0.90]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Greeks硬过滤Delta上限
+  source: backtest_grid
+  evidence: "Delta>0.85=深度实值，期权杠杆不足"
+  last_validated: "2026-06-27"
+
+tl_gamma_boost_factor:
+  type: float
+  default: 1.2
+  range: [1.0, 1.5]
+  grid: [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Gamma加成因子
+  source: backtest_grid
+  evidence: "Gamma凸性收益加成1.2倍"
+  last_validated: "2026-06-27"
+
+tl_vega_penalty_factor:
+  type: float
+  default: 0.8
+  range: [0.6, 0.9]
+  grid: [0.6, 0.7, 0.8, 0.9]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Vega惩罚因子
+  source: backtest_grid
+  evidence: "Vega暴露惩罚0.8倍"
+  last_validated: "2026-06-27"
+
+tl_theta_penalty_max:
+  type: float
+  default: 0.15
+  range: [0.05, 0.25]
+  grid: [0.05, 0.10, 0.15, 0.20, 0.25]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A Theta惩罚上限
+  source: backtest_grid
+  evidence: "Theta衰减惩罚上限15%"
+  last_validated: "2026-06-27"
+
+tl_gamma_max_front_month:
+  type: float
+  default: 0.08
+  range: [0.05, 0.10]
+  grid: [0.05, 0.06, 0.08, 0.10]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A 近月Gamma上限
+  source: backtest_grid
+  evidence: "近月Gamma>0.08风险过高"
+  last_validated: "2026-06-27"
+
+tl_theta_max_front_month_pct:
+  type: float
+  default: 0.015
+  range: [0.010, 0.025]
+  grid: [0.010, 0.015, 0.020, 0.025]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A 近月Theta上限百分比
+  source: backtest_grid
+  evidence: "近月Theta衰减>1.5%/日风险过高"
+  last_validated: "2026-06-27"
+
+tl_cluster_dispersion_threshold:
+  type: float
+  default: 0.15
+  range: [0.10, 0.25]
+  grid: [0.10, 0.15, 0.20, 0.25]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 簇离散度阈值
+  source: backtest_grid
+  evidence: "簇内品种离散度<0.15=强联动"
+  last_validated: "2026-06-27"
+
+tl_correlation_threshold:
+  type: float
+  default: 0.80
+  range: [0.70, 0.90]
+  grid: [0.70, 0.75, 0.80, 0.85, 0.90]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 品种相关性阈值
+  source: backtest_grid
+  evidence: "相关性>0.80=强联动品种簇"
+  last_validated: "2026-06-27"
+
+tl_layer2_weight_score1:
+  type: float
+  default: 0.70
+  range: [0.60, 0.80]
+  grid: [0.60, 0.65, 0.70, 0.75, 0.80]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 簇平均正确率权重
+  source: backtest_grid
+  evidence: "簇正确率权重0.70=正确率优先"
+  last_validated: "2026-06-27"
+
+tl_layer3_weight_score2:
+  type: float
+  default: 0.65
+  range: [0.55, 0.75]
+  grid: [0.55, 0.60, 0.65, 0.70, 0.75]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 全局排序权重
+  source: backtest_grid
+  evidence: "全局排序权重0.65=综合评分优先"
+  last_validated: "2026-06-27"
+
+tl_market_accuracy_floor_percentile:
+  type: int
+  default: 20
+  range: [10, 30]
+  grid: [10, 15, 20, 25, 30]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 市场正确率地板百分位
+  source: backtest_grid
+  evidence: "百分位<20%=正确率极低品种过滤"
+  last_validated: "2026-06-27"
+
+tl_resonance_veto_threshold:
+  type: float
+  default: 0.80
+  range: [0.70, 0.90]
+  grid: [0.70, 0.75, 0.80, 0.85, 0.90]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 共振否决阈值
+  source: backtest_grid
+  evidence: "共振度<0.80=否决该品种"
+  last_validated: "2026-06-27"
+
+tl_cluster_confidence_threshold:
+  type: float
+  default: 0.60
+  range: [0.50, 0.70]
+  grid: [0.50, 0.55, 0.60, 0.65, 0.70]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 簇置信度阈值
+  source: backtest_grid
+  evidence: "簇置信度>=0.60=有效簇"
+  last_validated: "2026-06-27"
+
+tl_max_single_product_pct:
+  type: float
+  default: 0.15
+  range: [0.10, 0.20]
+  grid: [0.10, 0.12, 0.15, 0.18, 0.20]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 单品种最大占比
+  source: backtest_grid
+  evidence: "单品种占比<=15%=分散化约束"
+  last_validated: "2026-06-27"
+
+tl_max_single_cluster_pct:
+  type: float
+  default: 0.40
+  range: [0.30, 0.50]
+  grid: [0.30, 0.35, 0.40, 0.45, 0.50]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 单簇最大占比
+  source: backtest_grid
+  evidence: "单簇占比<=40%=分散化约束"
+  last_validated: "2026-06-27"
+
+tl_circuit_breaker_consecutive_min:
+  type: int
+  default: 5
+  range: [3, 10]
+  grid: [3, 5, 7, 10]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 断路器连续最小触发次数
+  source: backtest_grid
+  evidence: "连续5次低分触发断路器"
+  last_validated: "2026-06-27"
+
+tl_circuit_breaker_position_mult:
+  type: float
+  default: 0.5
+  range: [0.3, 0.7]
+  grid: [0.3, 0.4, 0.5, 0.6, 0.7]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 断路器触发后仓位乘数
+  source: backtest_grid
+  evidence: "断路器触发后仓位减半"
+  last_validated: "2026-06-27"
+
+tl_layer1_sort_mode:
+  type: str
+  default: "lexicographic"
+  range: ["lexicographic", "weighted"]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A 排序模式(lexicographic=字典序, weighted=加权)
+  source: design
+  evidence: "字典序为默认稳定排序"
+  last_validated: "2026-06-27"
+
+tl_layer2_mode:
+  type: str
+  default: "veto"
+  range: ["veto", "weighted"]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 簇模式(veto=否决制, weighted=加权制)
+  source: design
+  evidence: "否决制为保守默认"
+  last_validated: "2026-06-27"
+
+tl_enable_resonance_weighting:
+  type: bool
+  default: false
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 是否启用共振加权
+  source: design
+  evidence: "默认关闭，待回测验证后开启"
+  last_validated: "2026-06-27"
+
+tl_enable_resonance_veto:
+  type: bool
+  default: false
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源B 是否启用共振否决
+  source: design
+  evidence: "默认关闭，待回测验证后开启"
+  last_validated: "2026-06-27"
+
+tl_enable_global_percentile:
+  type: bool
+  default: true
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 是否启用全局分位数
+  source: design
+  evidence: "默认开启全局分位数排名"
+  last_validated: "2026-06-27"
+
+tl_hard_filter_enabled:
+  type: bool
+  default: false
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A 是否启用Greeks硬过滤
+  source: design
+  evidence: "默认关闭，待回测验证后开启"
+  last_validated: "2026-06-27"
+
+tl_pure_mode:
+  type: bool
+  default: false
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A 是否启用纯净模式(仅Wilson CI排序)
+  source: design
+  evidence: "默认关闭，纯净模式仅用Wilson CI排序不含Greeks"
+  last_validated: "2026-06-27"
+
+tl_market_floor_mode:
+  type: str
+  default: "percentile"
+  range: ["percentile", "fixed"]
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源C 市场地板模式(percentile=百分位, fixed=固定值)
+  source: design
+  evidence: "百分位模式自适应市场状态"
+  last_validated: "2026-06-27"
+
+tl_ab_test_enabled:
+  type: bool
+  default: false
+  layer: subsystem_signal_source
+  editable: runtime
+  description: 信号源A/B测试开关(开启后同时运行A和B对比)
+  source: design
+  evidence: "默认关闭，A/B测试时开启"
+  last_validated: "2026-06-27"

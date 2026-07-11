@@ -259,7 +259,7 @@ DEFAULT_PARAM_TABLE = {  # R21-MEM-P2-05修复: 模块级大字典
     "history_load_batch_size": 200, "history_load_max_batch_size": 50,
     "history_load_batch_delay_sec": 0.2, "history_load_request_delay_sec": 0.1,
     "log_file_path": "strategy_startup.log", "test_mode": False,
-    "auto_start_after_init": False, "subscribe_only_specified_month_options": True,
+    "auto_start_after_init": True, "subscribe_only_specified_month_options": True,
     "subscribe_only_specified_month_futures": True, "load_month_params_in_init": False,
     "specified_month": "", "next_specified_month_1": "",
     "next_specified_month_2": "", "next_specified_month_3": "",
@@ -305,7 +305,7 @@ DEFAULT_PARAM_TABLE = {  # R21-MEM-P2-05修复: 模块级大字典
     "tick_writer_count": 6, "tick_shard_queue_capacity": 625000,
     "kline_queue_capacity": 100000, "maintenance_queue_capacity": 50000,
     "spill_enabled": False, "spill_base_dir": "",
-    "hft_hard_time_stop_ms": 1000, "spring_hard_time_stop_sec": 30,
+    "hft_hard_time_stop_ms": 60000, "spring_hard_time_stop_sec": 600,
     "resonance_hard_time_stop_min": 5, "box_hard_time_stop_min": 30,
     "min_profit_threshold": 0.002, "max_net_delta_pct": 0.30,
     "max_net_gamma_pct": 0.08, "max_net_vega_bps": 0.02,
@@ -317,9 +317,10 @@ DEFAULT_PARAM_TABLE = {  # R21-MEM-P2-05修复: 模块级大字典
     "direction_buy_call_threshold": 0.45, "direction_buy_put_threshold": 0.55,
     "default_order_flow_consistency": 0.5, "kline_missing_timeout_multiplier": 2.0,
     "phase_scan_gate_threshold": 25, "phase_scan_score_weights": [0.4, 0.3, 0.3],
-    "capital_route_s1_hft": 0.30, "capital_route_s2_minute": 0.20,
-    "capital_route_s3_box_extreme": 0.15, "capital_route_s4_box_spring": 0.15,
-    "capital_route_s5_arbitrage": 0.10, "capital_route_s6_market_making": 0.10,
+    "capital_route_s1_hft": 0.25, "capital_route_s2_minute": 0.15,
+    "capital_route_s3_box_extreme": 0.12, "capital_route_s4_box_spring": 0.12,
+    "capital_route_s5_arbitrage": 0.08, "capital_route_s6_market_making": 0.08,
+    "capital_route_s7_divergence_reversal": 0.20,
     "var_confidence_level": 0.95, "var_upgrade_threshold": 0.02,
     "atr_upgrade_threshold": 0.015, "option_buyer_discount": 0.6,
     "sigmoid_alpha": 1.0, "sigmoid_beta": 0.0,
@@ -382,7 +383,7 @@ class _ParamTableProxyDict(dict):
         return super().__contains__(key)
 
 try:
-    from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
+    from ali2026v3_trading.infra.metrics_registry import PhaseFeatureFlag
     if PhaseFeatureFlag.is_enabled('USE_PARAM_TABLE_PROVIDER'):
         _proxy = _ParamTableProxyDict(DEFAULT_PARAM_TABLE)
         DEFAULT_PARAM_TABLE = _proxy
@@ -535,7 +536,7 @@ def reset_param_cache() -> None:
 # R4-D-10修复: 配置热更新 — 已从config_json_loader.py导入check_config_hot_reload
 
 # R4-D-12修复: 参数版本追踪 — 权威源在config_version_tracker.py
-from ali2026v3_trading.config.config_version_tracker import (
+from ali2026v3_trading.config._params_canary_env import (
     _param_version_counter,
     _param_version_hash,
     _param_version_history,
@@ -567,6 +568,16 @@ _RISK_CRITICAL_PARAMS = frozenset([
     'circuit_breaker_pause_sec', 'signal_cooldown_sec',
     'max_net_delta_pct', 'max_net_gamma_pct', 'max_net_vega_bps',
 ])
+
+_SENSITIVE_KEY_PATTERNS = frozenset([
+    'password', 'token', 'secret', 'key', 'credential', 'api_key', 'auth'
+])
+
+def _filter_sensitive_keys(keys: list) -> list:
+    """过滤敏感键，用于日志输出"""
+    if not keys:
+        return []
+    return [k for k in keys if not any(s in k.lower() for s in _SENSITIVE_KEY_PATTERNS)]
 
 
 def update_cached_params(updates: Dict[str, Any], sync_default_table: bool = True, caller_id: str = "unknown", strategy_id: Optional[str] = None) -> Dict[str, Any]:
@@ -619,14 +630,31 @@ def update_cached_params(updates: Dict[str, Any], sync_default_table: bool = Tru
     for change in audit_changes:
         try:
             _hk = os.environ.get('AUDIT_HMAC_KEY', 'default_audit_key_change_in_prod')
-            if _hk == 'default_audit_key_change_in_prod': logging.critical("[SECURITY] AUDIT_HMAC_KEY使用默认密钥！")
-            _sig = hashlib.new(_hk.encode(), f'{change}:{caller_info}:{time.time()}'.encode(), hashlib.sha256).hexdigest()[:16]
+            if _hk == 'default_audit_key_change_in_prod':
+                if not hasattr(update_cached_params, '_hmac_warn_ts') or (time.time() - getattr(update_cached_params, '_hmac_warn_ts', 0)) > 3600:
+                    update_cached_params._hmac_warn_ts = time.time()
+                    # FIX-20260708-AUDIT-HMAC: 默认密钥安全风险升级为ERROR级别，
+                    # 并在日志中给出明确设置指引。审计HMAC用于参数变更防篡改，
+                    # 生产环境必须通过环境变量 AUDIT_HMAC_KEY 配置独立密钥。
+                    logging.error(
+                        "[SECURITY] AUDIT_HMAC_KEY使用默认密钥，审计签名可被预测。"
+                        "请在启动前设置环境变量: set AUDIT_HMAC_KEY=<your_random_key> (Windows) "
+                        "或 export AUDIT_HMAC_KEY=<your_random_key> (Linux/Mac)"
+                    )
+            # FIX-20260704-AUDIT-HMAC-EMPTY: hashlib.new误用为hmac.new导致_sig始终为空
+            # 根因: hashlib.new第一个参数是算法名(如'sha256')，传入密钥会抛ValueError被except捕获→_sig=''
+            # 修复: 使用hmac.new(key, msg, digestmod)正确计算HMAC签名
+            import hmac as _hmac_mod
+            _sig = _hmac_mod.new(_hk.encode(), f'{change}:{caller_info}:{time.time()}'.encode(), hashlib.sha256).hexdigest()[:16]
         except Exception:
             _sig = ''
-        logging.warning("[config_params] AUDIT: %s caller=%s hmac=%s", change, caller_id, _sig)
+        logging.debug("[config_params] AUDIT: %s caller=%s hmac=%s", change, caller_id, _sig)
     safe_keys = _filter_sensitive_keys(list(normalized_updates.keys()))
     logging.info("[config_params] 已更新参数缓存字段：%s", ', '.join(sorted(safe_keys)))
-    _record_param_version_snapshot('update_cached_params', target_cache)
+    try:
+        _record_param_version_snapshot('update_cached_params', target_cache)
+    except (TypeError, AttributeError, copy.Error) as _deepcopy_err:
+        logging.debug("[config_params] _record_param_version_snapshot skipped (unpicklable value): %s", _deepcopy_err)
     _notify_param_change(sorted(safe_keys), 'update_cached_params')
     for _k, _v in normalized_updates.items():
         try:

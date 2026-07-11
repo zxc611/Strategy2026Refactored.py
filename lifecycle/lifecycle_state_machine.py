@@ -6,7 +6,7 @@ import logging
 from enum import Enum
 from typing import Dict, List, Optional, Set, Any
 
-from ali2026v3_trading.infra.state_machine import BaseStateMachine
+from ali2026v3_trading.infra.service_contracts import BaseStateMachine
 
 
 # ──────────────────────────────────────────────────────────────
@@ -43,11 +43,14 @@ def _state_is(state, *targets) -> bool:
 
 
 VALID_STATE_TRANSITIONS: Dict[StrategyState, List[StrategyState]] = {
-    StrategyState.INITIALIZING: [StrategyState.RUNNING, StrategyState.ERROR, StrategyState.DEGRADED],
-    StrategyState.RUNNING: [StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED, StrategyState.PARALLEL_RUNNING],
+    # FIX-20260709-PAUSE-ROOT-V2: 增加INITIALIZING→STOPPED(允许初始化中被停止)
+    StrategyState.INITIALIZING: [StrategyState.RUNNING, StrategyState.ERROR, StrategyState.DEGRADED, StrategyState.STOPPED],
+    # FIX-20260709-PAUSE-ROOT-V2: 增加RUNNING→DEGRADED_STOP(on_stop时jobs未清零)
+    StrategyState.RUNNING: [StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED, StrategyState.PARALLEL_RUNNING, StrategyState.DEGRADED_STOP],
     StrategyState.PARALLEL_RUNNING: [StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED],
     StrategyState.PAUSED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR],
-    StrategyState.DEGRADED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED_STOP],
+    # FIX-20260707-PAUSE: DEGRADED增加PAUSED转换（允许订阅重试中的策略被暂停）
+    StrategyState.DEGRADED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED_STOP, StrategyState.PAUSED],
     StrategyState.ERROR: [StrategyState.INITIALIZING, StrategyState.STOPPED, StrategyState.DEGRADED],
     StrategyState.DEGRADED_STOP: [StrategyState.STOPPED, StrategyState.INITIALIZING],
     StrategyState.STOPPED: [StrategyState.INITIALIZING, StrategyState.DESTROYED],
@@ -61,21 +64,31 @@ VALID_STATE_TRANSITIONS: Dict[StrategyState, List[StrategyState]] = {
 
 _INITIALIZED = StrategyState.INITIALIZING.value
 _RUNNING = StrategyState.RUNNING.value
+_PARALLEL_RUNNING = StrategyState.PARALLEL_RUNNING.value
+_DEGRADED = StrategyState.DEGRADED.value
 _PAUSED = StrategyState.PAUSED.value
 _STOPPED = StrategyState.STOPPED.value
+_ERROR = StrategyState.ERROR.value
+_DEGRADED_STOP = StrategyState.DEGRADED_STOP.value
 _DESTROYED = StrategyState.DESTROYED.value
 
-_ALL_STATES = frozenset({_INITIALIZED, _RUNNING, _PAUSED, _STOPPED, _DESTROYED})
+_ALL_STATES = frozenset({_INITIALIZED, _RUNNING, _PARALLEL_RUNNING, _DEGRADED, _PAUSED, _STOPPED, _ERROR, _DEGRADED_STOP, _DESTROYED})
 
 
 class LifecycleStateMachine(BaseStateMachine):
-    """P1-56修复: 继承 BaseStateMachine 抽象基类"""
+    """P1-56修复: 继承 BaseStateMachine 抽象基类 — 与 VALID_STATE_TRANSITIONS 保持一致"""
 
     _LEGAL_TRANSITIONS: Dict[str, Set[str]] = {
-        _INITIALIZED: {_RUNNING, _DESTROYED},
-        _RUNNING: {_PAUSED, _STOPPED, _DESTROYED},
-        _PAUSED: {_RUNNING, _STOPPED, _DESTROYED},
+        # FIX-20260709-PAUSE-ROOT-V2: 与VALID_STATE_TRANSITIONS同步
+        _INITIALIZED: {_RUNNING, _ERROR, _DEGRADED, _STOPPED},
+        _RUNNING: {_PAUSED, _STOPPED, _ERROR, _DEGRADED, _PARALLEL_RUNNING, _DEGRADED_STOP},
+        _PARALLEL_RUNNING: {_RUNNING, _PAUSED, _STOPPED, _ERROR, _DEGRADED},
+        # FIX-20260707-PAUSE: DEGRADED增加PAUSED转换（与VALID_STATE_TRANSITIONS同步）
+        _DEGRADED: {_RUNNING, _STOPPED, _ERROR, _DEGRADED_STOP, _PAUSED},
+        _PAUSED: {_RUNNING, _STOPPED, _ERROR},
         _STOPPED: {_INITIALIZED, _DESTROYED},
+        _ERROR: {_INITIALIZED, _STOPPED, _DEGRADED},
+        _DEGRADED_STOP: {_STOPPED, _INITIALIZED},
         _DESTROYED: set(),
     }
 

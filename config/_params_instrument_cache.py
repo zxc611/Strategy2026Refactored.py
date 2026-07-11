@@ -13,6 +13,8 @@ import json  # R5-1: 保留用于json.JSONDecodeError
 
 from ali2026v3_trading.infra.serialization_utils import json_loads
 
+from ali2026v3_trading.infra.shared_utils import normalize_instrument_id
+
 import os
 
 import logging
@@ -124,7 +126,10 @@ class InstrumentCacheService:
 
             cached_info = dict(info)
 
-            cached_info['instrument_id'] = instrument_id
+            # A-01修复：标准化instrument_id，确保键格式一致
+            # 避免数据库存储带前缀（SHFE.au2501）而平台推送不带前缀（au2501）导致查找失败
+            normalized_instrument_id = normalize_instrument_id(instrument_id)
+            cached_info['instrument_id'] = normalized_instrument_id
 
 
 
@@ -170,11 +175,11 @@ class InstrumentCacheService:
                 )
 
             
-
+            
             # _更新ID三层架构缓存（在锁内存 仅写入新架构2个字典
             # 5.1.2: instrument_id -> internal_id
 
-            self._instrument_id_to_internal_id[instrument_id] = cid
+            self._instrument_id_to_internal_id[normalized_instrument_id] = cid
 
             
 
@@ -584,22 +589,12 @@ class InstrumentCacheService:
     
 
     def load_instrument_list(self, params: Any, source: str = 'param_cache') -> Optional[Dict[str, Any]]:
-
-        """
-
-        加载合约列表（从参数缓存或输出文件）'
+        """加载合约列表（从参数缓存或输出文件）
         Args:
-
             params: 参数对象（dict或对象）
-
-            source: 加载来源源param_cache' _'output_files'
-
-            
-
+            source: 加载来源，'param_cache' 或 'output_files'
         Returns:
-
-            Dict: {'futures_list': [...], 'options_dict': {...}} _None
-
+            Dict: {'futures_list': [...], 'options_dict': {...}} 或 None
         """
 
         try:
@@ -644,30 +639,21 @@ class InstrumentCacheService:
 
                 options_metadata = {}
 
+                _total_loaded = 0
+
                 for attempt in range(1, max_retries + 1):
 
                     futures_from_file = []
 
                     options_from_file = []
-
                     _futures_meta = {}
-
                     _options_meta = {}
-
                     _fixed_config_files = [
-
                         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_futures_fixed.txt'),
-
                         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subscription_options_fixed.txt'),
-
                     ]
-
-                    
-
                     load_success = True
-
                     for fixed_config_file in _fixed_config_files:
-
                         if not os.path.exists(fixed_config_file):
 
                             continue
@@ -702,66 +688,40 @@ class InstrumentCacheService:
 
                                         futures_from_file.append(contract)
 
+                                        _total_loaded += 1
+
                                         internal_id = int(parts[1]) if len(parts) > 1 else None
 
                                         product = parts[2] if len(parts) > 2 else None
 
                                         year_month = parts[3] if len(parts) > 3 else None
-
                                         if internal_id is not None:
-
                                             _futures_meta[contract] = {
-
                                                 'internal_id': internal_id,
-
                                                 'product': product,
-
                                                 'year_month': year_month,
-
                                             }
-
                                     else:
-
                                         options_from_file.append(contract)
-
                                         internal_id = int(parts[1]) if len(parts) > 1 else None
-
                                         underlying_future_id = int(parts[2]) if len(parts) > 2 else None
-
                                         product = parts[3] if len(parts) > 3 else None
-
                                         underlying_product = parts[4] if len(parts) > 4 else None
-
                                         year_month = parts[5] if len(parts) > 5 else None
-
                                         option_type = parts[6] if len(parts) > 6 else None
-
                                         strike_price = float(parts[7]) if len(parts) > 7 else None
-
                                         if internal_id is not None:
-
                                             _options_meta[contract] = {
-
                                                 'internal_id': internal_id,
-
                                                 'underlying_future_id': underlying_future_id,
-
                                                 'product': product,
-
                                                 'underlying_product': underlying_product,
-
                                                 'year_month': year_month,
-
                                                 'option_type': option_type,
-
                                                 'strike_price': strike_price,
-
                                             }
-
                         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as e:
-
                             logging.warning(f"[ParamsService] 加载固定配置文件失败 (attempt {attempt}/{max_retries}): {e}")
-
                             load_success = False
 
                             break
@@ -855,12 +815,7 @@ class InstrumentCacheService:
 
                             options_dict[product].append(opt)
 
-
-
                     logging.info(f"[ParamsService] 从固定配置文件加载：{len(futures_list)} 期货，{len(options_from_file)} 期权")
-
-
-
                 if not futures_list and not options_dict:
 
                     config_dir = self.get_str('config_dir', '.arts')
@@ -887,17 +842,16 @@ class InstrumentCacheService:
 
             if futures_list or options_dict:
 
-                return {
+                result = {
 
                     'futures_list': list(futures_list) if futures_list else [],
 
                     'options_dict': dict(options_dict) if options_dict else {},
 
                     'futures_metadata': futures_metadata,
-
                     'options_metadata': options_metadata,
-
                 }
+                return result
 
             logging.error(
 
@@ -1031,7 +985,10 @@ class InstrumentCacheService:
 
             cached_info = dict(info)
 
-            cached_info['instrument_id'] = instrument_id
+            # FIX-P0-08: 标准化instrument_id，与cache_instrument_info保持一致
+            # 避免DB存储带前缀(SHFE.au2501)而查找用标准化key(au2501)导致查找失败
+            normalized_instrument_id = normalize_instrument_id(instrument_id)
+            cached_info['instrument_id'] = normalized_instrument_id
 
 
 
@@ -1076,7 +1033,7 @@ class InstrumentCacheService:
 
 
 
-            temp_instrument_id_to_internal_id[instrument_id] = cid
+            temp_instrument_id_to_internal_id[normalized_instrument_id] = cid
 
             temp_instrument_meta_by_id[cid] = cached_info
 

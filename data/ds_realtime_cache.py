@@ -203,10 +203,19 @@ class RealTimeCache:
         if pending_ticks:
             logging.info(f"[RealTimeCache] params_service已接入，回放暂存tick (pending_count={len(pending_ticks)}, dropped={dropped_count})")
             replayed = 0
+            replay_failed = 0
             for pt in pending_ticks:
-                if self.update_tick(**pt):
+                try:
+                    result = self.update_tick(**pt)
+                    # FIX-20260707-REPLAY-COUNT: update_tick返回internal_id,
+                    # 新注册合约的internal_id可能为0(尚未分配), 但tick数据已正确写入_latest_ticks
+                    # 不应将internal_id=0计为replay失败
                     replayed += 1
-            logging.info(f"[RealTimeCache] 暂存tick回放完成 (replayed={replayed}, dropped={dropped_count})")
+                except Exception as _replay_err:
+                    replay_failed += 1
+                    if replay_failed <= 3:
+                        logging.warning(f"[RealTimeCache] 暂存tick回放失败: {_replay_err}, tick={pt.get('symbol','?')}")
+            logging.info(f"[RealTimeCache] 暂存tick回放完成 (replayed={replayed}, failed={replay_failed}, dropped={dropped_count})")
 
     def _should_log_pending_count(self, c: int) -> bool:
         return c <= 5 or c in (10, 20, 50, 100, 200, 500, 1000) or c % 5000 == 0
@@ -528,6 +537,12 @@ class RealTimeCache:
                 _delta_vol = max(0, vol - _last_cumulative_vol)
                 _last_cumulative_vol = vol
                 vol = _delta_vol
+            # FIX-P0-18: price<=0时尝试使用bid/ask中间价，避免深度虚值期权K线缺失
+            if price <= 0:
+                _bid = t.get('bid_price1') or t.get('bid_price')
+                _ask = t.get('ask_price1') or t.get('ask_price')
+                if isinstance(_bid, (int, float)) and isinstance(_ask, (int, float)) and _bid > 0 and _ask > 0:
+                    price = (_bid + _ask) / 2.0
             if ts is None or price <= 0:
                 continue
             elapsed = (ts - period_start).total_seconds() if period_start else 0

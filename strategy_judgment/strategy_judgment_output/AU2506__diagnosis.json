@@ -1,0 +1,91 @@
+{
+  "backtest_period": "2025-01",
+  "dimensions": [
+    {
+      "anomalies": [],
+      "confidence": 0.0,
+      "detail": "仅有0个极值样本(<30)",
+      "dimension": "信号强度演化",
+      "pattern": "数据不足",
+      "sample_count": 0,
+      "score": 0.5,
+      "severity": "数据不足",
+      "sub_items": []
+    },
+    {
+      "anomalies": [],
+      "confidence": 0.0,
+      "detail": "仅有0个极值样本",
+      "dimension": "仓位变化模式",
+      "pattern": "数据不足",
+      "sample_count": 0,
+      "score": 0.5,
+      "severity": "数据不足",
+      "sub_items": []
+    },
+    {
+      "anomalies": [],
+      "confidence": 0.0,
+      "detail": "仅有0个极值样本",
+      "dimension": "盈亏路径形态",
+      "pattern": "数据不足",
+      "sample_count": 0,
+      "score": 0.5,
+      "severity": "数据不足",
+      "sub_items": []
+    },
+    {
+      "anomalies": [],
+      "confidence": 0.0,
+      "detail": "仅有0个极值样本",
+      "dimension": "Greeks暴露合理性",
+      "pattern": "数据不足",
+      "sample_count": 0,
+      "score": 0.5,
+      "severity": "数据不足",
+      "sub_items": []
+    },
+    {
+      "anomalies": [],
+      "confidence": 0.0,
+      "detail": "仅有0个极值样本",
+      "dimension": "策略池联动一致性",
+      "pattern": "数据不足",
+      "sample_count": 0,
+      "score": 0.5,
+      "severity": "数据不足",
+      "sub_items": []
+    }
+  ],
+  "extreme_count": 0,
+  "extreme_point_count": 0,
+  "near_high_count": 0,
+  "near_low_count": 0,
+  "overall_score": {
+    "confidence": 0.0,
+    "cross_strategy_score": 0.5,
+    "greeks_rationality": 0.5,
+    "greeks_score": 0.5,
+    "overall_score": 0.5,
+    "pnl_path_quality": 0.5,
+    "pnl_score": 0.5,
+    "position_score": 0.5,
+    "position_smoothness": 0.5,
+    "sample_count": 0,
+    "severity": "数据不足",
+    "signal_decay_consistency": 0.5,
+    "signal_score": 0.5,
+    "summary": "行为一致性=0.50(数据不足)"
+  },
+  "raw_data": {},
+  "recommendations": [
+    "[数据不足] 信号强度演化: 样本0(<30)，增加回测期或降时间维度",
+    "[数据不足] 仓位变化模式: 样本0(<30)，增加回测期或降时间维度",
+    "[数据不足] 盈亏路径形态: 样本0(<30)，增加回测期或降时间维度",
+    "[数据不足] Greeks暴露合理性: 样本0(<30)，增加回测期或降时间维度",
+    "[数据不足] 策略池联动一致性: 样本0(<30)，增加回测期或降时间维度"
+  ],
+  "strategy_id": "",
+  "strategy_type": "",
+  "symbol": "AU2506"
+}

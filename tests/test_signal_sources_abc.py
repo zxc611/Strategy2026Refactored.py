@@ -427,6 +427,7 @@ class TestSelectOtmTargetsSignalSourceRouting:
 
         cache = WidthCacheQueryService()
         cache._lock = threading.RLock()
+        cache._query_count = 0
         cache._status_counts = {
             1: {
                 '2607': {

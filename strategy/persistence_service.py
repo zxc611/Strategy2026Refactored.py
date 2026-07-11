@@ -227,10 +227,18 @@ class CheckpointService:
         for key in state_ref_keys:
             val = _get(key)
             if val is not None:
+                # FIX-20260708: state_ref_keys应使用set_ref(引用)而非set(深拷贝)
+                # 原代码先尝试set()(深拷贝)，仅当TypeError/copy.Error才回退set_ref()
+                # 导致_stats(dict)被深拷贝，后续p._stats['start_time']=...等修改不可见
+                # 表现为：运行时长=0:00:00, 信号数量=0, 交易数量=0（状态报告恒为初始快照）
                 try:
-                    self._state_store.set(key, val)
-                except (TypeError, copy.Error):
                     self._state_store.set_ref(key, val)
+                except (TypeError, AttributeError):
+                    # set_ref失败时回退到set(深拷贝)，保证至少能存储
+                    try:
+                        self._state_store.set(key, val)
+                    except (TypeError, copy.Error):
+                        pass
         try:
             _has = self._has_attr or (lambda k: _get(k) is not None)
             if _has('storage'):

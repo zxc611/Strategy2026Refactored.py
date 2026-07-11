@@ -32,7 +32,13 @@ from datetime import datetime, timezone, timedelta
 from enum import IntEnum
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+# FIX-20260702: shared_utils 作为基础设施底座不再依赖 _helpers，
+# 从而切断 shared_utils <-> _helpers <-> serialization_utils 循环导入。
+def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
+    logger = logging.getLogger(name)
+    if level is not None:
+        logger.setLevel(level)
+    return logger
 
 
 # ============================================================
@@ -110,10 +116,13 @@ def safe_int(value: Any, default: int = 0) -> int:
     """安全转换为整数"""
     try:
         if value is None:
+            _safe_cast_fallback_counter['safe_int_none'] += 1
             return default
-        return round(float(value))  # [R22-TS-P1-04] 改用round避免截断
+        return round(float(value))
     except (ValueError, TypeError) as e:
+        _safe_cast_fallback_counter['safe_int_error'] += 1
         logging.warning(f"[safe_int] Conversion failed for value '{value}': {e}")
+        _report_safe_cast_stats()
         return default
 
 
@@ -121,11 +130,37 @@ def safe_float(value: Any, default: float = 0.0) -> float:
     """安全转换为浮点数"""
     try:
         if value is None:
+            _safe_cast_fallback_counter['safe_float_none'] += 1
             return default
         return float(value)
     except (ValueError, TypeError) as e:
+        _safe_cast_fallback_counter['safe_float_error'] += 1
         logging.warning(f"[safe_float] Conversion failed for value '{value}': {e}")
+        _report_safe_cast_stats()
         return default
+
+
+_safe_cast_fallback_counter: Dict[str, int] = {
+    'safe_int_none': 0, 'safe_int_error': 0,
+    'safe_float_none': 0, 'safe_float_error': 0,
+}
+_safe_cast_counter_lock = threading.Lock()
+_safe_cast_last_report_time = 0.0
+_SAFE_CAST_REPORT_INTERVAL_SEC = 3600.0
+
+
+def _report_safe_cast_stats() -> None:
+    global _safe_cast_last_report_time
+    now = time.time()
+    if now - _safe_cast_last_report_time < _SAFE_CAST_REPORT_INTERVAL_SEC:
+        return
+    with _safe_cast_counter_lock:
+        if now - _safe_cast_last_report_time < _SAFE_CAST_REPORT_INTERVAL_SEC:
+            return
+        _safe_cast_last_report_time = now
+        total = sum(_safe_cast_fallback_counter.values())
+        if total > 0:
+            logging.info("[Observability] safe_cast降级统计(每小时): %s", dict(_safe_cast_fallback_counter))
 
 
 def safe_price_check(price) -> bool:
@@ -854,9 +889,23 @@ def atomic_replace_file(target_path: str, new_content: str,
         return result
 
     # 步骤4: 原子替换
-    try:
-        os.replace(temp_path, target_path)
-    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+    # Windows 上目标文件可能被瞬时占用(杀毒软件扫描/句柄未释放)，抛 PermissionError([WinError 5])
+    # 增加重试机制避免瞬时占用导致失败
+    _replace_err = None
+    for _attempt in range(3):
+        try:
+            os.replace(temp_path, target_path)
+            _replace_err = None
+            break
+        except PermissionError as _pe:
+            _replace_err = _pe
+            if _attempt < 2:
+                time.sleep(0.1 * (_attempt + 1))
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            _replace_err = e
+            break
+    if _replace_err is not None:
+        e = _replace_err
         result['error'] = f"原子替换失败: {e}"
         # 回滚
         if backup_path and os.path.exists(backup_path):
@@ -872,7 +921,7 @@ def atomic_replace_file(target_path: str, new_content: str,
         return result
 
     result['success'] = True
-    logging.info("UPG-P1-07: 文件原子替换成功: %s (backup=%s)", target_path, backup_path)
+    logging.debug("UPG-P1-07: 文件原子替换成功: %s (backup=%s)", target_path, backup_path)
     return result
 
 
@@ -1214,11 +1263,20 @@ def get_tick_field(tick: Any, field_name: str, default: Any = None) -> Any:
     按候选属性名列表依次尝试getattr，返回第一个非None值。'
     tick_processing_service._get_tick_field 和 position_service._get_platform_attr
     均应委托到此函数。
+
+    FIX-20260704-DBL-MAX: 过滤C++ DBL_MAX(1.79e308)/inf/nan哨兵值
+    根因: PythonGO C++ TickData在无买盘时用DBL_MAX作为哨兵值，getattr返回1.79e308而非None
+    导致bid_price1=1.79e308通过>0检查，触发"盘口交叉异常"误报
     """
+    import math
     attr_names = TICK_FIELD_NAMES.get(field_name, [field_name])
     for attr in attr_names:
         val = getattr(tick, attr, None)
         if val is not None and val != '':
+            # FIX-20260704-DBL-MAX: 过滤C++哨兵值(DBL_MAX/inf/nan)
+            if isinstance(val, float):
+                if not math.isfinite(val) or val > 1e300:
+                    continue
             return val
     return default
 

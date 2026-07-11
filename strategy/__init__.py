@@ -34,21 +34,26 @@ def __getattr__(name: str):
         from .strategy_core_service import StrategyCoreService  # 真实来源: strategy.strategy_core_service
         return StrategyCoreService
     if name == "ServiceFactory":
-        from .service_factory import ServiceFactory  # 真实来源: strategy.service_factory
+        from .strategy_core_service import ServiceFactory  # 真实来源: strategy.strategy_core_service
         return ServiceFactory
     if name in ("ShadowStrategyEngine", "ShadowTradeRecord", "AlphaMetrics", "get_shadow_strategy_engine"):
         from . import shadow_strategy_facade as _facade  # 真实来源: strategy.shadow_strategy_facade
         return getattr(_facade, name)
     _DEPRECATED_MODULES = {
         "_box_spring_types": ".box_spring_detector",
+        "_shadow_internals": "._shadow_types",
+        "_shadow_strategy_pnl": "._shadow_types",
         "box_detector": ".box_spring_detector",
+        "box_spring_executor_helpers": ".box_spring_executor",
         "checkpoint_service": ".persistence_service",
+        "kline_data_service": ".instrument_service",
         "recovery_service": ".persistence_service",
         "service_factory": ".strategy_core_service",
-        "shadow_strategy_types": ".shadow_strategy_core",
+        "shadow_strategy_types": "._shadow_types",
         "strategy_core_service_builder": ".strategy_core_service",
         "strategy_tick_handler": ".tick_hft",
         "tick_hft_dispatch": ".tick_hft",
+        "types": ".instrument_service",
     }
     if name in _DEPRECATED_MODULES:
         import importlib

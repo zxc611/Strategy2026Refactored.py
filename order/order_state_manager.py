@@ -401,6 +401,17 @@ class OrderStateManager:
 
         now = datetime.now(CHINA_TZ)
 
+        # [FIX-20260708-TZ] 安全时间差计算：兼容offset-aware和offset-naive的datetime
+        def _safe_elapsed(dt_ref, dt_cmp):
+            """计算时间差，自动处理timezone-aware/naive混合"""
+            try:
+                return (dt_ref - dt_cmp).total_seconds()
+            except TypeError:
+                # offset-aware与offset-naive混合：剥离timezone信息
+                _naive_now = dt_ref.replace(tzinfo=None) if dt_ref.tzinfo else dt_ref
+                _naive_cmp = dt_cmp.replace(tzinfo=None) if dt_cmp.tzinfo else dt_cmp
+                return (_naive_now - _naive_cmp).total_seconds()
+
         timeout_orders = []
 
         with svc._lock:
@@ -418,7 +429,7 @@ class OrderStateManager:
                     # 映射将在订单过期清理时统一删除。
                     if order['status'] in ('FILLED', 'ALL_FILLED', 'CANCELLED', 'FAILED', '全成', '全部成交', '已撤销', '部成部撤', 'ORPHANED'):
 
-                        elapsed = (now - order.get('updated_at', order.get('created_at', now))).total_seconds()
+                        elapsed = _safe_elapsed(now, order.get('updated_at', order.get('created_at', now)))
 
                         if elapsed > 300:
 
@@ -430,7 +441,7 @@ class OrderStateManager:
 
                     self.add_pending(order_id, order)
 
-                elapsed = (now - order.get('created_at', now)).total_seconds()
+                elapsed = _safe_elapsed(now, order.get('created_at', now))
 
                 _order_action = order.get('action', '')
 
@@ -446,7 +457,10 @@ class OrderStateManager:
 
                 _expired_order = svc._orders_by_id.get(oid, {})
 
-                _expired_key = f"{_expired_order.get('instrument_id', '')}_{_expired_order.get('direction', '')}_{_expired_order.get('action', '')}_{_expired_order.get('volume', '')}_{round(_expired_order.get('price', 0), 4)}"
+                # FIX-R28-CONSISTENCY: 幂等key构造必须包含signal_id，与order_executor.py保持一致
+                _expired_sig = _expired_order.get('signal_id', '')
+                _expired_sig_suffix = f"_{_expired_sig}" if _expired_sig else ""
+                _expired_key = f"{_expired_order.get('instrument_id', '')}_{_expired_order.get('direction', '')}_{_expired_order.get('action', '')}_{_expired_order.get('volume', '')}_{round(_expired_order.get('price', 0), 4)}{_expired_sig_suffix}"
 
                 svc._order_idempotent_set.discard(_expired_key)
 
@@ -473,7 +487,7 @@ class OrderStateManager:
 
                 current_order['updated_at'] = datetime.now(CHINA_TZ)
 
-                logging.info("[R23-SM-04-FIX] 订单超时标记TIMEOUT: order_id=%s elapsed=%.1fs", order_id, (datetime.now(CHINA_TZ) - current_order.get('created_at', datetime.now(CHINA_TZ))).total_seconds())
+                logging.info("[R23-SM-04-FIX] 订单超时标记TIMEOUT: order_id=%s elapsed=%.1fs", order_id, _safe_elapsed(datetime.now(CHINA_TZ), current_order.get('created_at', datetime.now(CHINA_TZ))))
 
             self.remove_pending(order_id)
 
@@ -520,7 +534,7 @@ class OrderStateManager:
 
                         if o['status'] in ('FILLED', 'CANCELLED', 'FAILED', 'ORPHANED', '全部成交', '已撤销', '部成部撤', 'ALL_FILLED')
 
-                        and (datetime.now(CHINA_TZ) - o['updated_at']).total_seconds() > 3600]
+                        and _safe_elapsed(datetime.now(CHINA_TZ), o['updated_at']) > 3600]
 
             for oid in to_remove:
 

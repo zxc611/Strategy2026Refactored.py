@@ -78,7 +78,7 @@ def load_historical_klines_with_stop(
     normalized_period = storage._normalize_kline_period(kline_style)
     effective_batch_size = max(1, int(batch_size or len(instruments) or 1))
     total_batches = (len(instruments) + effective_batch_size - 1) // effective_batch_size if instruments else 0
-    empty_batch_limit = max(0, safe_int(os.getenv('ALI2026_HISTORICAL_EMPTY_BATCH_LIMIT', '5')))
+    empty_batch_limit = max(0, safe_int(os.getenv('ALI2026_HISTORICAL_EMPTY_BATCH_LIMIT', '20')))
     consecutive_empty_batches = 0
 
     for batch_index, start in enumerate(range(0, len(instruments), effective_batch_size), start=1):
@@ -117,7 +117,7 @@ def load_historical_klines_with_stop(
                     with storage._lock:
                         if warn_key not in storage._runtime_missing_warned:
                             storage._runtime_missing_warned.add(warn_key)
-                            logging.warning("[load_historical_klines] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
+                            logging.debug("[load_historical_klines] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
                     return {'failed': True}
 
                 if not exchange:
@@ -137,7 +137,7 @@ def load_historical_klines_with_stop(
                         try:
                             raw_dt = getattr(kline, 'datetime', None)
                             if raw_dt is None:
-                                raw_dt = getattr(kline, 'date', None) or getattr(kline, 'time', None) or getattr(kline, 'timestamp', None)
+                                raw_dt = getattr(kline, 'date', None) or getattr(kline, 'time', None)
                             ts = storage._to_timestamp(raw_dt)
                             if ts is None:
                                 _kline_ts_warn_count += 1
@@ -203,7 +203,13 @@ def load_historical_klines_with_stop(
                         'enqueued': saved_count,
                     }
                 else:
-                    logging.info(f"[Storage] {instrument_id}: 无历史K线数据")
+                    # FIX-20260708-HKL-DIAG: 无历史K线数据时记录时间窗口，便于区分"非交易时段API空数据"与"真正缺失数据"
+                    from datetime import datetime as _dt_diag
+                    _now_diag = _dt_diag.now(CHINA_TZ)
+                    logging.info(
+                        f"[Storage] {instrument_id}: 无历史K线数据 (查询窗口 {start_time} ~ {end_time}, "
+                        f"当前系统时间 {_now_diag.isoformat()}, 非交易时段/周末/节假日可能返回空数据)"
+                    )
                     return {'failed': True, 'instrument_id': instrument_id, 'reason': 'no_data'}
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
                 logging.error(f"[Storage] 加载历史K线失败 {instrument_str}: {exc}")
@@ -278,8 +284,10 @@ def load_historical_klines_with_stop(
                 logging.debug(f"[Storage] 历史K线进度回调失败: {exc}")
 
         if empty_batch_limit and consecutive_empty_batches >= empty_batch_limit:
-            logging.info(
-                "[Storage] 历史K线连续 %d 个批次无数据，提前结束本轮加载: batch=%d/%d, success=%d, failed=%d",
+            # FIX-M8-5: 提升日志级别为WARNING，并提示后续将依赖合成K线
+            logging.warning(
+                "[Storage] 历史K线连续 %d 个批次无数据，提前结束本轮加载: batch=%d/%d, success=%d, failed=%d "
+                "(后续K线覆盖将依赖aggregate_kline_only合成)",
                 consecutive_empty_batches, batch_index, total_batches, success_count, failed_count,
             )
             break
@@ -670,6 +678,10 @@ class HistoricalKlineMixin:
                     )
                     def _retry_after_delay():
                         time.sleep(delay)  # R23-P2-22标记: P2级阻塞重试
+                        # FIX-20260711-PAUSE-ACTION: sleep后检查暂停/销毁状态，避免覆盖暂停
+                        if getattr(self, '_is_paused', False) or getattr(self, '_destroyed', False):
+                            logging.info("[HKL] retry cancelled: strategy paused or destroyed")
+                            return
                         try:
                             self._start_historical_kline_load()
                         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:

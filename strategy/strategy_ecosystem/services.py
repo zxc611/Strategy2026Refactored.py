@@ -9,8 +9,8 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
-from ali2026v3_trading.infra.performance_monitor import count_call
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from ali2026v3_trading.infra.metrics_registry import count_call
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.signal.plr_calculator import get_plr_calculator
 
@@ -97,7 +97,7 @@ class OpsService:
         result = {'passed': True, 'violations': [], 'checked_invariants': 0}
         with self._lock:
             total_alloc = sum(s.capital_allocation for s in [
-                self._master, self._reverse, self._other,
+                self._master, self._divergence, self._other,
                 self._spring, self._arbitrage, self._market_making,
             ])
             result['checked_invariants'] += 1
@@ -108,7 +108,7 @@ class OpsService:
                 result['passed'] = False
 
             active_count = sum(1 for s in [
-                self._master, self._reverse, self._other,
+                self._master, self._divergence, self._other,
                 self._spring, self._arbitrage, self._market_making,
             ] if s.state == SlotState.ACTIVE and not s.paused)
             result['checked_invariants'] += 1
@@ -116,7 +116,7 @@ class OpsService:
                 result['violations'].append("无活跃策略(至少需要1个)")
                 result['passed'] = False
 
-            for s in [self._master, self._reverse, self._other,
+            for s in [self._master, self._divergence, self._other,
                       self._spring, self._arbitrage, self._market_making]:
                 if s.state == SlotState.ACTIVE and not s.paused and s.expected_value < 0:
                     if s.total_pnl != 0 or s.consecutive_losses > 3:
@@ -126,7 +126,7 @@ class OpsService:
                         )
                         result['passed'] = False
 
-            for s in [self._master, self._reverse, self._other,
+            for s in [self._master, self._divergence, self._other,
                       self._spring, self._arbitrage, self._market_making]:
                 result['checked_invariants'] += 1
                 if s.state not in VALID_STRATEGY_TRANSITIONS:
@@ -424,7 +424,7 @@ class TradingEVService:
     def _get_slot(self, strategy_id: str) -> Optional[StrategySlot]:
         slot_map = {
             'master': self._master,
-            'reverse': self._reverse,
+            'divergence': self._divergence,
             'other': self._other,
             'spring': self._spring,
             'arbitrage': self._arbitrage,
@@ -433,7 +433,7 @@ class TradingEVService:
         return slot_map.get(strategy_id)
 
     def _is_same_delta_direction(self, my_id: str, my_direction: str, other_id: str) -> bool:
-        other_slot = self._master if other_id == 'master' else self._reverse
+        other_slot = self._master if other_id == 'master' else self._divergence
         other_dir = getattr(other_slot, 'last_direction', '')
         if not other_dir:
             return True
@@ -845,70 +845,81 @@ class TradingEVService:
                 logger.debug("[StrategyEcosystem] 影子引擎EV融合检查跳过: %s", _sse_err)
 
             cascade_result = {}
+            # [DRY-RUN A-04] dry_run模式下跳过CascadeJudge评判，仅记录日志直接放行
+            _dry_run_mode = False
             try:
-                import sys, os
-                _project_root = os.path.dirname(os.path.abspath(__file__))
-                if _project_root not in sys.path and os.path.isdir(_project_root):
-                    sys.path.insert(0, _project_root)
-                from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
-                _slot = self._get_slot('master')
-                _live_metrics = {
-                    'sharpe': getattr(_slot, 'sharpe', 0.0),
-                    'calmar': getattr(_slot, 'calmar', 0.0),
-                    'sortino_ratio': getattr(_slot, 'sortino', getattr(_slot, 'sharpe', 0.0) * 1.2),
-                    'profit_loss_ratio': getattr(_slot, 'profit_factor', 1.0),
-                    'max_consecutive_losses': getattr(_slot, 'consecutive_losses', 0),
-                    'win_rate': getattr(_slot, 'win_rate', 0.5),
-                    'total_trades': getattr(_slot, 'total_trades', 0),
-                    'max_flat_period_days': getattr(_slot, 'max_flat_period_days', 999),
-                    'peak_margin_used': getattr(_slot, 'peak_margin_used', 0.0),
-                    'sharpe_ci_lower': getattr(_slot, 'sharpe_ci_lower', 0.0),
-                    'sharpe_ci_upper': getattr(_slot, 'sharpe_ci_upper', 0.0),
-                    'sharpe_ci_width': getattr(_slot, 'sharpe_ci_width', 0.0),
-                    'alpha_action': getattr(_slot, 'alpha_action', 'hold'),
-                }
-                _adapted = adapt_backtest_result(_live_metrics, strategy_type=getattr(_slot, 'strategy_type', ''))
+                from ali2026v3_trading.config.config_service import get_cached_params as _gcp_dry
+                _dry_run_mode = bool(_gcp_dry().get('dry_run_mode', False))
+            except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _dr_err:
+                logging.debug("[DRY-RUN] dry_run_mode读取失败(默认False): %s", _dr_err)
+            if _dry_run_mode:
+                cascade_result = {'passed': True, 'score': 1.0, 'fatal': None, 'dry_run_skipped': True}
+                logger.info("[DRY-RUN] 瀑布式评判已跳过(dry_run_mode=True)")
+            else:
                 try:
-                    from ali2026v3_trading.config.config_service import get_cached_params
-                    _params_for_cascade = get_cached_params()
-                except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                    _params_for_cascade = None
-                _capital_scale_str = self._capital_scale.value if self._capital_scale else 'medium'
-                _cascade = CascadeJudge.from_config(capital_scale=_capital_scale_str, params=_params_for_cascade)
-                _cascade_report = _cascade.judge(_adapted)
-                cascade_result = {
-                    'passed': _cascade_report.passed,
-                    'score': _cascade_report.final_score,
-                    'fatal': _cascade_report.fatal_reason,
-                }
-                if not _cascade_report.passed:
-                    logger.warning("[StrategyEcosystem] 瀑布式评判否决: %s", _cascade_report.fatal_reason)
-
-                _ci_width = _live_metrics.get('sharpe_ci_width', 0.0)
-                _alpha_action = _live_metrics.get('alpha_action', 'hold')
-                try:
-                    from param_pool.state_param_sets import BACKTEST_THRESHOLDS as _CI_THRESHOLDS
-                except ImportError:
+                    import sys, os
+                    _project_root = os.path.dirname(os.path.abspath(__file__))
+                    if _project_root not in sys.path and os.path.isdir(_project_root):
+                        sys.path.insert(0, _project_root)
+                    from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
+                    _slot = self._get_slot('master')
+                    _live_metrics = {
+                        'sharpe': getattr(_slot, 'sharpe', 0.0),
+                        'calmar': getattr(_slot, 'calmar', 0.0),
+                        'sortino_ratio': getattr(_slot, 'sortino', getattr(_slot, 'sharpe', 0.0) * 1.2),
+                        'profit_loss_ratio': getattr(_slot, 'profit_factor', 1.0),
+                        'max_consecutive_losses': getattr(_slot, 'consecutive_losses', 0),
+                        'win_rate': getattr(_slot, 'win_rate', 0.5),
+                        'total_trades': getattr(_slot, 'total_trades', 0),
+                        'max_flat_period_days': getattr(_slot, 'max_flat_period_days', 999),
+                        'peak_margin_used': getattr(_slot, 'peak_margin_used', 0.0),
+                        'sharpe_ci_lower': getattr(_slot, 'sharpe_ci_lower', 0.0),
+                        'sharpe_ci_upper': getattr(_slot, 'sharpe_ci_upper', 0.0),
+                        'sharpe_ci_width': getattr(_slot, 'sharpe_ci_width', 0.0),
+                        'alpha_action': getattr(_slot, 'alpha_action', 'hold'),
+                    }
+                    _adapted = adapt_backtest_result(_live_metrics, strategy_type=getattr(_slot, 'strategy_type', ''))
                     try:
-                        from param_pool.backtest_config import BACKTEST_THRESHOLDS as _CI_THRESHOLDS
-                    except ImportError:
-                        _CI_THRESHOLDS = {}
-                _max_ci_width = _CI_THRESHOLDS.get('max_ci_width', 0.5)
-                _min_ci_width = _CI_THRESHOLDS.get('min_ci_width', 0.05)
-                if _ci_width > _max_ci_width:
-                    logger.warning("[StrategyEcosystem] Alpha CI过宽: ci_width=%.4f > max=%.4f，CI置信区间不足", _ci_width, _max_ci_width)
-                if _alpha_action == 'eliminate':
-                    cascade_result['ci_veto'] = 'eliminate'
-                    logger.warning("[StrategyEcosystem] Alpha CI否决(eliminate): ci_width=%.4f, 策略应从生态中淘汰", _ci_width)
-                elif _alpha_action == 'reduce_weight':
-                    cascade_result['ci_veto'] = 'reduce_weight'
-                    logger.warning("[StrategyEcosystem] Alpha CI降权(reduce_weight): ci_width=%.4f, 资金分配降权", _ci_width)
-                elif _alpha_action == 'flag':
-                    cascade_result['ci_flag'] = True
-                    logger.info("[StrategyEcosystem] Alpha CI标注(flag): ci_width=%.4f, Sharpe中等可靠", _ci_width)
+                        from ali2026v3_trading.config.config_service import get_cached_params
+                        _params_for_cascade = get_cached_params()
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
+                        _params_for_cascade = None
+                    _capital_scale_str = self._capital_scale.value if self._capital_scale else 'medium'
+                    _cascade = CascadeJudge.from_config(capital_scale=_capital_scale_str, params=_params_for_cascade)
+                    _cascade_report = _cascade.judge(_adapted)
+                    cascade_result = {
+                        'passed': _cascade_report.passed,
+                        'score': _cascade_report.final_score,
+                        'fatal': _cascade_report.fatal_reason,
+                    }
+                    if not _cascade_report.passed:
+                        logger.warning("[StrategyEcosystem] 瀑布式评判否决: %s", _cascade_report.fatal_reason)
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
-                cascade_result = {'error': str(_e)}
+                    _ci_width = _live_metrics.get('sharpe_ci_width', 0.0)
+                    _alpha_action = _live_metrics.get('alpha_action', 'hold')
+                    try:
+                        from param_pool.state_param_sets import BACKTEST_THRESHOLDS as _CI_THRESHOLDS
+                    except ImportError:
+                        try:
+                            from param_pool.backtest_config import BACKTEST_THRESHOLDS as _CI_THRESHOLDS
+                        except ImportError:
+                            _CI_THRESHOLDS = {}
+                    _max_ci_width = _CI_THRESHOLDS.get('max_ci_width', 0.5)
+                    _min_ci_width = _CI_THRESHOLDS.get('min_ci_width', 0.05)
+                    if _ci_width > _max_ci_width:
+                        logger.warning("[StrategyEcosystem] Alpha CI过宽: ci_width=%.4f > max=%.4f，CI置信区间不足", _ci_width, _max_ci_width)
+                    if _alpha_action == 'eliminate':
+                        cascade_result['ci_veto'] = 'eliminate'
+                        logger.warning("[StrategyEcosystem] Alpha CI否决(eliminate): ci_width=%.4f, 策略应从生态中淘汰", _ci_width)
+                    elif _alpha_action == 'reduce_weight':
+                        cascade_result['ci_veto'] = 'reduce_weight'
+                        logger.warning("[StrategyEcosystem] Alpha CI降权(reduce_weight): ci_width=%.4f, 资金分配降权", _ci_width)
+                    elif _alpha_action == 'flag':
+                        cascade_result['ci_flag'] = True
+                        logger.info("[StrategyEcosystem] Alpha CI标注(flag): ci_width=%.4f, Sharpe中等可靠", _ci_width)
+
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
+                    cascade_result = {'error': str(_e)}
 
             try:
                 from ali2026v3_trading.strategy.strategy_ecosystem import validate_ev_cache_time_decay

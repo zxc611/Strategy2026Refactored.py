@@ -155,6 +155,25 @@ def _reset_config_instrument_catalog(data_service) -> None:
     conn = data_service.get_connection()
     try:
         conn.execute("BEGIN")
+        conn.execute("""CREATE TABLE IF NOT EXISTS instruments_registry (
+            instrument_id VARCHAR PRIMARY KEY, product VARCHAR, exchange VARCHAR,
+            year_month VARCHAR, internal_id INTEGER, option_type VARCHAR,
+            strike_price DOUBLE, underlying_future_id INTEGER,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS future_products (
+            product VARCHAR PRIMARY KEY, exchange VARCHAR, format_template VARCHAR,
+            tick_size DOUBLE, contract_size DOUBLE, is_active BOOLEAN)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS option_products (
+            product VARCHAR PRIMARY KEY, exchange VARCHAR, underlying_product VARCHAR,
+            format_template VARCHAR, tick_size DOUBLE, contract_size DOUBLE, is_active BOOLEAN)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS futures_instruments (
+            internal_id BIGINT PRIMARY KEY, instrument_id VARCHAR UNIQUE,
+            product VARCHAR, exchange VARCHAR, year_month VARCHAR, is_active BOOLEAN)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS option_instruments (
+            internal_id BIGINT PRIMARY KEY, instrument_id VARCHAR UNIQUE,
+            product VARCHAR, exchange VARCHAR, underlying_future_id INTEGER,
+            underlying_product VARCHAR, year_month VARCHAR, option_type VARCHAR,
+            strike_price DOUBLE, is_active BOOLEAN)""")
         for table_name in (
             'instruments_registry',
             'option_instruments',
@@ -277,8 +296,18 @@ def _rebuild_config_instruments(data_service, futures_parsed, options_parsed, fu
         next_internal_id += 1
 
     option_rows = []
+    _missing_underlying_count = 0
     for instrument_id, product, exchange, year_month, option_type, strike_price, underlying_future_key in options_parsed:
-        underlying_future_id = future_id_map[underlying_future_key]
+        # FIX-P0-16: underlying_future_key 直接字典访问导致 KeyError 中断所有期权注册
+        underlying_future_id = future_id_map.get(underlying_future_key)
+        if underlying_future_id is None:
+            _missing_underlying_count += 1
+            if _missing_underlying_count <= 10 or _missing_underlying_count % 100 == 0:
+                logging.error(
+                    "[FIX-P0-16] 期权 %s 的标的期货 %s 未在 future_id_map 中, 跳过该期权(累计%d个)",
+                    instrument_id, underlying_future_key, _missing_underlying_count,
+                )
+            continue
         underlying_product = _get_option_underlying_product(product)
         product_code = product.lower() if product else None
         shard_key = ShardRouter._deterministic_hash(product_code) if product_code else None
@@ -293,6 +322,25 @@ def _rebuild_config_instruments(data_service, futures_parsed, options_parsed, fu
     conn = data_service.get_connection()
     try:
         conn.execute("BEGIN")
+        conn.execute("""CREATE TABLE IF NOT EXISTS instruments_registry (
+            instrument_id VARCHAR PRIMARY KEY, product VARCHAR, exchange VARCHAR,
+            year_month VARCHAR, internal_id INTEGER, option_type VARCHAR,
+            strike_price DOUBLE, underlying_future_id INTEGER,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS future_products (
+            product VARCHAR PRIMARY KEY, exchange VARCHAR, format_template VARCHAR,
+            tick_size DOUBLE, contract_size DOUBLE, is_active BOOLEAN)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS option_products (
+            product VARCHAR PRIMARY KEY, exchange VARCHAR, underlying_product VARCHAR,
+            format_template VARCHAR, tick_size DOUBLE, contract_size DOUBLE, is_active BOOLEAN)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS futures_instruments (
+            internal_id BIGINT PRIMARY KEY, instrument_id VARCHAR UNIQUE,
+            product VARCHAR, exchange VARCHAR, year_month VARCHAR, is_active BOOLEAN)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS option_instruments (
+            internal_id BIGINT PRIMARY KEY, instrument_id VARCHAR UNIQUE,
+            product VARCHAR, exchange VARCHAR, underlying_future_id INTEGER,
+            underlying_product VARCHAR, year_month VARCHAR, option_type VARCHAR,
+            strike_price DOUBLE, is_active BOOLEAN)""")
         for table_name in (
             'instruments_registry',
             'option_instruments',
@@ -443,11 +491,16 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                 from ali2026v3_trading.config.config_exchange import ExchangeConfig
                 _ec = ExchangeConfig()
                 _declared_option_products = set(_ec.option_products.keys())
-                _loaded_option_products = {p[0] for p in option_products_set}
+                # FIX-20260704-OPTION-PRODUCT-CASE: 配置声明为大写，TXT中合约ID产品码可能为小写，统一upper后比较
+                _loaded_option_products = {p[0].upper() for p in option_products_set}
                 _missing_in_txt = _declared_option_products - _loaded_option_products
                 if _missing_in_txt:
-                    logging.warning(
-                        "[ensure_products] 配置声明但TXT缺失的期权品种: %s — 这些品种将无法订阅tick数据",
+                    # FIX-20260704-MISSING-OPTION-PRODUCTS: 降级为INFO，避免启动期日志污染
+                    # 根因: 期货+期权配置总数已达StrategyLib.dll 16287上限(当前16288)，
+                    # 无法为全部声明品种生成期权合约；缺失品种意味着当前未挂牌/未配置期权，
+                    # 策略不会交易这些期权，属正常配置状态，不必以WARNING形式重复提示。
+                    logging.info(
+                        "[ensure_products] 声明但未配置期权的品种(已达合约上限，正常): %s",
                         sorted(_missing_in_txt))
             except Exception as _e:
                 logging.debug("[ensure_products] 期权品种完整性检查跳过: %s", _e)

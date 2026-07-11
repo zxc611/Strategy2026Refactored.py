@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Any
 
@@ -121,6 +122,12 @@ class PositionPnlService:
         return _REASON_STRATEGY_MAP.get(open_reason, 'high_freq')
 
     def _check_stop_profit(self, record, current_price: float) -> None:
+        # FIX-20260704-STARTUP-GRACE: 启动后30秒内跳过止盈检查
+        _now_ts = time.time()
+        if not hasattr(self._ps, '_startup_close_grace_until'):
+            self._ps._startup_close_grace_until = _now_ts + 30.0
+        if _now_ts < self._ps._startup_close_grace_until:
+            return
         if record.volume == 0:
             return
         if record.stop_profit_price > 0:
@@ -142,8 +149,35 @@ class PositionPnlService:
                 )
 
     def _check_stop_loss(self, record, current_price: float) -> None:
+        # FIX-20260704-STARTUP-GRACE: 启动后30秒内跳过止损检查
+        _now_ts = time.time()
+        if not hasattr(self._ps, '_startup_close_grace_until'):
+            self._ps._startup_close_grace_until = _now_ts + 30.0
+        if _now_ts < self._ps._startup_close_grace_until:
+            return
         if record.volume == 0:
             return
+        # FIX-20260709-P0: 增加-2点绝对硬止损 (不依赖stop_loss_price设置)
+        # 根因: 期权买卖价差约1点，5分钟时间止损导致每笔亏-1点；
+        # 原止损close_stop_loss_ratio=0.3(30%)对低价期权过于宽松，需绝对点数止损截断亏损
+        if record.open_price > 0 and current_price > 0:
+            is_long = record.volume > 0
+            if is_long:
+                _unrealized_pts = current_price - record.open_price
+            else:
+                _unrealized_pts = record.open_price - current_price
+            if _unrealized_pts <= -2.0:
+                if getattr(record, '_closing', False) or getattr(record, 'closing_order_id', ''):
+                    return
+                logging.info(
+                    '[PositionService] FIX-20260709-P0: -2点绝对硬止损触发, instrument=%s direction=%s '
+                    'open=%.2f current=%.2f loss=%.2fpt',
+                    record.instrument_id, 'LONG' if is_long else 'SHORT',
+                    record.open_price, current_price, _unrealized_pts,
+                )
+                self._ps._trigger_close_position(
+                    record, f"HardStopLoss@{current_price:.2f}(loss={_unrealized_pts:.2f}pt)", current_price)
+                return
         if record.stop_loss_price <= 0:
             if record.volume != 0:
                 if record.stop_loss_price == 0:
@@ -227,6 +261,15 @@ class PositionPnlService:
             return None
 
     def _check_time_stop(self, record, now: datetime = None) -> None:
+        # FIX-20260704-STARTUP-GRACE: 启动后30秒内跳过时间止损检查
+        # 根因: 从JSONL恢复的持仓open_time为旧时间，elapsed远超hold_time，
+        # 启动时立即触发全量平仓→平台拒绝result=-1→重试耗尽→CANNOT_CLOSE
+        # 修复: 启动后30秒宽限期内跳过时间止损，待平台就绪+行情到达后再正常检查
+        _now_ts = time.time()
+        if not hasattr(self._ps, '_startup_close_grace_until'):
+            self._ps._startup_close_grace_until = _now_ts + 30.0
+        if _now_ts < self._ps._startup_close_grace_until:
+            return
         now = now or datetime.now(_CHINA_TZ)
         open_reason = getattr(record, 'open_reason', '')
         _sg = getattr(record, 'strategy_group', '')
@@ -234,6 +277,7 @@ class PositionPnlService:
         _STRATEGY_HOLD_OVERRIDES = {
             'spring': 120.0, 'box': 60.0, 'arbitrage': 30.0,
             'market_making': 15.0, 'high_freq': 45.0,
+            'divergence': 45.0, 'resonance': 5.0,
         }
         if _sg in _STRATEGY_HOLD_OVERRIDES:
             max_hold_minutes = _STRATEGY_HOLD_OVERRIDES[_sg]
@@ -346,6 +390,13 @@ class PositionPnlService:
                 logging.debug(f"[PositionService._check_time_stop] SafetyMetaLayer check error: {e}")
 
     def _check_two_stage_stop(self, record, now: datetime = None) -> None:
+        # FIX-20260704-STARTUP-GRACE: 启动后30秒内跳过两阶段止损检查
+        # 根因: 同_check_time_stop，恢复的持仓open_time为旧时间，立即触发止损
+        _now_ts = time.time()
+        if not hasattr(self._ps, '_startup_close_grace_until'):
+            self._ps._startup_close_grace_until = _now_ts + 30.0
+        if _now_ts < self._ps._startup_close_grace_until:
+            return
         # P0-1修复: 与回测引擎擎check_two_stage_stop逻辑对齐
         # Stage1: 持仓时间>=阈值 AND 最大浮盈>=阈值 → 标记stage1_passed
         # Stage2: stage1通过后，利润斜率衰减→触发平仓
@@ -390,6 +441,8 @@ class PositionPnlService:
             'arbitrage': {'stage1_min_minutes': 15.0, 'stage1_profit_threshold': 0.005},
             'market_making': {'stage1_min_minutes': 10.0, 'stage1_profit_threshold': 0.01},
             'high_freq': {'stage1_min_minutes': 20.0, 'stage1_profit_threshold': 0.003},
+            'resonance': {'stage1_min_minutes': 3.0, 'stage1_profit_threshold': 0.005},
+            'divergence': {'stage1_min_minutes': 15.0, 'stage1_profit_threshold': 0.003},
         }
         _override = _TWO_STAGE_STRATEGY_OVERRIDES.get(_sg, {})
         try:

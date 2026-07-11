@@ -253,7 +253,8 @@ class TestHardStopCloseExemptionBehavior:
         safety._daily_hard_stop_triggered = True
         safety._daily_new_open_blocked = True
         open_signal = {"action": "OPEN", "symbol": "test", "amount": 1}
-        result = svc._check_safety_meta_layer(open_signal)
+        # FIX-20260706: _check_safety_meta_layer定义在RiskCheckService上，需通过_check_service访问
+        result = svc._check_service._check_safety_meta_layer(open_signal)
         assert result.is_block, "硬止损期间开仓应被阻断"
 
     def test_hard_stop_allows_close(self):
@@ -262,7 +263,8 @@ class TestHardStopCloseExemptionBehavior:
         safety = get_safety_meta_layer(svc.params)
         safety._daily_hard_stop_triggered = True
         close_signal = {"action": "CLOSE", "symbol": "test", "amount": 1}
-        result = svc._check_safety_meta_layer(close_signal)
+        # FIX-20260706: _check_safety_meta_layer定义在RiskCheckService上，需通过_check_service访问
+        result = svc._check_service._check_safety_meta_layer(close_signal)
         assert not result.is_block, "硬止损期间平仓应被允许"
 
     def test_new_open_blocked_still_allows_close(self):
@@ -272,7 +274,8 @@ class TestHardStopCloseExemptionBehavior:
         safety._daily_hard_stop_triggered = False
         safety._daily_new_open_blocked = True
         close_signal = {"action": "CLOSE", "symbol": "test", "amount": 1}
-        result = svc._check_safety_meta_layer(close_signal)
+        # FIX-20260706: _check_safety_meta_layer定义在RiskCheckService上，需通过_check_service访问
+        result = svc._check_service._check_safety_meta_layer(close_signal)
         assert not result.is_block, "开仓阻断时平仓应被允许"
 
     def test_can_close_always_true(self):

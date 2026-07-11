@@ -67,16 +67,22 @@ class QueryCacheMixin:
         return dt
 
     def query(self, sql: str, params: Optional[List] = None, arrow: bool = True, raise_on_error: bool = False, use_cache: bool = True):
-        """
-        执行 SQL 查询，默认返回 Arrow Table。
-        自动检测 SQL 类型：SELECT/PRAGMA 用读连接，INSERT/UPDATE/DELETE 用写连接。'
-        """
         is_read = sql.strip().upper().startswith(('SELECT', 'PRAGMA', 'DESCRIBE', 'EXPLAIN', 'SHOW'))
         if use_cache and self.QUERY_CACHE_SIZE > 0 and is_read:
             return self._query_with_cache(sql, params, arrow=arrow)
         
         conn = self._get_read_connection() if is_read else self._get_connection()
         try:
+            try:
+                conn.execute("SELECT 1").fetchone()
+            except Exception as _conn_check_err:
+                _err_str = str(_conn_check_err).lower()
+                if any(kw in _err_str for kw in ('connection', 'closed', 'timeout', 'broken pipe', 'reset', 'refused', 'unavailable')):
+                    logger.warning("[FIX-08] 连接不可用，标记不健康并重建: %s", _conn_check_err)
+                    conn._unhealthy = True
+                    self._return_connection(conn)
+                    conn = self._get_read_connection() if is_read else self._get_connection()
+            
             if params:
                 rel = conn.execute(sql, params)
             else:
@@ -86,6 +92,9 @@ class QueryCacheMixin:
                 result = result.read_all()
             return result
         except Exception as e:
+            _err_str = str(e).lower()
+            if any(kw in _err_str for kw in ('connection', 'closed', 'timeout', 'broken pipe', 'reset', 'refused', 'unavailable')):
+                conn._unhealthy = True
             logger.error(f"Query failed: {e}\nSQL: {sql}")
             if raise_on_error:
                 raise

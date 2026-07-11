@@ -55,15 +55,15 @@ import threading
 # Single source of truth for exports - used by both __getatr__ and __all__
 # P1-29[v6] Plan: change _LAZY_IMPORTS from hardcoded dict to dynamically generated from __init__.py __all__
 _LAZY_IMPORTS = {
-    'Strategy2026': ('ali2026v3_trading.strategy_core_service', 'Strategy2026'),
-    'ServiceContainer': ('ali2026v3_trading.config_service', 'ServiceContainer'),
+    'Strategy2026': ('ali2026v3_trading.strategy.strategy_core_service', 'Strategy2026'),
+    'ServiceContainer': ('ali2026v3_trading.infra.service_container', 'ServiceContainer'),
     'InstrumentDataManager': ('ali2026v3_trading', 'InstrumentDataManager'),
-    'OrderService': ('ali2026v3_trading.order_service', 'OrderService'),
-    'RiskService': ('ali2026v3_trading.risk_service', 'RiskService'),
-    'ParamsService': ('ali2026v3_trading.params_service', 'ParamsService'),
-    'StrategyCore': ('ali2026v3_trading.strategy_core_service', 'StrategyCoreService'),
-    'StrategyState': ('ali2026v3_trading.strategy_lifecycle_mixin', 'StrategyState'),
-    'ConfigService': ('ali2026v3_trading.config_service', 'ConfigService'),
+    'OrderService': ('ali2026v3_trading.order.order_service', 'OrderService'),
+    'RiskService': ('ali2026v3_trading.risk.risk_service', 'RiskService'),
+    'ParamsService': ('ali2026v3_trading.config.params_service', 'ParamsService'),
+    'StrategyCore': ('ali2026v3_trading.strategy.strategy_core_service', 'StrategyCoreService'),
+    'StrategyState': ('ali2026v3_trading.lifecycle.lifecycle_state_machine', 'StrategyState'),
+    'ConfigService': ('ali2026v3_trading.config.config_service', 'ConfigService'),
 }
 
 _IMPORT_CACHE: dict = {}  # R21-MEM-P2-10修复: 模块导入缓存无TTL/大小限制，但模块导入后不会变化，无需TTL；条目数有限(<=_LAZY_IMPORTS长度)无需max_size

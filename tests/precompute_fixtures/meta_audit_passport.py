@@ -5,7 +5,7 @@ import re
 import traceback
 import warnings
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 import numpy as np
 import pandas as pd
@@ -520,7 +520,7 @@ class RestrictedExecLoader:
 from ali2026v3_trading.infra.shared_utils import compute_content_hash
 import json
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 import os
 
 import numpy as np

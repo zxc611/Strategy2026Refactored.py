@@ -7,10 +7,10 @@ from __future__ import annotations
 import threading, logging, time, os
 from typing import Any, Dict, List, Optional, Callable, Tuple
 
-from ali2026v3_trading.strategy.kline_data_service import KlineDataService
+from ali2026v3_trading.strategy.instrument_service import KlineDataService
 from ali2026v3_trading.infra.exceptions import FutureLeakException
 from ali2026v3_trading.strategy.tick_processing_service import TickProcessingService, MarketEvent, TickEvent, BarCompletedEvent
-from ali2026v3_trading.strategy.recovery_service import RecoveryService
+from ali2026v3_trading.strategy.persistence_service import RecoveryService
 from ali2026v3_trading.strategy.persistence_service import CheckpointService
 from ali2026v3_trading.strategy.lifecycle_service import LifecycleService
 from ali2026v3_trading.strategy.instrument_service import InstrumentService
@@ -36,7 +36,7 @@ class ServiceFactory:
         is_shadow: bool = False,
         is_backtest: bool = False,
     ):
-        self._strategy_id = strategy_id
+        self._strategy_id = str(strategy_id)
         self._state_store = state_store
         self._callback_group = callback_group
         self._is_shadow = is_shadow
@@ -56,7 +56,7 @@ class ServiceFactory:
 
     def create_kline_service(self) -> Any:
         """创建KlineDataService实例"""
-        from ali2026v3_trading.strategy.kline_data_service import KlineDataService
+        from ali2026v3_trading.strategy.instrument_service import KlineDataService
         svc = KlineDataService(
             state_store=self._state_store,
             callback_group=self._callback_group,
@@ -151,17 +151,18 @@ class StrategyCoreService:
 
     def _init_core_deps(self, event_bus):
         try:
-            from ali2026v3_trading.infra.phase_feature_flag import PhaseFeatureFlag
+            from ali2026v3_trading.infra.metrics_registry import PhaseFeatureFlag
             if PhaseFeatureFlag.is_enabled('USE_BUILDER_INIT'):
-                from ali2026v3_trading.strategy.strategy_core_service_builder import StrategyCoreServiceBuilder
+                from ali2026v3_trading.strategy.strategy_core_service import StrategyCoreServiceBuilder
                 _b = StrategyCoreServiceBuilder()
                 _b.set_config(getattr(self, '_params', {})); _b.set_event_bus(event_bus)
                 _b.build_state_store().build_managers().build_thread_pools().build_platform_apis().build_monitoring()
                 _b.apply_to(self); self._init_services(event_bus); return
         except (ImportError, AttributeError, TypeError) as _builder_err:
             logging.debug("[StrategyCoreService] Builder初始化失败，回退手动导入: %s", _builder_err)
-        self._state_store = self._try_import('ali2026v3_trading.infra.state_store', 'get_state_store')
-        self._callback_group = self._try_import('ali2026v3_trading.infra.callback_registry', 'get_callback_group')
+        self._state_store = self._try_import('ali2026v3_trading.infra.service_contracts', 'get_state_store')
+        # FIX-R7: callback_registry模块已重构至registry_service，更新引用路径
+        self._callback_group = self._try_import('ali2026v3_trading.infra.registry_service', 'get_callback_group')
         self._data_access = self._try_import('ali2026v3_trading.data.data_access', 'get_data_access')
         self._strategy_executor = self._create_executor(); self._init_services(event_bus)
 
@@ -212,7 +213,8 @@ class StrategyCoreService:
     def _create_executor(self):
         try:
             import concurrent.futures as _cf
-            return _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"strat_{self.strategy_id[:12]}")
+            _sid_str = str(self.strategy_id)
+            return _cf.ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"strat_{_sid_str[:12]}")
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _e:
             logging.warning("[R22-P1-NEW] 策略线程池创建失败: %s", _e); return None
 
@@ -293,7 +295,7 @@ class StrategyCoreService:
     def _init_logging(self, p=None): self._lifecycle_svc._init_logging(p); self._config_layer.init_logging(p)
     def _init_scheduler(self): self._lifecycle_svc._init_scheduler(); self._config_layer.init_scheduler()
     def _stop_scheduler(self): self._lifecycle_svc._stop_scheduler(); self._config_layer.stop_scheduler()
-    _LIFECYCLE_DELEGATE = frozenset({'_start_platform_subscribe_async','_platform_subscribe_worker','_do_bind_platform_apis','_inject_runtime_context','_get_fallback_market_center','_init_analytics_services','_build_instrument_groups','_resolve_option_underlying_id','_init_t_type_service_and_preload','_register_analytics_jobs','_start_analytics_warmup_async','_ensure_analytics_ready','_warm_storage_async','_start_historical_kline_load_async','_start_historical_kline_load','_shutdown_historical_services','_unsubscribe_all_instruments','_shutdown_runtime_services','_log_resource_ownership_table','_log_t_type_future_probe','_add_option_status_diagnosis_job','_add_tick_sync_job','_add_14_contracts_diagnosis_job','_add_trading_jobs','_ensure_check_pending_orders_job','_publish_event','compare_parallel_results','get_parallel_running_status','record_parallel_result','get_parallel_results','prepare_restart','record_tick','record_trade','record_signal','get_uptime','_init_lifecycle_submodules','_init_logging','_init_scheduler','_extract_contract_year_month','_reset_historical_state_for_restart'})
+    _LIFECYCLE_DELEGATE = frozenset({'_start_platform_subscribe_async','_platform_subscribe_worker','_do_bind_platform_apis','_inject_runtime_context','_get_fallback_market_center','_init_analytics_services','_build_instrument_groups','_resolve_option_underlying_id','_init_t_type_service_and_preload','_register_analytics_jobs','_start_analytics_warmup_async','_ensure_analytics_ready','_warm_storage_async','_start_historical_kline_load_async','_start_historical_kline_load','_shutdown_historical_services','_unsubscribe_all_instruments','_shutdown_runtime_services','_log_resource_ownership_table','_log_t_type_future_probe','_add_option_status_diagnosis_job','_add_tick_sync_job','_add_14_contracts_diagnosis_job','_add_trading_jobs','_ensure_check_pending_orders_job','_publish_event','compare_parallel_results','get_parallel_running_status','record_parallel_result','get_parallel_results','prepare_restart','record_tick','record_trade','record_signal','get_uptime','_init_lifecycle_submodules','_init_logging','_init_scheduler','_extract_contract_year_month','_reset_historical_state_for_restart','_lifecycle_platform','_lifecycle_state_machine','_lifecycle_resource','_lifecycle_parallel','_lc_transition','_lc_init','_lc_bind','_lc_callbacks','_lc_monitor','_lc_parallel_ops','_cancel_all_timers'})
     def _auto_recovery_flow(self): return self._recovery_svc.auto_recovery_flow()
     def _watchdog_restart(self, mr=3, cs=60): return self._recovery_svc.watchdog_restart(mr, cs)
     def recover_from_checkpoint(self): return self._recovery_svc.recover_from_checkpoint()
@@ -358,7 +360,7 @@ class StrategyCoreServiceBuilder:
 
     def build_state_store(self) -> 'StrategyCoreServiceBuilder':
         try:
-            from ali2026v3_trading.infra.state_store import StateStore
+            from ali2026v3_trading.infra.service_contracts import StateStore
             self._built_state_store = StateStore()
         except ImportError:
             self._built_state_store = None
@@ -408,7 +410,7 @@ class StrategyCoreServiceBuilder:
             'health_aggregator': None,
         }
         try:
-            from ali2026v3_trading.infra.performance_monitor import PerformanceMonitor
+            from ali2026v3_trading.infra.metrics_registry import PerformanceMonitor
             self._built_monitoring['performance_monitor'] = PerformanceMonitor()
         except ImportError:
             pass
@@ -437,6 +439,6 @@ class StrategyCoreServiceBuilder:
         return instance
 
 # 打破循环依赖: StrategyParams 从独立模块导入，不再从 strategy_2026 导入
-from ali2026v3_trading.strategy.types import StrategyParams
+from ali2026v3_trading.strategy.instrument_service import StrategyParams
 # Re-export Strategy2026 for backward compatibility
 from ali2026v3_trading.strategy.strategy_2026 import Strategy2026

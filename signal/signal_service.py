@@ -13,10 +13,9 @@ from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.infra.shared_utils import SignalType, VALID_SIGNAL_TYPES, OPEN_SIGNAL_TYPES
+from ali2026v3_trading.infra.shared_utils import SignalType, VALID_SIGNAL_TYPES, OPEN_SIGNAL_TYPES, CLOSE_SIGNAL_TYPES
 from ali2026v3_trading.infra.shared_utils import generate_prefixed_id  # R9-3
-from ali2026v3_trading.signal.signal_timing_filter import KalmanFilter1D, EMASignalFilter, SignalTimingFilter, AdaptiveSignalThreshold
-from ali2026v3_trading.signal.signal_history_service import SignalHistoryService
+from ali2026v3_trading.signal.signal_components import KalmanFilter1D, EMASignalFilter, SignalTimingFilter, AdaptiveSignalThreshold, SignalHistoryService, CooldownManager, SignalFilterChain
 try:
     from ali2026v3_trading.governance.mode_engine import ModeEngine
 except ImportError:
@@ -94,14 +93,15 @@ class SignalContext:
 class SignalGenerator:
     """generate_signal过滤链模式(反向合并入signal_service)
 
-    _FILTER_CHAIN定义7层过滤链执行顺序:
+    _FILTER_CHAIN定义8层过滤链执行顺序:
     1. _filter_by_strength: 信号强度过滤
     2. _filter_by_plr: PLR过滤
     3. _filter_by_mode_engine: ModeEngine模式过滤
     4. _filter_by_cooldown: 冷却过滤
-    5. _filter_by_decision_score: 决策评分过滤
-    6. _filter_by_hft: HFT时序过滤
-    7. _filter_by_adaptive: 自适应阈值过滤
+    5. _filter_by_s5_s6_monitor: S5套利/S6做市商硬约束过滤(FIX-20260711-S5S6-CHAIN)
+    6. _filter_by_decision_score: 决策评分过滤
+    7. _filter_by_hft: HFT时序过滤
+    8. _filter_by_adaptive: 自适应阈值过滤
     """
 
     _FILTER_CHAIN = [
@@ -109,6 +109,7 @@ class SignalGenerator:
         '_filter_by_plr',
         '_filter_by_mode_engine',
         '_filter_by_cooldown',
+        '_filter_by_s5_s6_monitor',
         '_filter_by_decision_score',
         '_filter_by_hft',
         '_filter_by_adaptive',
@@ -195,6 +196,80 @@ class SignalGenerator:
             ctx.filter_name = 'cooldown'
         return ctx
 
+    def _filter_by_s5_s6_monitor(self, ctx: SignalContext) -> SignalContext:
+        """FIX-20260711-S5S6-CHAIN: S5套利/S6做市商硬约束过滤
+
+        与订单流/希腊字母/夏普/三角评判/盈亏比/延迟/资金大小七模块做相同处理，
+        但作为**硬约束**（绝对不能违背）：
+
+        - S5套利信号方向与当前信号方向冲突 → 拒绝
+        - S6做市preferred_side与当前信号方向冲突 → 拒绝
+        - 无S5/S6信号（TTL过期或未初始化） → 放行（不阻断正常交易）
+        - CLOSE信号 → 放行（平仓不受约束，风控优先）
+        """
+        # CLOSE信号不受S5/S6约束（风控平仓优先）
+        if ctx.signal_type in CLOSE_SIGNAL_TYPES:
+            return ctx
+
+        # 确定当前信号方向: BUY=开多, SELL=开空
+        _signal_dir = 'BUY' if ctx.signal_type == SignalType.BUY else 'SELL'
+
+        # === S5套利硬约束 ===
+        try:
+            from ali2026v3_trading.strategy.monitor.arbitrage_monitor import ArbitrageMonitor
+            _arb = ArbitrageMonitor.get_instance()
+            _last_sig = _arb.get_last_simulated_signal()
+            if _last_sig is not None:
+                # 检查TTL: 信号生成时间在60秒内有效
+                import time as _time
+                _sig_age = _time.time() - getattr(_last_sig, 'timestamp', 0.0)
+                if _sig_age <= 60.0:
+                    _s5_dir = str(getattr(_last_sig, 'direction', '')).upper()
+                    _s5_inst = str(getattr(_last_sig, 'instrument_id', ''))
+                    # 仅当instrument_id匹配时才硬约束（同品种）
+                    if _s5_inst == ctx.instrument_id and _s5_dir and _s5_dir != _signal_dir:
+                        self._svc._stats['filtered_signals'] += 1
+                        self._svc._stats['s5_s6_conflict_filtered'] = self._svc._stats.get('s5_s6_conflict_filtered', 0) + 1
+                        logging.info(
+                            "[S5S6-CHAIN] 信号被S5套利硬约束拒绝: %s %s vs S5=%s (age=%.1fs)",
+                            ctx.instrument_id, _signal_dir, _s5_dir, _sig_age,
+                        )
+                        ctx.rejected = True
+                        ctx.reject_reason = f's5_arbitrage_conflict: signal={_signal_dir} s5={_s5_dir}'
+                        ctx.filter_name = 's5_s6_monitor'
+                        return ctx
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s5_err:
+            logging.debug("[S5S6-CHAIN] S5套利监控查询失败(放行): %s", _s5_err)
+
+        # === S6做市商硬约束 ===
+        try:
+            from ali2026v3_trading.strategy.monitor.market_making_monitor import MarketMakingMonitor
+            # FIX-20260711-S6-TOP-TIER: P2 多合约registry — 按instrument_id获取实例
+            _mmm = MarketMakingMonitor.get_instance(instrument_id=ctx.instrument_id)
+            _preferred = str(_mmm.get_preferred_side()).lower()
+            if _preferred != 'neutral':
+                _s6_inst = str(getattr(_mmm, 'instrument_id', ''))
+                # 仅当instrument_id匹配时才硬约束（同品种）
+                if _s6_inst == ctx.instrument_id:
+                    # S6 preferred_side='buy' 表示更想买 → 支持BUY方向
+                    # S6 preferred_side='sell' 表示更想卖 → 支持SELL方向
+                    _s6_supports = 'BUY' if _preferred == 'buy' else 'SELL'
+                    if _s6_supports != _signal_dir:
+                        self._svc._stats['filtered_signals'] += 1
+                        self._svc._stats['s5_s6_conflict_filtered'] = self._svc._stats.get('s5_s6_conflict_filtered', 0) + 1
+                        logging.info(
+                            "[S5S6-CHAIN] 信号被S6做市商硬约束拒绝: %s %s vs S6=%s",
+                            ctx.instrument_id, _signal_dir, _s6_supports,
+                        )
+                        ctx.rejected = True
+                        ctx.reject_reason = f's6_market_making_conflict: signal={_signal_dir} s6={_s6_supports}'
+                        ctx.filter_name = 's5_s6_monitor'
+                        return ctx
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s6_err:
+            logging.debug("[S5S6-CHAIN] S6做市商监控查询失败(放行): %s", _s6_err)
+
+        return ctx
+
     def _filter_by_decision_score(self, ctx: SignalContext) -> SignalContext:
         _dim_kwargs = self._svc._collect_decision_dimensions(ctx.instrument_id)
         if getattr(self._svc, '_decision_score_filter_enabled', True):
@@ -221,7 +296,8 @@ class SignalGenerator:
                     logging.warning("[R22-EP-P1] decision_score_filter异常, fail-safe阻断: %s (后续同类异常静默)", e)
                     self._svc._dsf_warn_suppressed = True
                 ctx.rejected = True
-                ctx.reject_name = 'decision_score_exception'
+                # FIX-P0-20: ctx.reject_name 拼写错误，应为 ctx.reject_reason
+                ctx.reject_reason = 'decision_score_exception'
                 ctx.filter_name = 'decision_score'
         else:
             try:
@@ -367,6 +443,35 @@ class SignalGenerator:
             logging.debug("[R3-L2] suppressed exception", exc_info=True)
             pass
             pass
+        # FIX-20260711-S5S6-CHAIN: 收集S5套利/S6做市商维度（与7模块做相同处理）
+        try:
+            from ali2026v3_trading.strategy.monitor.arbitrage_monitor import ArbitrageMonitor
+            _arb = ArbitrageMonitor.get_instance()
+            _last_arb = _arb.get_last_simulated_signal()
+            if _last_arb is not None:
+                kwargs['s5_arbitrage_signal'] = {
+                    'direction': getattr(_last_arb, 'direction', ''),
+                    'deviation_bps': getattr(_last_arb, 'deviation_bps', 0.0),
+                    'confidence': getattr(_last_arb, 'confidence', 0.0),
+                    'quality_score': getattr(_last_arb, 'quality_score', 0.0),
+                    'instrument_id': getattr(_last_arb, 'instrument_id', ''),
+                }
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
+            logging.debug("[R3-L2] S5套利维度收集失败", exc_info=True)
+            pass
+        try:
+            from ali2026v3_trading.strategy.monitor.market_making_monitor import MarketMakingMonitor
+            # FIX-20260711-S6-TOP-TIER: P2 多合约registry — 按instrument_id获取实例
+            _mmm = MarketMakingMonitor.get_instance(instrument_id=instrument_id)
+            kwargs['s6_market_making_state'] = {
+                'preferred_side': _mmm.get_preferred_side(),
+                'inventory_skew': _mmm.get_inventory_skew(),
+                'inventory': _mmm.get_inventory(),
+                'instrument_id': getattr(_mmm, 'instrument_id', ''),
+            }
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
+            logging.debug("[R3-L2] S6做市商维度收集失败", exc_info=True)
+            pass
         return kwargs
 
     @staticmethod
@@ -417,7 +522,7 @@ class SignalGenerator:
         svc._cooldown_durations = {}
         svc._last_cleanup = time.time()
         svc._signal_dedup_cache = {}
-        svc._stats = {'total_signals': 0, 'filtered_signals': 0, 'plr_filtered': 0, 'mode_filtered': 0, 'cooldown_filtered': 0, 'decision_filtered': 0, 'emitted_signals': 0, 'dedup_filtered': 0, 'last_signal_time': None}
+        svc._stats = {'total_signals': 0, 'filtered_signals': 0, 'plr_filtered': 0, 'mode_filtered': 0, 'cooldown_filtered': 0, 'decision_filtered': 0, 'emitted_signals': 0, 'dedup_filtered': 0, 's5_s6_conflict_filtered': 0, 'last_signal_time': None}
         svc._lock = __import__('threading').RLock()
         svc._signal_queue = __import__('collections').deque(maxlen=2000)
         svc._signal_states = {}
@@ -430,13 +535,12 @@ class SignalGenerator:
         svc._plr_filter_enabled = False
         svc._hft_signal_filter = None
         svc._hft_filter_enabled = False
-        from ali2026v3_trading.signal.signal_filter_chain import SignalFilterChain
-        from ali2026v3_trading.signal.cooldown_manager import CooldownManager
+
         svc._filter_chain = SignalFilterChain(svc)
         svc._cooldown_mgr = CooldownManager()
         svc._decision_score_filter_enabled = True
         svc._adaptive_threshold = None
-        from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR
+        from ali2026v3_trading.config._params_canary_env import DEFAULT_LOG_DIR
         svc._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_LOG_DIR)
         svc._history_service.set_log_dir(svc._log_dir)
         svc._daily_report_generated = {}
@@ -483,7 +587,7 @@ class SignalGenerator:
             pass
             pass
         try:
-            from ali2026v3_trading.signal.signal_service import AdaptiveSignalThreshold
+
             svc._adaptive_threshold = AdaptiveSignalThreshold()
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             svc._adaptive_threshold = None

@@ -474,6 +474,87 @@ class StorageDataWriteService:
                     logging.debug("外部 K 线正常，丢弃合成的 K 线：%s %s %.3f",
                                   instrument, period, completed_ts)
 
+    # FIX-M3: K线聚合被完全绕过修复
+    # 根因: _dispatch_tick_inner 直接调用 batch_insert_ticks, 绕过 process_tick 中的 _KlineAggregator
+    # 修复: 新增 aggregate_kline_only(tick) 只跑 K线聚合，不重复写 tick (避免与 batch_insert_ticks 双写)
+    @requires_phase(InitPhase.READY)
+    def aggregate_kline_only(self, tick: Dict[str, Any]) -> None:
+        """仅运行 K线聚合器，不写 tick (tick 已由 batch_insert_ticks 写入)。
+
+        与 process_tick 的差异:
+        - 跳过 _enqueue_write('_save_tick_impl')，避免与 batch_insert_ticks 双写
+        - 仅执行 _KlineAggregator.update() 并在K线完成时调用 save_external_kline
+        - 兼容 datetime/ts/timestamp/UpdateTime 字段名
+        """
+        try:
+            if not isinstance(tick, dict):
+                return
+            tick_norm = self._normalize_tick_fields(tick)
+            tick_ts = self._to_timestamp(tick_norm.get('ts'))
+            if tick_ts is None:
+                return
+            instrument = tick_norm.get('instrument_id')
+            price = tick_norm.get('last_price')
+            # FIX-P0-17: price<=0时尝试使用bid/ask中间价，避免深度虚值期权K线永远无法生成
+            if not isinstance(price, (int, float)) or price <= 0:
+                _bid = tick_norm.get('bid_price1') or tick_norm.get('bid_price')
+                _ask = tick_norm.get('ask_price1') or tick_norm.get('ask_price')
+                if isinstance(_bid, (int, float)) and isinstance(_ask, (int, float)) and _bid > 0 and _ask > 0:
+                    price = (_bid + _ask) / 2.0
+                else:
+                    return
+            if not instrument:
+                return
+            current_time = tick_ts
+            for period in self.SUPPORTED_PERIODS:
+                key = (instrument, period)
+                with self._agg_lock:
+                    agg = self._aggregators.get(key)
+                    if agg is None:
+                        agg = _KlineAggregator(instrument, period, logging.getLogger(__name__))
+                        self._aggregators[key] = agg
+                completed_kline = agg.update(tick_ts, price,
+                                             volume=tick_norm.get('volume', 0),
+                                             amount=tick_norm.get('amount', 0.0),
+                                             open_interest=tick_norm.get('open_interest'))
+                if completed_kline:
+                    if self._is_ext_kline_missing(instrument, period, current_time):
+                        self.save_external_kline(completed_kline)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _agg_err:
+            logging.debug("[FIX-M3] aggregate_kline_only failed (non-fatal): %s", _agg_err)
+
+    @requires_phase(InitPhase.READY)
+    def flush_incomplete_klines(self) -> int:
+        """FIX-M8-3: 强制刷新所有未完成的K线，解决稀疏tick场景下K线永不完成的问题。
+
+        场景: 736 real ticks / 16288 instruments = ~0.045 tick/instrument
+        大多数instrument只有1个tick，_KlineAggregator.update()初始化后永不返回completed_kline
+        导致klines_real=0，即使tick数据已正常落库。
+
+        此方法遍历所有_aggregators，调用flush()强制返回当前未完成的K线，
+        确保每个收到tick的instrument至少有一根K线落库。
+        应由周期性任务(flush_tick_buffer)调用。
+        """
+        flushed_count = 0
+        try:
+            with self._agg_lock:
+                aggregators = list(self._aggregators.items())
+            for (instrument, period), agg in aggregators:
+                try:
+                    kline = agg.flush()
+                    if kline:
+                        if self._is_ext_kline_missing(instrument, period, time.time()):
+                            self.save_external_kline(kline)
+                            flushed_count += 1
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _flush_err:
+                    logging.debug("[FIX-M8-3] flush aggregator failed: inst=%s period=%s err=%s",
+                                  instrument, period, _flush_err)
+            if flushed_count > 0:
+                logging.info("[FIX-M8-3] flush_incomplete_klines: 刷新 %d 根未完成K线", flushed_count)
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _bulk_err:
+            logging.warning("[FIX-M8-3] flush_incomplete_klines bulk failed: %s", _bulk_err)
+        return flushed_count
+
     @requires_phase(InitPhase.READY)
     def save_external_kline(self, kline_data: Dict[str, Any]) -> None:
         if not self._validate_kline(kline_data):
@@ -496,7 +577,7 @@ class StorageDataWriteService:
             with self._lock:
                 if warn_key not in self._runtime_missing_warned:
                     self._runtime_missing_warned.add(warn_key)
-                    logging.warning("[save_external_kline] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
+                    logging.debug("[save_external_kline] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
             return
 
         internal_id = self._get_info_internal_id(info)

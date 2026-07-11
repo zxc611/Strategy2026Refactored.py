@@ -783,6 +783,34 @@ parameter_attributes:
       max_net_gamma_pct: 0.20
       max_net_vega_bps: 0.10
 
+  dry_run_mode:
+    default: true
+    type: bool
+    layer: engineering
+    editable: runtime
+    description: "模拟运行模式(只记录信号不下单)，用于验证数据/交易链路"
+    source: design
+    evidence: "实盘模拟跑通专用开关，生产环境必须关闭"
+    last_validated: "2026-06-30"
+    side_effects:
+      _platform_insert_order: "bypassed"
+      _platform_cancel_order: "bypassed"
+      cascade_judge: "bypassed"
+      cyclic_dependency_guard: "bypassed"
+      on_order_callback: "simulated (dry_run自构造虚拟回报)"
+      on_trade_callback: "simulated (dry_run自构造虚拟成交)"
+
+  dry_run_callback_delay_sec:
+    default: 0.05
+    type: float
+    range: [0.0, 5.0]
+    layer: engineering
+    editable: runtime
+    description: "dry_run模式下虚拟回调注入延迟(秒)，模拟平台网络往返"
+    source: design
+    evidence: "50ms≈CTP本地回报典型延迟"
+    last_validated: "2026-06-30"
+
   # --------------------------------------------------------------------------
   # 次系统5 TVF六维仓位调整因子参数
   # --------------------------------------------------------------------------
@@ -2367,9 +2395,10 @@ route_priority:
 mutual_exclusion:
   rules:
     - [debug_mode, stress_test_mode]
-  description: "调试模式和压力测试模式不可同时开启"
+    - [dry_run_mode, stress_test_mode]
+  description: "调试模式和压力测试模式不可同时开启；dry_run与stress_test不可同时开启(压力测试会污染dry_run验证结果)"
   source: "设计"
-  evidence: "运行时安全约束：debug与stress_test模式互斥"
+  evidence: "运行时安全约束：debug与stress_test模式互斥；dry_run与stress_test模式互斥"
 
 # ============================================================
 # 参数依赖关系
@@ -2410,3 +2439,128 @@ constraints:
   max_risk_positions:
     rule: "max_risk_ratio * position_limit_max_ratio must not exceed allowed risk budget"
     strict: false
+
+# ============================================================================
+# v2.8 §21: 三层排序五态组合方案参数
+# ============================================================================
+
+  sorter.scoring_scheme:
+    default: "scheme_1"
+    type: string
+    range: ["scheme_1", "scheme_2", "scheme_3", "all"]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "排序方案选择: scheme_1=实盘默认(net_score+confidence), scheme_2=D/Q正交分解, scheme_3=entropy+concentration+direction_bias, all=全特征"
+    source: design
+    evidence: "v2.8 §21.4 实施路线, 实盘默认scheme_1(稳妥)"
+    last_validated: "2026-07-07"
+
+  sorter.output_mode:
+    default: "research"
+    type: string
+    range: ["research", "production"]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "输出模式: research=全字段(回测用), production=瘦身字段(实盘用, 按scoring_scheme自动选择)"
+    source: design
+    evidence: "v2.8 §21.2 铁律二: 生产环境必须瘦身"
+    last_validated: "2026-07-07"
+
+  sorter.direction_threshold:
+    default: 0.10
+    type: float
+    range: [0.05, 0.20]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "方向判定阈值: D > threshold → long, D < -threshold → short"
+    source: design
+    evidence: "v2.8 §21.1 评审二默认值0.1"
+    last_validated: "2026-07-07"
+
+  sorter.quality_high_threshold:
+    default: 0.30
+    type: float
+    range: [0.20, 0.40]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "质量分级阈值: Q > threshold → high, Q > 0 → medium, else → low"
+    source: design
+    evidence: "v2.8 §21.1 评审二默认值0.3"
+    last_validated: "2026-07-07"
+
+  sorter.sort_trigger_bars:
+    default: 1
+    type: int
+    range: [1, 60]
+    layer: L0_risk
+    editable: restart_required
+    description: "排序激发间隔(K线倍数): 每隔N根K线触发一次排序. 1=每根K线(默认), 2=每2根, 3=每3根. 实际秒数=sort_trigger_bars×K线周期(由kline_style决定), M1时1bar=60s, M5时1bar=300s"
+    source: design
+    evidence: "v2.8 专业定义: 排序激发以K线长度为基准单位, 默认1根K线"
+    last_validated: "2026-07-07"
+
+  sorter.kline_style:
+    default: "M1"
+    type: string
+    range: ["T1", "M1", "M3", "M5", "M15", "M30", "H1"]
+    layer: L0_risk
+    editable: restart_required
+    description: "K线周期: 与config_params.kline_style对齐, 决定sort_trigger_bars和cooldown_bars的秒数换算. T1=tick级(1bar=1tick≈1s), M1=60s/根, M5=300s/根. 高频策略用T1"
+    source: design
+    evidence: "v2.8: 排序时间约束以K线为基准, T1支持高频1bar=1tick"
+    last_validated: "2026-07-07"
+
+  sorter.cooldown_bars:
+    default: 0
+    type: int
+    range: [0, 30]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "信号冷却期(K线倍数): 同一品种两次信号之间的最小K线根数间隔. 0=无冷却(默认,排序驱动即可), 1=1根K线冷却(M1=60s), 2=2根(M1=120s). 避免排序结果变化不大时重复下单"
+    source: design
+    evidence: "v2.8 专业定义: 冷却期以K线长度为基准, 0=由排序激发间隔自然节流"
+    last_validated: "2026-07-07"
+
+  sorter.tier1_wilson_threshold:
+    default: 0.50
+    type: float
+    range: [0.30, 0.70]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "Tier1(高置信)Wilson下界阈值: coverage≥80%且wilson≥此值→Tier1"
+    source: design
+    evidence: "v2.8 参数化: 原 TIER1_WILSON_THRESHOLD=0.50 硬编码常量"
+    last_validated: "2026-07-07"
+
+  sorter.tier2_coverage_threshold:
+    default: 0.40
+    type: float
+    range: [0.20, 0.60]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "Tier2(中置信)覆盖率阈值: coverage≥此值且correct_up_pct≥tier2_correct_up→Tier2"
+    source: design
+    evidence: "v2.8 参数化: 原 TIER2_COVERAGE_THRESHOLD=0.40 硬编码常量"
+    last_validated: "2026-07-07"
+
+  sorter.tier2_correct_up_threshold:
+    default: 0.45
+    type: float
+    range: [0.30, 0.60]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "Tier2(中置信)正确上涨比阈值: correct_up_pct≥此值(且coverage≥tier2_coverage)→Tier2"
+    source: design
+    evidence: "v2.8 参数化: 原 TIER2_CORRECT_UP_THRESHOLD=0.45 硬编码常量"
+    last_validated: "2026-07-07"
+
+  sorter.tier3_correct_up_threshold:
+    default: 0.35
+    type: float
+    range: [0.20, 0.50]
+    layer: L0_risk
+    editable: runtime_readonly
+    description: "Tier3(低置信)正确上涨比阈值: correct_up_pct≥此值→Tier3, 低于此值→Tier4(噪声)"
+    source: design
+    evidence: "v2.8 参数化: 原 TIER3_CORRECT_UP_THRESHOLD=0.35 硬编码常量"
+    last_validated: "2026-07-07"

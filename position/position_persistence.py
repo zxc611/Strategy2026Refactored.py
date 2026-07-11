@@ -133,6 +133,15 @@ class PositionPersistenceService:
                 try:
                     # 完整快照恢复
                     if 'position_id' in snap and 'open_time' in snap:
+                        # FIX-20260704-GHOST-PERSIST: CANNOT_CLOSE持仓在恢复时直接删除
+                        # 根因: 重启后closing_order_id被重置为空，CANNOT_CLOSE标记丢失，
+                        # 导致幽灵持仓每次重启都重新触发TimeStop/StopProfit→平台拒绝→重试耗尽→CANNOT_CLOSE
+                        # 每轮产生321条ERROR+WARNING洪泛(229条平仓重试耗尽+233条平仓下单失败+88条R28重试)
+                        # 修复: closing_order_id为CANNOT_CLOSE的持仓是已确认无法平仓的幽灵持仓，恢复时跳过
+                        _saved_closing_oid = snap.get('closing_order_id', '')
+                        if _saved_closing_oid == 'CANNOT_CLOSE':
+                            logging.info("[GHOST-PERSIST] 跳过恢复CANNOT_CLOSE幽灵持仓: pid=%s inst=%s", pid, inst_id)
+                            continue
                         rec = PositionRecord.from_dict(snap)
                         # 重启后_closing必须重置为False，避免卡住
                         rec._closing = False

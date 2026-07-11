@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -63,7 +63,7 @@ class CRParams:
     strength_trend_release_threshold: float = 0.05
     hf_co_size: float = 1.0
     hf_co_sl: float = 1.2
-    hf_co_hold: float = 300.0
+    hf_co_hold: float = 1800.0  # FIX-20260709-P0: 5min→30min, 给期权足够时间发展
     hf_counter_size: float = 0.4
     hf_counter_sl: float = 0.4
     hf_counter_hold: float = 30.0
@@ -120,6 +120,18 @@ class CRParams:
     sp_default_sl: float = 1.0
     sp_default_hold: float = 3600.0
     sp_bias_boost_mult: float = 1.2
+    div_chaos_size: float = 0.1
+    div_chaos_sl: float = 0.3
+    div_chaos_hold: float = 180.0
+    div_release_size: float = 0.7
+    div_release_sl: float = 0.8
+    div_release_hold: float = 1800.0
+    div_default_size: float = 0.4
+    div_default_sl: float = 1.0
+    div_default_hold: float = 900.0
+    div_bias_threshold: float = 0.4
+    div_entropy_penalty_coeff: float = 0.6
+    div_min_size: float = 0.1
     hft_default_floor: float = 0.4
     hft_resonance_floor: float = 0.7
     hft_floor_strength: float = 0.5
@@ -162,7 +174,7 @@ class CycleResonanceOutput:
 class RiskSurfaceAdjustment:
     size_multiplier: float = 1.0
     stop_loss_multiplier: float = 1.0
-    max_hold_seconds: float = 300.0
+    max_hold_seconds: float = 1800.0  # FIX-20260709-P0-V2: 300→1800, 防止_last_output=None时5min截断
     allow_overnight: bool = False
     min_size: float = 0.1
 
@@ -354,6 +366,12 @@ class CycleResonanceModule:
         if output is None:
             output = self._last_output
         if output is None:
+            # FIX-20260709-P0-V2: _last_output=None时crm.update()从未被调用，
+            # 返回保守默认值(max_hold_seconds=1800.0=30min)而非激进的300.0(5min)
+            logging.warning(
+                '[CycleResonanceModule] get_risk_surface: _last_output=None (crm.update未调用), '
+                'strategy=%s 使用保守默认max_hold=1800s', strategy,
+            )
             return RiskSurfaceAdjustment()
 
         is_co_aligned = output.directional_bias * (1 if strategy in ("high_freq", "resonance") else 0) >= 0
@@ -373,8 +391,8 @@ class CycleResonanceModule:
         elif strategy == "spring":
             return self._spring_risk_surface(output, is_charge, is_release)
 
-        elif strategy == "master":
-            return self._resonance_risk_surface(output, is_chaos, is_release)
+        elif strategy == "divergence":
+            return self._divergence_risk_surface(output, is_chaos, is_release)
 
         return RiskSurfaceAdjustment()
 
@@ -524,6 +542,45 @@ class CycleResonanceModule:
             max_hold_seconds=max_hold,
             allow_overnight=overnight,
             min_size=self._p.hf_size_mult_min,
+        )
+
+    def _divergence_risk_surface(
+        self,
+        output: CycleResonanceOutput,
+        is_chaos: bool,
+        is_release: bool,
+    ) -> RiskSurfaceAdjustment:
+        """背离反转策略风险曲面
+
+        FIX-20260711-P1-7: S7独立RiskSurface，不再与S2(resonance)共享。
+        背离反转在混沌期极度保守（背离信号不可靠），释放期可适度参与（趋势确认后背离更可靠），
+        蓄力期轻仓试错。
+        """
+        if is_chaos:
+            size_mult = self._p.div_chaos_size
+            sl_mult = self._p.div_chaos_sl
+            max_hold = self._p.div_chaos_hold
+        elif is_release:
+            size_mult = self._p.div_release_size
+            sl_mult = self._p.div_release_sl
+            max_hold = self._p.div_release_hold
+        else:
+            size_mult = self._p.div_default_size
+            sl_mult = self._p.div_default_sl
+            max_hold = self._p.div_default_hold
+
+        if abs(output.directional_bias) > self._p.div_bias_threshold:
+            size_mult *= 1.1 if output.directional_bias > 0 else 0.9
+
+        entropy_penalty = 1.0 - self._p.div_entropy_penalty_coeff * output.state_entropy
+        size_mult *= entropy_penalty
+
+        return RiskSurfaceAdjustment(
+            size_multiplier=float(np.clip(size_mult, self._p.hf_size_mult_min, self._p.hf_size_mult_max)),
+            stop_loss_multiplier=sl_mult,
+            max_hold_seconds=max_hold,
+            allow_overnight=is_release and output.resonance_strength > 0.5,
+            min_size=self._p.div_min_size,
         )
 
     def check_portfolio_constraints(

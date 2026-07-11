@@ -23,8 +23,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
-from ali2026v3_trading.strategy.shadow_strategy_types import ShadowTradeRecord, AlphaMetrics, ShadowParamsSnapshot
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from ali2026v3_trading.strategy._shadow_types import ShadowTradeRecord, AlphaMetrics, ShadowParamsSnapshot
 from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer, yaml_safe_load
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.infra.resilience import (
@@ -77,6 +77,8 @@ class ShadowStrategySignalService:
         signal_strength: float = 0.0,
         strategy_group: str = "s2_resonance",
     ) -> ShadowTradeRecord:
+        if price <= 0 or quantity <= 0 or not instrument_id:
+            return None
         # FR-P1-02修复: 记录影子引擎tick时间戳
         self._last_shadow_tick_timestamp = time.time()
         with self._lock:
@@ -130,6 +132,8 @@ class ShadowStrategySignalService:
         signal_strength: float = 0.0,
         strategy_group: str = "s2_resonance",
     ) -> ShadowTradeRecord:
+        if price <= 0 or quantity <= 0 or not instrument_id:
+            return None
         with self._lock:
             random_dir = self._rng.choice(['long', 'short'])
 

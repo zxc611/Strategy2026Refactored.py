@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.6.0 (2026-07-03)
+
+### 稳定性与可观测性修复（基于日志分析与端到端验证）
+
+- **registry_service**: `_deep_copy_if_mutable` 增加 `RuntimeError` 捕获，修复并发场景下 deepcopy 字典触发 "dictionary changed size during iteration" 导致 KlineLoad 任务崩溃；退化为返回引用并 debug 日志。
+- **historical_data_manager**: `get('storage')` → `get_ref('storage')`（line 165/292），storage 通过 `set_ref` 存储为共享服务对象，`get` 会 deepcopy 导致并发问题，`get_ref` 返回原引用符合共享服务对象访问语义。
+- **shared_utils**: `atomic_replace_file` 增加 `PermissionError` 捕获 + 3次递增重试（0.1s/0.2s），修复 Windows 下杀毒扫描/句柄未释放导致的 [WinError 5] WAL 文件替换失败。
+- **subscription_service**: 审计增加 90 秒启动宽限期 + 修正误导措辞（`platform_ack_observed=false` 硬编码未真正观测 → `platform_ack_unobservable=true`），消除订阅刚建立时 gap 接近100%的 CRITICAL 误报。
+- **lifecycle_init**: `_init_logging` 提前到品种加载之前（Step0a），修复品种加载失败/阻塞时日志永不初始化的诊断盲区；清理重复代码块（103→73行）。
+
+### SIM/LIVE 代码对齐
+
+- SIM→LIVE: 12个文件（本轮 SIM 修复同步到 LIVE）
+- LIVE→SIM: 4个文件（strategy_2026.py / strategy_core_service.py / ds_schema_manager.py 等热修复回传）
+- 对齐后差异从17降至1（仅剩 CrashProbe.py 临时探针）
+
+### 验证
+
+- 37项断言全部通过（registry并发安全9 + atomic_replace_file重试8 + historical_data_manager get_ref 3 + subscription审计宽限期8 + 其他9）
+- 9/9 模块导入验证通过
+- __pycache__ 已清理
+
 ## 1.5.0 (2026-06-12)
 
 ### Other

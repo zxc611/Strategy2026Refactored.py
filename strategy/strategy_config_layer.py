@@ -11,6 +11,8 @@ import threading
 from typing import Any, Dict, Optional
 
 from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
+from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from datetime import datetime
 
 
 class StrategyConfigLayer:
@@ -60,8 +62,10 @@ class StrategyConfigLayer:
         provider._scheduler_manager = StrategyScheduler()
 
         # 性能统计
+        # FIX-20260708-V2: start_time初始化为当前时间(而非None)，确保output_periodic_summary
+        # 即使on_init()未完成也能显示运行时长。on_init()会在L122更新为精确的初始化完成时间。
         provider._stats = {
-            'start_time': None,
+            'start_time': datetime.now(CHINA_TZ),
             'total_ticks': 0,
             'total_trades': 0,
             'total_signals': 0,
@@ -86,7 +90,7 @@ class StrategyConfigLayer:
         # Phase 2 (CC-02+CC-04): 组合持有6个Manager，替代Mixin继承
         from ali2026v3_trading.lifecycle.lifecycle_manager import LifecycleManager
         from ali2026v3_trading.strategy_judgment.analytics_manager import AnalyticsManager
-        from ali2026v3_trading.infra.event_publisher import EventPublisher
+        from ali2026v3_trading.infra.concurrent_utils import EventPublisher
         from ali2026v3_trading.infra.scheduler_service import SchedulerManagerProxy
         provider._lifecycle_mgr = LifecycleManager(provider=provider)
 
@@ -167,6 +171,114 @@ class StrategyConfigLayer:
         if not reason:
             logging.warning("[StrategyConfigLayer] R14-P1-DEAD-02: _resolve_open_reason遇到未知状态'%s'，默认OTHER_SCALP", state)
             reason = 'OTHER_SCALP'
+
+        # FIX-20260711-S3S5S6: S3-BOX_EXTREME/S5-ARBITRAGE/S6-MARKET_MAKING信号通路
+        # 根因: SPM五态系统不产出box_extreme/arbitrage/market_making状态，
+        #       导致_STATE_REASON_MAP中对应映射为死代码，S3/S5/S6永远0下单
+        # 修复: 当SPM状态为'other'时，检查独立信号检测器，优先级:
+        #       BOX_EXTREME > ARBITRAGE > MARKET_MAKING > OTHER_SCALP
+        if state in (STRATEGY_MODE_OTHER, 'other'):
+            try:
+                eco = None
+                try:
+                    from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
+                    eco = get_strategy_ecosystem()
+                except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                    pass
+
+                # S3-BOX_EXTREME: 检查BoxDetector极值信号
+                # P0-2修复: classify_extreme_state()要求current_price为必需参数，
+                #           且resonance_direction需为fall/rise等值才能产出tradeable信号
+                if eco is not None:
+                    bd = getattr(eco, '_box_detector', None)
+                    if bd is not None:
+                        try:
+                            _bd_price = 0.0
+                            try:
+                                from ali2026v3_trading.data.data_service import get_data_service
+                                _bd_ds = get_data_service()
+                                if _bd_ds and getattr(_bd_ds, 'realtime_cache', None):
+                                    _bd_price = _bd_ds.realtime_cache.get_latest_price(
+                                        getattr(self._provider, '_instrument_id', '')
+                                    ) or 0.0
+                            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                                pass
+                            _bd_res_dir = ''
+                            try:
+                                from ali2026v3_trading.param_pool.optimization.cycle_sharpe import get_cycle_resonance_module
+                                _bd_crm = get_cycle_resonance_module()
+                                _bd_output = getattr(_bd_crm, '_last_output', None)
+                                if _bd_output and hasattr(_bd_output, 'directional_bias'):
+                                    _bd_bias = _bd_output.directional_bias
+                                    if _bd_bias > 0.3:
+                                        _bd_res_dir = 'rise'
+                                    elif _bd_bias < -0.3:
+                                        _bd_res_dir = 'fall'
+                            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                                pass
+                            if _bd_price > 0:
+                                bd.classify_extreme_state(
+                                    current_price=_bd_price,
+                                    resonance_direction=_bd_res_dir,
+                                )
+                        except (ValueError, KeyError, TypeError, AttributeError):
+                            pass
+                        extreme = getattr(bd, '_extreme_state', None)
+                        if extreme is not None and getattr(extreme, 'tradeable', False):
+                            reason = 'BOX_EXTREME'
+                            logging.info("[FIX-S3S5S6] BoxDetector极值信号触发: extreme_type=%s → BOX_EXTREME",
+                                        getattr(extreme, 'extreme_type', 'unknown'))
+
+                # S5-ARBITRAGE: 检查套利信号(高置信度)
+                # 注意: HFT通道已在handle_arbitrage_signal()中直接下单(reason='hft_arbitrage')
+                #       为避免双重下单，仅当HFT通道未处理该信号时才走主交易周期
+                if reason == 'OTHER_SCALP':
+                    try:
+                        from ali2026v3_trading.strategy.tick_hft import get_last_arbitrage_signal
+                        arb_sig = get_last_arbitrage_signal()
+                        if arb_sig is not None:
+                            arb_conf = arb_sig.get('confidence', 0.0)
+                            arb_dev = abs(arb_sig.get('deviation_bps', 0.0))
+                            arb_consumed = arb_sig.get('hft_consumed', False)
+                            if arb_conf >= 0.8 and arb_dev > 100 and not arb_consumed:
+                                reason = 'ARBITRAGE'
+                                logging.info("[FIX-S3S5S6] 套利信号触发: dev=%.1fbps conf=%.2f → ARBITRAGE",
+                                            arb_dev, arb_conf)
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                        pass
+
+                # S6-MARKET_MAKING: 检查做市条件(窄价差+低持仓)
+                if reason == 'OTHER_SCALP':
+                    try:
+                        pos_svc = getattr(self._provider, '_position_service', None)
+                        if pos_svc is not None:
+                            open_count = len(getattr(pos_svc, '_positions', {}))
+                            max_positions = getattr(pos_svc, '_max_positions', 30)
+                            if open_count < max_positions * 0.1:
+                                eco_mm = eco if eco is not None else None
+                                mm_slot = getattr(eco_mm, '_market_making', None) if eco_mm else None
+                                if mm_slot is not None and getattr(mm_slot, 'state', None) is not None:
+                                    mm_cap = getattr(mm_slot, 'capital_allocation', 0.0)
+                                    if mm_cap > 0.05:
+                                        spread_ok = False
+                                        try:
+                                            from ali2026v3_trading.config.params_service import get_params_service
+                                            _ps_mm = get_params_service()
+                                            _last_spread_bps = _ps_mm.get_float('last_bid_ask_spread_bps', 999.0)
+                                            _max_spread = _ps_mm.get_float('market_maker_max_spread_bps', 50.0)
+                                            spread_ok = _last_spread_bps <= _max_spread
+                                        except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                                            spread_ok = True
+                                        if spread_ok:
+                                            reason = 'MARKET_MAKING'
+                                            logging.info("[FIX-S3S5S6] 做市条件触发: open=%d cap=%.2f spread_ok=%s → MARKET_MAKING",
+                                                         open_count, mm_cap, spread_ok)
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        pass
+
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _s3s5s6_err:
+                logging.debug("[FIX-S3S5S6] S3/S5/S6信号检查异常: %s", _s3s5s6_err)
+
         return reason
 
     def init_services(self, event_bus: Optional[Any] = None) -> None:
@@ -444,7 +556,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 # R1-2修复: CACHE_TTL权威源从config._constants导入，消除与config_params的循环依赖
-from ali2026v3_trading.config._constants import CACHE_TTL  # noqa: F401
+from ali2026v3_trading.config._params_canary_env import CACHE_TTL  # noqa: F401
 
 STRATEGY_MODE_CORRECT_TRENDING = "correct_trending"
 STRATEGY_MODE_INCORRECT_REVERSAL = "incorrect_reversal"
@@ -457,6 +569,7 @@ STRATEGY_MODE_BOX_SPRING = "box_spring"
 STRATEGY_MODE_ARBITRAGE = "arbitrage"
 STRATEGY_MODE_MARKET_MAKING = "market_making"
 STRATEGY_MODE_HIGH_FREQ = "high_freq"
+STRATEGY_MODE_DIVERGENCE_REVERSAL = "divergence_reversal"
 
 ALL_STRATEGY_MODES = (
     STRATEGY_MODE_CORRECT_TRENDING,
@@ -465,6 +578,7 @@ ALL_STRATEGY_MODES = (
     STRATEGY_MODE_RESONANCE,
     STRATEGY_MODE_BOX,
     STRATEGY_MODE_HFT,
+    STRATEGY_MODE_DIVERGENCE_REVERSAL,
 )
 
 STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE = "correct_trending_defensive"
@@ -486,22 +600,26 @@ ALL_MARKET_STATES = (
 # 键 = 状态字符串（5策略状态 + 5原始五态 + 4策略模式，'other'重复已合并）
 # 值 = 开仓理由标签
 _STATE_REASON_MAP = {
-    # 5种策略状态 → 5种基础理由
+    # 5种策略状态 → 7种开仓理由
     STRATEGY_MODE_CORRECT_TRENDING: STRATEGY_MODE_CORRECT_RESONANCE,
-    STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE: STRATEGY_MODE_CORRECT_DIVERGENCE,
-    STRATEGY_MODE_INCORRECT_REVERSAL: 'INCORRECT_REVERSAL',
-    'incorrect_reversal_defensive': 'INCORRECT_DIVERGENCE',
+    STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE: 'DIVERGENCE_REVERSAL',
+    STRATEGY_MODE_INCORRECT_REVERSAL: 'DIVERGENCE_REVERSAL',
+    'incorrect_reversal_defensive': 'DIVERGENCE_REVERSAL',
     STRATEGY_MODE_OTHER: 'OTHER_SCALP',
-    # 5种原始五态 → 5种基础理由（来自backtest_config，避免重复映射）
+    # 5种原始五态 → 7种开仓理由
     'correct_rise': 'CORRECT_RESONANCE',
-    'correct_fall': 'CORRECT_DIVERGENCE',
-    'wrong_rise': 'INCORRECT_REVERSAL',
-    'wrong_fall': 'INCORRECT_DIVERGENCE',
-    # 4种策略模式 → 策略理由（来自原函数级定义）
+    'correct_fall': 'DIVERGENCE_REVERSAL',
+    'wrong_rise': 'DIVERGENCE_REVERSAL',
+    'wrong_fall': 'DIVERGENCE_REVERSAL',
+    # 4种策略模式 → 策略理由
     'spring': 'BOX_SPRING',
     'box': 'BOX_SPRING',
+    'hft': 'HIGH_FREQ',
+    'high_freq': 'HIGH_FREQ',
     'arbitrage': 'ARBITRAGE',
     'market_making': 'MARKET_MAKING',
+    'divergence_reversal': 'DIVERGENCE_REVERSAL',
+    'box_extreme': 'BOX_EXTREME',
 }
 
 _strategy_param_caches: Dict[str, Dict[str, Any]] = {}
@@ -723,7 +841,7 @@ def check_multi_level_cache_consistency() -> Dict[str, bool]:
     """[FR-P1-11-FIX] 多级缓存一致性校验"""
     _now = time.time()
     result = {}
-    for _sid in _strategy_param_caches:
+    for _sid in list(_strategy_param_caches):
         _strategy_ts = _strategy_cache_timestamps.get(_sid, 0.0)
         result[_sid] = (_now - _strategy_ts) < _get_cache_ttl()
     return result

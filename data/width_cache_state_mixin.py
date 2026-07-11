@@ -99,6 +99,48 @@ class WidthCacheStateService:
         self._option_info_timestamps: Dict[int, float] = {}
         self._instrument_id_timestamps: Dict[str, float] = {}
         self._last_cache_cleanup: float = time.time()
+        # AS-01：守恒断言定时检查
+        self._last_conservation_audit: float = 0.0
+
+    def _decrement_status_count_for_option(self, internal_id: int, info: Optional[Dict[str, Any]] = None) -> None:
+        info = info or self._option_info.get(internal_id)
+        if not info:
+            return
+        status = self._current_status.get(internal_id)
+        if status is None:
+            return
+        future_id = info.get('underlying_future_id')
+        month = info.get('month')
+        opt_type = info.get('option_type')
+        bucket = self._status_counts.get(future_id, {}).get(month, {}).get(opt_type)
+        if bucket is not None:
+            bucket[status] = max(0, bucket.get(status, 0) - 1)
+
+    def _remove_option_runtime_state(self, internal_id: int, opt_info: Optional[Dict[str, Any]] = None) -> None:
+        opt_info = opt_info or self._option_info.get(internal_id)
+        self._decrement_status_count_for_option(internal_id, opt_info)
+        instrument_id = (opt_info or {}).get('instrument_id') or self._internal_id_to_instrument_id.get(internal_id)
+        if instrument_id:
+            self._instrument_id_to_internal_id.pop(instrument_id, None)
+            self._instrument_id_timestamps.pop(instrument_id, None)
+        if opt_info:
+            future_id = opt_info.get('underlying_future_id')
+            opt_type = opt_info.get('option_type')
+            if future_id is not None and opt_type:
+                option_list = self._options_by_future_type.get(future_id, {}).get(opt_type, [])
+                if internal_id in option_list:
+                    option_list[:] = [iid for iid in option_list if iid != internal_id]
+        self._option_info.pop(internal_id, None)
+        self._option_prev_price.pop(internal_id, None)
+        self._option_last_distinct_price.pop(internal_id, None)
+        self._option_last_direction.pop(internal_id, None)
+        self._option_volume.pop(internal_id, None)
+        self._option_daily_volume.pop(internal_id, None)
+        self._sync_flag.pop(internal_id, None)
+        self._current_status.pop(internal_id, None)
+        self._option_price.pop(internal_id, None)
+        self._option_info_timestamps.pop(internal_id, None)
+        self._internal_id_to_instrument_id.pop(internal_id, None)
 
     def _enforce_cache_size_limit(self) -> None:
         _now = time.time()
@@ -114,49 +156,34 @@ class WidthCacheStateService:
                 self._option_info_timestamps[_eid] = _now
                 continue
             _opt_info = self._option_info.get(_eid)
-            self._option_info.pop(_eid, None)
-            self._option_prev_price.pop(_eid, None)
-            self._option_last_distinct_price.pop(_eid, None)
-            self._option_last_direction.pop(_eid, None)
-            self._option_volume.pop(_eid, None)
-            self._option_daily_volume.pop(_eid, None)
-            self._sync_flag.pop(_eid, None)
-            self._current_status.pop(_eid, None)
-            self._option_price.pop(_eid, None)
-            del self._option_info_timestamps[_eid]
-            if _opt_info:
-                _fid = _opt_info.get('underlying_future_id')
-                _otype = _opt_info.get('option_type')
-                if _fid is not None and _otype:
-                    _olist = self._options_by_future_type.get(_fid, {}).get(_otype, [])
-                    if _eid in _olist:
-                        _olist[:] = [x for x in _olist if x != _eid]
+            self._remove_option_runtime_state(_eid, _opt_info)
         if _expired_ids:
             logging.warning("[CacheEvict] TTL淘汰期权: count=%d skipped_active=%d remaining=%d", len(_expired_ids) - _skipped_active, _skipped_active, len(self._option_info))
         if len(self._option_info) > MAX_OPTION_CACHE_SIZE:
             _sorted_keys = sorted(self._option_info_timestamps, key=self._option_info_timestamps.get)
-            _to_remove = _sorted_keys[:len(self._option_info) - MAX_OPTION_CACHE_SIZE]
+            _to_remove = []
+            _skipped_active = 0
+            for _eid in _sorted_keys:
+                if len(self._option_info) - len(_to_remove) <= MAX_OPTION_CACHE_SIZE:
+                    break
+                if self._option_price.get(_eid, 0) > 0:
+                    _skipped_active += 1
+                    self._option_info_timestamps[_eid] = _now
+                    continue
+                _to_remove.append(_eid)
             for _eid in _to_remove:
-                self._option_info.pop(_eid, None)
-                self._option_info_timestamps.pop(_eid, None)
-                self._option_prev_price.pop(_eid, None)
-                self._option_last_distinct_price.pop(_eid, None)
-                self._option_last_direction.pop(_eid, None)
-                self._option_volume.pop(_eid, None)
-                self._option_daily_volume.pop(_eid, None)
-                self._sync_flag.pop(_eid, None)
-                self._current_status.pop(_eid, None)
-                self._option_price.pop(_eid, None)
-
-            logging.warning("[CacheEvict] 容量淘汰期权: count=%d remaining=%d limit=%d", len(_to_remove), len(self._option_info), MAX_OPTION_CACHE_SIZE)
+                self._remove_option_runtime_state(_eid)
+            if _to_remove:
+                logging.warning("[CacheEvict] 容量淘汰期权: count=%d skipped_active=%d remaining=%d limit=%d", len(_to_remove), _skipped_active, len(self._option_info), MAX_OPTION_CACHE_SIZE)
+        # instrument_id缓存淘汰
         _expired_iids = [k for k, ts in self._instrument_id_timestamps.items() if ts < _expired_cutoff]
         for _iid in _expired_iids:
             self._instrument_id_to_internal_id.pop(_iid, None)
             del self._instrument_id_timestamps[_iid]
         if len(self._instrument_id_to_internal_id) > MAX_INSTRUMENT_ID_MAP_SIZE:
             _sorted_keys = sorted(self._instrument_id_timestamps, key=self._instrument_id_timestamps.get)
-            _to_remove = _sorted_keys[:len(self._instrument_id_to_internal_id) - MAX_INSTRUMENT_ID_MAP_SIZE]
-            for _iid in _to_remove:
+            _to_remove_iids = _sorted_keys[:len(self._instrument_id_to_internal_id) - MAX_INSTRUMENT_ID_MAP_SIZE]
+            for _iid in _to_remove_iids:
                 self._instrument_id_to_internal_id.pop(_iid, None)
                 self._instrument_id_timestamps.pop(_iid, None)
         # RES-P1-08修复: 期货缓存上限控制（P2-3: 跳过有活跃期权的期货）
@@ -190,6 +217,40 @@ class WidthCacheStateService:
             _excess = list(self._sort_buckets.keys())[MAX_SORT_BUCKETS_FUTURES:]
             for _fid in _excess:
                 self._sort_buckets.pop(_fid, None)
+        # AS-01：守恒断言检查
+        self._audit_conservation()
+    
+    def _audit_conservation(self) -> None:
+        """AS-01：数据守恒断言检查（每5分钟执行一次）"""
+        _now = time.time()
+        if _now - self._last_conservation_audit < 300:
+            return
+        
+        # 注册过程中跳过检查（_option_info数在快速增长）
+        if len(self._option_info) < 10000:
+            return
+        
+        self._last_conservation_audit = _now
+        
+        # 断言1：_option_info数 == _status_counts total
+        _option_info_count = len(self._option_info)
+        _status_total = 0
+        for _fid, _months_data in self._status_counts.items():
+            for _month, _types_data in _months_data.items():
+                for _otype, _bucket in _types_data.items():
+                    _status_total += sum(_bucket.values())
+        
+        # 允许1的误差（注册过程中的短暂不一致）
+        if abs(_option_info_count - _status_total) > 1:
+            logging.warning(
+                "[ConservationAudit] 断言失败: _option_info=%d != _status_counts_total=%d (diff=%d)",
+                _option_info_count, _status_total, abs(_option_info_count - _status_total)
+            )
+        else:
+            logging.info(
+                "[ConservationAudit] 断言通过: _option_info=%d ≈ _status_counts_total=%d",
+                _option_info_count, _status_total
+            )
 
     def _get_params(self):
         if self._params_service is not None:
@@ -280,21 +341,25 @@ class WidthCacheStateService:
             logging.info("[R22-DIAG] classify: fid=%s month=%s opt=%s cur=%s prev=%s dir=%s | fstate_fid=%s init=%s rising=%s price=%s",
                           underlying_future_id, month, opt_type, current_price, prev_price, option_direction,
                           future_state.get('future_id'), future_state.get('initialized'), future_state.get('rising'), future_state.get('price'))
-        elif self._r22_diag_count % 1000 == 0:
+        elif self._r22_diag_count % 10000 == 0:
             logging.info("[R22-DIAG] classify count=%d", self._r22_diag_count)
         if future_state['future_id'] is None:
-            return 'other'
-        if current_price <= 0 or prev_price <= 0:
             return 'other'
 
         if not future_state['initialized']:
             return 'other'
 
+        # FIX-P0-19: rising=None表示期货方向未知，应返回'other'而非隐式转为False(下跌)
+        # 与_compute_sync_flag中"rising is None → return False"保持一致
+        if future_state.get('rising') is None:
+            return 'other'
+
         if option_direction is None:
-            if current_price > prev_price:
-                option_direction = True
-            elif current_price < prev_price:
-                option_direction = False
+            if current_price > 0 and prev_price > 0:
+                if current_price > prev_price:
+                    option_direction = True
+                elif current_price < prev_price:
+                    option_direction = False
 
         if option_direction is None:
             future_rising = bool(future_state.get('rising', False))
@@ -309,24 +374,38 @@ class WidthCacheStateService:
         future_rising = bool(future_state['rising'])
         option_rising = option_direction
 
+        # =====================================================================
+        # 五态分类核心逻辑（期货\期权同步性判定）
+        #
+        # 定义（同步=正确, 不同步=错误）：
+        #   CR 正确上涨: 期货涨+CALL涨 | 期货跌+PUT涨  （期货\期权同步上涨）
+        #   CF 正确下跌: 期货涨+PUT跌  | 期货跌+CALL跌  （期货\期权同步下跌）
+        #   WR 错误上涨: 期货涨+PUT涨  | 期货跌+CALL涨  （期货\期权不同步，期权反涨）
+        #   WF 错误下跌: 期货涨+CALL跌 | 期货跌+PUT跌   （期货\期权不同步，期权反跌）
+        #
+        # CALL: 期货涨时CALL应涨(同步→CR), CALL反跌(不同步→WF)
+        #       期货跌时CALL应跌(同步→CF), CALL反涨(不同步→WR)
+        # PUT:  期货跌时PUT应涨(同步→CR), PUT反跌(不同步→WF)
+        #       期货涨时PUT应跌(同步→CF), PUT反涨(不同步→WR)
+        # =====================================================================
         if opt_type == 'CALL':
-            if future_rising and option_rising:
+            if future_rising and option_rising:       # 期货涨+CALL涨 → 同步上涨
                 return 'correct_rise'
-            if not future_rising and option_rising:
-                return 'wrong_rise'
-            if not future_rising and not option_rising:
-                return 'correct_fall'
-            if future_rising and not option_rising:
+            if future_rising and not option_rising:   # 期货涨+CALL跌 → 不同步下跌
                 return 'wrong_fall'
-        else:
-            if not future_rising and option_rising:
+            if not future_rising and option_rising:   # 期货跌+CALL涨 → 不同步上涨
+                return 'wrong_rise'
+            if not future_rising and not option_rising:  # 期货跌+CALL跌 → 同步下跌
+                return 'correct_fall'
+        else:  # PUT
+            if not future_rising and option_rising:   # 期货跌+PUT涨 → 同步上涨
                 return 'correct_rise'
-            if future_rising and option_rising:
-                return 'wrong_rise'
-            if future_rising and not option_rising:
-                return 'correct_fall'
-            if not future_rising and not option_rising:
+            if not future_rising and not option_rising:  # 期货跌+PUT跌 → 不同步下跌
                 return 'wrong_fall'
+            if future_rising and option_rising:       # 期货涨+PUT涨 → 不同步上涨
+                return 'wrong_rise'
+            if future_rising and not option_rising:   # 期货涨+PUT跌 → 同步下跌
+                return 'correct_fall'
 
         return 'other'
 
@@ -361,12 +440,12 @@ class WidthCacheStateService:
         定义：
         - 只使用最近两笔不同且大于 0 的价格来生成方向
         - 平价 Tick 不改变方向
-        - 0 价或无效价视为断层，清空方向；恢复后需等待下一笔不同价重新建方向
+        - FIX-P0-10: price<=0时保留已有方向（仅清空锚点价格），避免级联other效应
+          原设计清空方向导致大量期权被分类为'other'，correct_up_pct极低
         """
         if price <= 0:
             self._option_last_distinct_price[internal_id] = None
-            self._option_last_direction[internal_id] = None
-            return None
+            return self._option_last_direction.get(internal_id)
 
         anchor_price = self._option_last_distinct_price.get(internal_id)
         if anchor_price is None or anchor_price <= 0:
@@ -400,17 +479,21 @@ class WidthCacheStateService:
         if future_state.get('rising') is None:
             return False
 
-        if current_price <= 0 or option_direction is None:
+        # FIX-P0-09: price<=0不再直接返回False，允许方向已知时计算sync_flag
+        # 仅当方向为None时才返回False（方向未知无法判断同步性）
+        if option_direction is None:
             return False
 
         future_rising = bool(future_state['rising'])
         future_price = future_state['price']
         is_otm = self._is_out_of_the_money(opt_type, future_price, strike)
-        is_target = (
+        is_correct = (
             (future_rising and opt_type == 'CALL' and option_direction)
+            or (not future_rising and opt_type == 'CALL' and not option_direction)
             or (not future_rising and opt_type == 'PUT' and option_direction)
+            or (future_rising and opt_type == 'PUT' and not option_direction)
         )
-        return is_target and is_otm
+        return is_correct and is_otm
 
     def register_future(self, future_internal_id: int, initial_price: float, month: str = None):
         """注册期货品种，初始化价格和方向
@@ -460,28 +543,66 @@ class WidthCacheStateService:
             underlying_future_id: 标的期货 internal_id
             internal_id: 系统内部代理键（优先使用）
         """
+        # R24-P2-06修复: 入门前置防御性校验，避免异常数据进入锁内操作
+        if not instrument_id:
+            logging.warning("[register_option] instrument_id为空")
+            return None
+        if underlying_future_id is None:
+            logging.warning("[register_option] underlying_future_id为空: inst=%s", instrument_id)
+            return None
+        try:
+            underlying_future_id = int(underlying_future_id)
+        except (TypeError, ValueError):
+            logging.warning("[register_option] underlying_future_id非整数: inst=%s fid=%s", instrument_id, underlying_future_id)
+            return None
+        if underlying_future_id <= 0:
+            logging.warning("[register_option] underlying_future_id非正: inst=%s fid=%s", instrument_id, underlying_future_id)
+            return None
+        if internal_id is not None:
+            try:
+                internal_id = int(internal_id)
+            except (TypeError, ValueError):
+                logging.warning("[register_option] internal_id非整数: inst=%s iid=%s", instrument_id, internal_id)
+                return None
+            if internal_id <= 0:
+                logging.warning("[register_option] internal_id非正: inst=%s iid=%s", instrument_id, internal_id)
+                return None
+        if not month or not isinstance(month, str):
+            logging.warning("[register_option] month为空或非法: inst=%s month=%s", instrument_id, month)
+            return None
+        if len(month) > 16:
+            logging.warning("[register_option] month过长: inst=%s month=%s", instrument_id, month)
+            return None
+        try:
+            strike_price = float(strike_price)
+        except (TypeError, ValueError):
+            logging.warning("[register_option] strike_price无法转float: inst=%s strike=%s", instrument_id, strike_price)
+            return None
+        if strike_price <= 0 or strike_price > 1e9:
+            logging.warning("[register_option] strike_price越界: inst=%s strike=%s", instrument_id, strike_price)
+            return None
+        try:
+            initial_price = float(initial_price)
+        except (TypeError, ValueError):
+            initial_price = 0.0
+        if initial_price < 0 or initial_price > 1e9:
+            initial_price = 0.0
+
         with self._lock:
             _reg_count = getattr(self.__class__, '_reg_option_count', 0)
             if _reg_count < 5:
-                logging.info(f"[WidthStrengthCache] register_option called: {instrument_id}, underlying_future_id={underlying_future_id}, internal_id={internal_id}")
+                logging.info("[WidthStrengthCache] register_option called: %s, underlying_future_id=%s, internal_id=%s", instrument_id, underlying_future_id, internal_id)
                 self.__class__._reg_option_count = _reg_count + 1
             instrument_id = self._normalize_instrument_id(instrument_id)
-            if underlying_future_id is None:
-                raise ValueError("underlying_future_id required (two-ID principle)")
-            underlying_future_id = int(underlying_future_id)
             if not self._get_future_product_by_underlying_id(underlying_future_id):
-                raise ValueError(f"Cannot resolve product for underlying_future_id={underlying_future_id}")
-            opt_type_upper = self._normalize_option_type(option_type)
-            if not month:
-                logging.warning("[register_option] month为空: inst=%s iid=%s", instrument_id, internal_id)
+                logging.warning("[register_option] 无法解析标的期货产品: inst=%s fid=%s", instrument_id, underlying_future_id)
                 return None
-            if strike_price is not None and float(strike_price) <= 0:
-                logging.warning("[register_option] strike_price<=0: inst=%s strike=%s", instrument_id, strike_price)
+            opt_type_upper = self._normalize_option_type(option_type)
+            if not opt_type_upper or opt_type_upper not in ('CALL', 'PUT'):
+                logging.warning("[register_option] option_type无效: inst=%s type=%s", instrument_id, option_type)
                 return None
             
             # 入口标准化：确定 internal_id
-            if internal_id is not None:
-                internal_id = int(internal_id)
             if internal_id is None:
                 internal_id = self._resolve_internal_id(instrument_id)
             
@@ -501,10 +622,15 @@ class WidthCacheStateService:
 
             existing_info = self._option_info.get(internal_id)
             existing_price = float(self._option_price.get(internal_id, 0.0) or 0.0)
+            existing_status = self._current_status.get(internal_id, 'other')
             preserve_runtime_state = existing_info is not None and initial_price <= 0 < existing_price
             if existing_info is not None:
                 old_future_id = existing_info.get('underlying_future_id')
+                old_month = existing_info.get('month')
                 old_type = existing_info['option_type']
+                if (old_future_id, old_month, old_type) != (underlying_future_id, month, opt_type_upper):
+                    self._decrement_status_count_for_option(internal_id, existing_info)
+                    self._current_status.pop(internal_id, None)
                 if old_future_id is not None:
                     old_list = self._options_by_future_type.get(old_future_id, {}).get(old_type, [])
                     if internal_id in old_list and old_future_id != underlying_future_id:
@@ -534,7 +660,6 @@ class WidthCacheStateService:
                 self._months[underlying_future_id].append(month)
 
             if preserve_runtime_state:
-                existing_status = self._current_status.get(internal_id, 'other')
                 self._set_current_status(internal_id, self._option_info[internal_id], existing_status)
                 return True
 
@@ -569,6 +694,12 @@ class WidthCacheStateService:
             self._future_zero_price_count += 1
             if self._future_zero_price_count <= 5:
                 logging.warning("[FutureZeroPrice] on_future_tick price<=0: fid=%s price=%s", future_internal_id, price)
+            with self._lock:
+                if not self._future_initialized.get(future_internal_id, False):
+                    self._future_initialized[future_internal_id] = True
+                    self._future_rising[future_internal_id] = None
+                    self._classify_pending_options(future_internal_id)
+                    logging.info("[FutureZeroPrice] fid=%s price<=0但仍标记initialized=True(rising=None)", future_internal_id)
             return
         with self._lock:
             # ✅ 从 id_cache 获取 product 和 month
@@ -666,8 +797,18 @@ class WidthCacheStateService:
                 if not hasattr(self, '_oot_diag_no_info'):
                     self._oot_diag_no_info = 0
                 self._oot_diag_no_info += 1
-                if self._oot_diag_no_info <= 5:
-                    logging.warning("[OOT-DIAG] no _option_info: inst=%s iid=%s price=%s info_count=%d", instrument_id, internal_id, price, len(self._option_info))
+                # FIX-20260704-OOT-DIAG-GRACE: 启动宽限期内(前90秒)TTS-Deferred未完成期权注册
+                # info_count=0是正常现象，降级为DEBUG避免日志污染；宽限期后保持WARNING
+                import time as _oot_time
+                if not hasattr(self, '_oot_diag_start_ts'):
+                    self._oot_diag_start_ts = _oot_time.time()
+                _oot_elapsed = _oot_time.time() - self._oot_diag_start_ts
+                if _oot_elapsed < 90.0:
+                    if self._oot_diag_no_info <= 5:
+                        logging.debug("[OOT-DIAG] no _option_info (启动宽限期内，TTS-Deferred未完成): inst=%s iid=%s price=%s info_count=%d elapsed=%.1fs", instrument_id, internal_id, price, len(self._option_info), _oot_elapsed)
+                else:
+                    if self._oot_diag_no_info <= 5:
+                        logging.debug("[OOT-DIAG] no _option_info: inst=%s iid=%s price=%s info_count=%d", instrument_id, internal_id, price, len(self._option_info))
                 if self._should_trace_option_tick(instrument_id):
                     self._log_tracked_option_tick(
                         instrument_id,
@@ -688,10 +829,20 @@ class WidthCacheStateService:
 
             prev_price = self._option_price.get(internal_id)
             if prev_price is None:
+                # FIX-P0-20: 首个tick price<=0时不进行分类，仅注册为'other'
+                # 与on_future_tick price<=0守卫一致，避免基于无效价格的错误分类
+                if price <= 0:
+                    self._option_last_direction[internal_id] = None
+                    self._option_info_timestamps[internal_id] = time.time()
+                    self._set_current_status(internal_id, info, 'other')
+                    self._sync_flag[internal_id] = False
+                    self._enforce_cache_size_limit()
+                    return
                 self._option_price[internal_id] = price
                 self._option_prev_price[internal_id] = price
                 self._option_last_distinct_price[internal_id] = price
                 self._option_last_direction[internal_id] = None
+                self._option_info_timestamps[internal_id] = time.time()
                 _fut_init = self._future_initialized.get(future_id, False)
                 if not hasattr(self, '_oot_diag_first_tick'):
                     self._oot_diag_first_tick = 0
@@ -718,6 +869,7 @@ class WidthCacheStateService:
                     if self._future_init_pending_count[future_id] <= 5:
                         logging.warning("[FutureInitPending] Future %s not initialized; option=%s queued for reclassification", future_id, instrument_id)
 
+                self._enforce_cache_size_limit()
                 return
             
             self._option_prev_price[internal_id] = prev_price
@@ -890,9 +1042,10 @@ class WidthCacheStateService:
             sync_flag = self._sync_flag.get(internal_id, False)
             instrument_id = info.get('instrument_id', self._internal_id_to_instrument_id.get(internal_id, str(internal_id)))
             
-            # 只处理同步虚值期权（correct_rise）
+            # [FIX-20260708-INCORRECT-REV] 允许所有4种非other状态进入sort_bucket
+            # 原代码只允许correct_rise/correct_fall，导致incorrect_reversal策略(wrong_rise/wrong_fall)永远无法选标
             current_status = self._current_status.get(internal_id, 'other')
-            if current_status not in ('correct_rise', 'correct_fall'):
+            if current_status not in ('correct_rise', 'correct_fall', 'wrong_rise', 'wrong_fall'):
                 self._remove_from_sort_bucket(internal_id, future_internal_id, month, opt_type)
                 return
             
@@ -914,6 +1067,7 @@ class WidthCacheStateService:
                 month=month,
                 product=str(future_info.get('product', '')).upper(),
                 last_tick_ts=time.monotonic(),  # 单调时钟，保证时间新鲜度排序有效
+                current_status=current_status,
             )
             
             # 插入排序桶 - 使用 future_internal_id 作为键

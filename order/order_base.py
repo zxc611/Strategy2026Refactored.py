@@ -436,6 +436,20 @@ def init_order_service_attrs(svc, params=None):
 
     svc._recover_order_state()
 
+    # FIX-20260707-DRY-RUN: 从params读取dry_run_mode配置
+    # dry_run模式下不实际下单，但保留完整策略逻辑+持仓+快照记录
+    svc._dry_run_mode = False
+    svc._dry_run_callback_delay_sec = 0.05
+    try:
+        from ali2026v3_trading.config.params_service import get_params_service
+        _ps = get_params_service()
+        svc._dry_run_mode = _ps.get_bool('dry_run_mode', False) or False
+        svc._dry_run_callback_delay_sec = float(_ps.get('dry_run_callback_delay_sec', 0.05) or 0.05)
+    except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+        pass
+    if svc._dry_run_mode:
+        logging.info("[DRY-RUN] 模拟运行模式已启用(dry_run_mode=True)，不实际下单但保留策略逻辑+快照")
+
 
 
 

@@ -40,10 +40,11 @@ class LifecycleManager:
         StrategyState.RUNNING: [StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED, StrategyState.PARALLEL_RUNNING],
         StrategyState.PARALLEL_RUNNING: [StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED],
         StrategyState.PAUSED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR],
-        StrategyState.DEGRADED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED_STOP],
-        StrategyState.ERROR: [StrategyState.INITIALIZING, StrategyState.STOPPED],
+        # FIX-20260709-PAUSE: 与 lifecycle_state_machine.py 同步，DEGRADED 增加 PAUSED 转换
+        StrategyState.DEGRADED: [StrategyState.RUNNING, StrategyState.STOPPED, StrategyState.ERROR, StrategyState.DEGRADED_STOP, StrategyState.PAUSED],
+        StrategyState.ERROR: [StrategyState.INITIALIZING, StrategyState.STOPPED, StrategyState.DEGRADED],
         StrategyState.DEGRADED_STOP: [StrategyState.STOPPED, StrategyState.INITIALIZING],
-        StrategyState.STOPPED: [StrategyState.INITIALIZING],
+        StrategyState.STOPPED: [StrategyState.INITIALIZING, StrategyState.DESTROYED],
     }
 
     def __init__(self, provider: Any = None):

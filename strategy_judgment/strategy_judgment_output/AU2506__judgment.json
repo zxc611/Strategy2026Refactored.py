@@ -1,0 +1,261 @@
+{
+  "backtest_period": "2025-01",
+  "blockers": [],
+  "capital_scale": "",
+  "conditions": [
+    "极值样本0<30，增加回测期或降时间维度"
+  ],
+  "diagnosis_report": {
+    "backtest_period": "2025-01",
+    "dimensions": [
+      {
+        "anomalies": [],
+        "confidence": 0.0,
+        "detail": "仅有0个极值样本(<30)",
+        "dimension": "信号强度演化",
+        "pattern": "数据不足",
+        "sample_count": 0,
+        "score": 0.5,
+        "severity": "数据不足",
+        "sub_items": []
+      },
+      {
+        "anomalies": [],
+        "confidence": 0.0,
+        "detail": "仅有0个极值样本",
+        "dimension": "仓位变化模式",
+        "pattern": "数据不足",
+        "sample_count": 0,
+        "score": 0.5,
+        "severity": "数据不足",
+        "sub_items": []
+      },
+      {
+        "anomalies": [],
+        "confidence": 0.0,
+        "detail": "仅有0个极值样本",
+        "dimension": "盈亏路径形态",
+        "pattern": "数据不足",
+        "sample_count": 0,
+        "score": 0.5,
+        "severity": "数据不足",
+        "sub_items": []
+      },
+      {
+        "anomalies": [],
+        "confidence": 0.0,
+        "detail": "仅有0个极值样本",
+        "dimension": "Greeks暴露合理性",
+        "pattern": "数据不足",
+        "sample_count": 0,
+        "score": 0.5,
+        "severity": "数据不足",
+        "sub_items": []
+      },
+      {
+        "anomalies": [],
+        "confidence": 0.0,
+        "detail": "仅有0个极值样本",
+        "dimension": "策略池联动一致性",
+        "pattern": "数据不足",
+        "sample_count": 0,
+        "score": 0.5,
+        "severity": "数据不足",
+        "sub_items": []
+      }
+    ],
+    "extreme_count": 0,
+    "extreme_point_count": 0,
+    "near_high_count": 0,
+    "near_low_count": 0,
+    "overall_score": {
+      "confidence": 0.0,
+      "cross_strategy_score": 0.5,
+      "greeks_rationality": 0.5,
+      "greeks_score": 0.5,
+      "overall_score": 0.5,
+      "pnl_path_quality": 0.5,
+      "pnl_score": 0.5,
+      "position_score": 0.5,
+      "position_smoothness": 0.5,
+      "sample_count": 0,
+      "severity": "数据不足",
+      "signal_decay_consistency": 0.5,
+      "signal_score": 0.5,
+      "summary": "行为一致性=0.50(数据不足)"
+    },
+    "raw_data": {},
+    "recommendations": [
+      "[数据不足] 信号强度演化: 样本0(<30)，增加回测期或降时间维度",
+      "[数据不足] 仓位变化模式: 样本0(<30)，增加回测期或降时间维度",
+      "[数据不足] 盈亏路径形态: 样本0(<30)，增加回测期或降时间维度",
+      "[数据不足] Greeks暴露合理性: 样本0(<30)，增加回测期或降时间维度",
+      "[数据不足] 策略池联动一致性: 样本0(<30)，增加回测期或降时间维度"
+    ],
+    "strategy_id": "",
+    "strategy_type": "",
+    "symbol": "AU2506"
+  },
+  "dimensions": [
+    {
+      "detail": "未提供盈利指标，无法评判",
+      "is_blocker": false,
+      "name": "盈利能力",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.5,
+      "weight": 0.09
+    },
+    {
+      "detail": "总分=0.50(阈值=0.7), 信号衰减=0.50, 仓位平滑=0.50, Greeks合理=0.50, PnL路径=0.50",
+      "is_blocker": true,
+      "name": "行为一致性",
+      "passed": false,
+      "score": 0.5,
+      "threshold": 0.7,
+      "weight": 0.15
+    },
+    {
+      "detail": "被动健康维度=0/5(建议提供explanation_coverage_result升级为主动ECR)",
+      "is_blocker": false,
+      "name": "过程可解释性",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.65,
+      "weight": 0.06
+    },
+    {
+      "detail": "样本量=0(≥30), 置信度=0.00",
+      "is_blocker": false,
+      "name": "统计显著性",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.7,
+      "weight": 0.06
+    },
+    {
+      "detail": "风险合规分=0.50(阈值=0.7)",
+      "is_blocker": true,
+      "name": "风险预算遵守",
+      "passed": false,
+      "score": 0.5,
+      "threshold": 0.7,
+      "weight": 0.11
+    },
+    {
+      "detail": "未执行极端行情测试，策略不具备上线资格",
+      "is_blocker": true,
+      "name": "极端生存能力",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.6,
+      "weight": 0.08
+    },
+    {
+      "detail": "跨品种验证不足(需≥3品种)",
+      "is_blocker": false,
+      "name": "跨品种一致性",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.6,
+      "weight": 0.04
+    },
+    {
+      "detail": "命中率=0.00, 方向准确率=0.00",
+      "is_blocker": false,
+      "name": "预测能力校准",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.5,
+      "weight": 0.05
+    },
+    {
+      "detail": "未执行参数稳定性检验",
+      "is_blocker": false,
+      "name": "参数稳定性",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.5,
+      "weight": 0.05
+    },
+    {
+      "detail": "未提供收益来源分解数据",
+      "is_blocker": false,
+      "name": "收益来源分散度",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.5,
+      "weight": 0.06
+    },
+    {
+      "detail": "未提供回撤恢复时间数据",
+      "is_blocker": false,
+      "name": "回撤恢复时间",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.5,
+      "weight": 0.05
+    },
+    {
+      "detail": "未提供策略间相关性数据",
+      "is_blocker": false,
+      "name": "策略间相关性",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.7,
+      "weight": 0.07
+    },
+    {
+      "detail": "未提供11维度实时风险评分数据",
+      "is_blocker": false,
+      "name": "实时风险评分",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.5,
+      "weight": 0.08
+    },
+    {
+      "detail": "未提供信号源评判数据（signal_source未启用时此维度不评分）",
+      "is_blocker": false,
+      "name": "并列信号源A/B/C",
+      "passed": false,
+      "score": 0.0,
+      "threshold": 0.6,
+      "weight": 0.05
+    }
+  ],
+  "is_auditable": false,
+  "is_reproducible": false,
+  "judgment_timestamp": "2026-07-01T13:07:29.493800+08:00",
+  "overall_score": 0.5,
+  "recommendations": [
+    "证据不足，无法判定。建议：",
+    "  1. 增加回测期（至少覆盖30个局部高低点）",
+    "  2. 降时间维度（分钟级数据产生更多极值样本）",
+    "  3. 跨品种验证（≥3品种）"
+  ],
+  "resonance_accuracy": {
+    "avg_confirmation_bars": 0.0,
+    "direction_accuracy": 0.0,
+    "hit_rate": 0.0,
+    "total_actual": 0,
+    "total_expected": 0,
+    "total_paired": 0
+  },
+  "snapshot_statistics": {
+    "bar_buffer_size": 0,
+    "monthly_extremes_found": 0,
+    "symbol": "",
+    "total_snapshots": 0,
+    "trigger_counts": {},
+    "weekly_extremes_found": 0,
+    "weekly_monthly_snapshot_count": 0,
+    "weekly_monthly_trigger_counts": {}
+  },
+  "strategy_id": "",
+  "strategy_type": "",
+  "symbol": "AU2506",
+  "verdict": "INSUFFICIENT_EVIDENCE_证据不足",
+  "version": "v1.5-production",
+  "warnings": []
+}

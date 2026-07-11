@@ -122,6 +122,7 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
         self._last_ext_kline = {}
         self._runtime_missing_warned = set()
         self._kline_batch_size = 500
+        self._subscription_manager = None
         # FIX: strategy_historical.py使用storage._stop_event.wait()，缺少此属性导致AttributeError
         self._stop_event = threading.Event()
         self._initialize()
@@ -182,14 +183,42 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
         _fn = DataService._subscribe_fn
         if _fn is None:
             logger.warning("[DataService] subscribe called but no subscribe_fn bound")
-            return None
+            # FIX-M9-02: 返回 False 而非 None, 使调用方能区分"未绑定"与"成功"
+            # 同时计入失败计数器, 避免 success=16288/failed=0 的虚假统计
+            DataService._subscribe_fail_count = getattr(DataService, '_subscribe_fail_count', 0) + 1
+            return False
         try:
             if callback is not None:
-                return _fn(instrument_id, callback)
-            return _fn(instrument_id)
+                _ret = _fn(instrument_id, callback)
+            else:
+                _ret = _fn(instrument_id)
+            # FIX-20260707-SUB-RET: 检查 _subscribe 包装器返回值
+            # 根因: _subscribe 现在返回 False 表示 C++ sub_market_data 返回失败码,
+            # 旧代码无条件返回 True 导致静默失败被计为成功
+            if _ret is False:
+                DataService._subscribe_fail_count = getattr(DataService, '_subscribe_fail_count', 0) + 1
+                return False
+            # FIX-M9-02: 返回 True 表示订阅调用成功 (不等于平台 ack)
+            return True
         except Exception as e:
+            # FIX-M9-02: 不再静默吞噬异常返回 None, 而是:
+            #   1) 计入失败计数器 (供 subscribe_all_instruments 校验)
+            #   2) 重新抛出, 让 _subscribe_single_with_retry 走重试队列
+            #   原实现 return None 会让 _do_subscribe 误判为"成功但无返回值",
+            #   导致 success_count 被无条件自增, 虚假的成功率掩盖真实失败
+            DataService._subscribe_fail_count = getattr(DataService, '_subscribe_fail_count', 0) + 1
             logger.warning("[DataService] subscribe(%s) failed: %s", instrument_id, e)
-            return None
+            raise
+
+    @classmethod
+    def get_subscribe_fail_count(cls) -> int:
+        """返回 subscribe 失败次数 (FIX-M9-02 新增, 供诊断使用)"""
+        return getattr(cls, '_subscribe_fail_count', 0)
+
+    @classmethod
+    def reset_subscribe_fail_count(cls) -> None:
+        """重置失败计数器 (FIX-M9-02 新增)"""
+        cls._subscribe_fail_count = 0
 
     def request_realtime(self, instrument_id, fields=None):
         _fn = DataService._subscribe_fn
@@ -345,29 +374,8 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
             if conn is None:
                 return None
             try:
-                try:
-                    row = conn.execute(
-                        "SELECT instrument_id, product, exchange, year_month, internal_id, option_type, strike_price, underlying_future_id FROM instruments_registry WHERE instrument_id = ?",
-                        [instrument_id]
-                    ).fetchone()
-                    if row and row[4] is not None:
-                        info = {
-                            'instrument_id': row[0],
-                            'product': row[1],
-                            'exchange': row[2],
-                            'year_month': row[3],
-                            'internal_id': row[4],
-                        }
-                        if row[5]:
-                            info['type'] = 'option'
-                            info['option_type'] = row[5]
-                            info['strike_price'] = row[6]
-                            info['underlying_future_id'] = row[7]
-                        else:
-                            info['type'] = 'future'
-                        return info
-                except Exception:
-                    pass
+                # FIX-20260707: 反转查询优先级，优先查futures_instruments/option_instruments
+                # 根因: instruments_registry表可能不存在(新连接未创建)，优先查会静默失败
                 try:
                     row = conn.execute(
                         "SELECT internal_id, instrument_id, product, exchange, year_month FROM futures_instruments WHERE instrument_id = ?",
@@ -408,6 +416,30 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
                         }
                 except Exception:
                     pass
+                # fallback: instruments_registry
+                try:
+                    row = conn.execute(
+                        "SELECT instrument_id, product, exchange, year_month, internal_id, option_type, strike_price, underlying_future_id FROM instruments_registry WHERE instrument_id = ?",
+                        [instrument_id]
+                    ).fetchone()
+                    if row and row[4] is not None:
+                        info = {
+                            'instrument_id': row[0],
+                            'product': row[1],
+                            'exchange': row[2],
+                            'year_month': row[3],
+                            'internal_id': row[4],
+                        }
+                        if row[5]:
+                            info['type'] = 'option'
+                            info['option_type'] = row[5]
+                            info['strike_price'] = row[6]
+                            info['underlying_future_id'] = row[7]
+                        else:
+                            info['type'] = 'future'
+                        return info
+                except Exception:
+                    pass
                 return None
             finally:
                 self._return_connection(conn)
@@ -441,8 +473,28 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
             return 0
 
     def _initialize(self):
-        logger.info("Initializing DataService (v3.3-facade)...")
-        
+        logger.info("Initializing DataService (v3.3-facade)... DB_FILE=%s", self.DB_FILE)
+
+        # FIX-20260702-HARDEN: 嵌入式环境自动检测 + 安全模式日志
+        try:
+            from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+            if DBConnectionMixin._EMBEDDED_MODE:
+                logger.info(
+                    "[FIX-20260702-HARDEN] PythonGO 嵌入式环境已检测！自动启用安全模式: "
+                    "单连接 + 同步执行 + threads=1 "
+                    "(消除 DuckDB 内部 C++ 线程池与宿主进程的冲突)"
+                )
+            elif not DBConnectionMixin._POOL_DISABLED:
+                logger.info(
+                    "[FIX-20260702] DuckDB连接池模式(多连接+ThreadPoolExecutor)已启用。"
+                    "实盘PythonGO嵌入式环境如遇 _duckdb.cp312 原生崩溃(0xc0000409)，"
+                    "请设置环境变量 DUCKDB_POOL_DISABLED=1 切换到安全模式。"
+                )
+            else:
+                logger.info("[FIX-20260702] DuckDB单连接同步执行模式已启用(DUCKDB_POOL_DISABLED=1)")
+        except (ImportError, AttributeError):
+            pass
+
         try:
             if DB_FILE:
                 os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
@@ -453,13 +505,15 @@ class DataService(DBConnectionMixin, QueryCacheMixin, OptionSyncMixin, DataWrite
 
         conn = self._get_connection()
         try:
-            if not self._load_or_create_table():
+            # FIX-20260702: 单连接模式下避免重复获取连接导致 _in_use 状态混乱，
+            # 统一使用同一个连接贯穿初始化流程。
+            if not self._load_or_create_table(conn):
                 self._create_empty_table(conn)
 
             self._ensure_ticks_raw_schema(conn)
-            self._create_indexes_and_views()
+            self._create_indexes_and_views(conn)
 
-            self._create_metadata_tables()
+            self._create_metadata_tables(conn)
         finally:
             self._return_connection(conn)
 

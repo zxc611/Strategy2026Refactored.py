@@ -70,8 +70,12 @@ class StorageHistoryService:
         if provider_type in ('get_kline_data', 'market_center.get_kline_data'):
             get_kline_data = getattr(resolved_provider, 'get_kline_data')
             count = self._estimate_kline_count(history_minutes, kline_style)  # 负值: PythonGO要求count<0表示从最新往回取
-            start_time_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
-            end_time_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
+
+            start_time_naive = start_time.replace(tzinfo=None) if hasattr(start_time, 'tzinfo') and start_time.tzinfo else start_time
+            end_time_naive = end_time.replace(tzinfo=None) if hasattr(end_time, 'tzinfo') and end_time.tzinfo else end_time
+            start_time_str = start_time_naive.strftime('%Y-%m-%d %H:%M:%S')
+            end_time_str = end_time_naive.strftime('%Y-%m-%d %H:%M:%S')
+
 
             def _log_probe_once(stage: str, call_name: str) -> None:
                 probe_key = (stage, provider_type, provider_module, provider_class, call_name)
@@ -141,10 +145,10 @@ class StorageHistoryService:
 
             kline_call_specs = [
                 ('kw_style_count', False, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, style=kline_style, count=count)),
+                ('kw_instrument_count', False, lambda: get_kline_data(exchange=exchange, instrument=instrument_id, style=kline_style, count=count)),
                 ('pos_style_count', False, lambda: get_kline_data(exchange, instrument_id, kline_style, count)),
                 ('kw_period_count', False, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, period=kline_style, count=count)),
                 ('kw_style_tstr', True, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, style=kline_style, start_time=start_time_str, end_time=end_time_str)),
-                ('kw_style_dt', True, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, style=kline_style, start_time=start_time, end_time=end_time)),
                 ('kw_period_tstr', True, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, period=kline_style, start_time=start_time_str, end_time=end_time_str)),
             ]
 
@@ -266,7 +270,7 @@ class StorageHistoryService:
                         with self._lock:
                             if warn_key not in self._runtime_missing_warned:
                                 self._runtime_missing_warned.add(warn_key)
-                                logging.warning("[load_historical_klines] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
+                                logging.debug("[load_historical_klines] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
                         failed_count += 1
                         continue
 
@@ -289,7 +293,7 @@ class StorageHistoryService:
                         for kline in kline_data:
                             try:
                                 ts = self._to_timestamp(
-                                    getattr(kline, 'timestamp', getattr(kline, 'ts', time_module.time()))
+                                    getattr(kline, 'datetime', None)
                                 )
                                 if ts is None:
                                     raise ValueError('invalid historical kline timestamp')
@@ -298,12 +302,12 @@ class StorageHistoryService:
                                     'ts': ts,
                                     'instrument_id': instrument_id,
                                     'exchange': exchange,
-                                    'open': getattr(kline, 'open', getattr(kline, 'Open', 0.0)),
-                                    'high': getattr(kline, 'high', getattr(kline, 'High', 0.0)),
-                                    'low': getattr(kline, 'low', getattr(kline, 'Low', 0.0)),
-                                    'close': getattr(kline, 'close', getattr(kline, 'Close', 0.0)),
-                                    'volume': getattr(kline, 'volume', getattr(kline, 'Volume', 0)),
-                                    'open_interest': getattr(kline, 'open_interest', getattr(kline, 'OpenInterest', 0)),
+                                    'open': getattr(kline, 'open', 0.0),
+                                    'high': getattr(kline, 'high', 0.0),
+                                    'low': getattr(kline, 'low', 0.0),
+                                    'close': getattr(kline, 'close', 0.0),
+                                    'volume': getattr(kline, 'volume', 0),
+                                    'open_interest': getattr(kline, 'open_interest', 0),
                                     'period': normalized_period,
                                 })
                             except Exception as e:

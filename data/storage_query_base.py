@@ -106,7 +106,7 @@ class StorageQueryBaseService:
             if warn_key in self._runtime_missing_warned:
                 return
             self._runtime_missing_warned.add(warn_key)
-        logging.warning(
+        logging.debug(
             "[%s] 合约未预注册，跳过运行时自动注册/建表：%s",
             source, instrument_id,
         )
@@ -197,6 +197,12 @@ class StorageQueryBaseService:
             return False
         bid_price1 = tick.get('bid_price1') or tick.get('BidPrice1')
         ask_price1 = tick.get('ask_price1') or tick.get('AskPrice1')
+        # FIX-20260704-DBL-MAX: 过滤C++ DBL_MAX(1.79e308)哨兵值
+        import math
+        if isinstance(bid_price1, float) and (not math.isfinite(bid_price1) or bid_price1 > 1e300):
+            bid_price1 = None
+        if isinstance(ask_price1, float) and (not math.isfinite(ask_price1) or ask_price1 > 1e300):
+            ask_price1 = None
         if bid_price1 is not None and ask_price1 is not None:
             if isinstance(bid_price1, (int, float)) and isinstance(ask_price1, (int, float)):
                 if bid_price1 > 0 and ask_price1 > 0 and bid_price1 >= ask_price1:

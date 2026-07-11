@@ -24,7 +24,7 @@ except ImportError:
     duckdb = None
 
 from ali2026v3_trading.infra.serialization_utils import safe_dataframe_to_parquet
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 logger = get_logger(__name__)
 
 
@@ -58,7 +58,7 @@ def check_minute_boundary_integrity(tick_df: pd.DataFrame,
 
 # ── Preprocess Validation ──
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 import numpy as np
 import pandas as pd

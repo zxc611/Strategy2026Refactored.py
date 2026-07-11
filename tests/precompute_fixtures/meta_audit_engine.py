@@ -6,7 +6,7 @@ from ali2026v3_trading.governance.greeks_calculator import _norm_cdf
 
 import ast
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 import numpy as np
 
@@ -418,7 +418,7 @@ class MetaAuditEngine:
 import traceback
 import warnings
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 import numpy as np
 import pandas as pd

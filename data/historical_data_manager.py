@@ -85,11 +85,11 @@ class HistoricalDataManager:
 
         subscribed, removed_by_month, min_year_month = self.filter_historical_month_scope(subscribed)
         if removed_by_month > 0:
-            logging.warning(f"[HKL][strategy_id={strategy_id}][owner_scope=strategy-instance]"
+            logging.info(f"[HKL][strategy_id={strategy_id}][owner_scope=strategy-instance]"
                             f"[source_type=historical-loader] Filtered by month: min={min_year_month}, removed={removed_by_month}")
 
         include_options = bool(_get_param_value(params, 'load_history_options', True))
-        from ali2026v3_trading.infra.subscription_manager import SubscriptionManager
+        from ali2026v3_trading.infra.subscription_service import SubscriptionManager
         future_count = 0
         option_count = 0
         instruments: List[str] = []
@@ -162,7 +162,7 @@ class HistoricalDataManager:
     def load_historical_klines_once(self, instruments: List[str], provider: Any, provider_source: str) -> None:
         strategy_id = self._state_store.get('strategy_id')
         params = self._state_store.get('params')
-        storage = self._state_store.get('storage')
+        storage = self._state_store.get_ref('storage')
         stats = self._state_store.get('_stats')
         e2e_counters = self._state_store.get('_e2e_counters')
         lock = self._state_store.get('_lock')
@@ -289,7 +289,7 @@ class HistoricalDataManager:
     def start_historical_kline_load(self, blocking: bool = False) -> None:
         strategy_id = self._state_store.get('strategy_id')
         params = self._state_store.get('params')
-        storage = self._state_store.get('storage')
+        storage = self._state_store.get_ref('storage')
 
         # 平台规范：auto_load_history默认值为True（与config_params.py和lifecycle_callbacks.py一致）
         auto_load = bool(_get_param_value(params, 'auto_load_history', True))
@@ -323,6 +323,11 @@ class HistoricalDataManager:
 
                     def _retry_after_delay():
                         time.sleep(delay)
+                        # FIX-20260711-PAUSE-ACTION: sleep后检查暂停/销毁状态，避免覆盖暂停
+                        # FIX-20260711-BUG: mgr_self无_provider属性，改用_state_store.get()（与L219-224一致）
+                        if mgr_self._state_store.get('_is_paused', False) or mgr_self._state_store.get('_destroyed', False):
+                            logging.info("[HKL] retry cancelled: strategy paused or destroyed")
+                            return
                         try:
                             mgr_self.start_historical_kline_load()
                         except Exception as e:

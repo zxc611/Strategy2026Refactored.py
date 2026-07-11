@@ -13,23 +13,118 @@
 - 旧模式：线程本地连接（_thread_local.conn），每个线程持有连接永不释放
 - 新模式：连接池（Queue），按需借出+用完归还，连接跨线程复用
 - 根因：旧模式下30+线程同时运行时连接池耗尽，高频回收导致性能雪崩
+
+FIX-20260702:
+- 所有 DuckDB 连接统一走 db_adapter，避免同库多入口配置不一致。
+- 支持 DUCKDB_POOL_DISABLED=1 单连接模式，降低 PythonGO 嵌入式环境下
+  多连接/多线程触发 _duckdb.cp312-win_amd64.pyd 原生崩溃的风险。
 """
-try:
-    import duckdb
-except ImportError:
-    duckdb = None
 import logging
 import threading
 import os
 import tempfile
 import time
 import queue
+from typing import Dict as _Dict
 try:
     import psutil
 except ImportError:
     psutil = None
 
+from ali2026v3_trading.data.db_adapter import connect as _db_connect
+from ali2026v3_trading.data.db_adapter import connect_in_memory as _db_connect_in_memory
+from ali2026v3_trading.data.db_adapter import get_duckdb_connection_type
+
 logger = logging.getLogger(__name__)
+
+
+_DuckDBPyConnection = get_duckdb_connection_type()
+
+
+def _is_embedded_python() -> bool:
+    """检测是否运行在 PythonGO 嵌入式环境中。
+
+    判断依据：
+    1. 进程名为 InfiniTrader（实盘平台宿主进程）
+    2. sys.executable 不包含 'python'（嵌入式 Python 解释器的可执行文件名通常不是 python）
+    3. 存在 INFINITRADER_INSTANCE_ID 环境变量（实盘平台设置）
+
+    FIX-20260702-HARDEN: 在嵌入式环境中自动启用安全模式（单连接+同步+threads=1）
+    """
+    import sys
+    try:
+        proc_name = os.path.basename(getattr(os, 'get_executable', lambda: sys.executable)()).lower()
+    except Exception:
+        proc_name = os.path.basename(sys.executable).lower()
+
+    if 'infinitrader' in proc_name:
+        return True
+
+    exe_lower = os.path.basename(sys.executable).lower()
+    if 'python' not in exe_lower and exe_lower.endswith('.exe'):
+        return True
+
+    if os.getenv('INFINITRADER_INSTANCE_ID'):
+        return True
+
+    return False
+
+
+def _duckdb_preflight_check() -> bool:
+    """DuckDB 安全预检：在子进程中测试 DuckDB 是否能正常工作。
+
+    在 PythonGO 嵌入式环境中，DuckDB 原生扩展可能与宿主进程的
+    C++ 运行时不兼容。此函数通过子进程测试来验证兼容性。
+
+    Returns:
+        True: DuckDB 可安全使用
+        False: DuckDB 在当前环境下不可用，应完全禁用
+
+    FIX-20260708-DUCKDB-PREFLIGHT: 嵌入式环境下跳过子进程预检，
+    原因：sys.executable=InfiniTrader.exe，不是Python解释器，
+    subprocess.run([InfiniTrader.exe, '-c', ...]) 会超时(10s)阻塞启动。
+    嵌入式环境改为进程内直接测试 import duckdb。
+    """
+    import subprocess
+    import sys
+
+    # FIX-20260708-DUCKDB-PREFLIGHT: 嵌入式环境跳过子进程预检
+    if _is_embedded_python():
+        try:
+            import duckdb
+            c = duckdb.connect(':memory:')
+            c.execute('SELECT 1').fetchone()
+            c.close()
+            logger.info("[FIX-20260708] DuckDB 进程内预检通过(嵌入式环境跳过子进程)")
+            return True
+        except Exception as e:
+            logger.error("[FIX-20260708] DuckDB 进程内预检失败(嵌入式环境): %s", e)
+            return False
+
+    # 非嵌入式环境：原有子进程预检逻辑
+    check_script = (
+        "import duckdb; "
+        "c = duckdb.connect(':memory:'); "
+        "c.execute('SELECT 1').fetchone(); "
+        "c.close(); "
+        "print('OK')"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, '-c', check_script],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and ('OK' in result.stdout or not result.stderr):
+            return True
+        else:
+            logger.error(
+                "[FIX-20260702] DuckDB 预检失败！returncode=%d, stdout=%s, stderr=%s",
+                result.returncode, result.stdout[:200], result.stderr[:500]
+            )
+            return False
+    except Exception as e:
+        logger.error("[FIX-20260702] DuckDB 预检异常: %s", e, exc_info=True)
+        return False
 
 
 class _TimedDuckDBConnection:
@@ -37,25 +132,77 @@ class _TimedDuckDBConnection:
 
     使用持久化线程池执行查询，超时后标记连接不健康。
     所有数据库操作方法均有超时保护。
+
+    FIX-20260702-HARDEN:
+    - 当 DUCKDB_POOL_DISABLED=1 (单连接模式) 时，查询改为同步执行，
+      避免 ThreadPoolExecutor 线程跳转触发 _duckdb.cp312 原生崩溃
+      (异常码 0xc0000409，偏移 0x186f565)。
+    - 增加 owner_thread 跟踪，跨线程访问时记录 warning，便于定位
+      嵌入式环境下的线程/DuckDB ABI 不兼容问题。
     """
 
     _QUERY_TIMEOUT_SEC = 30.0
+    # FIX-20260702-HARDEN: 嵌入式环境或 DUCKDB_POOL_DISABLED=1 时同步执行查询，
+    # 不创建 ThreadPoolExecutor，避免线程跳转触发 _duckdb.cp312 原生崩溃(0xc0000409)。
+    # 注意：此值在类定义时计算，依赖 _is_embedded_python() 的检测结果。
+    _SYNC_EXEC = (
+        os.getenv('DUCKDB_POOL_DISABLED', '0').lower() in ('1', 'true', 'yes')
+        or _is_embedded_python()
+    )
 
-    def __init__(self, conn: duckdb.DuckDBPyConnection, timeout_sec: float = 30.0):
+    def __init__(self, conn: "_DuckDBPyConnection", timeout_sec: float = 30.0):
         self._conn = conn
         self._QUERY_TIMEOUT_SEC = timeout_sec
         self._unhealthy = False
         self._last_used_time = time.time()
         self._in_use = False
-        import concurrent.futures as _cf
-        self._executor = _cf.ThreadPoolExecutor(max_workers=1)
+        # FIX-20260702-HARDEN: 记录创建线程，检测跨线程访问
+        self._owner_thread = threading.get_ident()
+        self._cross_thread_warned = False
+        if not _TimedDuckDBConnection._SYNC_EXEC:
+            import concurrent.futures as _cf
+            self._executor = _cf.ThreadPoolExecutor(max_workers=1)
+        else:
+            self._executor = None
 
     def _execute_with_timeout(self, fn, *args, **kwargs):
         if self._unhealthy:
             raise ConnectionError("连接已标记为不健康(前次查询超时)，请重新获取连接")
+        self._last_used_time = time.time()
+        # FIX-20260702-HARDEN: 跨线程访问检测（仅警告，不阻断）
+        _current_thread = threading.get_ident()
+        if _current_thread != self._owner_thread and not self._cross_thread_warned:
+            self._cross_thread_warned = True
+            logger.info(
+                "[FIX-20260702] DuckDB连接跨线程访问: owner=%s current=%s "
+                "(单连接模式下建议同线程访问以降低原生崩溃风险)",
+                self._owner_thread, _current_thread,
+            )
+        # FIX-20260702-HARDEN: 单连接模式下同步执行，避免 ThreadPoolExecutor 线程跳转
+        if self._executor is None:
+            _single_mode = getattr(DBConnectionMixin, '_POOL_DISABLED', False)
+            _query_lock = DBConnectionMixin._SINGLE_QUERY_LOCK if _single_mode else None
+            if _query_lock is not None:
+                _query_lock.acquire()
+            try:
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as exc:
+                    _msg = str(exc).lower()
+                    _is_catalog_err = 'catalog error' in _msg or 'does not exist' in _msg
+                    _is_fatal_err = ('hang' in _msg or 'timeout' in _msg or 'deadlock' in _msg) and not _is_catalog_err
+                    if _is_fatal_err:
+                        self._unhealthy = True
+                        logger.error("[FIX-20260702] 连接标记为不健康(超时/死锁): %s", exc)
+                    elif not _is_catalog_err:
+                        logger.debug("[FIX-20260702] 同步执行异常(非致命，不标记不健康): %s", exc)
+                    raise
+            finally:
+                if _query_lock is not None:
+                    _query_lock.release()
+        # 多连接模式：保留 ThreadPoolExecutor 超时保护
         import concurrent.futures
         try:
-            self._last_used_time = time.time()
             _future = self._executor.submit(fn, *args, **kwargs)
             return _future.result(timeout=self._QUERY_TIMEOUT_SEC)
         except concurrent.futures.TimeoutError:
@@ -92,14 +239,18 @@ class _TimedDuckDBConnection:
             pass
 
     def close(self):
+        # FIX-20260702-HARDEN: 单连接模式下 _executor 为 None，跳过 shutdown
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=False)
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
         try:
-            self._executor.shutdown(wait=False)
-        except RuntimeError:
-            pass
-        except Exception:
-            pass
-        finally:
             self._conn.close()
+        except Exception as _close_err:
+            logger.debug("[FIX-20260702] DuckDB连接关闭异常(已忽略): %s", _close_err)
 
     def __getattr__(self, name):
         if name.startswith('_'):
@@ -135,6 +286,23 @@ class DBConnectionMixin:
     _pool_full_warn_interval = 30.0  # 同一警告最多每30秒打印一次
     _pool_full_warn_last_ts = 0.0
 
+    # FIX-20260702-HARDEN: 自动检测 PythonGO 嵌入式环境，启用安全模式
+    # 根因：DuckDB 内部 C++ 线程池(SET threads=N)在 PythonGO 嵌入式进程中
+    # 与宿主 InfiniTrader C++ 运行时冲突，触发 _duckdb.cp312 原生崩溃(0xc0000409)。
+    # 安全模式：单连接 + 同步执行 + threads=1，彻底消除多线程冲突。
+    _EMBEDDED_MODE = (
+        os.getenv('DUCKDB_POOL_DISABLED', '').lower() in ('1', 'true', 'yes')
+        or _is_embedded_python()
+    )
+    _POOL_DISABLED = _EMBEDDED_MODE or os.getenv('DUCKDB_POOL_DISABLED', '0').lower() in ('1', 'true', 'yes')
+    _EMBEDDED_THREADS = 1 if _EMBEDDED_MODE else None  # None = use default
+    _SINGLE_CONN: "_TimedDuckDBConnection" = None
+    _SINGLE_CONN_LOCK = threading.Lock()
+    _SINGLE_QUERY_LOCK = threading.Lock()
+    _THREAD_LOCAL_CONNS: "_Dict[int, _TimedDuckDBConnection]" = {}
+    _THREAD_LOCAL_CONNS_LOCK = threading.Lock()
+    _PREFLIGHT_PASSED = False
+
     def _ensure_pool_initialized(self):
         if not hasattr(self, '_pool'):
             self._pool = queue.Queue(maxsize=self._MAX_POOL_SIZE)
@@ -148,10 +316,21 @@ class DBConnectionMixin:
             self._pool_full_warn_last_ts = 0.0
 
     def _connect_with_timeout(self, db_file: str):
+        # FIX-20260702: 单连接模式下避免创建临时 ThreadPoolExecutor 线程，
+        # 降低 PythonGO 嵌入式环境中线程/DuckDB 原生崩溃风险。
+        if DBConnectionMixin._POOL_DISABLED:
+            try:
+                raw_conn = _db_connect(db_file, False)
+                return _TimedDuckDBConnection(raw_conn, timeout_sec=30.0)
+            except Exception as e:
+                logger.error("[R27-P0-DR-11] 数据库连接失败: %s", e)
+                raise ConnectionError(f"DB连接失败: {e}")
+
         import concurrent.futures as _cf
         _executor = _cf.ThreadPoolExecutor(max_workers=1)
         try:
-            _future = _executor.submit(duckdb.connect, db_file, False)
+            # FIX-20260702: 统一走 db_adapter.connect，确保 read_only 等配置一致。
+            _future = _executor.submit(_db_connect, db_file, False)
             raw_conn = _future.result(timeout=self._DB_CONNECT_TIMEOUT_SEC)
             conn = _TimedDuckDBConnection(raw_conn, timeout_sec=30.0)
             return conn
@@ -162,14 +341,24 @@ class DBConnectionMixin:
         finally:
             _executor.shutdown(wait=False)
 
-    def _configure_connection(self, conn: duckdb.DuckDBPyConnection):
+    def _configure_connection(self, conn: "_DuckDBPyConnection"):
         mem_limit = self._get_duckdb_memory_limit()
         try:
             conn.execute(f"SET max_memory = '{mem_limit}'")
         except Exception as e:
             logger.warning(f"Failed to set max_memory: {e}")
+        # FIX-20260702-HARDEN: 嵌入式环境下强制 threads=1，
+        # 避免 DuckDB 内部 C++ 线程池与 PythonGO 宿主进程冲突
+        _threads = DBConnectionMixin._EMBEDDED_THREADS or self.DUCKDB_THREADS
+        if DBConnectionMixin._EMBEDDED_MODE and _threads != 1:
+            logger.info(
+                "[FIX-20260702] 嵌入式环境: DuckDB threads 从 %d 降为 1 "
+                "(避免内部C++线程池触发原生崩溃 0xc0000409)",
+                self.DUCKDB_THREADS,
+            )
+            _threads = 1
         try:
-            conn.execute(f"SET threads = {self.DUCKDB_THREADS}")
+            conn.execute(f"SET threads = {_threads}")
         except Exception as e:
             logger.warning(f"Failed to set threads: {e}")
         temp_dir = os.path.join(tempfile.gettempdir(), 'duckdb_tmp')
@@ -240,6 +429,19 @@ class DBConnectionMixin:
         return self.DUCKDB_MAX_MEMORY if self.DUCKDB_MAX_MEMORY else '4GB'
 
     def _create_new_connection(self):
+        # FIX-20260702-HARDEN: 嵌入式环境下首次连接前做安全预检
+        if DBConnectionMixin._EMBEDDED_MODE and not DBConnectionMixin._PREFLIGHT_PASSED:
+            logger.info("[FIX-20260702] 嵌入式环境检测到，执行 DuckDB 安全预检...")
+            passed = _duckdb_preflight_check()
+            DBConnectionMixin._PREFLIGHT_PASSED = True  # 只检一次
+            if not passed:
+                logger.error(
+                    "[FIX-20260702] DuckDB 安全预检失败！嵌入式环境可能不兼容 DuckDB 原生扩展。"
+                    "回退到内存模式以避免原生崩溃(0xc0000409)。"
+                )
+                self.DB_FILE = ':memory:'
+                self._USE_MEMORY_MODE = True
+
         try:
             conn = self._connect_with_timeout(self.DB_FILE)
         except (ConnectionError, Exception) as _conn_err:
@@ -256,9 +458,17 @@ class DBConnectionMixin:
             except Exception as _ice:
                 logger.debug("integrity_check skipped: %s", _ice)
             self._integrity_checked = True
+        # FIX-20260703: 确保核心 schema(ticks_raw + latest_prices)存在于每个新连接上
+        # 根因: 单连接模式下连接被标记不健康后销毁重建，新连接上表/视图可能不存在
+        _schema_hook = getattr(self, '_ensure_core_schema_on_connect', None)
+        if _schema_hook is not None:
+            try:
+                _schema_hook(conn)
+            except Exception as _schema_err:
+                logger.warning("[FIX-20260703] 新连接 schema 初始化失败: %s", _schema_err)
         return conn
 
-    def _get_connection(self, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    def _get_connection(self, read_only: bool = False) -> "_DuckDBPyConnection":
         self._ensure_pool_initialized()
 
         if not getattr(self, '_pool_size_initialized', False):
@@ -279,6 +489,43 @@ class DBConnectionMixin:
 
         if DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN is not None:
             return DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN
+
+        # FIX-20260702: 单连接模式，避免 PythonGO 嵌入式环境下多连接崩溃。
+        # FIX-20260704-P0-3: 线程局部连接，避免跨线程使用同一DuckDB连接导致原生崩溃(0xc0000409)
+        # 根因: owner=9180 current=19192 跨线程调用DuckDB C API，单连接锁只防并发不防跨线程
+        if DBConnectionMixin._POOL_DISABLED:
+            _current_tid = threading.get_ident()
+            with DBConnectionMixin._THREAD_LOCAL_CONNS_LOCK:
+                _tl_conn = DBConnectionMixin._THREAD_LOCAL_CONNS.get(_current_tid)
+                if _tl_conn is not None and not getattr(_tl_conn, '_unhealthy', False):
+                    _tl_conn._last_used_time = time.time()
+                    _tl_conn._in_use = True
+                    return _tl_conn
+            with DBConnectionMixin._SINGLE_CONN_LOCK:
+                if DBConnectionMixin._SINGLE_CONN is None or getattr(DBConnectionMixin._SINGLE_CONN, '_unhealthy', False):
+                    DBConnectionMixin._SINGLE_CONN = self._create_new_connection()
+                    logger.info("[FIX-20260702] DUCKDB_POOL_DISABLED=1，使用单连接模式")
+                DBConnectionMixin._SINGLE_CONN._last_used_time = time.time()
+                DBConnectionMixin._SINGLE_CONN._in_use = True
+            _owner_tid = DBConnectionMixin._SINGLE_CONN._owner_thread
+            if _current_tid != _owner_tid:
+                with DBConnectionMixin._THREAD_LOCAL_CONNS_LOCK:
+                    _tl_conn = DBConnectionMixin._THREAD_LOCAL_CONNS.get(_current_tid)
+                    if _tl_conn is None or getattr(_tl_conn, '_unhealthy', False):
+                        if _tl_conn is not None:
+                            try:
+                                _tl_conn.close()
+                            except Exception:
+                                pass
+                        _tl_conn = self._create_new_connection()
+                        _tl_conn._owner_thread = _current_tid
+                        DBConnectionMixin._THREAD_LOCAL_CONNS[_current_tid] = _tl_conn
+                        logger.debug("[FIX-20260704-P0-3] 为线程%d创建独立DuckDB连接(owner=%d), 避免跨线程原生崩溃",
+                                    _current_tid, _owner_tid)
+                    _tl_conn._last_used_time = time.time()
+                    _tl_conn._in_use = True
+                    return _tl_conn
+            return DBConnectionMixin._SINGLE_CONN
 
         try:
             conn = self._pool.get_nowait()
@@ -327,7 +574,7 @@ class DBConnectionMixin:
                 logger.error("连接池耗尽(等待超时30s)，降级到内存数据库")
                 return self._try_fallback_to_memory_db()
 
-    def _get_read_connection(self) -> duckdb.DuckDBPyConnection:
+    def _get_read_connection(self) -> "_DuckDBPyConnection":
         return self._get_connection(read_only=False)
 
     def set_max_pool_size(self, new_size: int) -> None:
@@ -348,6 +595,23 @@ class DBConnectionMixin:
     def _return_connection(self, conn):
         if conn is None or conn is DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN:
             return
+        # FIX-20260706: 线程局部连接归还——标记空闲，不健康则销毁重建
+        _is_tl_conn = False
+        with DBConnectionMixin._THREAD_LOCAL_CONNS_LOCK:
+            _is_tl_conn = conn in DBConnectionMixin._THREAD_LOCAL_CONNS.values()
+        if _is_tl_conn:
+            conn._in_use = False
+            conn._last_used_time = time.time()
+            if getattr(conn, '_unhealthy', False):
+                self._destroy_connection(conn)
+            return
+        # FIX-20260702: 单连接模式下不归还连接池，仅标记为空闲。
+        if conn is DBConnectionMixin._SINGLE_CONN:
+            conn._in_use = False
+            conn._last_used_time = time.time()
+            if getattr(conn, '_unhealthy', False):
+                self._destroy_connection(conn)
+            return
         conn._in_use = False
         conn._last_used_time = time.time()
         if getattr(conn, '_unhealthy', False):
@@ -363,6 +627,16 @@ class DBConnectionMixin:
             conn.close()
         except Exception:
             pass
+        # FIX-20260706: 从线程局部连接表中移除已销毁连接，防止下次获取到已关闭连接
+        with DBConnectionMixin._THREAD_LOCAL_CONNS_LOCK:
+            _dead_tids = [tid for tid, c in DBConnectionMixin._THREAD_LOCAL_CONNS.items() if c is conn]
+            for _tid in _dead_tids:
+                del DBConnectionMixin._THREAD_LOCAL_CONNS[_tid]
+        # FIX-20260702: 单连接模式被销毁时清空静态引用，便于下次重建。
+        if conn is DBConnectionMixin._SINGLE_CONN:
+            with DBConnectionMixin._SINGLE_CONN_LOCK:
+                DBConnectionMixin._SINGLE_CONN = None
+            return
         with self._pool_lock:
             if conn in self._all_connections:
                 self._all_connections.remove(conn)
@@ -370,6 +644,9 @@ class DBConnectionMixin:
 
     def _try_reclaim_connections(self) -> int:
         self._ensure_pool_initialized()
+        # FIX-20260702: 单连接模式不回收。
+        if DBConnectionMixin._POOL_DISABLED:
+            return 0
         reclaimed = 0
         now = time.time()
         with self._pool_lock:
@@ -412,12 +689,13 @@ class DBConnectionMixin:
         error_str = str(e)
         return 'FATAL' in error_str or 'database has been invalidated' in error_str
 
-    def _try_fallback_to_memory_db(self) -> duckdb.DuckDBPyConnection:
+    def _try_fallback_to_memory_db(self) -> "_DuckDBPyConnection":
         with DBConnectionMixin._SHARED_MEMORY_FALLBACK_LOCK:
             if DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN is not None:
                 return DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN
             try:
-                conn = duckdb.connect(':memory:')
+                # FIX-20260702: 统一走 db_adapter.connect_in_memory。
+                conn = _db_connect_in_memory()
                 self._init_memory_fallback_schema(conn)
                 DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN = conn
                 logger.warning("[R30-P0-08] 降级到内存数据库(schema已初始化)，数据不会持久化！")
@@ -535,7 +813,7 @@ class DBConnectionMixin:
             except Exception as fallback_err:
                 logger.critical("[R30-P0-08] 降级失败: %s，数据写入永久中断", fallback_err)
 
-    def get_connection(self, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    def get_connection(self, read_only: bool = False) -> "_DuckDBPyConnection":
         self._ensure_pool_initialized()
         conn = self._get_connection(read_only)
         self._thread_local.conn = conn
@@ -543,7 +821,7 @@ class DBConnectionMixin:
         self._thread_local.conn_generation = getattr(self, '_connection_generation', 0)
         return conn
 
-    def _reconnect_with_backoff(self, max_retries: int = 3) -> duckdb.DuckDBPyConnection:
+    def _reconnect_with_backoff(self, max_retries: int = 3) -> "_DuckDBPyConnection":
         if DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN is not None:
             return DBConnectionMixin._SHARED_MEMORY_FALLBACK_CONN
         for attempt in range(max_retries):

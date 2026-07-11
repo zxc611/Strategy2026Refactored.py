@@ -5,7 +5,7 @@ from __future__ import annotations
 # ── DuckDB Tick Storage ──
 
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 import os
 import re
 from dataclasses import dataclass, field
@@ -509,7 +509,7 @@ class DuckDBTickStorage:
 # ── External Validation Pipeline ──
 
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta

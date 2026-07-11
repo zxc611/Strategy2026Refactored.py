@@ -41,10 +41,10 @@ class StrategyBusinessLayer:
             if _src != 'legacy':
                 provider._signal_source = _src
             else:
-                from ali2026v3_trading.config.final_three_layer_config import SIGNAL_SOURCE
+                from ali2026v3_trading.config.tvf_param_loader import SIGNAL_SOURCE
                 provider._signal_source = _normalize_signal_source(SIGNAL_SOURCE)
         except Exception:
-            from ali2026v3_trading.config.final_three_layer_config import SIGNAL_SOURCE
+            from ali2026v3_trading.config.tvf_param_loader import SIGNAL_SOURCE
             provider._signal_source = _normalize_signal_source(SIGNAL_SOURCE)
 
     # ========== 服务惰性初始化 ==========
@@ -62,6 +62,12 @@ class StrategyBusinessLayer:
                 _store = getattr(provider, '_state_store', None)
                 if _store:
                     _store.set_ref('_order_service', provider._order_service)
+                # [FIX-20260708-PROVIDER-REF] 设置_provider_ref，使dry_run虚拟回调能获取策略对象
+                try:
+                    provider._order_service._provider_ref = provider
+                    logging.info("[StrategyBusinessLayer] _provider_ref已设置到OrderService")
+                except (AttributeError, TypeError):
+                    pass
                 logging.debug("[StrategyBusinessLayer] OrderService initialized (singleton)")
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
                 logging.warning("[StrategyBusinessLayer] Failed to initialize OrderService: %s", e)
@@ -585,25 +591,365 @@ class StrategyBusinessLayer:
                 logging.info("[StrategyBusinessLayer.execute_option_trading_cycle] R24-P1-CF-02: 初始化未完成，跳过交易周期")
             return
         if not provider._is_running or provider._is_paused:
+            # FIX-20260708: 升级为INFO(节流5分钟)，原DEBUG在生产日志不可见，导致交易周期"消失"无法排查
+            if not hasattr(self, '_skip_running_log_ts'):
+                self._skip_running_log_ts = 0.0
+            _now_sr = time.time()
+            if _now_sr - self._skip_running_log_ts >= 300:
+                self._skip_running_log_ts = _now_sr
+                logging.info("[OptionTrading] 跳过交易周期: _is_running=%s _is_paused=%s",
+                             provider._is_running, provider._is_paused)
             return
         if provider._state == StrategyState.DEGRADED:
             logging.info("[OptionTrading] 策略处于DEGRADED状态，跳过交易周期")
             return
         if not provider._trading_lock.acquire(blocking=False):
-
+            # FIX-P0-22: 原G4守卫完全静默，锁竞争时无法定位
+            # 添加DEBUG日志与连续失败计数器，超过阈值告警
+            if not hasattr(self, '_trading_lock_fail_count'):
+                self._trading_lock_fail_count = 0
+            self._trading_lock_fail_count += 1
+            logging.debug("[OptionTrading] R24-P1-CF-02 跳过交易周期: _trading_lock获取失败(连续第%d次)",
+                          self._trading_lock_fail_count)
+            if self._trading_lock_fail_count >= 10:
+                logging.warning("[OptionTrading] _trading_lock连续%d次获取失败，可能存在锁泄漏",
+                                self._trading_lock_fail_count)
             return
+        # FIX-P0-22: 锁获取成功后重置失败计数器
+        if hasattr(self, '_trading_lock_fail_count'):
+            self._trading_lock_fail_count = 0
         try:
+            # FIX-20260707-AUTO-TRADING: auto_trading开关前置检查
+            # 根因: UI关闭自动交易后(auto_trading_enabled=False)，策略代码仍尝试下单，
+            # 导致83次平台拒绝(result=-1)产生噪音ERROR日志
+            # FIX-20260707-DRY-RUN: dry_run模式下不跳过交易周期，
+            # 策略逻辑必须完整运行（信号/风控/持仓/快照），仅由OrderExecutor拦截实际下单
+            _dry_run_mode = False
+            try:
+                from ali2026v3_trading.config.params_service import get_params_service
+                _dry_run_mode = get_params_service().get_bool('dry_run_mode', False) or False
+            except Exception as _dr_err:
+                # FIX-20260708: dry_run_mode读取失败时记录警告，原代码静默pass导致问题不可见
+                if not hasattr(self, '_dry_run_read_err_ts'):
+                    self._dry_run_read_err_ts = 0.0
+                _now_dr = time.time()
+                if _now_dr - self._dry_run_read_err_ts >= 300:
+                    self._dry_run_read_err_ts = _now_dr
+                    logging.warning("[OptionTrading] dry_run_mode读取失败(默认False): %s", _dr_err)
+            # FIX-20260708-V3: 回退检查provider._dry_run_active（由lifecycle_callbacks.py设置）
+            # 根因: ParamsService._params可能未从params_default.json加载dry_run_mode，
+            # 但lifecycle_callbacks.py已通过config_params检测到dry_run_mode=True并设置_dry_run_active
+            # 此回退确保交易周期正确感知dry_run模式，避免hard_stop检查阻断dry_run交易
+            if not _dry_run_mode:
+                _dry_run_mode = bool(getattr(provider, '_dry_run_active', False))
+            # FIX-20260708: 每5分钟记录一次dry_run_mode值，便于诊断hard_stop是否阻断交易周期
+            if not hasattr(self, '_dry_run_log_ts'):
+                self._dry_run_log_ts = 0.0
+            _now_drl = time.time()
+            if _now_drl - self._dry_run_log_ts >= 300:
+                self._dry_run_log_ts = _now_drl
+                logging.info("[OptionTrading] dry_run_mode=%s", _dry_run_mode)
+            if not _dry_run_mode:
+                _auto_trading = getattr(provider, 'auto_trading_enabled', None)
+                if _auto_trading is None:
+                    _auto_trading = getattr(provider, 'my_trading', None)
+                if _auto_trading is False:
+                    # 节流: 每5分钟输出一次INFO，避免DEBUG在生产环境不可见
+                    if not hasattr(self, '_auto_trading_skip_ts'):
+                        self._auto_trading_skip_ts = 0.0
+                    _now = time.time()
+                    if _now - self._auto_trading_skip_ts >= 300:
+                        self._auto_trading_skip_ts = _now
+                        logging.info("[OptionTrading] auto_trading_enabled=False（开仓功能已关闭），跳过交易周期")
+                    return
+            # FIX-20260707-HARD-STOP: hard_stop前置检查（dry_run模式下不跳过）
+            if not _dry_run_mode:
+                try:
+                    from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
+                    _sid = str(getattr(provider, 'strategy_id', '') or 'global')
+                    _safety = get_safety_meta_layer(None, scope_id=_sid)
+                    if _safety and _safety.is_hard_stop_triggered():
+                        # 节流: 每5分钟输出一次INFO
+                        if not hasattr(self, '_hard_stop_skip_ts'):
+                            self._hard_stop_skip_ts = 0.0
+                        _now_hs = time.time()
+                        if _now_hs - self._hard_stop_skip_ts >= 300:
+                            self._hard_stop_skip_ts = _now_hs
+                            logging.info("[OptionTrading] hard_stop已触发，跳过交易周期")
+                        return
+                except Exception:
+                    pass  # 风控不可用时放行，不阻断交易
             # R24-P2-AT-01修复: 添加交易周期耗时记录
             _cycle_start = time.time()
             t_type = getattr(provider, 't_type_service', None)
             if not t_type:
+                # FIX-20260708: 升级为INFO(节流5分钟)，原DEBUG在生产日志不可见
+                if not hasattr(self, '_no_ttype_log_ts'):
+                    self._no_ttype_log_ts = 0.0
+                _now_nt = time.time()
+                if _now_nt - self._no_ttype_log_ts >= 300:
+                    self._no_ttype_log_ts = _now_nt
+                    logging.info("[OptionTrading] 跳过交易周期: t_type_service=None")
                 return
             signal_source = _normalize_signal_source(getattr(provider, '_signal_source', 'legacy'))
             if signal_source in ('A', 'B', 'C'):
                 targets = t_type.select_otm_targets_signal_sources(signal_source=signal_source)
             else:
                 targets = t_type.select_otm_targets_by_volume()
+            # FIX-20260708-V2: 记录信号数量（原代码从未调用record_signal，导致状态报告恒显示"信号数量=0"）
+            # 根因: _lifecycle_service属性名错误，应为_lifecycle_svc；且record_signal在_LIFECYCLE_DELEGATE中
+            # 修复: 直接调用provider.record_signal()，通过_LIFECYCLE_DELEGATE委托到_lifecycle_svc._lc_monitor
+            if targets:
+                try:
+                    _record_fn = getattr(provider, 'record_signal', None)
+                    _fn_name = getattr(_record_fn, '__name__', str(type(_record_fn).__name__) if _record_fn else 'None')
+                    if callable(_record_fn):
+                        for _ in targets:
+                            _record_fn()
+                    else:
+                        with provider._lock:
+                            provider._stats['total_signals'] = provider._stats.get('total_signals', 0) + len(targets)
+                    # [FIX-20260708-V5-DIAG] 诊断record_signal执行结果
+                    _sig_count = provider._stats.get('total_signals', -1)
+                    if not hasattr(provider, '_rs_diag_logged'):
+                        provider._rs_diag_logged = 0
+                    provider._rs_diag_logged += 1
+                    if provider._rs_diag_logged <= 5:
+                        logging.info("[OptionTrading] record_signal诊断: targets=%d fn=%s callable=%s total_signals=%d",
+                                     len(targets), _fn_name, callable(_record_fn), _sig_count)
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _rs_err:
+                    # [FIX-20260708-V4-DIAG] 诊断record_signal异常，原except pass静默吞掉了所有错误
+                    if not hasattr(provider, '_rs_err_logged'):
+                        provider._rs_err_logged = 0
+                    provider._rs_err_logged += 1
+                    if provider._rs_err_logged <= 3:
+                        logging.warning("[OptionTrading] record_signal异常(第%d次): %s targets_count=%d fn=%s",
+                                        provider._rs_err_logged, _rs_err, len(targets),
+                                        type(_record_fn).__name__ if _record_fn else 'None')
+                    # 回退：直接递增_stats
+                    try:
+                        provider._stats['total_signals'] = provider._stats.get('total_signals', 0) + len(targets)
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        pass
+            # [FIX-20260710-PRE-TARGETS] 将BS/DR/HFT集成移到targets为空检查之前
+            # 根因: targets为空时L734原return导致所有策略集成代码(BS/DR/HFT)从不执行
+            # 即使targets为空，BS/DR/HFT仍需运行以产生信号和更新内部状态
+            # DR不依赖targets（从DuckDB查数据），BS/HFT在targets为空时从width_cache获取替代合约列表
+            _fallback_instruments = []
             if not targets:
+                try:
+                    _wc_fb = getattr(t_type, '_width_cache', None) or getattr(t_type, 'width_cache', None)
+                    if _wc_fb:
+                        _fi_map = getattr(_wc_fb, '_future_initialized', {})
+                        _inst_map = getattr(_wc_fb, '_instrument_id_map', None) or getattr(_wc_fb, '_futures_instruments', None)
+                        for _fid, _init in _fi_map.items():
+                            if _init:
+                                _fb_inst = None
+                                if isinstance(_inst_map, dict):
+                                    _fb_inst = _inst_map.get(_fid)
+                                elif hasattr(_wc_fb, '_futures_map'):
+                                    _fm = getattr(_wc_fb, '_futures_map', {})
+                                    _fb_inst = _fm.get(_fid, {}).get('instrument_id')
+                                if _fb_inst:
+                                    _fallback_instruments.append({'instrument_id': _fb_inst, 'price': 0.0})
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
+            # ✅ P1-9修复: 集成box_spring_strategy的箱体弹簧扫描
+            # R13-API-01修复: 传递完整tick参数(high/low/volume/timestamp)，否则箱体检测失效
+            # R15-P1-PERF-02修复: 使用全局单例get_box_spring_strategy()，避免绕过单例创建多实例
+            try:
+                from ali2026v3_trading.strategy.box_spring_strategy_impl import get_box_spring_strategy
+                bss = get_box_spring_strategy()
+            except ImportError as _bss_ie:
+                logging.warning("[P1-FIX] box_spring_strategy导入失败, 箱体弹簧扫描不可用: %s", _bss_ie)
+                bss = None
+            try:
+                if bss is not None:
+                    _bs_tick_targets = targets if targets else _fallback_instruments
+                    for t in _bs_tick_targets:
+                        inst_id = t.get('instrument_id', '')
+                        if inst_id:
+                            bss.on_tick(
+                                instrument_id=inst_id,
+                                price=t.get('price', 0.0),
+                                high=t.get('high', 0.0),
+                                low=t.get('low', 0.0),
+                                volume=t.get('volume', 0),
+                                timestamp=t.get('timestamp'),
+                            )
+                    # [FIX-20260710-BS-TRIGGER] BoxSpring信号检测→下单链路修复
+                    _bs_signal_count = 0
+                    for t in _bs_tick_targets:
+                        _bs_inst = t.get('instrument_id', '')
+                        _bs_price = t.get('price', 0.0)
+                        if not _bs_inst or _bs_price <= 0:
+                            continue
+                        try:
+                            _bs_signal = bss.detect_spring(
+                                instrument_id=_bs_inst,
+                                future_price=_bs_price,
+                                option_instrument_id=t.get('option_instrument_id', _bs_inst),
+                                strike_price=t.get('strike_price', 0.0),
+                                iv=t.get('iv', 0.0),
+                                premium_price=t.get('premium_price', 0.0),
+                                days_to_expiry=t.get('days_to_expiry', 30),
+                                account_equity=t.get('account_equity', 100000.0),
+                            )
+                            if _bs_signal is not None:
+                                _bs_triggered = bss.check_trigger(
+                                    _bs_inst,
+                                    order_flow_imbalance=t.get('order_flow_imbalance', 0.0),
+                                    option_chain_activity=t.get('option_chain_activity', 0.0),
+                                )
+                                if _bs_triggered is not None:
+                                    _bs_order_id = bss.execute_spring_entry(_bs_triggered)
+                                    if _bs_order_id:
+                                        _bs_signal_count += 1
+                                        logging.info("[FIX-0710-BS-TRIGGER] BoxSpring入场: inst=%s order=%s dir=%s",
+                                                     _bs_inst, _bs_order_id, _bs_triggered.direction)
+                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _bs_sig_err:
+                            _bs_sig_err_count = getattr(provider, '_bs_sig_err_count', 0) + 1
+                            provider._bs_sig_err_count = _bs_sig_err_count
+                            if _bs_sig_err_count <= 3 or _bs_sig_err_count % 100 == 0:
+                                logging.debug("[FIX-0710-BS-TRIGGER] 弹簧检测异常(第%d次): %s",
+                                              _bs_sig_err_count, _bs_sig_err)
+                    if _bs_signal_count > 0:
+                        logging.info("[FIX-0710-BS-TRIGGER] BoxSpring本周期入场%d笔", _bs_signal_count)
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                logging.warning("[R22-EP-P1-17] [StrategyBusinessLayer] box_spring_strategy tick error: %s", e)
+            # [FIX-20260710-HFT-INTEGRATE] HFT引擎tick集成到交易周期
+            try:
+                _hft = getattr(provider, '_hft_engine', None)
+                if _hft is None:
+                    provider._ensure_hft_engine()
+                    _hft = getattr(provider, '_hft_engine', None)
+                if _hft is not None:
+                    _hft_tick_count = getattr(provider, '_hft_tick_count', 0) + 1
+                    provider._hft_tick_count = _hft_tick_count
+                    if _hft_tick_count % 10 == 1:
+                        _hft_tick_targets = targets if targets else _fallback_instruments
+                        for t in _hft_tick_targets:
+                            _hft_inst = t.get('instrument_id', '')
+                            _hft_price = t.get('price', 0.0)
+                            if _hft_inst and _hft_price > 0:
+                                _hft_result = _hft.on_tick_enhanced(
+                                    instrument_id=_hft_inst,
+                                    price=_hft_price,
+                                    volume=t.get('volume', 0),
+                                    direction=t.get('direction', 'BUY'),
+                                    product=t.get('product', ''),
+                                    bid_price=t.get('bid_price', 0.0),
+                                    ask_price=t.get('ask_price', 0.0),
+                                    resonance_strength=t.get('resonance_strength', 0.0),
+                                    current_state=getattr(provider, '_resolve_open_reason', lambda: 'UNKNOWN')(),
+                                )
+                                if _hft_result and any(v is not None for v in _hft_result.values() if not isinstance(v, bool)):
+                                    logging.debug("[FIX-0710-HFT] HFT信号: inst=%s result_keys=%s",
+                                                  _hft_inst, [k for k, v in _hft_result.items() if v is not None and not isinstance(v, bool)])
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _hft_err:
+                _hft_err_count = getattr(provider, '_hft_err_count', 0) + 1
+                provider._hft_err_count = _hft_err_count
+                if _hft_err_count <= 3 or _hft_err_count % 100 == 0:
+                    logging.debug("[FIX-0710-HFT] HFT引擎集成异常(第%d次): %s", _hft_err_count, _hft_err)
+            # [FIX-20260710-DIVERGENCE-REVERSAL-V2] 集成DivergenceReversalModule到交易周期
+            try:
+                from ali2026v3_trading.strategy.divergence_reversal import get_divergence_reversal_module
+                _dr_module = get_divergence_reversal_module()
+                if _dr_module is not None:
+                    _dr_call_count = getattr(provider, '_dr_update_call_count', 0) + 1
+                    provider._dr_update_call_count = _dr_call_count
+                    if _dr_call_count % 10 == 1:
+                        try:
+                            from ali2026v3_trading.data.data_service import get_data_service as _gds
+                            _ds = _gds()
+                            if _ds is not None and hasattr(_ds, 'query'):
+                                _dr_sql = (
+                                    "SELECT fi.instrument_id AS symbol, kr.timestamp AS minute, "
+                                    "kr.open, kr.high, kr.low, kr.close, kr.volume, "
+                                    "oi.option_type, oi.strike_price, fi2.last_price AS underlying_price "
+                                    "FROM klines_raw kr "
+                                    "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
+                                    "LEFT JOIN option_instruments oi ON oi.underlying_id = fi.internal_id "
+                                    "LEFT JOIN (SELECT internal_id, last_price FROM latest_prices) fi2 ON fi2.internal_id = fi.internal_id "
+                                    "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw) "
+                                    "ORDER BY kr.timestamp DESC LIMIT 500"
+                                )
+                                _dr_result = _ds.query(_dr_sql)
+                                if _dr_result is not None and len(_dr_result) > 0:
+                                    import pandas as _pd
+                                    _dr_df = _dr_result.to_pandas() if hasattr(_dr_result, 'to_pandas') else _pd.DataFrame(_dr_result.to_pylist())
+                                    if len(_dr_df) > 0:
+                                        _dr_output = _dr_module.update(_dr_df)
+                                        _dr_rev_sig = getattr(_dr_output, 'div_reversal_signal', None)
+                                        _dr_has_div = _dr_rev_sig is not None and bool(_dr_rev_sig)
+                                        if _dr_has_div:
+                                            logging.info("[FIX-0710-DIVREV-V2] DivergenceReversal检测到背离信号, "
+                                                         "reversal_signal=%s", _dr_rev_sig)
+                                        elif _dr_call_count % 100 == 1:
+                                            logging.info("[FIX-0710-DIVREV-V2] DivergenceReversal无背离信号(call=%d rows=%d)",
+                                                         _dr_call_count, len(_dr_df))
+                                else:
+                                    if _dr_call_count % 100 == 1:
+                                        logging.debug("[FIX-0710-DIVREV-V2] klines_raw查询无数据(call=%d)", _dr_call_count)
+                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _dr_qry_err:
+                            if _dr_call_count <= 3 or _dr_call_count % 100 == 0:
+                                logging.warning("[FIX-0710-DIVREV-V2] klines_raw查询失败(call=%d): %s",
+                                                _dr_call_count, _dr_qry_err)
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _dr_err:
+                _dr_err_count = getattr(provider, '_dr_err_count', 0) + 1
+                provider._dr_err_count = _dr_err_count
+                if _dr_err_count <= 3 or _dr_err_count % 100 == 0:
+                    logging.warning("[FIX-0710-DIVREV-V2] DivergenceReversalModule集成异常(第%d次): %s",
+                                    _dr_err_count, _dr_err)
+            if not targets:
+                # FIX-R6: targets为空时输出节流warning日志，避免完全静默
+                # 每5分钟输出一次，包含诊断信息
+                if not hasattr(provider, '_empty_targets_last_log'):
+                    provider._empty_targets_last_log = 0.0
+                _now = time.time()
+                if _now - provider._empty_targets_last_log >= 300:
+                    provider._empty_targets_last_log = _now
+                    try:
+                        _wc = getattr(t_type, '_width_cache', None) or getattr(t_type, 'width_cache', None)
+                        _tier_info = {}
+                        _init_count = 0
+                        if _wc:
+                            _init_count = sum(1 for v in getattr(_wc, '_future_initialized', {}).values() if v)
+                            _sc = getattr(_wc, '_status_counts', {})
+                            _fr_map = getattr(_wc, '_future_rising', {})
+                            _tier_counts = {1: 0, 2: 0, 3: 0, 4: 0}
+                            for fid, md in _sc.items():
+                                try:
+                                    _opt_type = 'CALL' if _fr_map.get(fid, False) else 'PUT'
+                                    _raw_months = list(md.keys()) if isinstance(md, dict) else []
+                                    _months = _wc._get_scoring_months(fid, _raw_months) if hasattr(_wc, '_get_scoring_months') else _raw_months
+                                    _month_list = []
+                                    for _mth in _months:
+                                        _counts = md.get(_mth, {}).get(_opt_type, {})
+                                        _cr = _counts.get('correct_rise', 0)
+                                        _wr = _counts.get('wrong_rise', 0)
+                                        _cf = _counts.get('correct_fall', 0)
+                                        _wf = _counts.get('wrong_fall', 0)
+                                        _other = _counts.get('other', 0)
+                                        _total = _cr + _wr + _cf + _wf + _other
+                                        _month_list.append({'cr': _cr, 'wr': _wr, 'cf': _cf, 'wf': _wf, 'other': _other, 'total': _total})
+                                    _w = _wc.resolve_month_weights(len(_month_list)) if hasattr(_wc, 'resolve_month_weights') else tuple(1.0 for _ in _month_list)
+                                    _cup = _wc.compute_correct_up_pct(_month_list, _w) if _month_list else 0.0
+                                    _cov = _wc.compute_coverage(_month_list, _w) if _month_list else 0.0
+                                    _wilson = 0.0
+                                    _nr = _wc.compute_noise_ratio(_month_list, _w) if _month_list else 0.0
+                                    _t = _wc.determine_tier(_cov, _wilson, _cup, _nr)
+                                    _tier_counts[_t] = _tier_counts.get(_t, 0) + 1
+                                except Exception:
+                                    pass
+                            _tier_info = _tier_counts
+                        logging.warning(
+                            "[OptionTrading] R24-P1-CF-02: targets为空，跳过下单周期 "
+                            "(initialized_futures=%d, tier_counts=%s, signal_source=%s, fallback_inst=%d)",
+                            _init_count, _tier_info, signal_source, len(_fallback_instruments)
+                        )
+                    except Exception as _diag_e:
+                        logging.warning("[OptionTrading] targets为空（诊断失败: %s）", _diag_e)
                 return
             open_reason = provider._resolve_open_reason()
             for t in targets:
@@ -681,13 +1027,32 @@ class StrategyBusinessLayer:
                     t['signal_id'] = _sig_id  # R13-P1-BIZ-06修复: 回写到target供后续order使用
                     check_result = rs.check_before_trade(signal)
                     if check_result.is_block:
-                        logging.warning("[OptionTrading] 风控阻断: %s %s reason=%s type=%s result=%s message=%s",
-                                        t.get('instrument_id', ''), t.get('direction', ''), check_result.reason,
-                                        type(check_result).__name__, check_result.result, getattr(check_result, 'message', ''))
+                        # NEW-04(FIX-20260706-RISK-BLOCK-NOISE): 限流风控阻断日志，避免hard_stop期间洪泛
+                        # 旧代码每个target每30s周期输出1条WARNING，hard_stop=True时612条/24min，可能拖慢平台UI
+                        _now = time.time()
+                        _last = getattr(provider, '_risk_block_last_log_ts', 0)
+                        _count = getattr(provider, '_risk_block_suppressed', 0)
+                        if (_now - _last) >= 60.0:
+                            if _count > 0:
+                                logging.warning("[OptionTrading] 风控阻断(限流): %s %s reason=%s (已抑制%d条同类日志)",
+                                                t.get('instrument_id', ''), t.get('direction', ''), check_result.reason, _count)
+                            else:
+                                logging.warning("[OptionTrading] 风控阻断: %s %s reason=%s type=%s result=%s message=%s",
+                                                t.get('instrument_id', ''), t.get('direction', ''), check_result.reason,
+                                                type(check_result).__name__, check_result.result, getattr(check_result, 'message', ''))
+                            provider._risk_block_last_log_ts = _now
+                            provider._risk_block_suppressed = 0
+                        else:
+                            provider._risk_block_suppressed = _count + 1
                         continue
                     passed_targets.append(t)
                 if not passed_targets:
-                    logging.info("[OptionTrading] 所有target均被风控阻断，跳过本次周期")
+                    # NEW-04: 限流"所有target均被风控阻断"日志，1条/60s
+                    _now2 = time.time()
+                    _last2 = getattr(provider, '_all_blocked_last_log_ts', 0)
+                    if (_now2 - _last2) >= 60.0:
+                        logging.info("[OptionTrading] 所有target均被风控阻断，跳过本次周期 (限流1/60s)")
+                        provider._all_blocked_last_log_ts = _now2
                     return
                 targets = passed_targets
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
@@ -700,32 +1065,80 @@ class StrategyBusinessLayer:
                 )
                 return
             # P-30/R7-M-15修复: 健康检查CRITICAL时暂停新开仓（手册12.1节）
-            # 双重检查: (1) _health_pause_new_open标志 (2) 实时health查询
-            if provider._health_pause_new_open:
-                _pause_ts = getattr(provider, '_health_pause_new_open_ts', 0) or 0
-                _pause_elapsed = time.time() - _pause_ts
-                if _pause_elapsed > 300:
-                    provider._health_pause_new_open = False
-                    provider._health_pause_new_open_ts = 0
-                    logging.warning("[OptionTrading] _health_pause_new_open超时自动恢复(暂停%.0fs)", _pause_elapsed)
-                else:
-                    logging.warning("[OptionTrading] _health_pause_new_open=True(健康异常, 已暂停%.0fs/300s), 暂停新开仓", _pause_elapsed)
-                    return
-            try:
-                health = provider.get_health_status()
-                if health.get('health') in ('CRITICAL', 'DEGRADED'):
-                    provider._health_pause_new_open = True
-                    provider._health_pause_new_open_ts = time.time()
-                    logging.warning("[OptionTrading] 系统健康状态=%s, 暂停新开仓",
-                                    health.get('health'))
-                    return
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                logging.warning("[OptionTrading] 健康检查异常: %s", e)
+            # FIX-20260709-DRY-RUN-PASS: dry_run模式下不阻断，但记录健康状态供快照诊断
+            if not _dry_run_mode:
+                # 双重检查: (1) _health_pause_new_open标志 (2) 实时health查询
+                if provider._health_pause_new_open:
+                    _pause_ts = getattr(provider, '_health_pause_new_open_ts', 0) or 0
+                    _pause_elapsed = time.time() - _pause_ts
+                    if _pause_elapsed > 300:
+                        provider._health_pause_new_open = False
+                        provider._health_pause_new_open_ts = 0
+                        logging.warning("[OptionTrading] _health_pause_new_open超时自动恢复(暂停%.0fs)", _pause_elapsed)
+                    else:
+                        logging.warning("[OptionTrading] _health_pause_new_open=True(健康异常, 已暂停%.0fs/300s), 暂停新开仓", _pause_elapsed)
+                        return
+                try:
+                    health = provider.get_health_status()
+                    if health.get('health') in ('CRITICAL', 'DEGRADED'):
+                        provider._health_pause_new_open = True
+                        provider._health_pause_new_open_ts = time.time()
+                        logging.warning("[OptionTrading] 系统健康状态=%s, 暂停新开仓",
+                                        health.get('health'))
+                        return
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    logging.warning("[OptionTrading] 健康检查异常: %s", e)
+            else:
+                # dry_run模式: 记录健康状态但不阻断
+                try:
+                    if provider._health_pause_new_open:
+                        logging.info(
+                            "[FIX-20260709-DRY-RUN-PASS] dry_run模式跳过_health_pause_new_open阻断 "
+                            "(快照中可查健康状态): 已暂停%.0fs/300s",
+                            (time.time() - (getattr(provider, '_health_pause_new_open_ts', 0) or 0)),
+                        )
+                    try:
+                        health = provider.get_health_status()
+                        if health.get('health') in ('CRITICAL', 'DEGRADED'):
+                            logging.info(
+                                "[FIX-20260709-DRY-RUN-PASS] dry_run模式跳过健康检查阻断(快照中记录): health=%s",
+                                health.get('health'),
+                            )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             provider._ensure_order_service()
             if provider._order_service:
                 order_ids = provider._order_service.execute_by_ranking(targets)
                 if order_ids:
                     logging.info("[OptionTrading] 下单完成: %d 笔 reason=%s", len(order_ids), open_reason)
+                    # FIX-20260708-V2: 记录交易数量（原代码从未调用record_trade，导致状态报告恒显示"交易数量=0"）
+                    # 根因: _lifecycle_service属性名错误，应为_lifecycle_svc；且record_trade在_LIFECYCLE_DELEGATE中
+                    # 修复: 直接调用provider.record_trade()，通过_LIFECYCLE_DELEGATE委托到_lifecycle_svc._lc_monitor
+                    # dry_run模式下execute_by_ranking返回空list(被OrderExecutor拦截)，不会误计交易
+                    try:
+                        _record_fn = getattr(provider, 'record_trade', None)
+                        if callable(_record_fn):
+                            for _ in order_ids:
+                                _record_fn()
+                        else:
+                            with provider._lock:
+                                provider._stats['total_trades'] = provider._stats.get('total_trades', 0) + len(order_ids)
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _rt_err:
+                        # [FIX-20260708-V4-DIAG] 诊断record_trade异常，原except pass静默吞掉了所有错误
+                        if not hasattr(provider, '_rt_err_logged'):
+                            provider._rt_err_logged = 0
+                        provider._rt_err_logged += 1
+                        if provider._rt_err_logged <= 3:
+                            logging.warning("[OptionTrading] record_trade异常(第%d次): %s order_count=%d fn=%s",
+                                            provider._rt_err_logged, _rt_err, len(order_ids),
+                                            type(_record_fn).__name__ if _record_fn else 'None')
+                        # 回退：直接递增_stats
+                        try:
+                            provider._stats['total_trades'] = provider._stats.get('total_trades', 0) + len(order_ids)
+                        except (ValueError, KeyError, TypeError, AttributeError):
+                            pass
             provider._feed_shadow_engine(targets, open_reason)
             # R14-P1-DEAD-08修复: 在决策循环中调用governance checker，手册14节治理检测
             try:
@@ -738,31 +1151,8 @@ class StrategyBusinessLayer:
                                         _gov_result.get('degradation_reasons', []))
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _gov_err:
                 logging.warning("[R22-EP-P1] governance check跳过(合规检查可能放行违规交易): %s", _gov_err)
-            # ✅ P1-9修复: 集成box_spring_strategy的箱体弹簧扫描
-            # R13-API-01修复: 传递完整tick参数(high/low/volume/timestamp)，否则箱体检测失效
-            # R15-P1-PERF-02修复: 使用全局单例get_box_spring_strategy()，避免绕过单例创建多实例
-            try:
-                from ali2026v3_trading.strategy.box_spring_strategy_impl import get_box_spring_strategy
-                bss = get_box_spring_strategy()
-            except ImportError as _bss_ie:
-                logging.warning("[P1-FIX] box_spring_strategy导入失败, 箱体弹簧扫描不可用: %s", _bss_ie)
-                bss = None
-            try:  # R23-P0-FIX: 补充缺失的try块，修复SyntaxError
-                if bss is not None:
-                    for t in targets:
-                        inst_id = t.get('instrument_id', '')
-                        if inst_id:
-                            # R13-API-01修复: 传递完整tick参数，箱体检测依赖high>0 and low>0条件
-                            bss.on_tick(
-                                instrument_id=inst_id,
-                                price=t.get('price', 0.0),
-                                high=t.get('high', 0.0),  # R13-API-01: 补充high参数
-                                low=t.get('low', 0.0),    # R13-API-01: 补充low参数
-                                volume=t.get('volume', 0),  # R13-API-01: 补充volume参数
-                                timestamp=t.get('timestamp'),  # R13-API-01: 补充timestamp参数
-                            )
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                logging.warning("[R22-EP-P1-17] [StrategyBusinessLayer] box_spring_strategy tick error: %s", e)
+            # [FIX-20260710-PRE-TARGETS] BS/DR/HFT集成已移到targets为空检查之前(见L757+)
+            # 原因: targets为空时return导致这些策略从不执行
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             # R10-P2-02: 关键异常日志添加exc_info=True
             logging.error("[StrategyBusinessLayer.execute_option_trading_cycle] Error: %s", e, exc_info=True)
@@ -789,8 +1179,8 @@ class StrategyBusinessLayer:
             _state_map = {
                 'correct_trending': 'master',
                 'correct_trending_defensive': 'master',
-                'incorrect_reversal': 'reverse',
-                'incorrect_reversal_defensive': 'reverse',
+                'incorrect_reversal': 'divergence',
+                'incorrect_reversal_defensive': 'divergence',
                 'other': 'other',
                 'spring': 'spring',
                 'arbitrage': 'arbitrage',
@@ -799,7 +1189,7 @@ class StrategyBusinessLayer:
             strategy_id = _state_map.get(current_state, 'master')
             # FIX-R23: 直接读取_active_strategy属性，避免check_mutual_exclusion被__getattr__拦截
             _active_strategy = getattr(eco, '_active_strategy', 'master')
-            if _active_strategy == 'other' and strategy_id in ('master', 'reverse'):
+            if _active_strategy == 'other' and strategy_id in ('master', 'divergence'):
                 for t in targets:
                     direction = t.get('direction', 'BUY')
                     logging.warning("[OptionTrading] 互斥阻断: strategy=%s dir=%s reason=%s blocked in other state",
@@ -839,8 +1229,8 @@ class StrategyBusinessLayer:
                 _state_map = {
                     'correct_trending': 'master',
                     'correct_trending_defensive': 'master',
-                    'incorrect_reversal': 'reverse',
-                    'incorrect_reversal_defensive': 'reverse',
+                    'incorrect_reversal': 'divergence',
+                    'incorrect_reversal_defensive': 'divergence',
                     'other': 'other',
                     'spring': 'spring',
                     'arbitrage': 'arbitrage',

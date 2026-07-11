@@ -192,7 +192,12 @@ class LifecycleParallelOps:
             p._lifecycle_parallel.exit_parallel_running()
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lpar_err:
             logging.debug("[LifecycleParallel] exit_parallel_running 委托失败: %s", _lpar_err)
-        success = p.transition_to(StrategyState.RUNNING)
+        # FIX-20260711-PAUSE-SAFE: 退出并行运行期时检查暂停状态，防止覆盖用户暂停指令
+        if getattr(p, '_is_paused', False):
+            logging.info("[ParallelRunning] 策略已暂停，退出并行运行期后保持PAUSED状态")
+            success = p.transition_to(StrategyState.PAUSED)
+        else:
+            success = p.transition_to(StrategyState.RUNNING)
         if success:
             p._publish_event('StrategyParallelRunningExited', {
                 'strategy_id': p.strategy_id,

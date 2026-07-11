@@ -18,7 +18,7 @@ from ali2026v3_trading.lifecycle.lifecycle_resource import LifecycleResource
 from ali2026v3_trading.lifecycle.lifecycle_parallel import LifecycleParallel
 from ali2026v3_trading.lifecycle.lifecycle_transition import LifecycleTransition
 from ali2026v3_trading.lifecycle.lifecycle_init import LifecycleInit
-from ali2026v3_trading.infra.shared_trading_constants import OPTION_TO_FUTURE_MAP  # 五唯一性修复
+from ali2026v3_trading.infra.commission_utils import OPTION_TO_FUTURE_MAP  # 五唯一性修复
 from ali2026v3_trading.lifecycle.lifecycle_bind import LifecycleBind
 from ali2026v3_trading.lifecycle.lifecycle_callbacks import LifecycleCallbacks
 from ali2026v3_trading.lifecycle.lifecycle_monitor import LifecycleMonitor
@@ -201,6 +201,16 @@ class LifecycleService:
     def transition_to(self, new_state):
         p = self._provider
         current_state = getattr(p, '_state', None)
+        # FIX-20260711-PAUSE-GUARD: 当_is_paused=True时，仅允许resume()路径转换到RUNNING
+        # 防止异步线程(subscribe-retry/exit_parallel_running等)覆盖用户暂停指令
+        _new_key = _state_key(new_state)
+        if getattr(p, '_is_paused', False) and _new_key in ('running', 'parallel_running'):
+            if not getattr(p, '_resume_in_progress', False):
+                logging.warning(
+                    "[LifecycleService.transition_to] PAUSE-GUARD: 拒绝 %s→%s (策略已暂停，非resume路径)",
+                    current_state, new_state,
+                )
+                return False
         try:
             result = self._lc_transition.transition_to(current_state, new_state)
         except TypeError:
@@ -211,14 +221,49 @@ class LifecycleService:
             _lm = getattr(p, '_lifecycle_mgr', None)
             if _lm is not None:
                 _lm.state = new_state
+            # FIX-20260709-PAUSE-ROOT-V2: 四元状态原子同步
+            # 根因: transition_to()只更新_state和_is_running，不更新_is_paused/_is_trading
+            # 导致任何通过transition_to()转换状态的代码路径(如DEGRADED→RUNNING恢复)都可能出现四元状态不一致
+            # 修复: 根据目标状态自动同步四元变量，作为PAUSE-SAFE规范的安全兜底
+            _new_key = _state_key(new_state)
+            if _new_key == 'running' or _new_key == 'parallel_running':
+                _new_running, _new_paused, _new_trading = True, False, True
+            elif _new_key == 'paused':
+                _new_running, _new_paused, _new_trading = False, True, False
+            elif _new_key in ('stopped', 'degraded_stop'):
+                _new_running, _new_paused, _new_trading = False, True, False
+            elif _new_key == 'degraded':
+                _new_running, _new_paused, _new_trading = True, False, True
+            elif _new_key == 'error':
+                _new_running, _new_paused, _new_trading = False, False, False
+            elif _new_key == 'initializing':
+                _new_running, _new_paused, _new_trading = False, False, True
+            else:
+                _new_running, _new_paused, _new_trading = None, None, None
+            if _new_running is not None:
+                p._is_running = _new_running
+                p._is_paused = _new_paused
+                p._is_trading = _new_trading
+                if _lm is not None:
+                    _lm.is_running = _new_running
+                    _lm.is_paused = _new_paused
             # FIX: 同步 _state 到 _state_store，否则状态报告(tick_processing_service.output_periodic_summary)
             # 从 _state_store 读取 _state 时恒显示 initializing，导致"长期处于初始化状态"假象
             _ss = getattr(p, '_state_store', None)
             if _ss is not None:
                 try:
                     _ss.set('_state', new_state)
+                    if _new_running is not None:
+                        _ss.set('_is_running', _new_running)
+                        _ss.set('_is_paused', _new_paused)
+                        _ss.set('_is_trading', _new_trading)
                 except (ValueError, KeyError, TypeError, AttributeError):
                     pass
+            logging.info(
+                "[LifecycleService.transition_to] %s -> %s (4-state synced: running=%s paused=%s trading=%s)",
+                current_state, new_state,
+                _new_running, _new_paused, _new_trading,
+            )
         return result
 
     # ========== Bind ==========
@@ -351,6 +396,33 @@ class LifecycleService:
 
     def _shutdown_runtime_services(self):
         return self._lc_callbacks._shutdown_runtime_services()
+
+    def _cancel_all_timers(self):
+        p = self._provider
+        _warm_timer = getattr(p, '_storage_warm_timer', None)
+        if _warm_timer is not None:
+            _warm_timer.cancel()
+            try:
+                p._storage_warm_timer = None
+            except (AttributeError,):
+                pass
+        _warm_thread = getattr(p, '_storage_warm_thread', None)
+        if _warm_thread is not None and _warm_thread.is_alive():
+            _warm_thread.join(timeout=5.0)
+            try:
+                p._storage_warm_thread = None
+            except (AttributeError,):
+                pass
+        _sub_thread = getattr(p, '_platform_subscribe_thread', None)
+        if _sub_thread is not None and _sub_thread.is_alive():
+            _stop_event = getattr(p, '_platform_subscribe_stop', None)
+            if _stop_event is not None:
+                _stop_event.set()
+            _sub_thread.join(timeout=5.0)
+            try:
+                p._platform_subscribe_thread = None
+            except (AttributeError,):
+                pass
 
     def _log_resource_ownership_table(self, phase='unknown'):
         return self._lc_callbacks._log_resource_ownership_table(phase)

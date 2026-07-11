@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional, Tuple
 
 
 
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 
 from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
 
@@ -480,7 +480,7 @@ class TVFParamLoader:
 
             if value <= 0:
 
-                errors.append(f'{name}必须为正则 {value}')
+                errors.append(f'{name}必须为正数 {value}')
 
 
 
@@ -636,4 +636,271 @@ def load_tvf_params(config_path: Optional[str] = None) -> Dict[str, Any]:
     loader = get_tvf_param_loader()
 
     return loader.load(config_path)
+
+
+# ============================================================================
+# 合并自 final_three_layer_config.py — 三层期权五态排序最终落地配置
+# 依据文档：docs/audit/三层期权五态排序方案_最终落地方案_20260624.md 第九章
+# ============================================================================
+
+MONTH_WEIGHTS_5 = (0.35, 0.25, 0.20, 0.12, 0.08)
+
+ASYMMETRIC_DECAY = {
+    'financial':     {'cr': 600, 'cf': 600, 'wr': 120, 'wf': 120, 'other': 60},
+    'black_metal':   {'cr': 300, 'cf': 300, 'wr': 60,  'wf': 60,  'other': 60},
+    'agricultural':  {'cr': 180, 'cf': 180, 'wr': 60,  'wf': 60,  'other': 60},
+    'energy_chem':   {'cr': 240, 'cf': 240, 'wr': 60,  'wf': 60,  'other': 60},
+    'default':       {'cr': 300, 'cf': 300, 'wr': 60,  'wf': 60,  'other': 60},
+}
+
+DELTA_MIN = 0.15
+DELTA_MAX = 0.85
+GAMMA_MAX_FRONT_MONTH = 0.08
+THETA_MAX_FRONT_MONTH_PCT = 0.015
+
+GAMMA_BOOST_FACTOR = 1.2
+GAMMA_BOOST_MIN = 0.05
+GAMMA_BOOST_DELTA_RANGE = 0.15
+VEGA_PENALTY_THRESHOLD = 0.10
+VEGA_PENALTY_IV_CHANGE = 0.05
+VEGA_PENALTY_FACTOR = 0.8
+THETA_PENALTY_MAX = 0.15
+THETA_PENALTY_GAMMA_MIN = 0.03
+
+TIER1_WILSON_THRESHOLD = 0.50  # 默认值，运行时从 SORTER_CONFIG['tier1_wilson_threshold'] 覆盖
+TIER2_COVERAGE_THRESHOLD = 0.40  # 默认值，运行时从 SORTER_CONFIG['tier2_coverage_threshold'] 覆盖
+TIER2_CORRECT_UP_THRESHOLD = 0.45  # 默认值，运行时从 SORTER_CONFIG['tier2_correct_up_threshold'] 覆盖
+TIER3_CORRECT_UP_THRESHOLD = 0.35  # 默认值，运行时从 SORTER_CONFIG['tier3_correct_up_threshold'] 覆盖
+
+LAYER1_SORT_MODE = 'lexicographic'
+LAYER1_WEIGHT_WILSON = 0.70
+LAYER1_WEIGHT_FRESHNESS = 0.20
+LAYER1_WEIGHT_LIQUIDITY = 0.10
+FILTER_RATE_ALERT_THRESHOLD = 0.30
+
+CLUSTERING_METHOD = 'GMM'
+CLUSTERING_FREQUENCY = 'quarterly'
+CLUSTERING_LOOKBACK_DAYS = 60
+CLUSTER_BIC_RANGE = (4, 6)
+CLUSTER_CONFIDENCE_THRESHOLD = 0.60
+
+RESONANCE_VETO_THRESHOLD = 0.80
+RESONANCE_MODE = 'veto'
+
+LAYER2_WEIGHT_SCORE1 = 0.70
+LAYER2_WEIGHT_RESONANCE = 0.20
+LAYER2_WEIGHT_REGIME = 0.10
+LAYER2_DISPERSION_THRESHOLD = 0.15
+LAYER2_DISPERSION_PENALTY = -0.05
+LAYER2_CORRELATION_THRESHOLD = 0.80
+LAYER2_CORRELATION_PENALTY = -0.05
+LAYER2_SCORE_FLOOR = 0.60
+
+CLUSTER_REGIME_STRONG_TREND_THRESHOLD = 0.60
+CLUSTER_REGIME_CHOPPY_THRESHOLD = 0.40
+
+LAYER3_WEIGHT_SCORE2 = 0.65
+LAYER3_WEIGHT_RESONANCE = 0.20
+LAYER3_WEIGHT_LIQUIDITY = 0.15
+LAYER3_SCORE_FLOOR = 0.55
+
+MARKET_ACCURACY_FLOOR_PERCENTILE = 20
+MARKET_POSITION_CAP_PERCENTILES = {
+    'p80': 1.00, 'p50': 0.75, 'p20': 0.50, 'p10': 0.25, 'below_p10': 0.00,
+}
+
+CIRCUIT_BREAKER_ACC_PERCENTILE = 10
+CIRCUIT_BREAKER_VOL_PERCENTILE = 99
+CIRCUIT_BREAKER_CONSECUTIVE_MIN = 5
+CIRCUIT_BREAKER_POSITION_MULT = 0.5
+CIRCUIT_BREAKER_TIER_FILTER = 1
+
+LIQUIDITY_WEIGHT_VOLUME = 0.40
+LIQUIDITY_WEIGHT_SPREAD = 0.30
+LIQUIDITY_WEIGHT_DEPTH = 0.30
+LIQUIDITY_VOLUME_THRESHOLD = 500
+LIQUIDITY_SPREAD_PCT = 0.02
+LIQUIDITY_DEPTH_THRESHOLD = 100
+LIQUIDITY_WATCH_VOLUME = 100
+
+MAX_SINGLE_PRODUCT_PCT = 0.15
+MAX_SINGLE_CLUSTER_PCT = 0.40
+DRIFT_LIMIT = 0.20
+
+SIGNAL_SOURCE = 'C'
+
+HARD_FILTER_ENABLED = False
+PURE_MODE = False
+
+ENABLE_RESONANCE_WEIGHTING = False
+ENABLE_RESONANCE_VETO = False
+
+ENABLE_GLOBAL_PERCENTILE = True
+MARKET_FLOOR_MODE = 'percentile'
+
+AB_TEST_ENABLED = False
+AB_TEST_EXPERIMENT_ALLOC = 0.20
+AB_TEST_CONTROL_ALLOC = 0.80
+AB_TEST_MIN_DURATION_DAYS = 14
+AB_TEST_DM_P_VALUE = 0.05
+AB_TEST_MIN_CALMAR_LIFT = 0.1
+
+DEGRADE_TIMEOUT_LAYER3 = 100
+DEGRADE_TIMEOUT_LAYER2 = 100
+
+ROLLBACK_NEW_PARAM_NEGATIVE_CALMAR_DAYS = 7
+ROLLBACK_DAILY_DRAWDOWN_PCT = 0.05
+ROLLBACK_LIVE_CALMAR_RATIO = 0.50
+
+FRESHNESS_WEIGHTS = {
+    'cr': 1.0, 'cf': 1.0, 'wr': 0.3, 'wf': 0.3, 'other': 0.0,
+}
+
+SIGNAL_DEDUP_WINDOW_SECONDS = 60
+
+CLUSTER_TIER_THRESHOLDS: Dict = {}
+
+CONSERVATIVE_DEFAULT_P50 = 0.40
+
+CIRCUIT_BREAKER_USE_TIMESTAMP = True
+
+SUGGESTED_LOTS_TIER1_BASE = 2
+SUGGESTED_LOTS_TIER2_BASE = 1
+SUGGESTED_LOTS_TIER3_BASE = 1
+SUGGESTED_LOTS_LOW_CAP_THRESHOLD = 0.3
+
+STRUCTURED_LOG_ENABLED = True
+
+BYPASS_MODE_ENABLED = False
+BYPASS_LOG_TABLE = 'bypass_observation_log'
+BYPASS_SNAPSHOT_INTERVAL_SEC = 300
+BYPASS_METRICS = [
+    'filter_rate', 'top3_overlap_ratio', 'filtered_out_avg_rank',
+    'filtered_out_delta_avg', 'path_a_calmar', 'path_b_calmar',
+]
+
+
+# ============================================================================
+# v2.5-v2.8: 排序层配置接口 SORTER_CONFIG
+# 依据文档：三层期权五态排序方案_最终落地方案V2_20260624.md
+#   §15.2 (v2.5): rank_window_days, month_weights, enable_rank_normalize
+#   §16.2 (v2.6): resonance_enabled, resonance_weight, resonance_dimensions
+#   §17.2 (v2.7): resonance_weight=0.5 (等权), direction_conflict, cold start fallback
+#   §21.3 (v2.8): output_mode, production_fields (生产环境瘦身)
+#   §22   (v2.8): sort_trigger_bars, cooldown_bars (K线倍数时间约束)
+# ============================================================================
+
+# K线周期→秒数映射表（支持 tick/M1/M3/M5/M15/M30/H1/H4/D1）
+# 高频策略: T1(tick) = 1个tick ≈ 0.5s(期货500ms推送)，用0表示事件驱动无法精确换算
+KLINE_PERIOD_SECONDS = {
+    'T1': 0,    # tick级: 1根K线=1个tick, 事件驱动无固定周期
+    'M1': 60, 'M3': 180, 'M5': 300, 'M15': 900,
+    'M30': 1800, 'H1': 3600, 'H4': 14400, 'D1': 86400,
+}
+
+# tick级默认参数: 高频模式下排序激发和冷却的实际时间约束
+_HFT_DEFAULT_TRIGGER_SEC = 1    # tick级默认激发间隔1秒（约2个tick）
+_HFT_DEFAULT_COOLDOWN_SEC = 0   # tick级默认无冷却
+
+
+def kline_bars_to_seconds(bars: int, kline_style: str = 'M1') -> int:
+    """将 K线倍数换算为秒数。
+
+    对于 tick 级 (T1): 1根K线=1个tick，事件驱动无法精确换算，
+    使用 _HFT_DEFAULT_TRIGGER_SEC 作为默认值。
+
+    Args:
+        bars: K线根数（1=1根K线, 2=2根K线, ...）
+        kline_style: K线周期（'T1', 'M1', 'M5', 'M15' 等）
+
+    Returns:
+        对应的秒数，tick级返回 bars × _HFT_DEFAULT_TRIGGER_SEC，
+        非 tick 级最小5秒（安全下限）
+    """
+    _style = str(kline_style or 'M1').upper()
+    _sec_per_bar = KLINE_PERIOD_SECONDS.get(_style, 60)  # 未知周期默认M1=60s
+
+    if _sec_per_bar == 0:
+        # tick级: 1 bar = 1 tick, 用默认间隔换算
+        # bars=1 → 1s, bars=2 → 2s, bars=5 → 5s...
+        return max(1, int(bars) * _HFT_DEFAULT_TRIGGER_SEC)
+
+    return max(5, int(bars) * _sec_per_bar)
+
+
+SORTER_CONFIG = {
+    # --- v2.5 核心参数 ---
+    'rank_window_days': 20,                # Rank 标准化滚动窗口（默认 20 日）
+    'month_weights': None,                 # None = 等权；传入向量 = 加权
+    'enable_rank_normalize': True,         # 是否启用 Rank 标准化
+    'rank_normalize_clip': (-3.0, 3.0),    # 截断范围
+    'score_delta_threshold': 0.10,         # rank_confidence 显著 gap 阈值
+    'output_candidates_max': 5,            # 多候选列表最大长度
+    'rank_confidence_method': 'percentile', # percentile / softmax / gap_ratio / t_statistic
+
+    # --- 排序时间约束（v2.8 K线倍数定义）---
+    # 排序激发间隔: 每隔多少根K线触发一次排序（排序→选标的→下单）
+    # 1=每根K线触发(默认), 2=每2根K线, 3=每3根K线...
+    # 实际秒数 = sort_trigger_bars × K线周期秒数 (由 kline_bars_to_seconds 换算)
+    # M1时: 1bar=60s, 2bar=120s; M5时: 1bar=300s, 2bar=600s
+    'sort_trigger_bars': 1,                # 默认1根K线（M1=60s, M5=300s）
+    # K线周期：与 config_params.kline_style 对齐
+    'kline_style': 'M1',                   # 默认1分钟K线
+    # 信号冷却期: 同一品种两次信号之间的最小K线根数间隔
+    # 0=无冷却, 1=1根K线冷却(M1=60s), 2=2根K线冷却(M1=120s)
+    # 排序结果变化不大时避免重复下单
+    'cooldown_bars': 0,                    # 默认无冷却（排序驱动即可）
+
+    # --- Tier 分类阈值（v2.8 参数化）---
+    # 原 TIER1_WILSON_THRESHOLD 等硬编码常量移入此配置
+    # Tier1=高置信(wilson≥阈值,coverage≥80%), Tier2=中置信, Tier3=低置信, Tier4=噪声
+    'tier1_wilson_threshold': 0.50,        # Tier1: Wilson下界≥0.50
+    'tier2_coverage_threshold': 0.40,      # Tier2: 覆盖率≥0.40
+    'tier2_correct_up_threshold': 0.45,    # Tier2: 正确上涨比≥0.45
+    'tier3_correct_up_threshold': 0.35,    # Tier3: 正确上涨比≥0.35
+
+    # --- v2.6/v2.7 共振模块参数 ---
+    'resonance_enabled': False,            # 默认关闭（安全闸门：Phase 2 完成前必须为 False）
+    'resonance_weight': 0.50,              # v2.7: 等权融合（消除未经证明的先验）
+    'resonance_weight_note': 'Equal-weight default. V7 walk-forward optimization required before production deployment.',
+    'resonance_binary_mode': False,        # False=连续值加权, True=二值化
+    'resonance_dimensions': ['D_term_structure', 'D_momentum', 'D_type_balance'],
+    'resonance_min_active': 2,             # 最少活跃维度数
+    'resonance_min_score': 0.30,           # 共振强度阈值
+    'resonance_direction_conflict_zero': True,  # v2.7: 方向冲突时 final_score=0
+    'resonance_cold_start_fallback': True, # v2.7: 冷启动权重重新分配
+
+    # --- D_type_balance 参数 ---
+    'type_balance_threshold': 0.50,        # Call/Put 占比 > 50% 才触发方向判定
+
+    # --- D_momentum 参数 ---
+    'momentum_period': 1,                  # v2.7: 当日动量（period=1）
+
+    # --- v2.8 输出模式参数（§21.3 铁律二：生产环境必须瘦身）---
+    'output_mode': 'research',             # 'research' = 全字段 / 'production' = 瘦身字段
+    'production_fields': None,             # None = 按 scoring_scheme 自动选择字段集
+    # v2.8 §21: 方案开关机制
+    # scheme_1(实盘默认): product_score=net_score, 主信号=confidence
+    # scheme_2: product_score=D, 主信号=D/Q正交分解
+    # scheme_3: product_score=D, 主信号=entropy/concentration/direction_bias
+    # all: 全特征输出(research模式)
+    'scoring_scheme': 'scheme_1',          # 实盘默认方案一（稳妥）
+}
+
+
+def update_sorter_config_from_v7_recommendation(config_delta: Dict) -> Dict:
+    """
+    v2.5 §15.2: V7 离线模块通过以下接口回传建议（人工审核后采纳）。
+    排序层不主动调用 V7、不嵌入回测逻辑、不读取 V7 数据库。
+    单向数据流：V7 → 人工 → 排序层。
+
+    使用示例：
+        update_sorter_config_from_v7_recommendation({'rank_window_days': 15})
+    人工审核后写入 SORTER_CONFIG，排序层不主动调用 V7。
+    """
+    if not isinstance(config_delta, dict) or not config_delta:
+        return SORTER_CONFIG
+    # 仅记录建议，不自动注入（需人工审核）
+    logger.info(f"[SORTER_CONFIG] V7 recommendation received (pending manual review): {config_delta}")
+    return SORTER_CONFIG
 

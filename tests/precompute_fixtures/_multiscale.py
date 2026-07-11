@@ -13,7 +13,7 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from ali2026v3_trading.infra.logging_utils import get_logger
+from ali2026v3_trading.infra._helpers import get_logger
 
 logger = get_logger(__name__)
 

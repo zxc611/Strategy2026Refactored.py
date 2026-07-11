@@ -76,27 +76,45 @@ class StrategyMonitoringLayer:
 
     def check_position_risk(self) -> None:
         """持仓风控检查 — 从StrategyCoreService.check_position_risk迁移
-        
+
         CC-04修复: 移除CyclicDependencyGuard，因为check_position_risk是定时调度调用，
         不存在真正的递归循环。之前的enter/exit模式在enter返回False时直接return
         而不调用exit，导致栈泄漏，后续所有调用被误判为循环依赖。
+
+        FIX-20260707-POSITION-RISK: 整个方法体包裹在try/except(Exception)中，
+        防止ParamIsolationGuard等未保护的代码抛出非标准异常时，
+        SchedulerService的_run()函数异常捕获列表不全导致线程静默死亡，
+        check_all_positions永远不被调用（7/6夜盘146条持仓无平仓评估的根因）。
         """
         provider = self._provider
-        if not provider._is_running:
+        # FIX-20260708-CLOSE-BREAK: 原代码检查 not provider._is_running 直接return，
+        # 但pause()设置_is_running=False后，持仓风控检查也被跳过，
+        # 导致暂停期间持仓无人看管（止盈止损/时间止损/两阶段止损全部失效）。
+        # 修复: 移除_is_running检查，暂停时仍执行持仓风控检查。
+        # 新开仓由execute_option_trading_cycle的_is_running检查保证不会执行。
+        if provider._destroyed:
             return
-        _param_guard = ParamIsolationGuard.get_instance() if _HAS_CAUSAL_CHAIN else None
-        if _param_guard:
-            _params = getattr(provider, 'params', {})
-            try:
-                _param_hash = str(hash(frozenset(_params.items() if _params else {})))
-            except TypeError:
-                _param_hash = str(hash(str(sorted(_params.items(), key=lambda x: str(x))) if _params else ''))
-            _param_guard.register_param_source("strategy_params", "strategy_core_service", _param_hash)
         try:
+            _param_guard = ParamIsolationGuard.get_instance() if _HAS_CAUSAL_CHAIN else None
+            if _param_guard:
+                _params = getattr(provider, 'params', {})
+                try:
+                    _param_hash = str(hash(frozenset(_params.items() if _params else {})))
+                except TypeError:
+                    _param_hash = str(hash(str(sorted(_params.items(), key=lambda x: str(x))) if _params else ''))
+                _param_guard.register_param_source("strategy_params", "strategy_core_service", _param_hash)
             provider._ensure_position_service()
             if provider._position_service:
                 provider._position_service.check_all_positions()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            else:
+                # FIX-20260707: _position_service为None时告警(节流5分钟)，而非静默跳过
+                if not hasattr(self, '_pos_svc_none_ts'):
+                    self._pos_svc_none_ts = 0.0
+                if time.time() - self._pos_svc_none_ts >= 300:
+                    self._pos_svc_none_ts = time.time()
+                    logging.warning("[check_position_risk] _position_service is None, skipping check_all_positions")
+        except Exception as e:
+            # FIX-20260707: 捕获所有异常，防止SchedulerService线程静默死亡
             logging.error("[StrategyMonitoringLayer.check_position_risk] Error: %s", e, exc_info=True)
 
 
@@ -133,19 +151,36 @@ class StrategyMonitoringLayer:
         )
 
         # Step 1: 暂停策略
+        # FIX-20260708-PAUSE-ROOT: 彻底修复emergency_stop的三元状态不同步问题
+        # 根因1: 原代码无锁修改_is_paused/_is_trading，与pause()/resume()的带锁修改竞态
+        # 根因2: 原代码使用_lifecycle_manager(错误)，正确属性名是_lifecycle_mgr
+        # 根因3: 原代码转换到STOPPED，导致无法resume（resume只接受PAUSED）
+        # 根因4: 原代码未设置_is_running=False，三元状态不完整
+        # 修复: 获取p._lock，使用_lifecycle_mgr，转换到PAUSED，同步四元状态
         try:
-            provider._is_paused = True
-            provider._is_trading = False
-            provider._health_pause_new_open = True
-            provider._health_pause_new_open_ts = time.time()
-            try:
-                if hasattr(provider, '_lifecycle_manager') and provider._lifecycle_manager is not None:
-                    from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
-                    provider._lifecycle_manager.transition_to(StrategyState.STOPPED)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _lsm_err:
-                logging.warning("[OPS-03] lifecycle state sync failed: %s", _lsm_err)
+            with provider._lock:
+                # ⚠️ FIX-20260707-PAUSE-SAFE: 四元状态原子同步 (_state/_is_paused/_is_running/_is_trading)
+                provider._is_paused = True
+                provider._is_running = False
+                provider._is_trading = False
+                provider._health_pause_new_open = True
+                provider._health_pause_new_open_ts = time.time()
+                _lm = getattr(provider, '_lifecycle_mgr', None)
+                if _lm is not None:
+                    _lm.is_paused = True
+                    _lm.is_running = False
+                # 转换到PAUSED而非STOPPED，允许后续resume恢复
+                from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
+                provider.transition_to(StrategyState.PAUSED)
+                _ss = getattr(provider, '_state_store', None)
+                if _ss is not None:
+                    try:
+                        _ss.set('_is_paused', True)
+                        _ss.set('_is_running', False)
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        pass
             result['paused'] = True
-            logging.critical("[OPS-03] 策略已暂停")
+            logging.critical("[OPS-03] 策略已暂停 (state=PAUSED, _is_paused=True, _is_running=False, _is_trading=False)")
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             result['errors'].append(f"pause failed: {e}")
 

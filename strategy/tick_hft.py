@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 from ali2026v3_trading.config import config_params
 from ali2026v3_trading.strategy_judgment.causal_chain_utils import (
@@ -42,6 +42,7 @@ __all__ = [
     'handle_transition_signal',
     'handle_smart_money_signal',
     'handle_filtered_signal',
+    'get_last_arbitrage_signal',
     # from strategy_tick_handler
     'TickHandlerMixin',
     'DynamicPursuitEngine',
@@ -70,94 +71,99 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     logging.debug("[R3-L2] _ensure_hft_engine_fn failed: %s", _r3_err)
                     pass
                 hft = svc._state_store.get_ref('_hft_engine') if svc._state_store else None
-        if hft is not None:
-            bid_price = svc._get_tick_field(tick, 'bid_price1', 0.0)
-            ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
+
+        # FIX-P0-25: 原width_resonance计算被耦合在if hft is not None:块内
+        # 导致HFT引擎未初始化时get_width_strength()从不被调用 → query_count=0
+        # width_resonance用于StateParamManager.update_market_context，与HFT引擎无关
+        # 应独立执行，确保宽度强度计算和状态参数更新不受HFT可用性影响
+        bid_price = svc._get_tick_field(tick, 'bid_price1', 0.0)
+        ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
+        direction_raw = ''
+        try:
+            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
+            if SubscriptionManager.is_option(instrument_id):
+                direction_raw = 'buy'
+            else:
+                rc = None
+                ds = svc._state_store.get_ref('_data_service') if svc._state_store else None
+                if ds:
+                    rc = getattr(ds, 'realtime_cache', None)
+                if rc:
+                    tick_data = rc.get_tick(instrument_id)
+                    if tick_data:
+                        direction_raw = tick_data.get('direction', '')
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
             direction_raw = ''
+
+        product = ''
+        try:
+            from ali2026v3_trading.infra.shared_utils import extract_product_code
+            product = extract_product_code(instrument_id)
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
+            logging.debug("[R3-L2] extract_product_code failed: %s", _r3_err)
+            pass
+
+        width_resonance = 0.0
+        try:
+            ps = None
             try:
-                from ali2026v3_trading.infra.subscription_service import SubscriptionManager
-                if SubscriptionManager.is_option(instrument_id):
-                    direction_raw = 'buy'
-                else:
-                    rc = None
-                    ds = svc._state_store.get_ref('_data_service') if svc._state_store else None
-                    if ds:
-                        rc = getattr(ds, 'realtime_cache', None)
-                    if rc:
-                        tick_data = rc.get_tick(instrument_id)
-                        if tick_data:
-                            direction_raw = tick_data.get('direction', '')
+                from ali2026v3_trading.config.params_service import get_params_service
+                ps = get_params_service()
             except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                direction_raw = ''
-
-            product = ''
-            try:
-                from ali2026v3_trading.infra.shared_utils import extract_product_code
-                product = extract_product_code(instrument_id)
-            except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                logging.debug("[R3-L2] extract_product_code failed: %s", _r3_err)
+                logging.debug("[R3-L2] get_params_service failed: %s", _r3_err)
                 pass
+            if ps:
+                meta = ps.get_instrument_meta_by_id(instrument_id)
+                if meta:
+                    uf_id = meta.get('underlying_future_id')
+                    if not uf_id:
+                        uf_id = meta.get('internal_id')
+                    if uf_id:
+                        tts = svc._state_store.get_ref('t_type_service') if svc._state_store else None
+                        if tts is None:
+                            try:
+                                from ali2026v3_trading.data.t_type_service import get_t_type_service
+                                tts = get_t_type_service()
+                            except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
+                                logging.debug("[R3-L2] get_t_type_service failed: %s", _r3_err)
+                                pass
+                        wc = getattr(tts, '_width_cache', None) if tts else None
+                        if wc:
+                            ws_method = getattr(wc, 'get_width_strength', None)
+                            get_months_method = getattr(wc, 'get_all_months', None)
+                            if ws_method and get_months_method:
+                                months = get_months_method(int(uf_id))
+                                if months:
+                                    ws = ws_method(int(uf_id), months)
+                                    width_resonance = min(ws / 10.0, 1.0) if ws > 0 else 0.0
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] width_resonance computation failed: %s", _r3_err)
+            pass
 
-            width_resonance = 0.0
-            try:
-                ps = None
-                try:
-                    from ali2026v3_trading.config.params_service import get_params_service
-                    ps = get_params_service()
-                except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                    logging.debug("[R3-L2] get_params_service failed: %s", _r3_err)
-                    pass
-                if ps:
-                    meta = ps.get_instrument_meta_by_id(instrument_id)
-                    if meta:
-                        uf_id = meta.get('underlying_future_id')
-                        if not uf_id:
-                            uf_id = meta.get('internal_id')
-                        if uf_id:
-                            tts = svc._state_store.get_ref('t_type_service') if svc._state_store else None
-                            if tts is None:
-                                try:
-                                    from ali2026v3_trading.data.t_type_service import get_t_type_service
-                                    tts = get_t_type_service()
-                                except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                                    logging.debug("[R3-L2] get_t_type_service failed: %s", _r3_err)
-                                    pass
-                            wc = getattr(tts, '_width_cache', None) if tts else None
-                            if wc:
-                                ws_method = getattr(wc, 'get_width_strength', None)
-                                get_months_method = getattr(wc, 'get_all_months', None)
-                                if ws_method and get_months_method:
-                                    months = get_months_method(int(uf_id))
-                                    if months:
-                                        ws = ws_method(int(uf_id), months)
-                                        width_resonance = min(ws / 10.0, 1.0) if ws > 0 else 0.0
-            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-                logging.debug("[R3-L2] width_resonance computation failed: %s", _r3_err)
-                pass
+        resonance_strength = 0.0
+        prev_resonance_strength = 0.0
+        try:
+            spm = svc._state_store.get_ref('_state_param_manager') if svc._state_store else None
+            if spm:
+                spm.update_market_context(width_resonance, last_price)
+                resonance_strength = getattr(spm, '_last_resonance_strength', 0.0) or 0.0
+                prev_resonance_strength = getattr(spm, '_prev_resonance_strength', 0.0) or 0.0
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] spm resonance_strength failed: %s", _r3_err)
+            pass
 
-            resonance_strength = 0.0
-            prev_resonance_strength = 0.0
-            try:
-                spm = svc._state_store.get_ref('_state_param_manager') if svc._state_store else None
-                if spm:
-                    spm.update_market_context(width_resonance, last_price)
-                    resonance_strength = getattr(spm, '_last_resonance_strength', 0.0) or 0.0
-                    prev_resonance_strength = getattr(spm, '_prev_resonance_strength', 0.0) or 0.0
-            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-                logging.debug("[R3-L2] spm resonance_strength failed: %s", _r3_err)
-                pass
+        current_state = 'other'
+        prev_state = 'other'
+        try:
+            spm2 = svc._state_store.get_ref('_state_param_manager') if svc._state_store else None
+            if spm2:
+                current_state = spm2.get_current_state()
+                prev_state = getattr(spm2, '_prev_state', 'other')
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.debug("[R3-L2] spm2 current_state failed: %s", _r3_err)
+            pass
 
-            current_state = 'other'
-            prev_state = 'other'
-            try:
-                spm2 = svc._state_store.get_ref('_state_param_manager') if svc._state_store else None
-                if spm2:
-                    current_state = spm2.get_current_state()
-                    prev_state = getattr(spm2, '_prev_state', 'other')
-            except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-                logging.debug("[R3-L2] spm2 current_state failed: %s", _r3_err)
-                pass
-
+        if hft is not None:
             hft_result = hft.on_tick_enhanced(
                 instrument_id=instrument_id, price=last_price, volume=volume,
                 direction=direction_raw, product=product,
@@ -414,12 +420,31 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
         logging.warning("[HFT] _execute_pursuit_add failed: %s", e)
 
 
+_last_arbitrage_signal: Optional[Dict[str, Any]] = None
+_last_arbitrage_signal_ts: float = 0.0
+_ARBITRAGE_SIGNAL_TTL_SEC: float = 60.0
+
+
+def get_last_arbitrage_signal() -> Optional[Dict[str, Any]]:
+    global _last_arbitrage_signal, _last_arbitrage_signal_ts
+    if _last_arbitrage_signal is None:
+        return None
+    if time.time() - _last_arbitrage_signal_ts > _ARBITRAGE_SIGNAL_TTL_SEC:
+        _last_arbitrage_signal = None
+        return None
+    return _last_arbitrage_signal
+
+
 def handle_arbitrage_signal(svc, arbitrage_signal: Dict[str, Any], instrument_id: str) -> None:
     direction = arbitrage_signal.get('direction', '')
     deviation = arbitrage_signal.get('deviation_bps', 0.0)
     confidence = arbitrage_signal.get('confidence', 0.0)
     if confidence < 0.6:
         return
+    global _last_arbitrage_signal, _last_arbitrage_signal_ts
+    _last_arbitrage_signal = dict(arbitrage_signal)
+    _last_arbitrage_signal['instrument_id'] = instrument_id
+    _last_arbitrage_signal_ts = time.time()
     logging.info("[HFT] microstructure arbitrage: %s dir=%s deviation=%.1fbps confidence=%.2f",
                  instrument_id, direction, deviation, confidence)
     try:
@@ -438,6 +463,21 @@ def handle_arbitrage_signal(svc, arbitrage_signal: Dict[str, Any], instrument_id
                 reason='hft_arbitrage_deviation', priority=7, cooldown_seconds=5,
                 signal_strength=min(abs(deviation) / 100.0, 1.0),
             )
+        # [FIX-20260711-S5S6] S5套利改为实盘模拟监控模式，不直接下单
+        # 原代码直接通过OrderService.send_order下单，现改为通过ArbitrageMonitor生成模拟信号+快照
+        if abs(deviation) > 10:
+            try:
+                from ali2026v3_trading.strategy.monitor.arbitrage_monitor import ArbitrageMonitor
+                _arb_monitor = ArbitrageMonitor.get_instance()
+                _arb_monitor.on_arbitrage_signal(arbitrage_signal)
+                _arb_monitor.save_snapshot(arbitrage_signal, instrument_id)
+                logging.info("[S5-MONITOR] 套利信号模拟保存: %s dir=%s deviation=%.1fbps (不下单，仅监控)",
+                             instrument_id, direction, deviation)
+                _last_arbitrage_signal['hft_consumed'] = True
+                _last_arbitrage_signal['monitor_saved'] = True
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _mon_err:
+                logging.warning("[S5-MONITOR] 套利监控模块调用失败(降级为纯日志): %s", _mon_err)
+                _last_arbitrage_signal['hft_consumed'] = True
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.debug("[HFT] _handle_arbitrage_signal error: %s", e)
 

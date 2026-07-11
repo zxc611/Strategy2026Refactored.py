@@ -19,8 +19,8 @@ from ali2026v3_trading.config.config_params import (
 )
 from ali2026v3_trading.strategy.box_detector import BoxDetector, BoxProfile, ExtremeState, BoxStrategyParams
 from ali2026v3_trading.strategy_judgment.strategy_judgment_facade import CapitalScale
-from ali2026v3_trading.infra.logging_utils import get_logger  # R9-5
-from ali2026v3_trading.infra.performance_monitor import count_call
+from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from ali2026v3_trading.infra.metrics_registry import count_call
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 
 from ali2026v3_trading.strategy.strategy_ecosystem._models import (
@@ -43,12 +43,12 @@ from ali2026v3_trading.strategy.strategy_ecosystem.services import (
 # P-12修复: LiveStrategySelector实盘集成初始化
 try:
     from ali2026v3_trading.param_pool.optimization.cycle_sharpe import LiveStrategySelector
-    from ali2026v3_trading.infra.module_load_status import mark_module_loaded
+    from ali2026v3_trading.infra.metrics_registry import mark_module_loaded
     mark_module_loaded('strategy_ecosystem_live_strategy_selector')
 except ImportError as _ie:
     LiveStrategySelector = None
     try:
-        from ali2026v3_trading.infra.module_load_status import mark_module_failed
+        from ali2026v3_trading.infra.metrics_registry import mark_module_failed
         mark_module_failed('strategy_ecosystem_live_strategy_selector', _ie)
     except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
         logging.debug("[R3-L2] silent except triggered: %s", _r3_err)
@@ -65,7 +65,7 @@ logger = get_logger(__name__)  # R9-5
 class CapitalRoutingService:
     """资金路由相关方法"""
 
-    @_require_interface(('_capital_scale', '_master', '_reverse', '_other'))
+    @_require_interface(('_capital_scale', '_master', '_divergence', '_other'))
     def _propagate_capital_scale(self) -> None:
         if self._capital_scale is None:
             return
@@ -129,6 +129,7 @@ class CapitalRoutingService:
                 's4_box_spring': params.get('capital_route_s4_box_spring', 0.15),
                 's5_arbitrage': params.get('capital_route_s5_arbitrage', 0.10),
                 's6_market_making': params.get('capital_route_s6_market_making', 0.10),
+                's7_divergence_reversal': params.get('capital_route_s7_divergence_reversal', 0.20),
             }
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             logger.debug("[R7-M-12] 读取capital_route参数失败，使用类常量默认值: %s", e)
@@ -143,7 +144,7 @@ class CapitalRoutingService:
         logger.info("[StrategyEcosystem] master子策略暂停开关: %s paused=%s", strategy_key, paused)
 
     @count_call()
-    @_require_interface(('_lock', '_capital_route', '_master', '_reverse', '_other'))
+    @_require_interface(('_lock', '_capital_route', '_master', '_divergence', '_other'))
     def route_capital(self, active_state: str) -> Dict[str, float]:
         self.on_bar_update()
         with self._lock:
@@ -153,32 +154,32 @@ class CapitalRoutingService:
             if not cr.dynamic_enabled:
                 return {
                     'master': _route_params.get('s1_hft', cr.master_base),
-                    'reverse': _route_params.get('s2_minute', cr.reverse_base),
+                    'divergence': _route_params.get('s7_divergence_reversal', cr.divergence_base),
                     'other': _route_params.get('s3_box_extreme', cr.other_base),
                     'spring': _route_params.get('s4_box_spring', self._spring.capital_allocation),
-                    'arbitrage': _route_params.get('s5_arbitrage', cr.arbitrage_base),
-                    'market_making': _route_params.get('s6_market_making', cr.market_making_base),
+                    'arbitrage': 0.0,  # FIX-20260711-S5S6: 不参与资金分配
+                    'market_making': 0.0,  # FIX-20260711-S5S6: 不参与资金分配
                 }
 
             if self._capital_scale == CapitalScale.SMALL:
                 spring_base = _route_params.get('s4_box_spring', self.CAPITAL_ALLOC_SMALL_SPRING)
                 master_base = _route_params.get('s1_hft', self.CAPITAL_ALLOC_SMALL_MASTER)
-                reverse_base = _route_params.get('s2_minute', self.CAPITAL_ALLOC_SMALL_REVERSE)
+                divergence_base = _route_params.get('s7_divergence_reversal', self.CAPITAL_ALLOC_SMALL_REVERSE)
                 other_base = _route_params.get('s3_box_extreme', self.CAPITAL_ALLOC_SMALL_OTHER)
             elif self._capital_scale == CapitalScale.LARGE:
                 spring_base = _route_params.get('s4_box_spring', self.CAPITAL_ALLOC_LARGE_SPRING)
                 master_base = _route_params.get('s1_hft', self.CAPITAL_ALLOC_LARGE_MASTER)
-                reverse_base = _route_params.get('s2_minute', self.CAPITAL_ALLOC_LARGE_REVERSE)
+                divergence_base = _route_params.get('s7_divergence_reversal', self.CAPITAL_ALLOC_LARGE_REVERSE)
                 other_base = _route_params.get('s3_box_extreme', self.CAPITAL_ALLOC_LARGE_OTHER)
             else:
                 spring_base = _route_params.get('s4_box_spring', cr.spring_base)
                 master_base = _route_params.get('s1_hft', cr.master_base)
-                reverse_base = _route_params.get('s2_minute', cr.reverse_base)
+                divergence_base = _route_params.get('s7_divergence_reversal', cr.divergence_base)
                 other_base = _route_params.get('s3_box_extreme', cr.other_base)
 
             allocations = {
                 'master': cr.min_maintenance_ratio,
-                'reverse': cr.min_maintenance_ratio,
+                'divergence': cr.min_maintenance_ratio,
                 'other': cr.min_maintenance_ratio,
                 'spring': spring_base,
             }
@@ -187,12 +188,12 @@ class CapitalRoutingService:
                 allocations['master'] = master_base + cr.master_active_boost
                 remaining = 1.0 - allocations['master'] - 2 * cr.min_maintenance_ratio - allocations['spring']
                 if remaining > 0:
-                    allocations['reverse'] += remaining * self.REMAINING_ALLOC_MASTER
+                    allocations['divergence'] += remaining * self.REMAINING_ALLOC_MASTER
                     allocations['other'] += remaining * self.REMAINING_ALLOC_MASTER_OTHER
                     allocations['spring'] += remaining * self.REMAINING_ALLOC_MASTER_SPRING
             elif active_state == STRATEGY_MODE_INCORRECT_REVERSAL:
-                allocations['reverse'] = reverse_base + cr.master_active_boost
-                remaining = 1.0 - allocations['reverse'] - 2 * cr.min_maintenance_ratio - allocations['spring']
+                allocations['divergence'] = divergence_base + cr.master_active_boost
+                remaining = 1.0 - allocations['divergence'] - 2 * cr.min_maintenance_ratio - allocations['spring']
                 if remaining > 0:
                     allocations['master'] += remaining * self.REMAINING_ALLOC_REVERSE_MASTER
                     allocations['other'] += remaining * self.REMAINING_ALLOC_REVERSE_OTHER
@@ -202,11 +203,11 @@ class CapitalRoutingService:
                 remaining = 1.0 - allocations['other'] - 2 * cr.min_maintenance_ratio - allocations['spring']
                 if remaining > 0:
                     allocations['master'] += remaining * self.REMAINING_ALLOC_OTHER_MASTER
-                    allocations['reverse'] += remaining * self.REMAINING_ALLOC_OTHER_REVERSE
+                    allocations['divergence'] += remaining * self.REMAINING_ALLOC_OTHER_REVERSE
                     allocations['spring'] += remaining * self.REMAINING_ALLOC_OTHER_SPRING
             else:
                 allocations['master'] = master_base
-                allocations['reverse'] = reverse_base
+                allocations['divergence'] = divergence_base
                 allocations['other'] = other_base
                 allocations['spring'] = spring_base
 
@@ -214,8 +215,8 @@ class CapitalRoutingService:
             state_multipliers = self.STATE_STRATEGY_MULTIPLIERS.get(active_state, {})
             strategy_to_slot = {
                 'master': ['s1_hft', 's2_resonance'],
-                'reverse': ['s2_resonance'],
-                'other': ['s3_box_extreme', 's4_box_spring'],
+                'divergence': ['s7_divergence_reversal'],
+                'other': ['s3_box_extreme'],
                 'spring': ['s4_box_spring'],
             }
             for slot_name, strategy_keys in strategy_to_slot.items():
@@ -277,7 +278,7 @@ class CapitalRoutingService:
             if cr.alpha_ratio > 0.0 and cr.alpha_ratio <= 1.0:
                 _alpha_w = cr.alpha_ratio
                 allocations['master'] = allocations.get('master', 0.0) * (1.0 + _alpha_w * 0.15)
-                allocations['reverse'] = allocations.get('reverse', 0.0) * (1.0 - _alpha_w * 0.10)
+                allocations['divergence'] = allocations.get('divergence', 0.0) * (1.0 - _alpha_w * 0.10)
                 allocations['other'] = allocations.get('other', 0.0) * (1.0 - _alpha_w * 0.05)
                 allocations['spring'] = allocations.get('spring', 0.0) * (1.0 - _alpha_w * 0.05)
                 _total_after = sum(allocations.values())
@@ -292,12 +293,12 @@ class CapitalRoutingService:
                 if _sse is not None:
                     if _sse.is_degradation_active():
                         logger.warning("[StrategyEcosystem] 影子引擎降级激活，资金分配降至min_maintenance_ratio")
-                        for slot_name in ('master', 'reverse', 'other', 'spring'):
+                        for slot_name in ('master', 'divergence', 'other', 'spring'):
                             if slot_name in allocations:
                                 allocations[slot_name] = cr.min_maintenance_ratio
                     elif _sse.is_absolute_ev_paused():
                         logger.warning("[StrategyEcosystem] 影子引擎EV暂停激活，资金分配降至min_maintenance_ratio")
-                        for slot_name in ('master', 'reverse', 'other', 'spring'):
+                        for slot_name in ('master', 'divergence', 'other', 'spring'):
                             if slot_name in allocations:
                                 allocations[slot_name] = cr.min_maintenance_ratio
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _sse_err:
@@ -307,8 +308,8 @@ class CapitalRoutingService:
                 from ali2026v3_trading.param_pool.optimization.cycle_sharpe import get_cycle_resonance_module
                 crm = get_cycle_resonance_module()
                 if crm:
-                    _SLOT_TO_CRM_STRATEGY = {'master': 'resonance', 'reverse': 'box', 'other': 'high_freq', 'spring': 'spring', 'divergence': 'divergence'}
-                    for slot_name in ['master', 'reverse', 'other', 'spring']:
+                    _SLOT_TO_CRM_STRATEGY = {'master': 'resonance', 'divergence': 'divergence', 'other': 'high_freq', 'spring': 'spring'}
+                    for slot_name in ['master', 'divergence', 'other', 'spring']:
                         try:
                             _crm_strategy = _SLOT_TO_CRM_STRATEGY.get(slot_name, slot_name)
                             risk_adj = crm.get_risk_surface(strategy=_crm_strategy)
@@ -333,13 +334,13 @@ class CapitalRoutingService:
                     _crm_phase = getattr(_crm_output, 'phase', None) if _crm_output else None
                     if _crm_phase is not None:
                         _priority_list = crm.get_signal_priority(_crm_phase, volatility_regime=_volatility_regime)
-                        _SLOT_MAP = {'resonance': 'master', 'spring': 'spring', 'high_freq': 'other', 'box': 'reverse', 'divergence': 'divergence'}
+                        _SLOT_MAP = {'resonance': 'master', 'spring': 'spring', 'high_freq': 'other', 'divergence': 'divergence'}
                         _ranked_allocs = []
                         for _p_slot in _priority_list:
                             _alloc_key = _SLOT_MAP.get(_p_slot)
                             if _alloc_key and _alloc_key in allocations:
                                 _ranked_allocs.append((_alloc_key, allocations[_alloc_key]))
-                        for _missing_key in ('master', 'reverse', 'other', 'spring'):
+                        for _missing_key in ('master', 'divergence', 'other', 'spring'):
                             if _missing_key not in [k for k, _ in _ranked_allocs]:
                                 _ranked_allocs.append((_missing_key, allocations.get(_missing_key, 0.0)))
                         _PRIORITY_BOOST = 1.15
@@ -349,17 +350,18 @@ class CapitalRoutingService:
                                      _crm_phase, _volatility_regime,
                                      _priority_list[:2] if _priority_list else [],
                                      _ranked_allocs[0][0] if _ranked_allocs else None)
-                    total2 = sum(v for k, v in allocations.items() if k in ('master', 'reverse', 'other', 'spring'))
+                    total2 = sum(v for k, v in allocations.items() if k in ('master', 'divergence', 'other', 'spring'))
                     if total2 > 1e-10:
-                        for k in ('master', 'reverse', 'other', 'spring'):
+                        for k in ('master', 'divergence', 'other', 'spring'):
                             allocations[k] /= total2
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logger.debug("[StrategyEcosystem] CRM route_capital integration: %s", e)
 
             # R3-P-01修复: s5_arbitrage/s6_market_making路由
-            allocations['arbitrage'] = _route_params.get('s5_arbitrage', cr.arbitrage_base)
-            allocations['market_making'] = _route_params.get('s6_market_making', cr.market_making_base)
-            allocations['divergence'] = _route_params.get('s7_divergence', cr.divergence_base)
+            # FIX-20260711-S5S6: S5套利/S6做市改为实盘模拟监控模式，不参与资金分配
+            allocations['arbitrage'] = 0.0
+            allocations['market_making'] = 0.0
+            allocations['divergence'] = _route_params.get('s7_divergence_reversal', cr.divergence_base)
 
             _total_alloc = sum(allocations.values())
             if _total_alloc > 1e-10 and abs(_total_alloc - 1.0) > 1e-6:
@@ -373,7 +375,7 @@ class CapitalRoutingService:
                 _dynamic_enabled = _ps.get_bool('capital_route_dynamic_enabled', False)
                 if _dynamic_enabled:
                     _perf_weights = {}
-                    for slot_name, strat in [('master', self._master), ('reverse', self._reverse),
+                    for slot_name, strat in [('master', self._master), ('divergence', self._divergence),
                                              ('other', self._other), ('spring', self._spring)]:
                         if strat and hasattr(strat, 'win_rate') and hasattr(strat, 'trade_count'):
                             wr = getattr(strat, 'win_rate', 0.5)
@@ -396,7 +398,7 @@ class CapitalRoutingService:
                 logger.debug("[P1-CA-002] 资金路由动态调整跳过: %s", _e)
 
             self._master.capital_allocation = allocations['master']
-            self._reverse.capital_allocation = allocations['reverse']
+            self._divergence.capital_allocation = allocations['divergence']
             self._other.capital_allocation = allocations['other']
             self._spring.capital_allocation = allocations.get('spring', cr.spring_base)
             self._arbitrage.capital_allocation = allocations.get('arbitrage', cr.arbitrage_base)
@@ -432,7 +434,7 @@ class CapitalRoutingService:
             self._auto_upgrade_capital_scale()
 
             _now_obs = time.time()
-            for _slot_name in ('master', 'reverse', 'other', 'spring', 'arbitrage', 'market_making'):
+            for _slot_name in ('master', 'divergence', 'other', 'spring', 'arbitrage', 'market_making'):
                 _slot = self._get_slot(_slot_name)
                 if _slot is not None and _slot.state == SlotState.RETIRED:
                     allocations[_slot_name] = 0.0
@@ -508,7 +510,7 @@ class CapitalRoutingService:
         with self._lock:
             return {
                 'master': self._master.capital_allocation,
-                'reverse': self._reverse.capital_allocation,
+                'divergence': self._divergence.capital_allocation,
                 'other': self._other.capital_allocation,
                 'spring': self._spring.capital_allocation,
                 'arbitrage': self._arbitrage.capital_allocation,
@@ -522,7 +524,7 @@ class CapitalRoutingService:
             cr = self._capital_route
             raw_allocations = {
                 'master': self._master.capital_allocation,
-                'reverse': self._reverse.capital_allocation,
+                'divergence': self._divergence.capital_allocation,
                 'other': self._other.capital_allocation,
                 'spring': self._spring.capital_allocation,
                 'arbitrage': self._arbitrage.capital_allocation,
@@ -540,7 +542,7 @@ class CapitalRoutingService:
                     total, {k: round(v, 4) for k, v in raw_allocations.items()},
                 )
                 self._master.capital_allocation = normalized['master']
-                self._reverse.capital_allocation = normalized['reverse']
+                self._divergence.capital_allocation = normalized['divergence']
                 self._other.capital_allocation = normalized['other']
                 self._spring.capital_allocation = normalized['spring']
                 self._arbitrage.capital_allocation = normalized['arbitrage']
@@ -609,14 +611,17 @@ class StrategyEcosystem:
         STRATEGY_MODE_CORRECT_TRENDING: {
             's1_hft': 1.5, 's2_resonance': 1.5, 's3_box_extreme': 0.8,
             's4_box_spring': 0.8, 's5_arbitrage': 1.0, 's6_market_making': 1.0,
+            's7_divergence_reversal': 0.8,
         },
         STRATEGY_MODE_INCORRECT_REVERSAL: {
             's1_hft': 1.2, 's2_resonance': 1.2, 's3_box_extreme': 0.5,
             's4_box_spring': 0.5, 's5_arbitrage': 1.0, 's6_market_making': 1.0,
+            's7_divergence_reversal': 1.5,
         },
         'other': {
             's1_hft': 0.6, 's2_resonance': 0.6, 's3_box_extreme': 1.5,
             's4_box_spring': 1.5, 's5_arbitrage': 1.0, 's6_market_making': 1.0,
+            's7_divergence_reversal': 0.6,
         },
     }
 
@@ -627,9 +632,9 @@ class StrategyEcosystem:
     # R13-P0-API-06修复: 状态→策略ID映射
     _STATE_TO_STRATEGY_MAP = {
         STRATEGY_MODE_CORRECT_TRENDING: 'master',
-        STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE: 'master',
-        STRATEGY_MODE_INCORRECT_REVERSAL: 'reverse',
-        'incorrect_reversal_defensive': 'reverse',
+        STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE: 'divergence',
+        STRATEGY_MODE_INCORRECT_REVERSAL: 'divergence',
+        'incorrect_reversal_defensive': 'divergence',
         STRATEGY_MODE_OTHER: 'other',
     }
 
@@ -651,6 +656,7 @@ class StrategyEcosystem:
             'spring': {'max_signals_per_min': 15, 'max_capital_pct': 0.15, 'signals_count': 0, 'last_reset': 0.0},
             'arbitrage': {'max_signals_per_min': 10, 'max_capital_pct': 0.10, 'signals_count': 0, 'last_reset': 0.0},
             'market_making': {'max_signals_per_min': 50, 'max_capital_pct': 0.10, 'signals_count': 0, 'last_reset': 0.0},
+            'divergence': {'max_signals_per_min': 20, 'max_capital_pct': 0.20, 'signals_count': 0, 'last_reset': 0.0},
         }
         self._strategy_error_counts: Dict[str, int] = {}
         self._strategy_circuit_breaker_threshold: int = 5
@@ -696,12 +702,7 @@ class StrategyEcosystem:
             state=SlotState.ACTIVE,
             capital_allocation=self.CAPITAL_ALLOC_MASTER_BASE,
         )
-        self._reverse = StrategySlot(
-            strategy_id='reverse',
-            strategy_type=STRATEGY_MODE_INCORRECT_REVERSAL,
-            state=SlotState.STANDBY,
-            capital_allocation=self.CAPITAL_ALLOC_REVERSE_BASE,
-        )
+        self._reverse = self._divergence
         self._other = StrategySlot(
             strategy_id='other',
             strategy_type='box_extreme',
@@ -714,17 +715,18 @@ class StrategyEcosystem:
             state=SlotState.ACTIVE,
             capital_allocation=self._capital_route.spring_base,
         )
+        # FIX-20260711-S5S6: S5套利/S6做市改为实盘模拟监控模式，不参与资金分配
         self._arbitrage = StrategySlot(
             strategy_id='arbitrage',
             strategy_type='arbitrage',
             state=SlotState.STANDBY,
-            capital_allocation=self._capital_route.arbitrage_base,
+            capital_allocation=0.0,
         )
         self._market_making = StrategySlot(
             strategy_id='market_making',
             strategy_type='market_making',
             state=SlotState.STANDBY,
-            capital_allocation=self._capital_route.market_making_base,
+            capital_allocation=0.0,
         )
         self._divergence = StrategySlot(
             strategy_id='divergence',
@@ -758,7 +760,7 @@ class StrategyEcosystem:
         self._strategy_param_evolution: deque = deque(maxlen=1000)
         self._strategy_doc_links: Dict[str, str] = {
             'master': 'docs/strategies/master.md',
-            'reverse': 'docs/strategies/reverse.md',
+            'divergence': 'docs/strategies/divergence.md',
             'other': 'docs/strategies/other.md',
             'spring': 'docs/strategies/spring.md',
             'arbitrage': 'docs/strategies/arbitrage.md',
@@ -772,7 +774,7 @@ class StrategyEcosystem:
         self._revival_requests: deque = deque(maxlen=200)
 
         self._master_trades: deque = deque(maxlen=10000)
-        self._reverse_trades: deque = deque(maxlen=10000)
+        self._divergence_trades: deque = deque(maxlen=10000)
         self._other_trades: deque = deque(maxlen=10000)
         self._spring_trades: deque = deque(maxlen=10000)
         self._arbitrage_trades: deque = deque(maxlen=10000)
@@ -780,7 +782,7 @@ class StrategyEcosystem:
         self._divergence_trades: deque = deque(maxlen=10000)
 
         self._master_equity: deque = deque(maxlen=10000)
-        self._reverse_equity: deque = deque(maxlen=10000)
+        self._divergence_equity: deque = deque(maxlen=10000)
         self._other_equity: deque = deque(maxlen=10000)
 
         self._trade_id_counter: int = 0
@@ -798,7 +800,7 @@ class StrategyEcosystem:
             'signal_confirm_ticks': 3,
             'cooldown_ms': 50,
             'min_imbalance': 0.15,
-            'hft_hard_time_stop_ms': 1000,
+            'hft_hard_time_stop_ms': 60000,
             'daily_drawdown_pct': 0.03,
             'risk_ratio': 0.2,
         }
@@ -827,7 +829,7 @@ class StrategyEcosystem:
         }
         self._s4_params = {
             'strategy_id': 's4_spring',
-            'spring_hard_time_stop_sec': 30,
+            'spring_hard_time_stop_sec': 600,
             'daily_drawdown_pct': 0.05,
             'risk_ratio': 0.3,
         }
@@ -835,7 +837,7 @@ class StrategyEcosystem:
         self._stats = {
             'total_trades': 0,
             'master_trades': 0,
-            'reverse_trades': 0,
+            'divergence_trades': 0,
             'other_trades': 0,
             'spring_trades': 0,
             'arbitrage_trades': 0,
@@ -919,7 +921,7 @@ class StrategyEcosystem:
         """状态切换回调：当SPM状态变化时联动策略切换"""
         strategy_map = {
             'correct_trending': 'master',
-            'incorrect_reversal': 'reverse',
+            'incorrect_reversal': 'divergence',
             'other': 'other',
             'spring': 'spring',
         }
@@ -932,11 +934,11 @@ class StrategyEcosystem:
         with self._lock:
             # 映射测试中的策略名到内部名
             name_map = {
-                'incorrect_reversal': 'reverse',
+                'incorrect_reversal': 'divergence',
                 'correct_trending': 'master',
             }
             internal_target = name_map.get(target, target)
-            if internal_target not in ('master', 'reverse', 'other', 'spring', 'arbitrage', 'market_making'):
+            if internal_target not in ('master', 'divergence', 'other', 'spring', 'arbitrage', 'market_making'):
                 return {'switched': False, 'reason': f'unknown strategy: {target}'}
             # 同策略不切换
             if internal_target == self._active_strategy:
@@ -956,7 +958,7 @@ class StrategyEcosystem:
         """将状态映射到策略ID"""
         state_to_strategy = {
             'correct_trending': 'master',
-            'incorrect_reversal': 'reverse',
+            'incorrect_reversal': 'divergence',
             'other': 'other',
             'spring': 'spring',
             'arbitrage': 'arbitrage',
@@ -968,7 +970,7 @@ class StrategyEcosystem:
         """检查互斥约束（策略切换后某些方向不允许开仓）"""
         with self._lock:
             # other状态下禁止master和reverse新开仓
-            if self._active_strategy == 'other' and strategy_id in ('master', 'reverse'):
+            if self._active_strategy == 'other' and strategy_id in ('master', 'divergence'):
                 return (False, f'{strategy_id} blocked in other state')
             return (True, 'allowed')
 
@@ -987,7 +989,7 @@ class StrategyEcosystem:
             try:
                 result['strategies'] = {
                     'master': {'paused': self._master.paused, 'frozen': self._master.frozen},
-                    'reverse': {'paused': self._reverse.paused, 'frozen': self._reverse.frozen},
+                    'divergence': {'paused': self._divergence.paused, 'frozen': self._divergence.frozen},
                     'other': {'paused': self._other.paused, 'frozen': self._other.frozen},
                 }
             except (ValueError, KeyError, TypeError, AttributeError):
@@ -1012,16 +1014,16 @@ class StrategyEcosystem:
             stats = dict(self._stats)
             stats['active_strategy'] = self._active_strategy
             stats['master_pnl'] = self._master.total_pnl
-            stats['reverse_pnl'] = self._reverse.total_pnl
+            stats['divergence_pnl'] = self._divergence.total_pnl
             stats['other_pnl'] = self._other.total_pnl
             stats['spring_pnl'] = self._spring.total_pnl
             stats['master_ev'] = self._master.expected_value
-            stats['reverse_ev'] = self._reverse.expected_value
+            stats['divergence_ev'] = self._divergence.expected_value
             stats['other_ev'] = self._other.expected_value
             stats['spring_ev'] = self._spring.expected_value
             stats['total_trades'] = stats.get('total_trades', 0)
             stats['master_trades'] = stats.get('master_trades', 0)
-            stats['reverse_trades'] = stats.get('reverse_trades', 0)
+            stats['divergence_trades'] = stats.get('divergence_trades', 0)
             return stats
 
     def get_stats(self) -> Dict[str, Any]:
@@ -1046,7 +1048,7 @@ class StrategyEcosystem:
     def _on_degrade_frequency(self, old_freq: int, new_freq: int, reason: str = "") -> None:
         """当LiveStrategySelector降频时，通知策略层调整决策频率"""
         logging.info("[P-13] _degrade_frequency回调: %d→%d, reason=%s", old_freq, new_freq, reason)
-        for sid in ('master', 'reverse', 'other', 'spring', 'arbitrage', 'market_making'):
+        for sid in ('master', 'divergence', 'other', 'spring', 'arbitrage', 'market_making'):
             slot = self._get_slot(sid)
             if slot is not None and hasattr(slot, 'decision_frequency'):
                 slot.decision_frequency = new_freq

@@ -26,27 +26,26 @@ from typing import Any, Dict, List, Optional
 from .infra.serialization_utils import json_dumps, json_loads, json_default_serializer
 
 try:
-    from .data.quant_infra import NumpyRingBuffer
-    from .data.quant_platform import ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor
-    from .data.quant_trend_scorer import MultiPeriodTrendScorer
-    from .data.quant_volatility import IVSurfacePCA, VolatilityRegimeFilter
+    from .data.quant_infra import NumpyRingBuffer, ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor, MultiPeriodTrendScorer, IVSurfacePCA, VolatilityRegimeFilter
     from .data.quant_hmm import AdaptiveHMM
     from .data.quant_cointegration import CointegrationScanner, SurvivalAnalyzer
     from .data.quant_services import (
         LightweightPersistence, HotConfigManager, numba_helper, HAS_NUMBA,
     )
-    from .infra.singleton_registry import SingletonRegistry
+    # FIX-20260709-PQS-IMPORT: singleton_registry.py已合并到registry_service.py
+    # 根因: from .infra.singleton_registry import SingletonRegistry 失败
+    #       (ModuleNotFoundError: No module named 'ali2026v3_trading.infra.singleton_registry')
+    #       导致L29-34的全部import被回滚，PQS整个模块无法加载
+    from .infra.registry_service import SingletonRegistry
 except ImportError:
-    from data.quant_infra import NumpyRingBuffer
-    from data.quant_platform import ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor
-    from data.quant_trend_scorer import MultiPeriodTrendScorer
-    from data.quant_volatility import IVSurfacePCA, VolatilityRegimeFilter
-    from data.quant_hmm import AdaptiveHMM
-    from data.quant_cointegration import CointegrationScanner, SurvivalAnalyzer
-    from data.quant_services import (
+    # FIX-20260709-PQS-IMPORT: fallback路径也需使用正确包名
+    from ali2026v3_trading.data.quant_infra import NumpyRingBuffer, ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor, MultiPeriodTrendScorer, IVSurfacePCA, VolatilityRegimeFilter
+    from ali2026v3_trading.data.quant_hmm import AdaptiveHMM
+    from ali2026v3_trading.data.quant_cointegration import CointegrationScanner, SurvivalAnalyzer
+    from ali2026v3_trading.data.quant_services import (
         LightweightPersistence, HotConfigManager, numba_helper, HAS_NUMBA,
     )
-    from infra.singleton_registry import SingletonRegistry
+    from ali2026v3_trading.infra.registry_service import SingletonRegistry
 from collections import deque
 
 
@@ -151,6 +150,10 @@ class ProductionQuantSystem:
         self._crm = None
         self._imbalance_window = cfg.get('imbalance_window', 20)
         self._signed_volume_history: deque = deque(maxlen=self._imbalance_window)
+        # FIX-20260709-PQS-ATTR: 初始化structured_logger避免AttributeError
+        # 根因: update_tick() L274访问self.structured_logger但__init__未初始化
+        # 导致PQS每次update_tick都失败，crm._last_output永远为None
+        self.structured_logger = None
         self._last_close: Optional[float] = None
 
     def initialize(self, symbols: Optional[List[str]] = None) -> None:

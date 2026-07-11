@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 
 from ali2026v3_trading.infra.resilience import deterministic_round
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.strategy._box_spring_types import (
+from ali2026v3_trading.strategy.box_spring_detector import (
     SpringState, BoxRange, SpringSignal, SpringPosition, PendingPullback,
     get_box_spring_strategy,
 )
@@ -317,6 +317,12 @@ class BoxSpringStrategy:
         elif timestamp is not None:
             self._current_bar_time = timestamp.timestamp() if hasattr(timestamp, 'timestamp') else None
 
+        # [FIX-20260708-BOXSPRING-HL] 当high/low为0时(如来自targets的选标数据无K线字段)，
+        # 使用price作为fallback，确保箱体检测能正常运行
+        if high <= 0 and price > 0:
+            high = price
+        if low <= 0 and price > 0:
+            low = price
         if high > 0 and low > 0:
             self.update_box(instrument_id, high, low, price, timestamp)
 

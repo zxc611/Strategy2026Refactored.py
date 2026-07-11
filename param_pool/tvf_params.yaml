@@ -382,6 +382,150 @@ grid_analysis:
   description: "约140亿组合（P0修复后），推荐拉丁超立方采样10000次或Optuna贝叶斯优化2000次"
 
 # ============================================================
+# 次系统8 并列信号源A/B/C参数搜索空间
+# v2.0重构：串行三层→并列信号源A/B/C
+# ============================================================
+signal_source_abc:
+  tl_signal_source:
+    values: ["A", "B", "C", "auto"]
+    description: "信号源选择，4个选项"
+  tl_tier1_wilson_threshold:
+    range: [0.50, 0.70]
+    num_points: 5
+    values: [0.50, 0.55, 0.60, 0.65, 0.70]
+    description: "Tier1 Wilson CI下限，5个采样点"
+  tl_tier2_coverage_threshold:
+    range: [0.40, 0.70]
+    num_points: 7
+    values: [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+    description: "Tier2覆盖率阈值，7个采样点"
+  tl_tier2_correct_up_threshold:
+    range: [0.45, 0.60]
+    num_points: 4
+    values: [0.45, 0.50, 0.55, 0.60]
+    description: "Tier2正确率上升阈值，4个采样点"
+  tl_tier3_correct_up_threshold:
+    range: [0.35, 0.50]
+    num_points: 4
+    values: [0.35, 0.40, 0.45, 0.50]
+    description: "Tier3正确率上升阈值，4个采样点"
+  tl_month_weight_1:
+    range: [0.25, 0.45]
+    num_points: 5
+    values: [0.25, 0.30, 0.35, 0.40, 0.45]
+    description: "第1近月权重，5个采样点"
+  tl_month_weight_2:
+    range: [0.20, 0.35]
+    num_points: 4
+    values: [0.20, 0.25, 0.30, 0.35]
+    description: "第2近月权重，4个采样点"
+  tl_month_weight_3:
+    range: [0.15, 0.30]
+    num_points: 4
+    values: [0.15, 0.20, 0.25, 0.30]
+    description: "第3近月权重，4个采样点"
+  tl_month_weight_4:
+    range: [0.08, 0.15]
+    num_points: 4
+    values: [0.08, 0.10, 0.12, 0.15]
+    description: "第4近月权重，4个采样点"
+  tl_month_weight_5:
+    range: [0.05, 0.12]
+    num_points: 4
+    values: [0.05, 0.08, 0.10, 0.12]
+    description: "第5近月权重，4个采样点"
+  tl_delta_min:
+    range: [0.10, 0.25]
+    num_points: 4
+    values: [0.10, 0.15, 0.20, 0.25]
+    description: "Greeks硬过滤Delta下限，4个采样点"
+  tl_delta_max:
+    range: [0.75, 0.90]
+    num_points: 4
+    values: [0.75, 0.80, 0.85, 0.90]
+    description: "Greeks硬过滤Delta上限，4个采样点"
+  tl_gamma_boost_factor:
+    range: [1.0, 1.5]
+    num_points: 6
+    values: [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+    description: "Gamma加成因子，6个采样点"
+  tl_vega_penalty_factor:
+    range: [0.6, 0.9]
+    num_points: 4
+    values: [0.6, 0.7, 0.8, 0.9]
+    description: "Vega惩罚因子，4个采样点"
+  tl_theta_penalty_max:
+    range: [0.05, 0.25]
+    num_points: 5
+    values: [0.05, 0.10, 0.15, 0.20, 0.25]
+    description: "Theta惩罚上限，5个采样点"
+  tl_gamma_max_front_month:
+    range: [0.05, 0.10]
+    num_points: 4
+    values: [0.05, 0.06, 0.08, 0.10]
+    description: "近月Gamma上限，4个采样点"
+  tl_theta_max_front_month_pct:
+    range: [0.010, 0.025]
+    num_points: 4
+    values: [0.010, 0.015, 0.020, 0.025]
+    description: "近月Theta上限百分比，4个采样点"
+  tl_cluster_dispersion_threshold:
+    range: [0.10, 0.25]
+    num_points: 4
+    values: [0.10, 0.15, 0.20, 0.25]
+    description: "簇离散度阈值，4个采样点"
+  tl_correlation_threshold:
+    range: [0.70, 0.90]
+    num_points: 5
+    values: [0.70, 0.75, 0.80, 0.85, 0.90]
+    description: "品种相关性阈值，5个采样点"
+  tl_layer2_weight_score1:
+    range: [0.60, 0.80]
+    num_points: 5
+    values: [0.60, 0.65, 0.70, 0.75, 0.80]
+    description: "簇平均正确率权重，5个采样点"
+  tl_layer3_weight_score2:
+    range: [0.55, 0.75]
+    num_points: 5
+    values: [0.55, 0.60, 0.65, 0.70, 0.75]
+    description: "全局排序权重，5个采样点"
+  tl_market_accuracy_floor_percentile:
+    range: [10, 30]
+    num_points: 5
+    values: [10, 15, 20, 25, 30]
+    description: "市场正确率地板百分位，5个采样点"
+  tl_resonance_veto_threshold:
+    range: [0.70, 0.90]
+    num_points: 5
+    values: [0.70, 0.75, 0.80, 0.85, 0.90]
+    description: "共振否决阈值，5个采样点"
+  tl_cluster_confidence_threshold:
+    range: [0.50, 0.70]
+    num_points: 5
+    values: [0.50, 0.55, 0.60, 0.65, 0.70]
+    description: "簇置信度阈值，5个采样点"
+  tl_max_single_product_pct:
+    range: [0.10, 0.20]
+    num_points: 5
+    values: [0.10, 0.12, 0.15, 0.18, 0.20]
+    description: "单品种最大占比，5个采样点"
+  tl_max_single_cluster_pct:
+    range: [0.30, 0.50]
+    num_points: 5
+    values: [0.30, 0.35, 0.40, 0.45, 0.50]
+    description: "单簇最大占比，5个采样点"
+  tl_circuit_breaker_consecutive_min:
+    range: [3, 10]
+    num_points: 4
+    values: [3, 5, 7, 10]
+    description: "断路器连续最小触发次数，4个采样点"
+  tl_circuit_breaker_position_mult:
+    range: [0.3, 0.7]
+    num_points: 5
+    values: [0.3, 0.4, 0.5, 0.6, 0.7]
+    description: "断路器触发后仓位乘数，5个采样点"
+
+# ============================================================
 # 使用说明
 # ============================================================
 # 1. 首次使用: 直接采用本文件的初始值

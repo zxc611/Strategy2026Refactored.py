@@ -42,9 +42,9 @@ class GreeksExposure:
 
 
 _REASON_STRATEGY_MAP = {
-    'CORRECT_RESONANCE': 'high_freq', 'CORRECT_DIVERGENCE': 'high_freq',
-    'INCORRECT_REVERSAL': 'resonance', 'INCORRECT_DIVERGENCE': 'resonance',
-    'OTHER_SCALP': 'box', 'BOX_SPRING': 'spring',
+    'CORRECT_RESONANCE': 'resonance', 'HIGH_FREQ': 'high_freq',
+    'DIVERGENCE_REVERSAL': 'divergence',
+    'OTHER_SCALP': 'box', 'BOX_SPRING': 'spring', 'BOX_EXTREME': 'box',
     'ARBITRAGE': 'arbitrage', 'MARKET_MAKING': 'market_making',
     'MANUAL': 'manual',
 }

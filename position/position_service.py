@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer
-from ali2026v3_trading.infra.performance_monitor import count_call
+from ali2026v3_trading.infra.metrics_registry import count_call
 from ali2026v3_trading.config import config_params
 
 try:
@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Any, Tuple
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
 from ali2026v3_trading.infra.shared_utils import api_version  # P1-21: 统一从shared_utils导入
-from ali2026v3_trading.risk.risk_position_bridge import RiskBridgeAdapter, PositionBridgeAdapter, BridgeRiskLevel
+from ali2026v3_trading.risk.risk_support import RiskBridgeAdapter, PositionBridgeAdapter, BridgeRiskLevel
 
 try:
     from ali2026v3_trading.infra.security_service import structured_audit_log as _structured_audit_log  # R1-4修复
@@ -54,7 +54,7 @@ except ImportError:
     _structured_audit_log = None
 
 # CP-06修复: 以下import从函数体内延迟import提升为模块级import（共享常量模块无循环依赖风险）
-from ali2026v3_trading.infra.shared_trading_constants import REASON_MULTIPLIERS  # R27-CP-01-FIX
+from ali2026v3_trading.infra.commission_utils import REASON_MULTIPLIERS  # R27-CP-01-FIX
 
 # CP-06注释: 以下延迟import因懒初始化模式保留在函数体内（非循环依赖，而是服务按需初始化）：
 # - position_command_service/position_check_service/position_pnl_service/position_persistence — 服务懒初始化
@@ -201,9 +201,11 @@ class PositionService(object):
 
     DEFAULT_TP_RATIO = 1.8
     DEFAULT_SL_RATIO = 0.30
-    TP_SL_REASON_DEFAULTS = {  # R17-P1-DOC-P1-09修复: 来源 V7.0手册§9.1/9.2 状态分层止盈止损比率
-        'CORRECT_RESONANCE': (1.5, 0.50), 'CORRECT_DIVERGENCE': (1.2, 0.40),  # 来源: V7.0手册§9.1 正确共振/背离
-        'INCORRECT_REVERSAL': (1.3, 0.60), 'OTHER_SCALP': (1.1, 0.30), 'BOX_SPRING': (5.0, 0.60),  # 来源: V7.0手册§9.2 反转/剥头皮/箱体弹簧
+    TP_SL_REASON_DEFAULTS = {
+        'CORRECT_RESONANCE': (1.5, 0.50),
+        'DIVERGENCE_REVERSAL': (1.3, 0.50),
+        'OTHER_SCALP': (1.1, 0.30), 'BOX_SPRING': (2.0, 0.40),  # FIX-20260711-P2: tp从5.0降至2.0/sl从0.60收紧至0.40
+        'BOX_EXTREME': (1.2, 0.40), 'ARBITRAGE': (1.2, 0.30), 'MARKET_MAKING': (1.1, 0.20),
     }
     OPTION_DELTA_PER_LOT_CALL = 0.5
     OPTION_DELTA_PER_LOT_PUT = -0.5
@@ -268,13 +270,13 @@ class PositionService(object):
 
         try:
             from ali2026v3_trading.infra.health_monitor import StructuredJsonlLogger
-            from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR
+            from ali2026v3_trading.config._params_canary_env import DEFAULT_LOG_DIR
             self._structured_logger = StructuredJsonlLogger(log_dir=DEFAULT_LOG_DIR)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             self._structured_logger = None
 
         self.t_type_service = get_t_type_service() if _HAS_T_TYPE else None
-        from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR as _DEFAULT_LOG_DIR2
+        from ali2026v3_trading.config._params_canary_env import DEFAULT_LOG_DIR as _DEFAULT_LOG_DIR2
         self._position_state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), _DEFAULT_LOG_DIR2, 'position_state.jsonl')
         self._position_state_lock = threading.Lock()
         self._cross_shard_lock = threading.RLock()
@@ -527,13 +529,13 @@ class PositionService(object):
     def _schedule_close_retry(self, record, price: float) -> None:
         return self._command_svc._schedule_close_retry(record, price)
 
-    _HARDCODED_REASON_DEFAULTS = {  # R17-P1-DOC-P1-09修复: 来源 V7.0手册§9.1/9.2 硬编码回退值(优先从state_param_manager读取)
-        'CORRECT_RESONANCE': (1.5, 0.50), 'CORRECT_DIVERGENCE': (1.2, 0.40),  # 来源: V7.0手册§9.1
-        'INCORRECT_REVERSAL': (1.3, 0.60), 'INCORRECT_DIVERGENCE': (1.2, 0.50),
-        'OTHER_SCALP': (1.1, 0.30),  # 来源: V7.0手册§9.2
-        'BOX_SPRING': (5.0, 0.60),  # R27-P0-FIX: 来源V7.0手册§9.2，与TP_SL_REASON_DEFAULTS对齐
-        'ARBITRAGE': (1.2, 0.30), 'MARKET_MAKING': (1.1, 0.20),
-        'MANUAL': (1.5, 0.50), '': (1.5, 0.50),  # 来源: V7.0手册§9.1 兜底默认值
+    _HARDCODED_REASON_DEFAULTS = {
+        'CORRECT_RESONANCE': (1.5, 0.50), 'HIGH_FREQ': (1.8, 0.30),
+        'DIVERGENCE_REVERSAL': (1.3, 0.50),
+        'OTHER_SCALP': (1.1, 0.30),
+        'BOX_SPRING': (2.0, 0.40),  # FIX-20260711-P2
+        'ARBITRAGE': (1.2, 0.30), 'MARKET_MAKING': (1.1, 0.20), 'BOX_EXTREME': (1.2, 0.40),
+        'MANUAL': (1.5, 0.50), '': (1.5, 0.50),
     }
     _FALLBACK_TP_SL = (1.8, 0.30)
 
@@ -556,15 +558,20 @@ class PositionService(object):
 
     def _verify_tp_sl_alignment_with_backtest(self, open_reason: str, tp: float, sl: float) -> None:
         try:
-            # CP-06修复: REASON_MULTIPLIERS已提升为模块级import
-            bt_mult = REASON_MULTIPLIERS.get(open_reason)
-            if bt_mult is not None:
-                base_tp = float(getattr(self, 'DEFAULT_TP_RATIO', 1.8))
-                base_sl = float(getattr(self, 'DEFAULT_SL_RATIO', 0.30))
-                bt_tp = base_tp * bt_mult.get('tp_mult', 1.0)
-                bt_sl = base_sl * bt_mult.get('sl_mult', 1.0)
+            bt_defaults = dict(getattr(self.__class__, 'TP_SL_REASON_DEFAULTS', {}) or {})
+            if open_reason in bt_defaults:
+                bt_tp, bt_sl = bt_defaults[open_reason]
                 if abs(tp - bt_tp) > 0.05 or abs(sl - bt_sl) > 0.05:
-                    logging.warning("[P0-2修复] 生产/回测TP-SL分叉: reason=%s", open_reason)
+                    logging.warning("[P0-2修复] 生产/回测TP-SL分叉: reason=%s prod=(%s,%s) bt=(%s,%s)", open_reason, tp, sl, bt_tp, bt_sl)
+            else:
+                bt_mult = REASON_MULTIPLIERS.get(open_reason)
+                if bt_mult is not None:
+                    base_tp = float(getattr(self, 'DEFAULT_TP_RATIO', 1.8))
+                    base_sl = float(getattr(self, 'DEFAULT_SL_RATIO', 0.30))
+                    bt_tp = base_tp * bt_mult.get('tp_mult', 1.0)
+                    bt_sl = base_sl * bt_mult.get('sl_mult', 1.0)
+                    if abs(tp - bt_tp) > 0.05 or abs(sl - bt_sl) > 0.05:
+                        logging.warning("[P0-2修复] 生产/回测TP-SL分叉(回退路径): reason=%s prod=(%s,%s) bt=(%s,%s)", open_reason, tp, sl, bt_tp, bt_sl)
         except (ImportError, AttributeError):
             pass
 

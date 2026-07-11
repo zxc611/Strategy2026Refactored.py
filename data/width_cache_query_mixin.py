@@ -19,7 +19,7 @@ from ali2026v3_trading.data.width_cache_types import (
     MAX_STATUS_COUNTS_SIZE, MAX_SORT_BUCKETS_FUTURES, _CACHE_TTL_SECONDS,
 )
 # 五唯一性修复：从 final_three_layer_config 统一导入 Tier 阈值与月份权重常量
-from ali2026v3_trading.config.final_three_layer_config import (
+from ali2026v3_trading.config.tvf_param_loader import (
     MONTH_WEIGHTS_5, TIER1_WILSON_THRESHOLD,
     TIER2_COVERAGE_THRESHOLD, TIER2_CORRECT_UP_THRESHOLD,
     TIER3_CORRECT_UP_THRESHOLD,
@@ -46,11 +46,32 @@ class WidthCacheQueryService:
         self._sorter_a = None
         self._sorter_b = None
         self._sorter_c = None
+        # v2.8 §21: 排序方案配置覆盖（回测时允许外部注入，实盘从params_service读取）
+        self._sorter_config_override: Optional[Dict[str, Any]] = None
 
     def __getattr__(self, name):
         if self._facade is not None and hasattr(self._facade, name):
             return getattr(self._facade, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    # v2.8 §21: 排序方案配置注入接口（回测三方案切换用）
+    def configure_sorter(self, config: Optional[Dict[str, Any]]) -> None:
+        """v2.8 §21: 注入排序方案配置覆盖。
+
+        用途：
+        - 回测驱动器调用此方法切换 scoring_scheme（scheme_1/2/3/all）
+        - 实盘不调用此方法，使用 SORTER_CONFIG 默认值（scheme_1）或 params_service 覆盖
+        - 传入 None 清除覆盖，恢复默认行为
+
+        Args:
+            config: 排序配置字典（如 {'scoring_scheme': 'scheme_2', 'output_mode': 'research'}），
+                    或 None 清除覆盖
+        """
+        self._sorter_config_override = config
+        # 清除已实例化的排序器，强制下次调用时用新配置重建
+        self._sorter_a = None
+        self._sorter_b = None
+        self._sorter_c = None
 
     @staticmethod
     def _resolve_month_mapping(params: Any) -> Dict[str, Any]:
@@ -235,6 +256,7 @@ class WidthCacheQueryService:
                         'month': entry.month,
                         'product': entry.product,
                         'sync_flag': entry.sync_flag,
+                        'current_status': getattr(entry, 'current_status', 'other'),
                     })
                 
                 return results
@@ -336,18 +358,19 @@ class WidthCacheQueryService:
 
     @staticmethod
     def compute_coverage(month_data: List[Dict], weights: Tuple[float, ...]) -> float:
-        """Compute coverage = (months with non-zero counts) / MAX_MONTHS_FOR_SCORING.
+        """Compute active trading coverage = active classified months / MAX_MONTHS_FOR_SCORING.
 
-        五唯一性修复：对齐规范公式 (count-based, not weighted sum)
+        `other` is diagnostic inventory, not an effective trading classification.
+        Pure-other months must not inflate coverage or make inactive option chains
+        look tradeable.
         """
         active_months = 0
         for i, data in enumerate(month_data):
             if i >= len(weights):
                 break
-            total = (data.get('cr', 0) + data.get('cf', 0) +
-                     data.get('wr', 0) + data.get('wf', 0) +
-                     data.get('other', 0))
-            if total > 0:
+            classified_total = (data.get('cr', 0) + data.get('cf', 0) +
+                                data.get('wr', 0) + data.get('wf', 0))
+            if classified_total > 0:
                 active_months += 1
         max_months = WidthCacheQueryService.MAX_MONTHS_FOR_SCORING
         return active_months / max_months if max_months > 0 else 0.0
@@ -400,8 +423,13 @@ class WidthCacheQueryService:
         - Tier 3: correct_up_pct >= TIER3_CORRECT_UP_THRESHOLD
         - Tier 4: otherwise (noise filter)
 
-        修复：当correct_up_pct > 0时，即使correct_up_pct <= noise_ratio，
-        也允许进入Tier 3（最低交易级别），避免夜盘other占比高导致品种全部被过滤。
+        FIX-R4修复：当correct_up_pct == 0时，区分"无分类数据"与"有数据但全错"。
+        - coverage == 0（无分类数据）：降级为Tier 3（允许交易），而非Tier 4。
+          原因：平台未推送tick导致无分类数据，不等于品种质量差。
+        - coverage > 0 但 correct_up_pct == 0（有数据但全错）：保持Tier 4。
+        这样避免84%期货因"无数据"被误判为"不可交易"。
+
+        noise_ratio参数保留用于未来扩展，当前不参与硬过滤（避免夜盘other占比高导致全过滤）。
         """
         if correct_up_pct > 0:
             if coverage >= 0.8 and wilson >= TIER1_WILSON_THRESHOLD:
@@ -414,6 +442,10 @@ class WidthCacheQueryService:
             else:
                 return 4
         else:
+            # FIX-R4: correct_up_pct == 0 时区分"无数据"与"全错"
+            if coverage == 0.0:
+                # 无分类数据（平台未推送tick），降级为Tier 3允许交易
+                return 3
             return 4
 
     def _get_scoring_months(self, fid: int, available_months: List[str]) -> List[str]:
@@ -481,6 +513,9 @@ class WidthCacheQueryService:
             future_internal_id: 可选，指定期货合约 internal_id。如果为 None，则自动选择最优期货。
         """
         # ✅ WidthStrengthCache自身就是缓存，直接使用self
+        # FIX-P0-24: 原query_count仅在get_width_strength()中递增，导致print_status_diagnosis
+        # 显示query_count=0误导诊断（实际select_otm_targets已被调用但未计数）
+        self._query_count += 1
         with self._lock:
             # BUG-15 fix: lazy backfill is_main_month for legacy options (design report 4.4)
             self._backfill_is_main_month()
@@ -537,6 +572,16 @@ class WidthCacheQueryService:
 
                 # BUG-9 fix: filter out Tier 4 (design report: "Tier 4 = 不交易")
                 if tier == 4:
+                    # FIX-P0-19: Tier 4 静默过滤无日志，添加计数与周期日志
+                    # 根因: if tier == 4: continue 无日志，是最大的期权信号丢失源
+                    # 修复: 添加计数器与周期性告警日志，便于排查
+                    _tier4_skip_count = getattr(self, '_tier4_skip_count', 0) + 1
+                    self._tier4_skip_count = _tier4_skip_count
+                    if _tier4_skip_count <= 5 or _tier4_skip_count % 100 == 0:
+                        logging.info(
+                            "[FIX-P0-19] 期货 %s 被判定为 Tier 4(不交易), 跳过(累计%d个期货跳过)",
+                            fid, _tier4_skip_count,
+                        )
                     continue
 
                 future_scores.append({
@@ -619,12 +664,56 @@ class WidthCacheQueryService:
 
     def _ensure_signal_sorters(self):
         if self._sorter_a is None:
+            # v2.5: AlphaEngine/ClusterView/GlobalView（旧名 IntraProductSorter 等为别名）
             from ali2026v3_trading.data.three_layer_sort import (
-                IntraProductSorter, InterProductClusterSorter, GlobalSorter,
+                AlphaEngine, ClusterView, GlobalView,
             )
-            self._sorter_a = IntraProductSorter()
-            self._sorter_b = InterProductClusterSorter()
-            self._sorter_c = GlobalSorter()
+            # v2.8 §21: 构建排序配置
+            # 优先级：外部覆盖(回测) > params_service(实盘运行时) > SORTER_CONFIG默认
+            sorter_config = self._build_sorter_config()
+            self._sorter_a = AlphaEngine(sorter_config=sorter_config) if sorter_config else AlphaEngine()
+            self._sorter_b = ClusterView()
+            self._sorter_c = GlobalView()
+
+    def _build_sorter_config(self) -> Optional[Dict[str, Any]]:
+        """v2.8 §21: 构建排序配置字典。
+
+        优先级：
+        1. 外部覆盖（_sorter_config_override，回测驱动器通过 configure_sorter 注入）
+        2. params_service 运行时配置（实盘从 params_default.json 读取）
+        3. None（回退到 AlphaEngine 内部的 SORTER_CONFIG 默认值）
+
+        Returns:
+            排序配置字典或 None（使用默认）
+        """
+        # 1. 外部覆盖优先（回测三方案切换）
+        if self._sorter_config_override is not None:
+            return dict(self._sorter_config_override)
+
+        # 2. 从 params_service 读取运行时配置（实盘）
+        try:
+            params = None
+            if self._facade is not None:
+                params = self._facade._get_params() if hasattr(self._facade, '_get_params') else None
+            if params is None:
+                from ali2026v3_trading.config.params_service import get_params_service as _get_ps
+                params = _get_ps()
+
+            scoring_scheme = params.get_str('sorter.scoring_scheme', '') if hasattr(params, 'get_str') else ''
+            output_mode = params.get_str('sorter.output_mode', '') if hasattr(params, 'get_str') else ''
+            if scoring_scheme or output_mode:
+                from ali2026v3_trading.config.tvf_param_loader import SORTER_CONFIG as _DEFAULT_SC
+                cfg = dict(_DEFAULT_SC)
+                if scoring_scheme and scoring_scheme in ('scheme_1', 'scheme_2', 'scheme_3', 'all'):
+                    cfg['scoring_scheme'] = scoring_scheme
+                if output_mode and output_mode in ('research', 'production'):
+                    cfg['output_mode'] = output_mode
+                return cfg
+        except Exception:
+            pass
+
+        # 3. 回退到默认（AlphaEngine 内部使用 SORTER_CONFIG）
+        return None
 
     def select_otm_targets_signal_sources(self, future_internal_id: int = None, signal_source: str = 'C') -> List[Dict[str, Any]]:
         """并列信号源排序入口（最终落地方案v2.0）。
@@ -636,6 +725,8 @@ class WidthCacheQueryService:
         if signal_source not in ('A', 'B', 'C'):
             signal_source = 'C'
         self._ensure_signal_sorters()
+        # FIX-P0-24: 与select_otm_targets_by_volume一致，递增query_count
+        self._query_count += 1
 
         source_a_results = []
 
@@ -707,9 +798,14 @@ class WidthCacheQueryService:
         if signal_source == 'A':
             sorted_products = []
             for r in source_a_results:
+                # v2.5: 优先使用 product_score_ts / final_score，向后兼容 best_score
+                score = r.get('final_score', r.get('product_score_ts', r.get('best_score', 0.0)))
                 sorted_products.append({
                     'product_id': r.get('product_id', ''),
-                    'best_score': r.get('best_score', 0.0),
+                    'product_score': r.get('product_score', score),
+                    'product_score_ts': r.get('product_score_ts', score),
+                    'final_score': r.get('final_score', score),
+                    'best_score': score,  # 向后兼容
                     'correct_up_pct': r.get('correct_up_pct', 0.0),
                     'tier': r.get('tier', 4),
                     'best_month': r.get('best_month'),
@@ -728,25 +824,56 @@ class WidthCacheQueryService:
             if sp.get('tier', 4) == 4:
                 continue
             fid = None
+            # v2.5: 同时获取 month_candidates 供按优先级尝试
+            month_candidates_info = None
             for r in source_a_results:
                 if r.get('product_id') == sp.get('product_id'):
                     fid = r.get('future_internal_id')
+                    month_candidates_info = r.get('month_candidates') or r.get('candidates')
                     break
             if fid is None:
                 continue
 
             future_rising = self._future_rising.get(fid, False)
             opt_type = 'CALL' if future_rising else 'PUT'
-            all_buckets = self._sort_buckets.get(fid, {})
+
+            # v2.8.1: 优先按 month_candidates 顺序尝试（按 primary_score 降序，scheme 感知）
+            # 若 month_candidates 不可用，回退到遍历所有月份桶（向后兼容）
             best_candidates = []
-            for mth in all_buckets:
-                mth_candidates = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
-                if mth_candidates and mth_candidates[0]:
-                    best_candidates.append(mth_candidates[0])
+            if month_candidates_info:
+                # v2.8.1: 按候选列表优先级尝试，利用 score_delta_to_next / rank_confidence 决策
+                for cand_info in month_candidates_info:
+                    mth = cand_info.get('month')
+                    if not mth:
+                        continue
+                    mth_candidates = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
+                    if mth_candidates and mth_candidates[0]:
+                        entry = mth_candidates[0]
+                        # v2.8.1: 附加候选诊断信息（含 v2.8 D 字段 + 向后兼容 net_score）
+                        entry['rank_confidence'] = cand_info.get('rank_confidence', 0.0)
+                        entry['score_delta_to_next'] = cand_info.get('score_delta_to_next')
+                        entry['net_score'] = cand_info.get('net_score', 0.0)
+                        entry['D'] = cand_info.get('D', 0.0)
+                        entry['primary_score'] = cand_info.get('primary_score', cand_info.get('net_score', 0.0))
+                        best_candidates.append(entry)
+            else:
+                # 向后兼容：无 month_candidates 时遍历所有月份桶
+                all_buckets = self._sort_buckets.get(fid, {})
+                for mth in all_buckets:
+                    mth_candidates = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
+                    if mth_candidates and mth_candidates[0]:
+                        best_candidates.append(mth_candidates[0])
             if not best_candidates:
                 continue
 
-            best_candidates.sort(key=lambda x: x.get('volume', 0), reverse=True)
+            # v2.8.1: month_candidates 已按 primary_score 降序（scheme 感知），
+            # 优先使用高 rank_confidence 的候选
+            # 仅当无 month_candidates_info 时才按 volume 排序（向后兼容）
+            if month_candidates_info:
+                # 保持 month_candidates 的 primary_score 优先顺序
+                pass
+            else:
+                best_candidates.sort(key=lambda x: x.get('volume', 0), reverse=True)
 
             try:
                 from ali2026v3_trading.position.position_service import get_position_service

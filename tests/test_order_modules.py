@@ -454,10 +454,10 @@ class TestOrderWALStateService:
 
 # 需要mock的order_flow_analyzer依赖
 _MOCK_PATCHES = [
-    'ali2026v3_trading.order.order_flow_bridge.MicrostructureAnalyzer',
-    'ali2026v3_trading.order.order_flow_bridge.MicrostructureConfig',
-    'ali2026v3_trading.order.order_flow_bridge.VolumeWeightedOrderFlow',
-    'ali2026v3_trading.order.order_flow_bridge.LiquidityConsumptionTracker',
+    'ali2026v3_trading.order.order_flow_bridge_service.MicrostructureAnalyzer',
+    'ali2026v3_trading.order.order_flow_bridge_service.MicrostructureConfig',
+    'ali2026v3_trading.order.order_flow_bridge_service.VolumeWeightedOrderFlow',
+    'ali2026v3_trading.order.order_flow_bridge_service.LiquidityConsumptionTracker',
 ]
 
 

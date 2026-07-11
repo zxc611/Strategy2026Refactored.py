@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Optional, Any, Tuple
@@ -31,7 +32,7 @@ except ImportError:
 if _HAS_NUMPY and np is None:
     _HAS_NUMPY = False
 
-from ali2026v3_trading.infra.performance_monitor import count_call
+from ali2026v3_trading.infra.metrics_registry import count_call
 from ali2026v3_trading.infra.shared_utils import api_version  # P1-21: 统一从shared_utils导入
 from ali2026v3_trading.position.position_greeks import _REASON_STRATEGY_MAP
 
@@ -40,7 +41,9 @@ class PositionCommandService:
     """命令处理服务 — 从PositionService拆分"""
 
     CLOSE_RETRY_MAX_ATTEMPTS = 3
-    CLOSE_RETRY_BASE_DELAY_SEC = 0.1
+    # FIX-20260704-RETRY-INTERVAL: 重试基础间隔从0.1s增加到1.0s，避免收盘后200ms内8次无效重试
+    # 根因: 收盘后所有平仓返回result=-1，0.1s间隔导致76笔下单在2秒内全部失败+耗尽重试
+    CLOSE_RETRY_BASE_DELAY_SEC = 1.0
     CLOSE_RETRY_MAX_THREADS = 10
     _MAX_CLOSE_RETRY_THREADS = CLOSE_RETRY_MAX_THREADS
 
@@ -920,6 +923,57 @@ class PositionCommandService:
         assert hasattr(record, 'instrument_id'), "_trigger_close_position: record必须有instrument_id属性"
         assert reason, "_trigger_close_position: reason(平仓原因)不能为空"
 
+        # FIX-20260704-STALE-POSITION: 持仓时长异常清理WARNING
+        # 根因: LIVE日志显示FG608P990持仓4859分钟(81小时)、FG608P970持仓4904分钟(82小时)
+        # 说明前几日EOD平仓未执行，持仓跨日堆积
+        # 修复: 持仓时长>24小时(1440分钟)时输出WARNING，提醒运维介入
+        try:
+            _open_ts = getattr(record, 'open_time', None)
+            if _open_ts is not None:
+                import time as _stale_time
+                _now_ts = _stale_time.time()
+                if isinstance(_open_ts, (int, float)):
+                    _hold_sec = _now_ts - _open_ts
+                    _hold_min = _hold_sec / 60.0
+                    if _hold_min > 1440.0:  # >24小时
+                        logging.warning("[STALE-POSITION] 持仓时长异常: inst=%s pos_id=%s hold=%.0f分钟(%.1f小时) reason=%s，疑似EOD平仓失效，请运维介入",
+                                        record.instrument_id, getattr(record, 'position_id', ''), _hold_min, _hold_min/60.0, reason)
+        except (ValueError, KeyError, TypeError, AttributeError) as _stale_err:
+            logging.debug("[STALE-POSITION] 持仓时长检查跳过(非致命): %s", _stale_err)
+
+        # FIX-20260704-MARKET-CLOSED: 收盘后不尝试平仓下单，避免result=-1+重试耗尽+CANNOT_CLOSE
+        # 根因: 23:36 CZCE夜盘23:30结束，策略仍尝试平仓→平台拒绝result=-1→重试耗尽→CANNOT_CLOSE
+        # 修复: 收盘后直接延后重试，不浪费下单调用，不污染日志
+        # FIX-20260709-PRE-MARKET: 区分"尚未开盘"和"已收盘"，尚未开盘时等待短时间后重试
+        # FIX-20260704-EXCH-INFER: record.exchange可能为空(从JSONL恢复时缺失)，从instrument_id推断交易所
+        try:
+            from ali2026v3_trading.infra.market_time_service import get_market_status
+            _exch = getattr(record, 'exchange', '') or ''
+            if not _exch:
+                # FIX-20260704-EXCH-INFER: 从instrument_id推断交易所作为fallback
+                _inst_id = getattr(record, 'instrument_id', '') or ''
+                if _inst_id:
+                    try:
+                        from ali2026v3_trading.config.config_service import resolve_product_exchange
+                        _exch = resolve_product_exchange(_inst_id) or ''
+                    except (ImportError, AttributeError, Exception):
+                        pass
+            if _exch:
+                _mkt_status = get_market_status(_exch)
+                if _mkt_status == 'PRE_MARKET':
+                    # 尚未开盘：等待短时间后重试（而非延后到下一轮重试周期）
+                    logging.info("[_trigger_close_position] 交易所尚未开盘，等待后重试平仓: inst=%s exchange=%s reason=%s",
+                                 record.instrument_id, _exch, reason)
+                    self._schedule_close_retry(record, current_price)
+                    return
+                elif _mkt_status == 'CLOSED':
+                    logging.info("[_trigger_close_position] 交易所已收盘，延后平仓: inst=%s exchange=%s reason=%s",
+                                 record.instrument_id, _exch, reason)
+                    self._schedule_close_retry(record, current_price)
+                    return
+        except (ImportError, AttributeError, Exception) as _mc_err:
+            logging.debug("[_trigger_close_position] 交易所状态检查跳过(非致命): %s", _mc_err)
+
         with self._ps._get_instrument_lock(record.instrument_id):
             _existing_closing_oid = getattr(record, 'closing_order_id', '')
             # FIX-CLOSE-UNIQUE-07: PENDING_xxx检查不充分 - 需区分PENDING/RETRY/实际order_id三种状态
@@ -1014,7 +1068,8 @@ class PositionCommandService:
                         if _open_price > 0:
                             base = float(_open_price)
                             _used_open_price_fallback = True
-                            logging.info("[R26b-CLOSE] 使用开仓价格作为fallback: %s open_price=%.4f", record.instrument_id, base)
+                            # FIX-20260704-R26B-CLOSE-NOISE: 降级为DEBUG避免188次INFO洪泛
+                            logging.debug("[R26b-CLOSE] 使用开仓价格作为fallback: %s open_price=%.4f", record.instrument_id, base)
                     if base > 0:
                         try:
                             from ali2026v3_trading.config.params_service import get_params_service
@@ -1022,6 +1077,13 @@ class PositionCommandService:
                         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                             tick_size = 1.0
                         price = base - tick_size if direction == 'SELL' else base + tick_size
+                        # FIX-20260704-CLOSE-NEG-PRICE: tick_size过大(如期权base=0.5/tick_size=1.0)导致price<=0
+                        # 根因: 全局tick_size=1.0对低权力期权不适用，0.5-1.0=-0.5触发price<=0跳过下单+死循环重试
+                        # 修复: price<=0时退化为百分比偏移(1%)，确保price>0
+                        if price <= 0:
+                            price = base * 0.99 if direction == 'SELL' else base * 1.01
+                            logging.info("[R26c-CLOSE] tick_size=%.4f导致price<=0，退化为百分比偏移: %s base=%.4f price=%.4f",
+                                         tick_size, record.instrument_id, base, price)
                     else:
                         logging.warning("[PositionService._trigger_close_position] 无法获取有效价格，将重试平仓: %s", record.instrument_id)
                         need_retry = True
@@ -1086,8 +1148,39 @@ class PositionCommandService:
                     if hasattr(order_id, 'error_code'):
                         _err_code = order_id.error_code or ''
                         _err_msg = order_id.error_message or ''
-                    logging.warning("[PositionService._trigger_close_position] 平仓下单失败: %s, 将重试, error_code=%s, error_message=%s",
-                                    record.instrument_id, _err_code, _err_msg)
+                    # FIX-20260704-GHOST-POSITION: 平仓被平台拒绝时，检查该持仓是否为幽灵持仓
+                    # 根因: 从position_state.jsonl恢复的历史持仓在交易平台上可能已不存在，
+                    # 每次重启都触发TimeStop/StopProfit→平台拒绝result=-1→重试耗尽→CANNOT_CLOSE
+                    # 下次重启CANNOT_CLOSE标记丢失，又重复同样流程，产生321条/轮ERROR+WARNING洪泛
+                    # 修复: 平台拒绝时用_platform_get_position验证持仓是否存在，不存在则直接删除
+                    _is_ghost = False
+                    if 'platform_rejected' in str(_err_code) or 'result=-1' in str(_err_msg):
+                        _platform_get_pos = getattr(self._ps, '_platform_get_position', None)
+                        if callable(_platform_get_pos):
+                            try:
+                                _platform_pos = _platform_get_position(record.instrument_id)
+                                if _platform_pos is None or (hasattr(_platform_pos, 'volume') and getattr(_platform_pos, 'volume', 0) == 0):
+                                    _is_ghost = True
+                                    logging.warning("[GHOST-POSITION] 平台确认持仓不存在，删除幽灵持仓: inst=%s pos_id=%s reason=%s",
+                                                    record.instrument_id, getattr(record, 'position_id', ''), reason)
+                                    self._rollback_position(record.instrument_id, getattr(record, 'position_id', ''), reason=f'ghost_position:{reason}')
+                                    return
+                            except (ValueError, KeyError, TypeError, AttributeError) as _gpe:
+                                logging.debug("[GHOST-POSITION] 平台持仓查询失败，无法确认: %s", _gpe)
+                    # FIX-20260704-CLOSE-FAIL-NOISE: 全局速率限制，60s内最多20条WARNING，超出降级DEBUG避免233次洪泛
+                    _cf_now = time.time()
+                    _cf_window = getattr(self, '_close_fail_warn_window', 0.0)
+                    if _cf_now - _cf_window > 60.0:
+                        self._close_fail_warn_count = 0
+                        self._close_fail_warn_window = _cf_now
+                    _cf_count = getattr(self, '_close_fail_warn_count', 0)
+                    if _cf_count < 20:
+                        logging.warning("[PositionService._trigger_close_position] 平仓下单失败: %s, 将重试, error_code=%s, error_message=%s",
+                                        record.instrument_id, _err_code, _err_msg)
+                        self._close_fail_warn_count = _cf_count + 1
+                    else:
+                        logging.debug("[PositionService._trigger_close_position] 平仓下单失败(速率限制): %s, error_code=%s",
+                                      record.instrument_id, _err_code)
                     # FIX-R31-CLOSING-PREVENT: 平仓失败时也设置_closing=True，防止在重试期间
                     # 时间止损/止盈/到期等路径再次触发_trigger_close_position导致重复下单。
                     # 重试逻辑(_schedule_close_retry)会在所有重试失败后重置_closing=False。
@@ -1145,6 +1238,46 @@ class PositionCommandService:
             from ali2026v3_trading.order.order_service import get_order_service
 
             def _attempt_close():
+                # FIX-20260704-RETRY-MARKET-CLOSED: 收盘后不重试平仓，返回'skip'避免消耗重试次数
+                # 根因: 收盘后所有平仓返回result=-1，重试3次全部失败标记CANNOT_CLOSE
+                # 修复: 检查交易所状态，收盘时返回'skip'保留重试次数，待开盘后自动重试
+                # FIX-20260709-PRE-MARKET: 区分"尚未开盘"和"已收盘"，尚未开盘时等待后重试
+                # FIX-20260704-EXCH-INFER: record.exchange为空时从instrument_id推断交易所
+                try:
+                    from ali2026v3_trading.infra.market_time_service import get_market_status
+                    _retry_exch = getattr(record, 'exchange', '') or ''
+                    if not _retry_exch:
+                        _retry_inst = getattr(record, 'instrument_id', '') or ''
+                        if _retry_inst:
+                            try:
+                                from ali2026v3_trading.config.config_service import resolve_product_exchange
+                                _retry_exch = resolve_product_exchange(_retry_inst) or ''
+                            except (ImportError, AttributeError, Exception):
+                                pass
+                    if _retry_exch:
+                        _retry_status = get_market_status(_retry_exch)
+                        if _retry_status == 'PRE_MARKET':
+                            logging.info("[RETRY-PRE-MARKET] 交易所尚未开盘，等待开盘后继续: %s exchange=%s", record.instrument_id, _retry_exch)
+                            # 尚未开盘时等待最多60秒，开盘后继续执行平仓（不返回skip，不消耗重试次数）
+                            for _wait in range(12):
+                                time.sleep(5.0)
+                                _check_status = get_market_status(_retry_exch)
+                                if _check_status == 'OPEN':
+                                    logging.info("[RETRY-PRE-MARKET] 交易所已开盘，继续平仓: %s exchange=%s", record.instrument_id, _retry_exch)
+                                    break
+                                if _check_status == 'CLOSED':
+                                    logging.info("[RETRY-MARKET-CLOSED] 等待期间交易所已收盘: %s exchange=%s", record.instrument_id, _retry_exch)
+                                    return 'skip'
+                            else:
+                                # 等待60秒后仍未开盘，返回skip保留重试次数
+                                logging.info("[RETRY-PRE-MARKET] 等待60秒后仍未开盘，保留重试: %s exchange=%s", record.instrument_id, _retry_exch)
+                                return 'skip'
+                            # 已开盘，继续执行后续平仓逻辑
+                        elif _retry_status == 'CLOSED':
+                            logging.info("[RETRY-MARKET-CLOSED] 交易所已收盘，跳过本次重试(保留次数): %s exchange=%s", record.instrument_id, _retry_exch)
+                            return 'skip'
+                except (ImportError, AttributeError, Exception) as _rmc_err:
+                    logging.debug("[RETRY-MARKET-CLOSED] 交易所状态检查跳过(非致命): %s", _rmc_err)
                 with self._ps._get_instrument_lock(record.instrument_id):
                     _pos_dict = self._ps.positions.get(record.instrument_id, {})
                     _still_exists = any(getattr(_r, 'position_id', None) == record.position_id for _r in _pos_dict.values())
@@ -1219,10 +1352,15 @@ class PositionCommandService:
             result = br.execute(_attempt_close)
             if result is None:
                 with self._ps._get_instrument_lock(record.instrument_id):
-                    record.closing_order_id = 'CANNOT_CLOSE'
                     _exhausted_method = getattr(record, 'close_method', '')
+                # FIX-20260704-GHOST-CLOSE: 重试耗尽的持仓直接删除(幽灵持仓)
+                # 根因: CANNOT_CLOSE标记不会被持久化到position_state.jsonl，
+                # 重启后closing_order_id被重置为空，同一批幽灵持仓再次触发平仓洪泛
+                # 修复: 重试耗尽=平台无法平仓=幽灵持仓，直接_rollback_position删除并持久化ROLLBACK
                 logging.error("[UPDATE-TIMELY-10] 平仓重试全部耗尽(inst=%s pos_id=%s close_method=%s)，"
-                              "已设置closing_order_id=CANNOT_CLOSE防止死循环重试，需人工介入排查",
+                              "判定为幽灵持仓，直接删除",
                               record.instrument_id, getattr(record, 'position_id', ''), _exhausted_method)
+                self._rollback_position(record.instrument_id, getattr(record, 'position_id', ''),
+                                        reason=f'cannot_close:{_exhausted_method}')
 
         self._close_retry_executor.submit(_retry_worker)

@@ -11,7 +11,7 @@ import atexit
 
 import copy
 
-from ali2026v3_trading.infra.logging_utils import get_logger
+from ali2026v3_trading.infra._helpers import get_logger
 
 import logging
 
@@ -494,6 +494,7 @@ class SingletonRegistry:
             if namespace not in cls._namespaces:
 
                 cls._namespaces[namespace] = _Namespace(namespace)
+                logging.debug("[Observability] SingletonRegistry新命名空间: %s (总命名空间数: %d)", namespace, len(cls._namespaces))
 
             return cls._namespaces[namespace]
 
@@ -602,6 +603,8 @@ class SingletonRegistry:
                 if cleanup_fn is not None:
 
                     ns._cleanup_fns[key] = cleanup_fn
+
+        logging.debug("[Observability] SingletonRegistry.register_singleton: name=%s has_cleanup=%s", name, cleanup_fn is not None)
 
 
 
@@ -718,6 +721,24 @@ def _deep_copy_if_mutable(value: Any) -> Any:
         return copy.deepcopy(value)
 
     except (TypeError, copy.Error):
+
+        return value
+
+    except RuntimeError:
+
+        logging.getLogger(__name__).debug(
+            "_deep_copy_if_mutable: deepcopy 遇到并发修改(RuntimeError)，退化为返回引用 type=%s",
+            type(value).__name__,
+        )
+
+        return value
+
+    except ValueError:
+
+        logging.getLogger(__name__).debug(
+            "_deep_copy_if_mutable: deepcopy 遇到并发修改(ValueError)，退化为返回引用 type=%s",
+            type(value).__name__,
+        )
 
         return value
 

@@ -457,7 +457,7 @@ _REASON_TIME_STOP_SOURCE = {
 }
 
 # R27-CP-01-FIX: P0_IRON_RULES 已移至 shared_trading_constants.py，此处从共享模块导入
-from ali2026v3_trading.infra.shared_trading_constants import P0_IRON_RULES  # noqa: F401
+from ali2026v3_trading.infra.commission_utils import P0_IRON_RULES  # noqa: F401
 
 # R10-P2-06修复: BACKTEST_THRESHOLDS唯一权威定义在task_scheduler.py
 _BACKTEST_THRESHOLDS_DEFAULT = {
@@ -656,4 +656,31 @@ CR_PARAM_GRID = {
     'hft_floor_strength': [0.3, 0.5, 0.7],
     'trend_direction_window': [50, 100, 150],
     'strength_history_window': [50, 100, 150],
+}
+
+# v2.8 §21: 排序方案参数网格（V7 walk-forward 验证用）
+SORTER_SCHEME_PARAM_GRID = {
+    # 方案选择：回测时三个方案都可测试，实盘默认 scheme_1
+    'scoring_scheme': ['scheme_1', 'scheme_2', 'scheme_3', 'all'],
+    # 输出模式：research(全字段) / production(瘦身)
+    'output_mode': ['research', 'production'],
+    # 方向判定阈值 D > 0.1 → long, D < -0.1 → short
+    'direction_threshold': [0.05, 0.10, 0.15, 0.20],
+    # 质量分级阈值 Q > 0.3 → high, Q > 0 → medium
+    'quality_high_threshold': [0.2, 0.3, 0.4],
+    # Rank 标准化窗口
+    'rank_window_days': [10, 15, 20, 25, 30],
+    # 共振权重（v2.7 遗留参数，V7 继续扫描）
+    'resonance_weight': [0.3, 0.4, 0.5, 0.6, 0.7],
+    # v2.8: 排序激发间隔（K线倍数，实际秒数=sort_trigger_bars×K线周期）
+    'sort_trigger_bars': [1, 2, 3, 5, 10],
+    # v2.8: K线周期（决定时间换算系数, T1=tick级高频）
+    'kline_style': ['T1', 'M1', 'M3', 'M5', 'M15'],
+    # v2.8: 信号冷却期（K线倍数）
+    'cooldown_bars': [0, 1, 2, 3, 5],
+    # v2.8: Tier 分类阈值
+    'tier1_wilson_threshold': [0.30, 0.40, 0.50, 0.60],
+    'tier2_coverage_threshold': [0.30, 0.40, 0.50],
+    'tier2_correct_up_threshold': [0.35, 0.45, 0.55],
+    'tier3_correct_up_threshold': [0.25, 0.35, 0.45],
 }

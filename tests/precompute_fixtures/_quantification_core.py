@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from ali2026v3_trading.infra.logging_utils import get_logger
+from ali2026v3_trading.infra._helpers import get_logger
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime

@@ -33,7 +33,7 @@ class PositionCheckService:
         try:
             if self._ps._risk_bridge is not None:
                 result = self._ps._risk_bridge.check_position_limit(account_id, required_amount)
-                from ali2026v3_trading.risk.risk_position_bridge import BridgeRiskLevel
+                from ali2026v3_trading.risk.risk_support import BridgeRiskLevel
                 return result.level == BridgeRiskLevel.PASS
             else:
                 logging.error("[PositionService.check_position_limit] RiskService not available, BLOCKING position check (fail-safe)")
@@ -170,8 +170,27 @@ class PositionCheckService:
                                 continue
                             _records_to_check.append((inst_id, pid, record))
                 # 在global_lock外执行可能触发平仓的检查
+                # FIX-20260708-CLOSE-BREAK: 原代码只调用_check_time_stop和_check_two_stage_stop，
+                # 遗漏了_check_stop_profit和_check_stop_loss，导致止盈止损永远不会被定时检查。
+                # 这是7/6夜盘146条持仓无平仓动作的根因之一。
                 for _inst_id, _pid, _record in _records_to_check:
                     try:
+                        # 获取当前价格供止盈止损检查
+                        _current_price = getattr(_record, 'current_price', 0.0)
+                        if _current_price <= 0:
+                            try:
+                                from ali2026v3_trading.data.data_service import get_data_service
+                                _ds = get_data_service()
+                                if _ds and _ds.realtime_cache:
+                                    _current_price = _ds.realtime_cache.get_latest_price(_inst_id) or 0.0
+                            except (ValueError, KeyError, TypeError, AttributeError):
+                                pass
+                        if _current_price > 0:
+                            if not getattr(_record, 'current_price', 0.0):
+                                _record.current_price = _current_price
+                            self._ps._check_stop_profit(_record, _current_price)
+                            self._ps._check_stop_loss(_record, _current_price)
+                            self._ps.check_trailing_stop(_record)
                         self._ps._check_time_stop(_record, now)
                         self._ps._check_two_stage_stop(_record, now)
                     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _check_err:
@@ -223,6 +242,20 @@ class PositionCheckService:
 
     def _validate_pnl_equity_consistency(self) -> None:
         try:
+            # FIX-20260708-V6: dry_run模式下跳过PnL权益一致性校验
+            # 根因: dry_run模式下equity来自平台真实账户，而realized_pnl仅记录虚拟交易，
+            # 两者口径不同导致恒定误报INV-P1-01(ERROR级日志噪音)
+            _dry_run = getattr(self._ps, '_dry_run_active', False)
+            if not _dry_run:
+                _dry_run = getattr(self._ps, '_dry_run_mode', False)
+            if not _dry_run:
+                try:
+                    from ali2026v3_trading.config.config_service import get_cached_params
+                    _dry_run = bool((get_cached_params() or {}).get('dry_run_mode', False))
+                except (ImportError, AttributeError, TypeError):
+                    pass
+            if _dry_run:
+                return
             from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
             _sid = str(getattr(self._ps, 'strategy_id', '') or 'global')
             safety = get_safety_meta_layer(params=self._ps._params if hasattr(self._ps, '_params') else None, strategy_id=_sid)

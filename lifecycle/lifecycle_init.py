@@ -16,6 +16,27 @@ from ali2026v3_trading.config.params_service import _read_param, get_param_value
 from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_is
 
 
+def _force_log_flush() -> None:
+    """强制刷新所有日志handler到磁盘 (os.fsync)"""
+    try:
+        _root = logging.getLogger()
+        for handler in _root.handlers:
+            try:
+                if handler is None:
+                    continue
+                handler.flush()
+                stream = getattr(handler, 'stream', None)
+                if stream is not None and hasattr(stream, 'fileno'):
+                    try:
+                        os.fsync(stream.fileno())
+                    except (OSError, ValueError):
+                        pass
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError):
+                pass
+    except Exception:
+        pass
+
+
 class LifecycleInit:
     def __init__(self, provider):
         self.p = provider
@@ -53,6 +74,16 @@ class LifecycleInit:
                     logging.info("[StrategyCoreService.on_init] 日志级别已修正为INFO")
                 logging.info("[StrategyCoreService.on_init] Initializing...")
                 init_started_at = time.perf_counter()
+                # Step0a: 最先初始化日志系统，确保后续所有步骤（含品种加载失败路径）都有日志落地
+                # 此前 _init_logging 位于品种加载之后，品种加载失败/阻塞时日志永不初始化，形成诊断盲区
+                p._init_kwargs = kwargs
+                p.params = kwargs.get('params')
+                p._init_logging(kwargs.get('params'))
+                logging.info("[Init-Step0a] 日志系统已初始化")
+                # Step0b: 初始化生命周期子模块
+                p._init_lifecycle_submodules()
+                logging.info("[Init-Step0b] 生命周期子模块已初始化")
+                # Step1: 品种加载
                 from ali2026v3_trading.config.config_service import ensure_products_with_retry
                 from ali2026v3_trading.data.data_service import get_data_service
                 ds = get_data_service()
@@ -67,29 +98,36 @@ class LifecycleInit:
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                     logging.error(f"[Init-Step1] 品种加载失败: {e}")
                     raise RuntimeError(f"品种加载失败，策略无法继续初始化: {e}") from e
-                p._init_kwargs = kwargs
-                p.params = kwargs.get('params')
-                p._init_lifecycle_submodules()
-                p._init_logging(kwargs.get('params'))
 
                 logging.info("[Init-Step2] 从合约配置文件加载合约列表+预注册...")
                 if p.storage is None:
                     raise RuntimeError("[Init-Step2] storage初始化失败，无法加载合约列表")
                 from ali2026v3_trading.data.query_service import QueryService
                 _qs = QueryService(p.storage)
-                p._init_instruments_result = _qs.load_and_preregister_instruments(p.storage, p.params)
-                total_f = len(p._init_instruments_result['futures_list'])
-                total_o = _qs._count_option_contracts(p._init_instruments_result['options_dict'])
+                _instr_ret = _qs.load_and_preregister_instruments(p.storage, p.params)
+                p._init_instruments_result = _instr_ret
+                del _instr_ret
+                total_f = p._init_instruments_result.get('total_futures', len(p._init_instruments_result.get('futures_list', [])))
+                total_o = p._init_instruments_result.get('total_options', _qs._count_option_contracts(p._init_instruments_result.get('options_dict', {})))
+                total_all = p._init_instruments_result.get('total_instruments', len(p._init_instruments_result.get('subscribed_instruments', [])))
+                _deferred_count = p._init_instruments_result.get('deferred_count', 0)
                 logging.info(
-                    f"[Init-Step2] 合约加载+预注册完成: 期货=%d, 期权=%d, 共=%d",
-                    total_f, total_o, len(p._init_instruments_result['subscribed_instruments']),
+                    f"[Init-Step2] 合约加载+预注册完成: 期货=%d, 期权=%d, 共=%d (延迟=%d)",
+                    total_f, total_o, total_all, _deferred_count,
                 )
-                # P1-15a修复：_init_scheduler移到Init-Step2之后，确保合约数据已加载
                 p._init_scheduler()
                 p._analytics_warmup_done = False
                 p._analytics_warmup_thread = None
                 p._start_analytics_warmup_async(p.params)
                 p._stats['start_time'] = datetime.now(CHINA_TZ)
+                # FIX-20260708: 重新注册_stats到state_store(引用模式)
+                # 确保output_periodic_summary能读取到start_time，修复"运行时长=0:00:00"
+                _ss = getattr(p, '_state_store', None)
+                if _ss is not None:
+                    try:
+                        _ss.set_ref('_stats', p._stats)
+                    except (TypeError, AttributeError):
+                        pass
                 logging.info(
                     "[StrategyCoreService.on_init] Initialized: %s (total=%.3fs)",
                     p.strategy_id,
@@ -162,23 +200,26 @@ class LifecycleInit:
         p = self.p
         try:
             storage = p.storage
-            logging.info(f"[StrategyCoreService._init_analytics_services] storage = {storage}")
+            logging.info("[StrategyCoreService._init_analytics_services] 开始初始化 analytics services")
             futures_instruments, option_instruments = p._build_instrument_groups(storage)
             runtime_strategy_instance = _read_param(params, 'strategy')
-            logging.info(f"[InitServices] futures_instruments count: {len(futures_instruments)}")
-            logging.info(f"[InitServices] option_instruments groups: {len(option_instruments)}")
-            logging.info(f"[InitServices] strategy_instance: {runtime_strategy_instance is not None}")
+            logging.info("[InitServices] futures_instruments count: %d", len(futures_instruments))
+            logging.info("[InitServices] option_instruments groups: %d", len(option_instruments))
+            logging.info("[InitServices] strategy_instance: %s", runtime_strategy_instance is not None)
             p.analytics_service = None
+            logging.info("[InitServices] 即将调用 _init_t_type_service_and_preload")
             p._init_t_type_service_and_preload(storage)
+            logging.info("[InitServices] _init_t_type_service_and_preload 已完成")
             p._register_analytics_jobs()
             p._future_ids = set()
             p._option_ids = set()
             logging.info(
                 "[AnalyticsInit] "
-                f"analytics_service initialized, futures={len(p._future_ids)}, options={len(p._option_ids)}"
+                "analytics_service initialized, futures=%d, options=%d",
+                len(p._future_ids), len(p._option_ids)
             )
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.error(f"[StrategyCoreService._init_analytics_services] Error: {e}", exc_info=True)
+            logging.error("[StrategyCoreService._init_analytics_services] Error: %s", e, exc_info=True)
             p.analytics_service = None
 
     def _build_instrument_groups(self, storage) -> Tuple[List[str], Dict[str, List[str]]]:
@@ -244,8 +285,9 @@ class LifecycleInit:
     def _init_t_type_service_and_preload(self, storage) -> None:
         p = self.p
         from ali2026v3_trading.data.t_type_service import get_t_type_service
+        logging.info("[AnalyticsInit] Step 1/7: 获取 t_type_service 单例")
         p.t_type_service = get_t_type_service()
-        logging.info("[AnalyticsInit] t_type_service initialized")
+        logging.info("[AnalyticsInit] Step 2/7: t_type_service 实例已获取: %s", p.t_type_service is not None)
         _storage = getattr(p, 'storage', None) or storage
         _sm = None
         if _storage is not None:
@@ -274,10 +316,12 @@ class LifecycleInit:
         futures_metadata = instruments_result.get('futures_metadata', {})
         options_metadata = instruments_result.get('options_metadata', {})
         futures_list = instruments_result.get('futures_list', [])
+        logging.info("[AnalyticsInit] Step 3/7: 准备注册期货 %d 个", len(futures_list))
         from ali2026v3_trading.data.data_service import get_latest_price
         from ali2026v3_trading.config.params_service import get_params_service as _get_ps
         _ps = _get_ps()
         futures_registered = 0
+        _futures_total = len(futures_list)
         for inst_id in futures_list:
             try:
                 meta = futures_metadata.get(inst_id, {})
@@ -294,67 +338,25 @@ class LifecycleInit:
                 year_month = (db_meta.get('year_month') if db_meta else None) or meta.get('year_month') or p._extract_contract_year_month(inst_id) or ''
                 p.t_type_service._width_cache.register_future(future_internal_id, float(price), month=year_month)
                 futures_registered += 1
+                if futures_registered % 50 == 0 or futures_registered == _futures_total:
+                    logging.info("[AnalyticsInit] 期货注册进度: %d/%d (last=%s)", futures_registered, _futures_total, inst_id)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.error("[AnalyticsInit] 注册期货 %s 失败: %s", inst_id, e)
         if futures_registered == 0:
             raise RuntimeError(
                 f"[AnalyticsInit] 期货预加载注册0个合约（配置中{len(futures_list)}个），策略初始化终止。请检查配置文件internal_id列。"
             )
-        logging.info("[AnalyticsInit] 注册期货 %d/%d", futures_registered, len(futures_list))
+        logging.info("[AnalyticsInit] Step 4/7: 期货注册完成 %d/%d", futures_registered, len(futures_list))
+
         options_dict = instruments_result.get('options_dict', {})
-        options_registered = 0
         options_total = sum(len(v) for v in options_dict.values())
-        _underlying_id_cache = {}
-        for product, option_ids in options_dict.items():
-            for opt_id in option_ids:
-                try:
-                    meta = options_metadata.get(opt_id, {})
-                    db_meta = _ps.get_instrument_meta_by_id(opt_id)
-                    internal_id = db_meta.get('internal_id') if db_meta else meta.get('internal_id')
-                    underlying_future_id = db_meta.get('underlying_future_id') if db_meta else meta.get('underlying_future_id')
-                    if underlying_future_id is None and db_meta and db_meta.get('underlying_product'):
-                        _up = db_meta['underlying_product']
-                        _ym = db_meta.get('year_month', '')
-                        if _up and _ym and (_up, _ym) not in _underlying_id_cache:
-                            from ali2026v3_trading.config.config_exchange import make_platform_future_id
-                            _fut_inst = make_platform_future_id(_up, _ym)
-                            _fut_meta = _ps.get_instrument_meta_by_id(_fut_inst)
-                            _underlying_id_cache[(_up, _ym)] = _fut_meta.get('internal_id') if _fut_meta else None
-                        underlying_future_id = _underlying_id_cache.get((_up, _ym))
-                    option_product = (db_meta.get('product') if db_meta else None) or meta.get('product')
-                    month = (db_meta.get('year_month') if db_meta else None) or meta.get('year_month')
-                    opt_type = (db_meta.get('option_type') if db_meta else None) or meta.get('option_type')
-                    strike = (db_meta.get('strike_price') if db_meta else None) or meta.get('strike_price')
-                    if internal_id is None or underlying_future_id is None:
-                        logging.warning("[AnalyticsInit] 期权 %s metadata缺失(internal_id=%s, underlying_future_id=%s, db=%s)，跳过",
-                                        opt_id, internal_id, underlying_future_id, bool(db_meta))
-                        continue
-                    if not option_product or not month or not opt_type or not strike or strike <= 0:
-                        logging.warning("[AnalyticsInit] 期权 %s 字段无效(product=%s, month=%s, type=%s, strike=%s)，跳过",
-                                        opt_id, option_product, month, opt_type, strike)
-                        continue
-                    price = get_latest_price(opt_id) or 0.0
-                    _reg_result = p.t_type_service.register_option_contract(
-                        instrument_id=opt_id,
-                        underlying_product=option_product,
-                        month=month,
-                        strike_price=float(strike),
-                        option_type=opt_type,
-                        initial_price=float(price),
-                        underlying_future_id=int(underlying_future_id),
-                        internal_id=int(internal_id),
-                    )
-                    if _reg_result is None:
-                        logging.warning("[AnalyticsInit] register_option_contract returned None: %s", opt_id)
-                        continue
-                    options_registered += 1
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                    logging.error("[AnalyticsInit] 注册期权 %s 失败: %s", opt_id, e)
-        if options_registered == 0 and options_total > 0:
-            raise RuntimeError(
-                f"[AnalyticsInit] 期权预加载注册0个合约（配置中{options_total}个），策略初始化终止。请检查配置文件internal_id/underlying_future_id列。"
-            )
-        logging.info("[AnalyticsInit] 注册期权 %d/%d", options_registered, options_total)
+        logging.info("[AnalyticsInit] Step 5/7: 期权 %d 个延迟到on_start后异步注册（DLL安全）", options_total)
+        p._deferred_t_type_options = {
+            'options_dict': {k: list(v) for k, v in options_dict.items()},
+            'options_metadata': dict(options_metadata),
+        }
+        logging.info("[AnalyticsInit] Step 6/7: 期权延迟注册数据已存储 (待注册=%d)", options_total)
+        logging.info("[AnalyticsInit] Step 7/7: 标记预加载完成（仅期货）")
         p.t_type_service.mark_preload_complete()
         stats = p.t_type_service._width_cache.get_cache_stats()
         logging.info(
@@ -480,42 +482,6 @@ class LifecycleInit:
                 file_handler.setFormatter(formatter)
                 root_logger.addHandler(file_handler)
                 file_handler.flush()
-            except (OSError, IOError, PermissionError):
-                pass
-        has_stream_handler = any(isinstance(h, StreamHandler) for h in root_logger.handlers)
-        if not has_stream_handler:
-            console_handler = StreamHandler(sys.stdout)
-            console_handler.setLevel(log_level)
-            console_handler.setFormatter(formatter)
-            root_logger.addHandler(console_handler)
-            error_handler = StreamHandler(sys.stderr)
-            error_handler.setLevel(logging.ERROR)
-            error_handler.setFormatter(formatter)
-            root_logger.addHandler(error_handler)
-        log_level_name = str((params or {}).get('log_level') or os.getenv('LOG_LEVEL', 'INFO'))
-        log_level = getattr(logging, log_level_name, logging.INFO)
-        log_dir = os.path.dirname(abs_log_file)
-        if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
-        root_logger.setLevel(log_level)
-        formatter = logging.Formatter(
-            '%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        has_target_file_handler = any(
-            isinstance(h, (FileHandler, RotatingFileHandler))
-            and os.path.abspath(getattr(h, 'baseFilename', '')) == abs_log_file
-            for h in root_logger.handlers
-        )
-        if not has_target_file_handler:
-            max_bytes = int((params or {}).get('log_max_bytes', 100 * 1024 * 1024))
-            backup_count = int((params or {}).get('log_backup_count', 3))
-            try:
-                file_handler = RotatingFileHandler(abs_log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
-                file_handler.setLevel(log_level)
-                file_handler.setFormatter(formatter)
-                root_logger.addHandler(file_handler)
-                file_handler.flush()
                 if os.path.exists(abs_log_file):
                     logging.info("[_init_logging] Created RotatingFileHandler: %s (verified)", abs_log_file)
                 else:
@@ -536,6 +502,10 @@ class LifecycleInit:
     def _init_scheduler(self) -> None:
         p = self.p
         p._scheduler_manager.initialize()
+        # FIX-20260711-PAUSE-ACTION: 绑定state_checker，使_can_run_jobs()检查暂停状态
+        # 根因: bind_state_checker从未被调用，_state_checker永远None，
+        # _can_run_jobs()永远返回True，暂停后APScheduler job仍会执行
+        p._scheduler_manager.bind_state_checker(lambda: not getattr(p, '_is_paused', False) and getattr(p, '_is_running', False))
         p._add_tick_sync_job()
         p._add_14_contracts_diagnosis_job()
         p._add_trading_jobs()

@@ -112,7 +112,7 @@ def register_thread_pool(name: str, pool: Any) -> None:
     """
     global _default_resource_manager
     if _default_resource_manager is None:
-        logging.info("[lifecycle_resource] register_thread_pool called but no default manager set")
+        logging.debug("[lifecycle_resource] register_thread_pool called but no default manager set")
         return
     _default_resource_manager.register_thread_pool(name, pool)
 

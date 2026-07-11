@@ -136,7 +136,7 @@ class SchedulerService:
             _scheduler_logger = logging.getLogger('ali2026v3_trading.infra.scheduler_service')
             if not _scheduler_logger.handlers:
                 import os
-                from ali2026v3_trading.config._constants import DEFAULT_LOG_DIR
+                from ali2026v3_trading.config._params_canary_env import DEFAULT_LOG_DIR
                 _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_LOG_DIR)
                 os.makedirs(_log_dir, exist_ok=True)
                 _log_path = os.path.join(_log_dir, 'scheduler_service.log')
@@ -469,8 +469,11 @@ class SchedulerService:
                 try:
                     if not cancel_event.is_set():
                         job.func()
-                except (ValueError, TypeError, KeyError, AttributeError, RuntimeError) as e:
-                    logging.error(f"[Scheduler] Job {job.job_id} execution error: {e}")
+                except Exception as e:
+                    # FIX-20260707: 从窄异常列表扩展为Exception，
+                    # 防止ImportError/NameError等未捕获异常导致线程静默死亡，
+                    # 造成check_position_risk等关键job永远不执行
+                    logging.error(f"[Scheduler] Job {job.job_id} execution error: {e}", exc_info=True)
                     result_container['error'] = e
                 finally:
                     result_container['done'] = True
