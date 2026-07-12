@@ -83,3 +83,12 @@ Thumbs.db
 *.duckdb
 *.duckdb.wal
 *.bak_before_*
+
+# WAL order logs
+*.wal
+
+# Signal logs (runtime generated)
+config/logs/signals.jsonl*
+
+# Lock files (runtime)
+*.lock
