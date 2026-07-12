@@ -5,6 +5,12 @@
 模块合并记录(2026-07-11):
     cooldown_manager.py + signal_timing_filter.py + signal_filter_chain.py + signal_history_service.py
     → signal_components.py（4合1）
+
+WARNING: 本包名 `signal` 与Python标准库 `signal` 冲突。
+  - 项目内引用本包必须使用完整路径: `from ali2026v3_trading.signal.xxx import ...`
+  - 需要标准库signal时必须使用: `import importlib; _stdlib_signal = importlib.import_module('signal')`
+  - 运行pytest时必须加 `-p no:anyio` 参数（anyio内部import signal会被本包拦截）
+  - 运行pytest时必须从项目父目录运行（确保ali2026v3_trading作为包名前缀生效）
 """
 from __future__ import annotations
 

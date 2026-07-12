@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
+import importlib
+_stdlib_signal = importlib.import_module('signal')
 import sys
 import threading
 import time
@@ -109,7 +110,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         def _signal_handler(sig, frame):
             logging.critical("[Strategy2026] SIGNAL RECEIVED: sig=%s", sig)
         try:
-            signal.signal(signal.SIGTERM, _signal_handler)
+            _stdlib_signal.signal(_stdlib_signal.SIGTERM, _signal_handler)
         except (ValueError, OSError):
             pass
         try:
