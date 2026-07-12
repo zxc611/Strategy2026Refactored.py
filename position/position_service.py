@@ -204,7 +204,7 @@ class PositionService(object):
     TP_SL_REASON_DEFAULTS = {
         'CORRECT_RESONANCE': (1.5, 0.50),
         'DIVERGENCE_REVERSAL': (1.3, 0.50),
-        'OTHER_SCALP': (1.1, 0.30), 'BOX_SPRING': (2.0, 0.40),  # FIX-20260711-P2: tp从5.0降至2.0/sl从0.60收紧至0.40
+        'OTHER_SCALP': (1.1, 0.30), 'BOX_SPRING': (1.3, 0.40),  # [FIX-20260712-S4] tp 2.0→1.3(匹配弹簧短持仓特性, 原FIX-20260711-P2: 5.0→2.0)
         'BOX_EXTREME': (1.2, 0.40), 'ARBITRAGE': (1.2, 0.30), 'MARKET_MAKING': (1.1, 0.20),
     }
     OPTION_DELTA_PER_LOT_CALL = 0.5
@@ -533,7 +533,7 @@ class PositionService(object):
         'CORRECT_RESONANCE': (1.5, 0.50), 'HIGH_FREQ': (1.8, 0.30),
         'DIVERGENCE_REVERSAL': (1.3, 0.50),
         'OTHER_SCALP': (1.1, 0.30),
-        'BOX_SPRING': (2.0, 0.40),  # FIX-20260711-P2
+        'BOX_SPRING': (1.3, 0.40),  # [FIX-20260712-S4] tp 2.0→1.3(匹配弹簧短持仓特性)
         'ARBITRAGE': (1.2, 0.30), 'MARKET_MAKING': (1.1, 0.20), 'BOX_EXTREME': (1.2, 0.40),
         'MANUAL': (1.5, 0.50), '': (1.5, 0.50),
     }

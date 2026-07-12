@@ -440,8 +440,9 @@ class TradingEVService:
         other_open_reason = getattr(other_slot, 'last_open_reason', '')
         if other_open_reason and any(kw in other_open_reason.upper() for kw in ('HEDGE', 'DELTA_HEDGE', '对冲')):
             return False
-        my_delta_sign = 1 if my_direction in ('long', 'BUY', 'buy') else -1
-        other_delta_sign = 1 if other_dir in ('long', 'BUY', 'buy') else -1
+        # FIX-DIR-DUAL-TRACK: 兼容策略内部值('BUY'/'SELL')、record值('long'/'short')和平台规范值('0'/'1')
+        my_delta_sign = 1 if my_direction in ('long', 'BUY', 'buy', '0') else -1
+        other_delta_sign = 1 if other_dir in ('long', 'BUY', 'buy', '0') else -1
         return my_delta_sign * other_delta_sign > 0
 
     def _check_cross_strategy_risk(self, instrument_id: str, direction: str) -> str:
@@ -526,6 +527,16 @@ class TradingEVService:
                 'extreme_state': extreme.to_dict(),
                 'reason': '极值不满足交易条件',
             }
+
+        # [FIX-20260712-S3] 假突破过滤 — 上策H-Rev: 过滤假突破信号
+        if extreme.extreme_type:
+            _pass_fb = self._box_detector.check_false_breakout(current_price, extreme.extreme_type)
+            if not _pass_fb:
+                return {
+                    'action': 'filtered',
+                    'extreme_state': extreme.to_dict(),
+                    'reason': '假突破过滤: 价格回落超过50%',
+                }
 
         trade_dir = self._box_detector.determine_trade_direction(extreme)
 

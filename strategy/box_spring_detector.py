@@ -242,13 +242,7 @@ class BoxSpringDetectorService:
             return datetime.fromtimestamp(self._current_bar_time, tz=CHINA_TZ)
         return datetime.now(CHINA_TZ)
 
-    def _invalidate_box(self, instrument_id: str, reason: str) -> None:
-        with self._lock:
-            box = self._boxes.get(instrument_id)
-            if box:
-                box.is_active = False
-                logging.debug("[BoxSpringDetector] box invalidated: %s reason=%s", instrument_id, reason)
-
+    # [FIX-20260712-AUDIT-P1] 删除重复的_invalidate_box定义，保留L361的info级别版本
     # ========================================================================
     # 箱体识别
     # ========================================================================
@@ -494,6 +488,77 @@ class BoxSpringDetectorService:
             return 'BUY_PUT'
         else:
             return 'BUY_STRADDLE'
+
+    # [FIX-20260712-S4] 弹簧强度评分模块 — 上策H-Rev
+    # 原理: 弹簧突破的强度取决于IV压缩程度、价格位置、箱体触底次数、gamma暴露
+    # 评分 < 阈值的信号应被过滤，避免低质量弹簧信号驱动交易
+    def compute_spring_strength(self, iv_percentile: float, price_pos: float,
+                                 gamma_exposure: float, box: Optional[BoxRange]) -> float:
+        """计算弹簧强度评分
+
+        Args:
+            iv_percentile: IV百分位（越低=压缩越深=弹簧越强）
+            price_pos: 价格在箱体中的位置 0-1（0.5=中间=最强）
+            gamma_exposure: gamma暴露值
+            box: 当前箱体
+
+        Returns:
+            float: 弹簧强度评分 0.0-1.0（>0.5为有效信号）
+        """
+        # 维度1: IV压缩分（IV越低，弹簧蓄能越强）— 权重0.35
+        # iv_percentile 0-5% → score 1.0; 5-20% → score 0.5; >20% → score 0.0
+        if iv_percentile <= self._iv_very_low_percentile:
+            iv_score = 1.0
+        elif iv_percentile <= self._iv_low_percentile:
+            iv_score = 0.5
+        else:
+            iv_score = 0.0
+
+        # 维度2: 价格位置分（越接近箱体中央=0.5，弹簧越平衡）— 权重0.25
+        # price_pos 0.5 → score 1.0; 偏离0.5 → 线性递减
+        pos_score = 1.0 - abs(price_pos - 0.5) * 2.0
+        pos_score = max(0.0, min(1.0, pos_score))
+
+        # 维度3: 箱体触底次数分（更多触底=箱体越可靠）— 权重0.20
+        # 需要从box对象获取触底次数
+        touch_count = 0
+        if box is not None:
+            touch_count = getattr(box, 'touch_count', 0) or getattr(box, 'bounces', 0)
+        touch_score = min(1.0, touch_count / max(1, self._min_box_touches))
+
+        # 维度4: Gamma暴露分（gamma越高=弹性越大）— 权重0.20
+        # gamma_exposure 归一化到 0-1（假设 0-0.1 范围）
+        gamma_score = min(1.0, abs(gamma_exposure) / 0.1) if gamma_exposure != 0 else 0.0
+
+        # 加权综合
+        strength = (
+            0.35 * iv_score +
+            0.25 * pos_score +
+            0.20 * touch_score +
+            0.20 * gamma_score
+        )
+
+        return max(0.0, min(1.0, strength))
+
+    # 弹簧强度阈值
+    SPRING_STRENGTH_THRESHOLD = 0.45  # 低于此值的信号被过滤
+
+    def detect_spring_strength(self, signal: 'SpringSignal', box: Optional['BoxRange']) -> float:
+        """从SpringSignal提取参数计算弹簧强度（供BoxSpringStrategy委托调用）"""
+        if signal is None:
+            return 0.0
+        # 从信号对象提取参数
+        iv_pct = getattr(signal, 'iv_percentile', 50.0)
+        gamma_exp = getattr(signal, 'gamma_exposure', 0.0)
+        current_price = getattr(signal, 'current_price', 0.0)
+        # 计算价格位置
+        price_pos = 0.5
+        if box is not None and hasattr(box, 'price_position'):
+            try:
+                price_pos = box.price_position(current_price)
+            except (ValueError, TypeError):
+                pass
+        return self.compute_spring_strength(iv_pct, price_pos, gamma_exp, box)
 
     def _estimate_gamma_exposure(self, S: float, K: float, sigma: float,
                                   T_days: int, premium: float) -> float:

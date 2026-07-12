@@ -68,7 +68,14 @@ _RE_OPTION = re.compile(r'^([A-Za-z]+)(\d{3,4})-?([CP])-?(\d+(?:\.\d+)?)$')
 
 @dataclass
 class DivergenceReversalParams:
-    """背离反转模块参数 — 全部从 param pool 读取"""
+    """背离反转模块参数 — 全部从 param pool 读取
+
+    [FIX-20260712-S7-V3] 用户本意重构:
+    - kline_period: 使用日K线/小时K线 (非分钟K线)
+    - primary_layer: 以L3(当月最活跃实值期权权利金背离)为主信号
+    - min_active_volume: 最活跃实值期权最低成交量筛选
+    - 不叠加MACD/RSI技术指标背离
+    """
     lookback: int = 20               # 新高/新低回看窗口
     atm_threshold: float = 0.03      # 平值阈值
     w_future: float = 0.35           # L1权重
@@ -87,6 +94,13 @@ class DivergenceReversalParams:
     position_scale: float = 0.3      # 仓位缩放系数
     moneyness_depth: float = 0.06    # 五级分类深度实/虚值阈值(=2*atm_threshold by default)
     shadow_variant: str = "master"   # 影子变体: "master" / "shadow_a" / "shadow_b"
+    # [FIX-20260712-S7-V3] 新增参数 — 用户本意: 日K/小时K线 + 最活跃实值期权
+    kline_period: str = "hourly"     # K线周期: "daily" / "hourly" / "minute"
+    min_active_volume: float = 1.0   # 最活跃实值期权最低成交量(筛选非活跃合约)
+    primary_layer: str = "L3"        # 主信号层: "L3"(用户本意) / "L1L2L3"(三层综合)
+    # [FIX-20260712-S7-V3-P2] 活跃度度量方式 + SQL缓存TTL
+    activity_metric: str = "total_volume"  # "total_volume" / "last_bar_volume" / "combined"
+    sql_cache_ttl_sec: float = 60.0  # SQL查询缓存TTL(秒), 按kline_period自动调整
 
     def __post_init__(self):
         # 确保 w_option_itm 满足权重守恒
@@ -144,6 +158,13 @@ class DivergenceReversalParams:
                 "cooldown_bars": "divergence_cooldown_bars",
                 "position_scale": "divergence_position_scale",
                 "moneyness_depth": "divergence_moneyness_depth",
+                # [S7-V3] 新增参数
+                "kline_period": "divergence_kline_period",
+                "min_active_volume": "divergence_min_active_volume",
+                "primary_layer": "divergence_primary_layer",
+                # [S7-V3-P2] 活跃度度量 + SQL缓存TTL
+                "activity_metric": "divergence_activity_metric",
+                "sql_cache_ttl_sec": "divergence_sql_cache_ttl_sec",
             }
             # FIX: get_param不支持点分路径，直接从params.yaml读取parameter_attributes
             _pa = {}
@@ -209,6 +230,70 @@ class DivergenceReversalOutput:
             'div_option_near_itm': self.div_option_near_itm,
             'div_reversal_signal': self.div_reversal_signal,
         })
+
+
+# ══════════════════════════════════════════════════════════════════
+# [FIX-20260712-S7-V3] 交易信号数据类 — 用户本意: 反趋势开仓
+# ══════════════════════════════════════════════════════════════════
+
+@dataclass
+class DivergenceSignal:
+    """背离反转交易信号 — 明确的开仓方向信号
+
+    用户本意:
+    - 日K线/小时K线上，期货趋势在继续(出现新高/新低)
+    - 当月最活跃实值期权权利金趋势没有继续(不再出现新高/新低)
+    - → 反趋势开仓(期货创新高但期权不创新高 → 看跌反趋势开仓)
+    """
+    direction: str = ""              # "BUY"(看涨反趋势) | "SELL"(看跌反趋势) | ""
+    strength: float = 0.0            # 信号强度 [0, 1]
+    futures_symbol: str = ""         # 期货合约代码
+    option_symbol: str = ""          # 最活跃实值期权合约代码
+    futures_price: float = 0.0       # 期货当前价格
+    option_premium: float = 0.0      # 期权权利金(当前)
+    futures_new_high: bool = False   # 期货是否创出新高
+    futures_new_low: bool = False    # 期货是否创出新低
+    option_new_high: bool = False    # 期权权利金是否创出新高
+    option_new_low: bool = False     # 期权权利金是否创出新低
+    divergence_type: str = ""        # "bearish"(看跌背离) | "bullish"(看涨背离)
+    reason: str = "DIVERGENCE_REVERSAL"
+    kline_period: str = "hourly"     # K线周期
+    timestamp: float = 0.0           # 信号时间戳
+    bar_time: str = ""               # K线时间标签
+
+    @property
+    def is_valid(self) -> bool:
+        """信号是否有效(有明确方向)"""
+        return self.direction in ("BUY", "SELL") and self.strength > 0.0
+
+    @property
+    def is_counter_trend_buy(self) -> bool:
+        """是否为反趋势做多(看涨背离: 期货新低但期权不创新低)"""
+        return self.direction == "BUY"
+
+    @property
+    def is_counter_trend_sell(self) -> bool:
+        """是否为反趋势做空(看跌背离: 期货新高但期权不创新高)"""
+        return self.direction == "SELL"
+
+    def to_dict(self) -> Dict:
+        return {
+            "direction": self.direction,
+            "strength": round(self.strength, 4),
+            "futures_symbol": self.futures_symbol,
+            "option_symbol": self.option_symbol,
+            "futures_price": self.futures_price,
+            "option_premium": self.option_premium,
+            "futures_new_high": self.futures_new_high,
+            "futures_new_low": self.futures_new_low,
+            "option_new_high": self.option_new_high,
+            "option_new_low": self.option_new_low,
+            "divergence_type": self.divergence_type,
+            "reason": self.reason,
+            "kline_period": self.kline_period,
+            "timestamp": self.timestamp,
+            "bar_time": self.bar_time,
+        }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -326,41 +411,67 @@ def _parse_year_month_fallback(ym_str: str) -> Tuple[int, int]:
 
 def _classify_contract_month(year: int, month: int, current_ym: Tuple[int, int]) -> str:
     """判断合约属于当月/下月/当季/下季/远季
-    
-    月份配置（2026年6月18日设定）：
-    - 当月: 2607 (7月)
-    - 下月: 2608 (8月)
-    - 当季月: 2609 (9月)
-    - 下季月: 2612 (12月)
-    - 远季月1: 2703 (2027年3月)
-    - 远季月2: 2706 (2027年6月)
-    
+
+    [FIX-20260712-S7-V3] 动态合约月份分类 — 替代原硬编码2607/2608/2609/2612/2703/2706
+    根据当前年月动态确定合约归属，避免合约到期后模块失效。
+
+    规则:
+    - 当月(current_month): 合约月份 == 当前月份
+    - 下月(next_month): 合约月份 == 当前月份+1
+    - 当季月(current_quarter): 当季季月(3/6/9/12)中>=当前月份的最近一个
+    - 下季月(next_quarter_1): 下一季季月
+    - 远季(next_quarter_2/far_quarter): 更远的季月
+
     Parameters
     ----------
     year       : 合约年份
     month      : 合约月份
-    current_ym : 当前年月 (year, month) - 已废弃，使用硬编码配置
+    current_ym : 当前年月 (year, month)
 
     Returns
     -------
     str : 'current_month' | 'next_month' | 'current_quarter' |
           'next_quarter_1' | 'next_quarter_2' | 'far'
     """
-    ym_str = f"{year % 100:02d}{month:02d}"
-    
-    if ym_str == '2607':
+    cur_year, cur_month = current_ym
+    # 合约的绝对月数 (0-indexed: 2026年1月 = 24312)
+    contract_ym = year * 12 + (month - 1)
+    current_ym_abs = cur_year * 12 + (cur_month - 1)
+    diff = contract_ym - current_ym_abs  # >0表示未来合约, =0表示当月, <0表示已过期
+
+    if diff < 0:
+        return 'far'  # 已过期合约归入远月
+
+    if diff == 0:
         return 'current_month'
-    if ym_str == '2608':
+    if diff == 1:
         return 'next_month'
-    if ym_str == '2609':
+
+    # 计算季月(3/6/9/12, 0-indexed月份: 2/5/8/11, 即 m%3==2)
+    def _next_quarter_month(base: int) -> int:
+        """从base开始找>=base的最近季月(3/6/9/12)"""
+        m = base % 12  # 0-indexed月份 (0=1月, 2=3月, 5=6月, 8=9月, 11=12月)
+        q_check = m % 3  # 季月时 q_check == 2
+        if q_check == 2:
+            return base  # base本身就是季月
+        return base + (2 - q_check)  # 距下一个季月的月数
+
+    # 当季月: >=当前月份的最近季月
+    cur_q = _next_quarter_month(current_ym_abs)
+    # 如果当季月就是当前月，则当季月归为current_month，取下一个季月
+    if cur_q == current_ym_abs:
+        cur_q = cur_q + 3  # 下一个季月
+
+    next_q = cur_q + 3
+    if contract_ym == cur_q:
         return 'current_quarter'
-    if ym_str == '2612':
+    if contract_ym == next_q:
         return 'next_quarter_1'
-    if ym_str == '2703':
+    if contract_ym == next_q + 3:
         return 'next_quarter_2'
-    if ym_str == '2706':
+    if contract_ym == next_q + 6:
         return 'far_quarter'
-    
+
     return 'far'
 
 
@@ -965,7 +1076,9 @@ class DivergenceReversalModule:
                 first_minute = pd.to_datetime(df['minute'].iloc[0])
                 current_ym = (first_minute.year, first_minute.month)
             else:
-                current_ym = (2026, 6)
+                # [FIX-20260712-AUDIT-P1] 硬编码(2026,6)回退值改为动态获取当前年月
+                _now = datetime.now()
+                current_ym = (_now.year, _now.month)
 
         p = self._params
 
@@ -1030,6 +1143,462 @@ class DivergenceReversalModule:
             p.shadow_variant,
         )
         return output
+
+    # ════════════════════════════════════════════════════════════
+    # [FIX-20260712-S7-V3] 信号生成 — 用户本意: 反趋势开仓
+    # ════════════════════════════════════════════════════════════
+
+    # kline_period 参数与 klines_raw.period 列的映射
+    _KLINE_PERIOD_SQL_MAP = {
+        "daily": "D1",
+        "hourly": "H1",
+        "minute": "M1",
+    }
+
+    def get_sql_period(self) -> str:
+        """返回当前参数对应的 klines_raw.period 值 (D1/H1/M1)
+
+        [FIX-20260712-S7-V3-P1] 使 strategy_business_layer 能按配置周期过滤K线，
+        避免 SQL 始终读取 M1 分钟K线导致 kline_period 参数失效。
+        """
+        return self._KLINE_PERIOD_SQL_MAP.get(self._params.kline_period, "M1")
+
+    def get_sql_cache_ttl(self) -> float:
+        """[S7-V3-P2] 返回SQL查询缓存TTL(秒)
+
+        按kline_period自动调整:
+        - daily:  300秒 (日K线一天只更新一次, 缓存5分钟足够)
+        - hourly:  60秒 (小时K线每小时更新, 缓存1分钟)
+        - minute:  10秒 (分钟K线频繁更新, 缓存10秒)
+        若用户显式设置 sql_cache_ttl_sec > 0, 则优先使用用户值
+        """
+        p = self._params
+        if p.sql_cache_ttl_sec > 0:
+            return p.sql_cache_ttl_sec
+        _DEFAULT_TTL = {"daily": 300.0, "hourly": 60.0, "minute": 10.0}
+        return _DEFAULT_TTL.get(p.kline_period, 60.0)
+
+    def _find_most_active_itm_option(
+        self,
+        df: pd.DataFrame,
+        symbol_ym_map: Dict[str, Tuple[int, int]],
+        current_ym: Tuple[int, int],
+        min_volume: float = 1.0,
+        activity_metric: str = "total_volume",
+    ) -> Optional[Tuple[str, str, float, float]]:
+        """筛选当月最活跃实值期权
+
+        用户本意: "当月一个最活跃实值期权交易价格(权利金)"
+        选择标准: 当月合约中，实值(ITM)且成交量最大的期权
+
+        [FIX-20260712-S7-V3-P2] activity_metric 支持三种活跃度度量:
+        - "total_volume": 按当日总成交量排序(默认, 反映整体流动性)
+        - "last_bar_volume": 按最后一根K线成交量排序(反映当前活跃度)
+        - "combined": 总成交量*0.4 + 末根成交量*0.6(兼顾整体与当前)
+
+        Returns
+        -------
+        Tuple[option_symbol, option_type, strike, volume] | None
+        """
+        if len(df) == 0:
+            return None
+
+        groups = _build_contract_group_map(df['symbol'].values, symbol_ym_map, current_ym)
+        cm_idx = groups.get('current_month', np.array([], dtype=np.int64))
+        if len(cm_idx) == 0:
+            return None
+
+        cm_df = df.iloc[cm_idx].copy()
+
+        # 筛选期权行(有option_type且非空)
+        if 'option_type' not in cm_df.columns or 'strike_price' not in cm_df.columns:
+            return None
+        opt_str = cm_df['option_type'].fillna('').astype(str).str.strip()
+        is_opt = (opt_str != '') & (opt_str.str.upper() != 'NONE') & (opt_str.str.upper() != 'NAN')
+        cm_opt = cm_df[is_opt].copy()
+        if len(cm_opt) == 0:
+            return None
+
+        # 需要underlying_price计算moneyness
+        if 'underlying_price' not in cm_opt.columns:
+            return None
+
+        opt_type_upper = cm_opt['option_type'].str.upper().str.strip()
+        underlying = cm_opt['underlying_price'].to_numpy(dtype=np.float64)
+        strike = cm_opt['strike_price'].to_numpy(dtype=np.float64)
+
+        is_call = opt_type_upper.str.startswith('C').values
+        moneyness = np.where(
+            is_call,
+            (underlying - strike) / np.where(underlying > 0, underlying, 1.0),
+            (strike - underlying) / np.where(underlying > 0, underlying, 1.0),
+        )
+        moneyness = np.nan_to_num(moneyness, nan=-1.0)
+        cm_opt['_moneyness'] = moneyness
+        cm_opt['_is_call'] = is_call
+
+        # 筛选实值期权 (moneyness > 0)
+        # 用户本意: "最活跃实值期权" — 不限定最接近平值，而是成交量最大的实值期权
+        itm_opts = cm_opt[cm_opt['_moneyness'] > 0].copy()
+        if len(itm_opts) == 0:
+            return None
+
+        # 按成交量筛选(如果volume列存在)
+        if 'volume' in itm_opts.columns:
+            itm_opts = itm_opts[itm_opts['volume'].fillna(0) >= min_volume]
+            if len(itm_opts) == 0:
+                return None
+            # [S7-V3-P2] 按 activity_metric 选择排序键
+            agg_dict = {
+                'total_vol': ('volume', 'sum'),
+                'last_vol': ('volume', 'last'),
+                'close': ('close', 'last'),
+                'strike': ('strike_price', 'last'),
+                'opt_type': ('option_type', 'last'),
+            }
+            latest_bar = itm_opts.groupby('symbol').agg(**agg_dict)
+            if activity_metric == "last_bar_volume":
+                latest_bar = latest_bar.sort_values('last_vol', ascending=False)
+                vol_val_key = 'last_vol'
+            elif activity_metric == "combined":
+                # 归一化后加权: 总量*0.4 + 末根*0.6
+                _tv = latest_bar['total_vol'].astype(float)
+                _lv = latest_bar['last_vol'].astype(float)
+                _tv_norm = _tv / (_tv.max() if _tv.max() > 0 else 1.0)
+                _lv_norm = _lv / (_lv.max() if _lv.max() > 0 else 1.0)
+                latest_bar['_combined_score'] = _tv_norm * 0.4 + _lv_norm * 0.6
+                latest_bar = latest_bar.sort_values('_combined_score', ascending=False)
+                vol_val_key = 'total_vol'
+            else:
+                latest_bar = latest_bar.sort_values('total_vol', ascending=False)
+                vol_val_key = 'total_vol'
+        else:
+            # 无volume列时，取close最大(通常最活跃)的实值期权
+            latest_bar = itm_opts.groupby('symbol').agg(
+                close=('close', 'last'),
+                strike=('strike_price', 'last'),
+                opt_type=('option_type', 'last'),
+            ).sort_values('close', ascending=False)
+            vol_val_key = None
+
+        if len(latest_bar) == 0:
+            return None
+
+        top = latest_bar.iloc[0]
+        opt_symbol = str(latest_bar.index[0])
+        opt_type = str(top.get('opt_type', '')).strip().upper()
+        strike_val = float(top.get('strike', 0))
+        vol_val = float(top.get(vol_val_key, 0)) if vol_val_key else 0.0
+
+        return (opt_symbol, opt_type, strike_val, vol_val)
+
+    def generate_signal(
+        self,
+        df: pd.DataFrame,
+        current_ym: Optional[Tuple[int, int]] = None,
+    ) -> DivergenceSignal:
+        """生成背离反转交易信号 — 用户本意的核心实现
+
+        用户本意:
+        - 日K线(小时K线)上，期货趋势在继续(出现新高/新低)
+        - 当月最活跃实值期权权利金趋势没有继续(不再出现新高/新低)
+        - → 反趋势开仓
+
+        判定逻辑:
+        1. 期货创出新高 → 期权权利金未创出新高 → 看跌背离 → SELL(反趋势做空)
+        2. 期货创出新低 → 期权权利金未创出新低 → 看涨背离 → BUY(反趋势做多)
+        3. 不叠加MACD/RSI技术指标
+
+        Parameters
+        ----------
+        df          : K线DataFrame, 包含 symbol/minute(或bar_time)/close/high/low/volume
+                      期权行还需: option_type/strike_price/underlying_price
+        current_ym  : 当前年月, None则从df推断
+
+        Returns
+        -------
+        DivergenceSignal
+        """
+        import time as _time
+        from datetime import datetime as _datetime
+
+        empty_signal = DivergenceSignal(kline_period=self._params.kline_period)
+
+        with self._lock:
+            n = len(df)
+            if n == 0:
+                return empty_signal
+
+            # 推断当前年月
+            if current_ym is None:
+                _now = _datetime.now()
+                if 'minute' in df.columns:
+                    try:
+                        first_minute = pd.to_datetime(df['minute'].iloc[0])
+                        current_ym = (first_minute.year, first_minute.month)
+                    except (ValueError, TypeError, KeyError):
+                        current_ym = (_now.year, _now.month)
+                else:
+                    current_ym = (_now.year, _now.month)
+
+            p = self._params
+            symbol_ym_map = self._resolve_symbol_ym_map(df)
+
+            # [S7-V3-P2] 按 primary_layer 分发信号生成逻辑
+            if p.primary_layer == "L1L2L3":
+                return self._generate_signal_composite(
+                    df, current_ym, symbol_ym_map, p)
+
+            # 默认 L3 模式: 当月最活跃实值期权背离
+            # 找当月最活跃实值期权
+            active_itm = self._find_most_active_itm_option(
+                df, symbol_ym_map, current_ym, p.min_active_volume,
+                activity_metric=p.activity_metric)
+            if active_itm is None:
+                logger.debug("[S7-V3] 未找到当月活跃实值期权, 无法生成信号")
+                return empty_signal
+
+            opt_symbol, opt_type, _strike, _vol = active_itm
+
+            # 获取当月期货合约数据
+            groups = _build_contract_group_map(df['symbol'].values, symbol_ym_map, current_ym)
+            cm_idx = groups.get('current_month', np.array([], dtype=np.int64))
+            if len(cm_idx) == 0:
+                return empty_signal
+
+            cm_df = df.iloc[cm_idx]
+            opt_str = cm_df['option_type'].fillna('').astype(str).str.strip() if 'option_type' in cm_df.columns else pd.Series([''] * len(cm_df))
+            is_future = (opt_str == '') | (opt_str.str.upper() == 'NONE') | (opt_str.str.upper() == 'NAN')
+            cm_future = cm_df[is_future]
+
+            if len(cm_future) < p.lookback:
+                logger.debug("[S7-V3] 当月期货数据不足(%d < %d), 无法检测背离",
+                             len(cm_future), p.lookback)
+                return empty_signal
+
+            # 按时间排序聚合期货收盘价
+            time_col = 'minute' if 'minute' in cm_future.columns else cm_future.columns[0]
+            fut_agg = cm_future.groupby(time_col).agg(
+                close=('close', 'last'),
+                high=('high', 'max') if 'high' in cm_future.columns else ('close', 'last'),
+                low=('low', 'min') if 'low' in cm_future.columns else ('close', 'last'),
+            ).sort_index()
+
+            if len(fut_agg) < p.lookback:
+                return empty_signal
+
+            # 期货新高/新低检测
+            fut_close = fut_agg['close'].values
+            fut_new_high = _rolling_new_extremum(fut_close, p.lookback, True)
+            fut_new_low = _rolling_new_extremum(fut_close, p.lookback, False)
+            fut_trend = _rolling_trend_direction(fut_close, p.lookback, p.trend_significance)
+
+            # 获取最活跃实值期权的权利金序列
+            opt_df = df[df['symbol'] == opt_symbol].copy()
+            if len(opt_df) < p.lookback:
+                logger.debug("[S7-V3] 期权'%s'数据不足(%d < %d)",
+                             opt_symbol, len(opt_df), p.lookback)
+                return empty_signal
+
+            opt_agg = opt_df.groupby(time_col if time_col in opt_df.columns else opt_df.columns[0]).agg(
+                close=('close', 'last'),
+            ).sort_index()
+
+            if len(opt_agg) < p.lookback:
+                return empty_signal
+
+            opt_close = opt_agg['close'].values
+            opt_new_high = _rolling_new_extremum(opt_close, p.lookback, True)
+            opt_new_low = _rolling_new_extremum(opt_close, p.lookback, False)
+
+            # 取最近一根K线的背离状态
+            last_idx = len(fut_agg) - 1
+            # 对齐期权和期货的时间索引
+            common_idx = fut_agg.index.intersection(opt_agg.index)
+            if len(common_idx) < p.lookback:
+                return empty_signal
+
+            last_common = common_idx[-1]
+            fut_pos = fut_agg.index.get_loc(last_common)
+            opt_pos = opt_agg.index.get_loc(last_common)
+
+            fut_nh = bool(fut_new_high[fut_pos]) if fut_pos < len(fut_new_high) else False
+            fut_nl = bool(fut_new_low[fut_pos]) if fut_pos < len(fut_new_low) else False
+            opt_nh = bool(opt_new_high[opt_pos]) if opt_pos < len(opt_new_high) else False
+            opt_nl = bool(opt_new_low[opt_pos]) if opt_pos < len(opt_new_low) else False
+            trend_dir = float(fut_trend[fut_pos]) if fut_pos < len(fut_trend) else 0.0
+
+            fut_price = float(fut_close[fut_pos])
+            opt_premium = float(opt_close[opt_pos])
+
+            # 核心背离判定 (用户本意):
+            # 期货趋势继续(新高/新低) + 期权权利金趋势未继续(不创新高/新低) → 反趋势开仓
+            signal = DivergenceSignal(
+                futures_symbol=str(cm_future['symbol'].iloc[-1] if 'symbol' in cm_future.columns else ''),
+                option_symbol=opt_symbol,
+                futures_price=fut_price,
+                option_premium=opt_premium,
+                futures_new_high=fut_nh,
+                futures_new_low=fut_nl,
+                option_new_high=opt_nh,
+                option_new_low=opt_nl,
+                kline_period=p.kline_period,
+                timestamp=_time.time(),
+                bar_time=str(last_common),
+            )
+
+            # 看跌背离: 期货创新高 + 期权权利金未创新高 → 反趋势做空(SELL)
+            if fut_nh and not opt_nh and trend_dir > 0:
+                signal.direction = "SELL"
+                signal.divergence_type = "bearish"
+                signal.strength = min(1.0, abs(trend_dir) * 10.0 + 0.3)
+                logger.info(
+                    "[S7-V3] 看跌背离信号: 期货新高但期权'%s'权利金未新高 → SELL "
+                    "(fut_price=%.2f opt_premium=%.2f strength=%.2f period=%s)",
+                    opt_symbol, fut_price, opt_premium, signal.strength, p.kline_period,
+                )
+
+            # 看涨背离: 期货创新低 + 期权权利金未创新低 → 反趋势做多(BUY)
+            elif fut_nl and not opt_nl and trend_dir < 0:
+                signal.direction = "BUY"
+                signal.divergence_type = "bullish"
+                signal.strength = min(1.0, abs(trend_dir) * 10.0 + 0.3)
+                logger.info(
+                    "[S7-V3] 看涨背离信号: 期货新低但期权'%s'权利金未新低 → BUY "
+                    "(fut_price=%.2f opt_premium=%.2f strength=%.2f period=%s)",
+                    opt_symbol, fut_price, opt_premium, signal.strength, p.kline_period,
+                )
+            else:
+                logger.debug(
+                    "[S7-V3] 无背离: fut_nh=%s fut_nl=%s opt_nh=%s opt_nl=%s trend=%.4f",
+                    fut_nh, fut_nl, opt_nh, opt_nl, trend_dir,
+                )
+
+            return signal
+
+    def _generate_signal_composite(
+        self,
+        df: pd.DataFrame,
+        current_ym: Tuple[int, int],
+        symbol_ym_map: Dict[str, Tuple[int, int]],
+        p: DivergenceReversalParams,
+    ) -> DivergenceSignal:
+        """[S7-V3-P2] L1L2L3 三层综合背离信号生成
+
+        当 primary_layer="L1L2L3" 时调用此方法:
+        1. 运行 L1(跨期期货) + L2(远月集体) + L3(近实值) 三层背离检测
+        2. 用 _compute_reversal_signal 加权合成综合信号
+        3. 取最后一根K线的综合信号值判定方向:
+           - composite < -signal_threshold → SELL(看跌背离, 反趋势做空)
+           - composite > +signal_threshold → BUY(看涨背离, 反趋势做多)
+        4. 交易标的仍选当月最活跃实值期权(与L3模式一致, 保证可执行性)
+
+        用户本意: L3为主信号, L1L2L3模式为可选增强(三层共振时信号更强)
+        """
+        import time as _time
+
+        empty_signal = DivergenceSignal(kline_period=p.kline_period)
+
+        n = len(df)
+        if n == 0:
+            return empty_signal
+
+        # ── 1. 运行三层背离检测 ──
+        div_future = _detect_future_cross_term_divergence(
+            df, symbol_ym_map, current_ym, p.lookback,
+            p.trend_significance, p.div_strength_clip)
+        div_option_coll = _detect_option_premium_collective_divergence(
+            df, symbol_ym_map, current_ym, p.lookback, p.min_ratio,
+            p.trend_significance, p.div_strength_clip)
+        div_option_itm = _detect_option_near_itm_divergence(
+            df, symbol_ym_map, current_ym, p.lookback, p.atm_threshold,
+            p.trend_significance, p.div_strength_clip)
+
+        # ── 2. 加权合成综合信号 ──
+        composite = _compute_reversal_signal(
+            div_future, div_option_coll, div_option_itm, p)
+
+        if len(composite) == 0:
+            return empty_signal
+
+        # ── 3. 取最后一根K线的综合信号值 ──
+        last_val = float(composite[-1])
+        if abs(last_val) < p.signal_threshold:
+            logger.debug(
+                "[S7-V3-L1L2L3] 综合信号=%.4f 低于阈值%.2f, 无背离",
+                last_val, p.signal_threshold)
+            return empty_signal
+
+        # ── 4. 选当月最活跃实值期权作为交易标的 ──
+        active_itm = self._find_most_active_itm_option(
+            df, symbol_ym_map, current_ym, p.min_active_volume,
+            activity_metric=p.activity_metric)
+        if active_itm is None:
+            logger.debug("[S7-V3-L1L2L3] 未找到当月活跃实值期权")
+            return empty_signal
+
+        opt_symbol, opt_type, _strike, _vol = active_itm
+
+        # 获取当月期货和期权的最新价格
+        groups = _build_contract_group_map(df['symbol'].values, symbol_ym_map, current_ym)
+        cm_idx = groups.get('current_month', np.array([], dtype=np.int64))
+        if len(cm_idx) == 0:
+            return empty_signal
+
+        cm_df = df.iloc[cm_idx]
+        opt_str = cm_df['option_type'].fillna('').astype(str).str.strip() if 'option_type' in cm_df.columns else pd.Series([''] * len(cm_df))
+        is_future = (opt_str == '') | (opt_str.str.upper() == 'NONE') | (opt_str.str.upper() == 'NAN')
+        cm_future = cm_df[is_future]
+
+        fut_price = float(cm_future['close'].iloc[-1]) if len(cm_future) > 0 and 'close' in cm_future.columns else 0.0
+        fut_symbol = str(cm_future['symbol'].iloc[-1]) if len(cm_future) > 0 and 'symbol' in cm_future.columns else ''
+
+        opt_df = df[df['symbol'] == opt_symbol]
+        opt_premium = float(opt_df['close'].iloc[-1]) if len(opt_df) > 0 and 'close' in opt_df.columns else 0.0
+
+        # 时间标签
+        time_col = 'minute' if 'minute' in df.columns else None
+        bar_time = str(df[time_col].iloc[-1]) if time_col else ""
+
+        # ── 5. 判定方向 ──
+        signal = DivergenceSignal(
+            futures_symbol=fut_symbol,
+            option_symbol=opt_symbol,
+            futures_price=fut_price,
+            option_premium=opt_premium,
+            kline_period=p.kline_period,
+            timestamp=_time.time(),
+            bar_time=bar_time,
+        )
+
+        if last_val < -p.signal_threshold:
+            # 看跌背离 → 反趋势做空
+            signal.direction = "SELL"
+            signal.divergence_type = "bearish"
+            signal.strength = min(1.0, abs(last_val))
+            logger.info(
+                "[S7-V3-L1L2L3] 三层综合看跌背离: composite=%.4f → SELL "
+                "(fut=%s@%.2f opt=%s@%.2f L1=%.3f L2=%.3f L3=%.3f)",
+                last_val, fut_symbol, fut_price, opt_symbol, opt_premium,
+                float(div_future[-1]) if len(div_future) > 0 else 0.0,
+                float(div_option_coll[-1]) if len(div_option_coll) > 0 else 0.0,
+                float(div_option_itm[-1]) if len(div_option_itm) > 0 else 0.0,
+            )
+        elif last_val > p.signal_threshold:
+            # 看涨背离 → 反趋势做多
+            signal.direction = "BUY"
+            signal.divergence_type = "bullish"
+            signal.strength = min(1.0, abs(last_val))
+            logger.info(
+                "[S7-V3-L1L2L3] 三层综合看涨背离: composite=%.4f → BUY "
+                "(fut=%s@%.2f opt=%s@%.2f L1=%.3f L2=%.3f L3=%.3f)",
+                last_val, fut_symbol, fut_price, opt_symbol, opt_premium,
+                float(div_future[-1]) if len(div_future) > 0 else 0.0,
+                float(div_option_coll[-1]) if len(div_option_coll) > 0 else 0.0,
+                float(div_option_itm[-1]) if len(div_option_itm) > 0 else 0.0,
+            )
+
+        return signal
 
     def to_dict(self) -> Dict:
         return {

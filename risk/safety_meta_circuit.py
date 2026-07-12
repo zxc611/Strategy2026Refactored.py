@@ -598,7 +598,7 @@ class CircuitBreakerService:
                                         _actual_oid = getattr(_risk_result, 'order_id', '')
                                         if _actual_oid:
                                             rec.closing_order_id = _actual_oid
-                                        _pnl_mult = 1.0 if getattr(rec, 'direction', '') in ('long', 'BUY') else -1.0
+                                        _pnl_mult = 1.0 if getattr(rec, 'direction', '') in ('long', 'BUY', '0') else -1.0
                                         rec.realized_pnl = _pnl_mult * (price - rec.open_price) * reduce_volume
                                     else:
                                         rec.closing_order_id = 'CANNOT_CLOSE'

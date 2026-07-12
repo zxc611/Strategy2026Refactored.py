@@ -46,12 +46,21 @@ _REASON_STRATEGY_MAP = {
     'DIVERGENCE_REVERSAL': 'divergence',
     'OTHER_SCALP': 'box', 'BOX_SPRING': 'spring', 'BOX_EXTREME': 'box',
     'ARBITRAGE': 'arbitrage', 'MARKET_MAKING': 'market_making',
+    'INTRADAY': 'intraday',
     'MANUAL': 'manual',
 }
 
 
 def _is_option_instrument(instrument_id: str) -> bool:
-    return '-C-' in instrument_id or '-P-' in instrument_id
+    if not instrument_id:
+        return False
+    _upper = instrument_id.upper()
+    if any(p in _upper for p in ['-C', '-P', '_C', '_P', 'CALL', 'PUT']):
+        return True
+    import re as _re
+    if _re.match(r'^([A-Za-z]+\d+)([CP])(\d+)$', instrument_id):
+        return True
+    return False
 
 
 def _try_greeks_calculator(instrument_id: str, greek_name: str) -> Optional[float]:
@@ -74,12 +83,12 @@ def _estimate_option_delta(instrument_id: str, direction: str, volume: int) -> f
     # P1-03修复: 优先委托GreeksCalculator，fallback时记录降级日志
     precise = _try_greeks_calculator(instrument_id, 'delta')
     if precise is not None:
-        sign = 1.0 if direction in ('long', 'BUY') else -1.0
+        sign = 1.0 if direction in ('long', 'BUY', '0') else -1.0
         return sign * precise * abs(volume)
     logging.debug("[P1-03] delta降级到常量估算: %s", instrument_id)
     from ali2026v3_trading.position.position_service import PositionService
     delta_per_lot = PositionService.OPTION_DELTA_PER_LOT_CALL if '-C-' in instrument_id else (PositionService.OPTION_DELTA_PER_LOT_PUT if '-P-' in instrument_id else 0.0)
-    sign = 1.0 if direction in ('long', 'BUY') else -1.0
+    sign = 1.0 if direction in ('long', 'BUY', '0') else -1.0
     return sign * delta_per_lot * abs(volume)
 
 
@@ -133,7 +142,7 @@ def _aggregate_greeks_exposure_inner(positions: Dict[str, Dict[str, Any]], resul
                 gamma = _estimate_option_gamma(instrument_id, rec.volume)
                 result.total_option_lots += abs(rec.volume)
             else:
-                sign = 1.0 if rec.direction in ('long', 'BUY') else -1.0
+                sign = 1.0 if rec.direction in ('long', 'BUY', '0') else -1.0
                 delta, vega, gamma = sign * abs(rec.volume), 0.0, 0.0
                 result.total_futures_lots += abs(rec.volume)
             inst_delta += delta

@@ -188,7 +188,14 @@ class BoxDetector:
             'iv_filtered': 0,
             'flow_exhaustion_confirmed': 0,
             'tradeable_signals': 0,
+            'false_breakout_filtered': 0,  # [FIX-20260712-S3] 假突破过滤统计
         }
+
+        # [FIX-20260712-S3] 假突破过滤模块 — 上策H-Rev: 假突破过滤
+        # 记录最近极值信号的价格和时间，用于检测假突破
+        self._breakout_tracker: deque = deque(maxlen=20)  # [(timestamp, price, extreme_type), ...]
+        self._false_breakout_lookback_sec = 120.0  # 回看窗口：2分钟内的突破
+        self._false_breakout_retrace_ratio = 0.50  # 价格回落超过50%视为假突破
 
         self._box_id_counter: int = 0
         logger.info("[BoxDetector] 初始化完成, lookback=%d, min_bars=%d",
@@ -560,6 +567,55 @@ class BoxDetector:
         elif extreme_state.is_top_extreme and extreme_state.tradeable:
             return 'short'
         return ''
+
+    # [FIX-20260712-S3] 假突破过滤模块 — 上策H-Rev
+    # 原理: 极值突破后若价格迅速回落回箱体内，说明是假突破，应过滤信号
+    # 实现: 记录最近突破信号，检查当前价格是否已从突破点回落超过50%
+    def check_false_breakout(self, current_price: float, extreme_type: str) -> bool:
+        """检查当前信号是否为假突破
+
+        Args:
+            current_price: 当前价格
+            extreme_type: 极值类型 ('box_bottom_extreme' / 'box_top_extreme')
+
+        Returns:
+            True = 通过过滤（不是假突破），False = 假突破（应过滤掉）
+        """
+        with self._lock:
+            # [FIX-20260712-S3-P1] 无箱体时无法计算突破距离，放行信号避免 crash
+            if self._current_box is None:
+                return True
+
+            now = time.time()
+            # 清理过期记录
+            while self._breakout_tracker:
+                _ts, _price, _etype = self._breakout_tracker[0]
+                if now - _ts > self._false_breakout_lookback_sec:
+                    self._breakout_tracker.popleft()
+                else:
+                    break
+
+            # 检查是否有同类型的近期突破记录
+            for _ts, _price, _etype in self._breakout_tracker:
+                if _etype != extreme_type:
+                    continue
+                # 计算价格从突破点的回落比例
+                if _price <= 0 or current_price <= 0:
+                    continue
+                price_move = abs(current_price - _price)
+                breakout_distance = abs(_price - (self._current_box.lower if 'bottom' in extreme_type else self._current_box.upper))
+                if breakout_distance > 0:
+                    retrace_ratio = price_move / breakout_distance
+                    if retrace_ratio > self._false_breakout_retrace_ratio:
+                        self._stats['false_breakout_filtered'] += 1
+                        logger.debug("[BoxDetector] 假突破过滤: extreme=%s breakout_price=%.2f current=%.2f retrace=%.1f%%",
+                                     extreme_type, _price, current_price, retrace_ratio * 100)
+                        return False
+                break  # 只检查最近一条同类型记录
+
+            # 记录当前突破信号
+            self._breakout_tracker.append((now, current_price, extreme_type))
+            return True
 
     def get_extreme_state(self) -> Optional[ExtremeState]:
         with self._lock:

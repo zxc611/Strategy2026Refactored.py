@@ -242,12 +242,13 @@ OPTION_TO_FUTURE_MAP = {'MO': 'IM', 'IO': 'IF', 'HO': 'IH'}
 REASON_MULTIPLIERS = {
     "CORRECT_RESONANCE":    {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
     "HIGH_FREQ":            {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
-    "DIVERGENCE_REVERSAL":  {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.67},  # FIX-20260711-P2: tp_mult/sl_mult从0.83/1.0修正为1.0（TP_SL_REASON_DEFAULTS已提供1.3/0.50）
-    "BOX_SPRING":           {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.8},  # FIX-20260711-P2: sl_mult从0.8修正为1.0（TP_SL_REASON_DEFAULTS已提供2.0/0.40）；time_mult=0.8保持
-    "OTHER_SCALP":          {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.33},  # FIX-20260711-P2: tp_mult/sl_mult从0.73/0.6修正为1.0（TP_SL_REASON_DEFAULTS已提供1.1/0.30）
-    "BOX_EXTREME":          {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.33},  # FIX-20260711-P2: tp_mult/sl_mult从0.73/0.6修正为1.0（TP_SL_REASON_DEFAULTS已提供1.2/0.40）
-    "ARBITRAGE":            {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.25},  # FIX-20260711-P2: tp_mult/sl_mult从0.5/0.5修正为1.0（TP_SL_REASON_DEFAULTS已提供1.2/0.30；S5不开仓但保持一致性）
-    "MARKET_MAKING":        {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},  # FIX-20260711-P2: sl_mult从0.8修正为1.0（TP_SL_REASON_DEFAULTS已提供1.1/0.20；S6不开仓但保持一致性）
+    "INTRADAY":             {"tp_mult": 1.5,  "sl_mult": 0.5,  "time_mult": 2.0},  # [FIX-20260712-S2] S2日内: 高止盈/严止损/长持仓
+    "DIVERGENCE_REVERSAL":  {"tp_mult": 0.83, "sl_mult": 1.0,  "time_mult": 0.67},
+    "BOX_SPRING":           {"tp_mult": 1.0,  "sl_mult": 0.8,  "time_mult": 1.0},  # [FIX-20260712-S4] sl_mult 1.2→0.8(收紧止损), time_mult 1.5→1.0(收紧时间)
+    "OTHER_SCALP":          {"tp_mult": 0.73, "sl_mult": 0.6,  "time_mult": 0.33},
+    "BOX_EXTREME":          {"tp_mult": 0.85, "sl_mult": 0.6,  "time_mult": 0.50},  # [FIX-20260712-S3-P2] tp_mult 0.73→0.85(修复止盈目标0.876<开仓价的逻辑bug, 1.2*0.85=1.02正收益, 过渡值待回测标定); [FIX-20260712-S3] time_mult 0.33→0.50
+    "ARBITRAGE":            {"tp_mult": 0.5,  "sl_mult": 0.5,  "time_mult": 0.25},
+    "MARKET_MAKING":        {"tp_mult": 1.0,  "sl_mult": 0.8,  "time_mult": 1.0},  # FIX-20260711: tp_mult从0.4修复为1.0（0.4导致止盈目标0.44<1）
     "MANUAL":               {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
 }
 

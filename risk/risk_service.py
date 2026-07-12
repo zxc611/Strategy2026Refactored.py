@@ -336,9 +336,7 @@ class RiskService:
             if not _time_stop_ok:
                 logging.warning("[R33-P1-7] 断路器与时间止损冲突检查 cb_paused=%s, time_stop=%s", _cb_paused, _hard_time_stop)
 
-        except ImportError:
-            pass
-        except (ImportError, AttributeError, TypeError) as _cv_err:
+        except (ImportError, AttributeError, TypeError) as _cv_err:  # [FIX-20260712-AUDIT-P1] 合并重复的ImportError捕获
             logging.error("[R33-P1-7] crack_validation pre-check error: %s", _cv_err)
 
         # FIX-20260707-HARD-STOP: 补充日回撤硬停止检查
@@ -348,7 +346,7 @@ class RiskService:
         _daily_hard_stop = getattr(self, '_daily_hard_stop_triggered', None)
         if _daily_hard_stop is None:
             try:
-                from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
+                from ali2026v3_trading.risk.risk_circuit_breaker import get_safety_meta_layer  # [FIX-20260712-AUDIT-P1] 修正循环导入：从risk_circuit_breaker导入而非自身模块
                 _sid = str(getattr(self, '_scope_id', '') or 'global')
                 _safety = get_safety_meta_layer(None, scope_id=_sid)
                 if _safety:

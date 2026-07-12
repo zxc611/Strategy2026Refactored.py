@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from ali2026v3_trading.infra.shared_utils import CHINA_TZ
 from ali2026v3_trading.infra.shared_utils import SignalType, VALID_SIGNAL_TYPES, OPEN_SIGNAL_TYPES, CLOSE_SIGNAL_TYPES
 from ali2026v3_trading.infra.shared_utils import generate_prefixed_id  # R9-3
-from ali2026v3_trading.signal.signal_components import KalmanFilter1D, EMASignalFilter, SignalTimingFilter, AdaptiveSignalThreshold, SignalHistoryService, CooldownManager, SignalFilterChain
+from ali2026v3_trading.signal.signal_components import (
+    KalmanFilter1D, EMASignalFilter, SignalTimingFilter, AdaptiveSignalThreshold, SignalHistoryService,
+)
 try:
     from ali2026v3_trading.governance.mode_engine import ModeEngine
 except ImportError:
@@ -486,7 +488,10 @@ class SignalGenerator:
                                      alpha_ratio: Optional[float] = None,
                                      cross_correlation: Optional[float] = None,
                                      tri_validation_score: Optional[float] = None,
-                                     slippage_source: str = 'LIVE') -> Dict[str, Any]:
+                                     slippage_source: str = 'LIVE',
+                                     s5_arbitrage_signal: Optional[Dict[str, Any]] = None,
+                                     s6_market_making_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # [FIX-20260712-S1S2-P1] 吸收S5/S6维度，避免 **kwargs 传入未知参数触发 fail-safe 阻断
         try:
             from ali2026v3_trading.risk.risk_service import get_risk_service
             rs = get_risk_service()
@@ -535,7 +540,7 @@ class SignalGenerator:
         svc._plr_filter_enabled = False
         svc._hft_signal_filter = None
         svc._hft_filter_enabled = False
-
+        from ali2026v3_trading.signal.signal_components import SignalFilterChain, CooldownManager
         svc._filter_chain = SignalFilterChain(svc)
         svc._cooldown_mgr = CooldownManager()
         svc._decision_score_filter_enabled = True
@@ -587,7 +592,7 @@ class SignalGenerator:
             pass
             pass
         try:
-
+            from ali2026v3_trading.signal.signal_service import AdaptiveSignalThreshold
             svc._adaptive_threshold = AdaptiveSignalThreshold()
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             svc._adaptive_threshold = None
@@ -681,8 +686,8 @@ class SignalService:
             _s=dict(self._stats);self.expire_stale_signals()
             return {'service_name':'SignalService',**_s,'stats_invariant_ok':_s.get('total_signals',0)==_s.get('filtered_signals',0)+_s.get('emitted_signals',0),'history_size':self._history_service.get_statistics()['total_signals'],'active_cooldowns':self._cooldown_mgr.count_active_cooldowns(self._default_cooldown_seconds)}
     def validate_signal(self, signal): return SignalGenerator.validate_signal(signal)
-    def apply_decision_score_filter(self, signal, state_strength, order_flow_consistency, hmm_state=None, cr_output=None, greeks_dashboard=None, consecutive_losses=0, current_pnl=0.0, drawdown_pct=0.0, alpha_ratio=None, cross_correlation=None, tri_validation_score=None, slippage_source='LIVE'):
-        return SignalGenerator.apply_decision_score_filter(signal,state_strength,order_flow_consistency,hmm_state=hmm_state,cr_output=cr_output,greeks_dashboard=greeks_dashboard,consecutive_losses=consecutive_losses,current_pnl=current_pnl,drawdown_pct=drawdown_pct,alpha_ratio=alpha_ratio,cross_correlation=cross_correlation,tri_validation_score=tri_validation_score,slippage_source=slippage_source)
+    def apply_decision_score_filter(self, signal, state_strength, order_flow_consistency, hmm_state=None, cr_output=None, greeks_dashboard=None, consecutive_losses=0, current_pnl=0.0, drawdown_pct=0.0, alpha_ratio=None, cross_correlation=None, tri_validation_score=None, slippage_source='LIVE', s5_arbitrage_signal=None, s6_market_making_state=None):
+        return SignalGenerator.apply_decision_score_filter(signal,state_strength,order_flow_consistency,hmm_state=hmm_state,cr_output=cr_output,greeks_dashboard=greeks_dashboard,consecutive_losses=consecutive_losses,current_pnl=current_pnl,drawdown_pct=drawdown_pct,alpha_ratio=alpha_ratio,cross_correlation=cross_correlation,tri_validation_score=tri_validation_score,slippage_source=slippage_source,s5_arbitrage_signal=s5_arbitrage_signal,s6_market_making_state=s6_market_making_state)
     def _collect_decision_dimensions(self, instrument_id): return SignalGenerator.collect_decision_dimensions(instrument_id)
     def run_benchmark(self, iterations=100, cooldown_enabled=False): return SignalGenerator.run_benchmark(self,iterations,cooldown_enabled)
     def generate_daily_signal_report(self, date=None): return self._history_service.generate_daily_signal_report(date)

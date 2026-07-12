@@ -98,9 +98,9 @@ def check_self_trade_across_splits(
 
                     if price_a > 0 and price_b > 0:
 
-                        buy_idx = i if order_a.get('direction') == TradeDirection.BUY else j
+                        buy_idx = i if order_a.get('direction') in (TradeDirection.BUY, '0') else j
 
-                        sell_idx = j if order_a.get('direction') == TradeDirection.BUY else i
+                        sell_idx = j if order_a.get('direction') in (TradeDirection.BUY, '0') else i
 
                         buy_order = orders[buy_idx]
 

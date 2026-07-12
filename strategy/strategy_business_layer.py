@@ -796,6 +796,22 @@ class StrategyBusinessLayer:
                                 account_equity=t.get('account_equity', 100000.0),
                             )
                             if _bs_signal is not None:
+                                # [FIX-20260712-S4] 弹簧强度评分 — 上策H-Rev: 过滤低质量弹簧信号
+                                # [FIX-20260712-S4-P2] 统一引用SPRING_STRENGTH_THRESHOLD类常量, 消除硬编码
+                                try:
+                                    _spring_box = bss.get_active_box(_bs_inst) if hasattr(bss, 'get_active_box') else None
+                                    _spring_strength = bss.detect_spring_strength(
+                                        _bs_signal, _spring_box
+                                    ) if hasattr(bss, 'detect_spring_strength') else 0.5
+                                    _spring_threshold = getattr(bss, 'SPRING_STRENGTH_THRESHOLD', 0.45)  # 统一引用类常量, fallback=0.45
+                                    if _spring_strength < _spring_threshold:
+                                        logging.info(
+                                            "[FIX-20260712-S4] 弹簧强度不足, 过滤信号: inst=%s strength=%.3f threshold=%.3f",
+                                            _bs_inst, _spring_strength, _spring_threshold
+                                        )
+                                        continue
+                                except (ValueError, KeyError, TypeError, AttributeError):
+                                    pass  # 评分异常时不阻断信号
                                 _bs_triggered = bss.check_trigger(
                                     _bs_inst,
                                     order_flow_imbalance=t.get('order_flow_imbalance', 0.0),
@@ -851,7 +867,9 @@ class StrategyBusinessLayer:
                 provider._hft_err_count = _hft_err_count
                 if _hft_err_count <= 3 or _hft_err_count % 100 == 0:
                     logging.debug("[FIX-0710-HFT] HFT引擎集成异常(第%d次): %s", _hft_err_count, _hft_err)
-            # [FIX-20260710-DIVERGENCE-REVERSAL-V2] 集成DivergenceReversalModule到交易周期
+            # [FIX-20260712-S7-V3] DivergenceReversal信号生成集成 — 用户本意: 反趋势开仓
+            # 旧版[FIX-20260710-DIVREV-V2]仅记录日志不生成交易信号，导致S7背离检测与交易完全断开
+            # 新版调用generate_signal()生成明确方向信号，有效信号追加到targets列表参与交易
             try:
                 from ali2026v3_trading.strategy.divergence_reversal import get_divergence_reversal_module
                 _dr_module = get_divergence_reversal_module()
@@ -863,44 +881,186 @@ class StrategyBusinessLayer:
                             from ali2026v3_trading.data.data_service import get_data_service as _gds
                             _ds = _gds()
                             if _ds is not None and hasattr(_ds, 'query'):
-                                _dr_sql = (
-                                    "SELECT fi.instrument_id AS symbol, kr.timestamp AS minute, "
-                                    "kr.open, kr.high, kr.low, kr.close, kr.volume, "
-                                    "oi.option_type, oi.strike_price, fi2.last_price AS underlying_price "
-                                    "FROM klines_raw kr "
-                                    "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
-                                    "LEFT JOIN option_instruments oi ON oi.underlying_id = fi.internal_id "
-                                    "LEFT JOIN (SELECT internal_id, last_price FROM latest_prices) fi2 ON fi2.internal_id = fi.internal_id "
-                                    "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw) "
-                                    "ORDER BY kr.timestamp DESC LIMIT 500"
-                                )
-                                _dr_result = _ds.query(_dr_sql)
-                                if _dr_result is not None and len(_dr_result) > 0:
-                                    import pandas as _pd
-                                    _dr_df = _dr_result.to_pandas() if hasattr(_dr_result, 'to_pandas') else _pd.DataFrame(_dr_result.to_pylist())
-                                    if len(_dr_df) > 0:
-                                        _dr_output = _dr_module.update(_dr_df)
-                                        _dr_rev_sig = getattr(_dr_output, 'div_reversal_signal', None)
-                                        _dr_has_div = _dr_rev_sig is not None and bool(_dr_rev_sig)
-                                        if _dr_has_div:
-                                            logging.info("[FIX-0710-DIVREV-V2] DivergenceReversal检测到背离信号, "
-                                                         "reversal_signal=%s", _dr_rev_sig)
-                                        elif _dr_call_count % 100 == 1:
-                                            logging.info("[FIX-0710-DIVREV-V2] DivergenceReversal无背离信号(call=%d rows=%d)",
+                                # [S7-V3-P1] 按配置周期过滤K线，避免kline_period参数失效/混合多周期数据
+                                _dr_period = _dr_module.get_sql_period()
+                                # [S7-V3-P2] SQL缓存: 若距上次查询不足TTL秒, 跳过SQL直接用缓存DataFrame
+                                _dr_cache_ttl = _dr_module.get_sql_cache_ttl()
+                                _dr_last_ts = getattr(provider, '_dr_last_sql_ts', 0.0)
+                                _dr_cached_df = getattr(provider, '_dr_cached_df', None)
+                                _now_ts = time.time()
+                                _use_cache = (_dr_cached_df is not None
+                                              and (_now_ts - _dr_last_ts) < _dr_cache_ttl)
+                                if _use_cache:
+                                    _dr_df = _dr_cached_df
+                                else:
+                                    _dr_sql = (
+                                        "SELECT fi.instrument_id AS symbol, kr.timestamp AS minute, "
+                                        "kr.open, kr.high, kr.low, kr.close, kr.volume, "
+                                        "oi.option_type, oi.strike_price, fi2.last_price AS underlying_price "
+                                        "FROM klines_raw kr "
+                                        "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
+                                        "LEFT JOIN option_instruments oi ON oi.underlying_future_id = fi.internal_id "
+                                        "LEFT JOIN (SELECT internal_id, last_price FROM latest_prices) fi2 ON fi2.internal_id = fi.internal_id "
+                                        "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = ?) "
+                                        "AND kr.period = ? "
+                                        "ORDER BY kr.timestamp DESC LIMIT 500"
+                                    )
+                                    _dr_result = _ds.query(_dr_sql, [_dr_period, _dr_period])
+                                    if _dr_result is not None and len(_dr_result) > 0:
+                                        import pandas as _pd
+                                        _dr_df = _dr_result.to_pandas() if hasattr(_dr_result, 'to_pandas') else _pd.DataFrame(_dr_result.to_pylist())
+                                        # 更新缓存
+                                        provider._dr_cached_df = _dr_df
+                                        provider._dr_last_sql_ts = _now_ts
+                                    else:
+                                        _dr_df = None
+                                        provider._dr_cached_df = None
+                                if _dr_df is not None and len(_dr_df) > 0:
+                                    # [S7-V3] 调用generate_signal生成方向信号(用户本意: 反趋势开仓)
+                                    _dr_signal = _dr_module.generate_signal(_dr_df)
+                                    if _dr_signal is not None and _dr_signal.is_valid:
+                                        logging.info(
+                                            "[S7-V3-DIVREV] 背离反转信号触发: dir=%s strength=%.2f "
+                                            "fut=%s@%.2f opt=%s@%.2f type=%s period=%s bar=%s",
+                                            _dr_signal.direction, _dr_signal.strength,
+                                            _dr_signal.futures_symbol, _dr_signal.futures_price,
+                                            _dr_signal.option_symbol, _dr_signal.option_premium,
+                                            _dr_signal.divergence_type, _dr_signal.kline_period,
+                                            _dr_signal.bar_time,
+                                        )
+                                        # 有效信号追加到targets列表 — 使背离信号真正参与交易
+                                        _dr_target = {
+                                            'instrument_id': _dr_signal.option_symbol,
+                                            'direction': _dr_signal.direction,
+                                            'price': _dr_signal.option_premium,
+                                            'volume': 0,
+                                            'lots': 1,
+                                            'action': 'OPEN',
+                                            'open_reason': 'DIVERGENCE_REVERSAL',
+                                            'reason': 'DIVERGENCE_REVERSAL',
+                                            'signal_id': generate_prefixed_id('DIVSIG', 12),
+                                            'divergence_signal': _dr_signal.to_dict(),
+                                            'source': 's7_divergence_reversal_v3',
+                                        }
+                                        targets.append(_dr_target)
+                                        provider._dr_last_signal = _dr_signal.to_dict()
+                                        logging.info("[S7-V3-DIVREV] 背离信号已追加到targets (reason=DIVERGENCE_REVERSAL)")
+                                    else:
+                                        # 无背离信号时保持静默(节流日志)
+                                        if _dr_call_count % 100 == 1:
+                                            logging.info("[S7-V3-DIVREV] 无背离信号(call=%d rows=%d)",
                                                          _dr_call_count, len(_dr_df))
+                                        # 仍调用update()保持向后兼容(三层诊断输出)
+                                        _dr_module.update(_dr_df)
                                 else:
                                     if _dr_call_count % 100 == 1:
-                                        logging.debug("[FIX-0710-DIVREV-V2] klines_raw查询无数据(call=%d)", _dr_call_count)
+                                        logging.debug("[S7-V3-DIVREV] klines_raw查询无数据(call=%d)", _dr_call_count)
                         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _dr_qry_err:
                             if _dr_call_count <= 3 or _dr_call_count % 100 == 0:
-                                logging.warning("[FIX-0710-DIVREV-V2] klines_raw查询失败(call=%d): %s",
+                                logging.warning("[S7-V3-DIVREV] klines_raw查询失败(call=%d): %s",
                                                 _dr_call_count, _dr_qry_err)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _dr_err:
                 _dr_err_count = getattr(provider, '_dr_err_count', 0) + 1
                 provider._dr_err_count = _dr_err_count
                 if _dr_err_count <= 3 or _dr_err_count % 100 == 0:
-                    logging.warning("[FIX-0710-DIVREV-V2] DivergenceReversalModule集成异常(第%d次): %s",
+                    logging.warning("[S7-V3-DIVREV] DivergenceReversalModule集成异常(第%d次): %s",
                                     _dr_err_count, _dr_err)
+            # [FIX-20260712-S2-V2] S2日内交易四维信号组装 — 用户本意: 共振+订单流+希腊+三角
+            # 冗余桥接模块已删除，此处直接在业务层组装四维信号(参照S7修复方式)
+            # 条件(全部满足): 共振>0.75 + |订单流|>0.20 + 希腊>0.4 + 三角>0.5
+            try:
+                _s2_call_count = getattr(provider, '_s2_call_count', 0) + 1
+                provider._s2_call_count = _s2_call_count
+                if _s2_call_count % 30 == 1:  # 30tick采样一次(S2日内不需要高频)
+                    _s2_targets = targets if targets else _fallback_instruments
+                    # 获取订单流不平衡(从OrderFlowBridge)
+                    _s2_of_imbalance = 0.0
+                    try:
+                        from ali2026v3_trading.order.order_flow_bridge import OrderFlowBridge
+                        _s2_ofb = OrderFlowBridge()
+                        _s2_of_imbalance = _s2_ofb.get_instant_imbalance('') or 0.0
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                        pass
+                    # 获取希腊字母评分和三角评判评分(从RiskComputeService)
+                    _s2_greeks_score = 0.5  # 默认中性
+                    _s2_tri_score = 0.5     # 默认中性
+                    try:
+                        from ali2026v3_trading.risk.risk_service import get_risk_service
+                        _s2_rs = get_risk_service()
+                        if _s2_rs and hasattr(_s2_rs, '_risk_compute'):
+                            _s2_rc = _s2_rs._risk_compute
+                            try:
+                                _s2_gd = getattr(_s2_rs, '_greeks_dashboard', None)
+                                _s2_greeks_score = _s2_rc._compute_greeks_usage_score(_s2_gd)
+                            except (ValueError, KeyError, TypeError, AttributeError):
+                                pass
+                            try:
+                                _s2_tri_score = _s2_rc._compute_tri_validation_score(None)
+                            except (ValueError, KeyError, TypeError, AttributeError):
+                                pass
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                        pass
+                    # S2参数(阈值高于S1以提高胜率)
+                    _S2_RESONANCE_THRESH = 0.75   # > S1的0.6
+                    _S2_ORDER_FLOW_THRESH = 0.20  # > S1的0.15
+                    _S2_GREEKS_THRESH = 0.4
+                    _S2_TRI_THRESH = 0.5
+                    for t in _s2_targets:
+                        _s2_inst = t.get('instrument_id', '')
+                        _s2_price = t.get('price', 0.0)
+                        _s2_res = t.get('resonance_strength', 0.0)
+                        _s2_dir_hint = t.get('direction', '')
+                        if not _s2_inst or _s2_price <= 0:
+                            continue
+                        # 四维条件检查(全部满足才开仓)
+                        if _s2_res < _S2_RESONANCE_THRESH:
+                            continue
+                        if abs(_s2_of_imbalance) < _S2_ORDER_FLOW_THRESH:
+                            continue
+                        if _s2_greeks_score < _S2_GREEKS_THRESH:
+                            continue
+                        if _s2_tri_score < _S2_TRI_THRESH:
+                            continue
+                        # 方向: 订单流不平衡符号决定(正=BUY, 负=SELL)
+                        if _s2_dir_hint in ('BUY', 'SELL'):
+                            _s2_dir = _s2_dir_hint
+                        elif _s2_of_imbalance > 0:
+                            _s2_dir = 'BUY'
+                        else:
+                            _s2_dir = 'SELL'
+                        _s2_target = {
+                            'instrument_id': _s2_inst,
+                            'direction': _s2_dir,
+                            'price': _s2_price,
+                            'volume': 0,
+                            'lots': 1,
+                            'action': 'OPEN',
+                            'reason': 'INTRADAY',
+                            'open_reason': 'INTRADAY',  # [FIX-20260712-S2-P0] 必须包含open_reason，否则order_executor_platform.py:815读取为空→持仓管理/Greeks限额/EV缓存路由全部断裂
+                            'strategy_group': 'intraday',
+                            'signal_id': generate_prefixed_id('S2INT', 12),
+                            'take_profit_ratio': 1.5,
+                            'stop_loss_ratio': 0.5,
+                            'max_hold_minutes': 240.0,
+                            's2_scores': {
+                                'resonance': round(_s2_res, 4),
+                                'order_flow': round(_s2_of_imbalance, 4),
+                                'greeks': round(_s2_greeks_score, 4),
+                                'tri_validation': round(_s2_tri_score, 4),
+                            },
+                            'source': 's2_intraday_v2',
+                        }
+                        targets.append(_s2_target)
+                        provider._s2_last_signal = _s2_target
+                        logging.info(
+                            "[S2-INTRADAY] 四维信号追加targets: inst=%s dir=%s res=%.3f of=%.4f greeks=%.3f tri=%.3f",
+                            _s2_inst, _s2_dir, _s2_res, _s2_of_imbalance, _s2_greeks_score, _s2_tri_score,
+                        )
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _s2_err:
+                _s2_err_count = getattr(provider, '_s2_err_count', 0) + 1
+                provider._s2_err_count = _s2_err_count
+                if _s2_err_count <= 3 or _s2_err_count % 100 == 0:
+                    logging.warning("[S2-INTRADAY] 四维信号组装异常(第%d次): %s", _s2_err_count, _s2_err)
             if not targets:
                 # FIX-R6: targets为空时输出节流warning日志，避免完全静默
                 # 每5分钟输出一次，包含诊断信息
@@ -951,7 +1111,7 @@ class StrategyBusinessLayer:
                     except Exception as _diag_e:
                         logging.warning("[OptionTrading] targets为空（诊断失败: %s）", _diag_e)
                 return
-            open_reason = provider._resolve_open_reason()
+            open_reason = getattr(provider, '_resolve_open_reason', lambda: 'UNKNOWN')()  # [FIX-20260712-AUDIT-P0] 保护调用防止AttributeError
             for t in targets:
                 t['open_reason'] = t.get('open_reason', '') or open_reason
             # FIX-P0-1: 在targets过滤阶段排除trading=False合约，根因修复重复下单失败

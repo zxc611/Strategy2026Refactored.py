@@ -1730,7 +1730,8 @@ def verify_bar_tick_consistency(conn, instrument_id: str, trade_date: str,
     try:
         bar_row = conn.execute(
             "SELECT SUM(volume) as total_vol, MIN(low) as bar_low, MAX(high) as bar_high "
-            "FROM klines_raw WHERE instrument_id=? AND trade_date=?",
+            "FROM klines_raw kr JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
+            "WHERE fi.instrument_id=? AND kr.trade_date=?",
             [instrument_id, trade_date]
         ).fetchone()
         tick_row = conn.execute(

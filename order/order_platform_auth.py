@@ -147,7 +147,14 @@ class PlatformAuthenticator:
         _sign_payload = f"{_nonce}:{_timestamp:.3f}:{_token}"
 
         _hmac_key = os.environ.get('ORDER_SIGN_KEY', 'default_order_sign_key_change_in_prod')
-
+        if _hmac_key == 'default_order_sign_key_change_in_prod':
+            if not hasattr(type(self), '_order_sign_key_warned'):
+                type(self)._order_sign_key_warned = True
+                logging.error(
+                    "[SECURITY] ORDER_SIGN_KEY使用默认密钥，订单签名可被预测。"
+                    "请在启动前设置环境变量: set ORDER_SIGN_KEY=<your_random_key> (Windows) "
+                    "或 export ORDER_SIGN_KEY=<your_random_key> (Linux/Mac)"
+                )
         _signature = hmac.new(_hmac_key.encode(), _sign_payload.encode(), hashlib.sha256).hexdigest()[:16]
 
         if not self.validate_nonce(_nonce, _timestamp):

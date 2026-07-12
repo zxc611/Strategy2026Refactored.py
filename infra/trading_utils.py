@@ -55,7 +55,7 @@ class UnifiedSlippageModel:
 
             return 0.0
 
-        signed = 1.0 if str(side).upper() in ('BUY', 'CLOSE_SHORT') else -1.0
+        signed = 1.0 if str(side).upper() in ('BUY', 'CLOSE_SHORT') or str(side) == '0' else -1.0
 
         impact_bps = self.base_bps + self.impact_factor * math.sqrt(max(volume, 0.0))
 

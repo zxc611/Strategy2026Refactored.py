@@ -272,10 +272,12 @@ class _OrderExecutorBase:
                 _fb_source = 'direct'
                 if _provider_ref is None:
                     # 回退1: 通过_platform_insert_order.__self__回溯策略对象
+                    # FIX-PROVIDER-FALLBACK-1: __self__是OrderService自身而非策略对象，
+                    # 获取到后_position_service仍为None，需跳过此无效回退
                     _platform_fn = getattr(svc, '_platform_insert_order', None)
                     if _platform_fn is not None:
                         _host = getattr(_platform_fn, '__self__', None)
-                        if _host is not None:
+                        if _host is not None and _host is not svc:
                             _provider_ref = _host
                             _fb_source = 'platform_fn_self'
                 if _provider_ref is None:
@@ -456,6 +458,14 @@ class _OrderExecutorBase:
                 _fat_finger_threshold = 0.20
                 if _ref_is_open_price_fallback:
                     _fat_finger_threshold = 0.50
+                # FIX-FAT-FINGER-OPTION: 期权CLOSE订单放宽fat_finger阈值至0.80
+                # 期权时间价值衰减导致开仓价与当前市价偏离极大(>50%常见)，
+                # 原阈值0.50导致合法期权平仓被误杀→幽灵持仓(如sc2608P440偏离62.50%)
+                # 期权合约ID格式: 品种+年月+P/C+行权价 (如sc2608P440, sc2608C470, HO2609-C-3200)
+                import re as _re
+                _is_option = bool(_re.search(r'\d[-]?[CP][-]?\d', ctx.instrument_id))
+                if _is_option:
+                    _fat_finger_threshold = 0.80
 
             if _price_deviation > _fat_finger_threshold:
 

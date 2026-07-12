@@ -362,7 +362,7 @@ def execute_pursuit_entry(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: A
             instrument_id=instrument_id, volume=signal_volume, price=price,
             direction=direction, action='OPEN', exchange=exchange,
             signal_strength=signal_strength, bids=bids, asks=asks,
-            open_reason='CORRECT_RESONANCE',
+            open_reason='HIGH_FREQ',  # [FIX-20260712-S1] 改为HIGH_FREQ以使用60秒持仓/1分钟硬止损(原CORRECT_RESONANCE映射到resonance组=5分钟)
             signal_id=pursuit_signal.get('signal_id', ''),
         )
         if order_ids:
@@ -404,7 +404,7 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
             instrument_id=instrument_id, volume=add_volume, price=price,
             direction=direction, action='OPEN', exchange=exchange,
             signal_strength=0.9, bids=bids, asks=asks,
-            open_reason='CORRECT_RESONANCE',
+            open_reason='HIGH_FREQ',  # [FIX-20260712-S1] 改为HIGH_FREQ以使用60秒持仓/1分钟硬止损
             signal_id=pursuit_signal.get('signal_id', ''),
         )
         if order_ids:

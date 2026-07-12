@@ -307,7 +307,7 @@ class OrderChaseService:
                                             _rec.closing_order_id = _actual_oid
                                             _rec.close_method = 'emergency_close'
                                             _rec.close_reason = f'emergency_close_by_{caller_id}'
-                                            _pnl_mult = 1.0 if getattr(_rec, 'direction', '') in ('long', 'BUY') else -1.0
+                                            _pnl_mult = 1.0 if getattr(_rec, 'direction', '') in ('long', 'BUY', '0') else -1.0
                                             _rec.realized_pnl = _pnl_mult * (price - _rec.open_price) * volume
                                             break
                         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _a1_err:
@@ -426,7 +426,7 @@ class OrderChaseService:
                     with _pos_svc._get_instrument_lock(instrument_id):
                         _pos_dict = _pos_svc.positions.get(instrument_id, {})
                         _total_closeable = 0
-                        _is_sell = original_order.get('direction', '') == 'SELL'
+                        _is_sell = original_order.get('direction', '') in ('SELL', '1')
                         _closing_count = 0
                         for _r in _pos_dict.values():
                             _rv = getattr(_r, 'volume', 0)
@@ -467,7 +467,7 @@ class OrderChaseService:
 
             price_offset = tick_size * chase_ticks
 
-        if original_order['direction'] == TradeDirection.BUY:
+        if original_order['direction'] in (TradeDirection.BUY, '0'):
 
             new_price = original_order['price'] + price_offset
 

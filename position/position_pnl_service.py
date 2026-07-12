@@ -26,7 +26,15 @@ from ali2026v3_trading.position.position_greeks import _REASON_STRATEGY_MAP
 
 
 def _is_option_instrument(instrument_id: str) -> bool:
-    return '-C-' in instrument_id or '-P-' in instrument_id
+    if not instrument_id:
+        return False
+    _upper = instrument_id.upper()
+    if any(p in _upper for p in ['-C', '-P', '_C', '_P', 'CALL', 'PUT']):
+        return True
+    import re as _re
+    if _re.match(r'^([A-Za-z]+\d+)([CP])(\d+)$', instrument_id):
+        return True
+    return False
 
 
 def _calc_effective_trading_minutes(open_time: datetime, now: datetime) -> float:
@@ -275,9 +283,10 @@ class PositionPnlService:
         _sg = getattr(record, 'strategy_group', '')
         max_hold_minutes = self.DEFAULT_MAX_HOLD_MINUTES
         _STRATEGY_HOLD_OVERRIDES = {
-            'spring': 120.0, 'box': 60.0, 'arbitrage': 30.0,
-            'market_making': 15.0, 'high_freq': 45.0,
+            'spring': 5.0, 'box': 60.0, 'arbitrage': 30.0,  # [FIX-20260712-S4] spring 120→5min(匹配弹簧短持仓特性)
+            'market_making': 15.0, 'high_freq': 1.0,   # [FIX-20260712-S1] S1高频: 60秒(原45分钟)
             'divergence': 45.0, 'resonance': 5.0,
+            'intraday': 240.0,  # [FIX-20260712-S2] S2日内: 4小时(日内交易)
         }
         if _sg in _STRATEGY_HOLD_OVERRIDES:
             max_hold_minutes = _STRATEGY_HOLD_OVERRIDES[_sg]
@@ -436,13 +445,14 @@ class PositionPnlService:
         # 读取参数（按strategy_group差异化）
         _sg = getattr(record, 'strategy_group', '')
         _TWO_STAGE_STRATEGY_OVERRIDES = {
-            'spring': {'stage1_min_minutes': 60.0, 'stage1_profit_threshold': 0.001},
+            'spring': {'stage1_min_minutes': 3.0, 'stage1_profit_threshold': 0.001},  # [FIX-20260712-S4] 60→3min(匹配弹簧短持仓特性)
             'box': {'stage1_min_minutes': 30.0, 'stage1_profit_threshold': 0.002},
             'arbitrage': {'stage1_min_minutes': 15.0, 'stage1_profit_threshold': 0.005},
             'market_making': {'stage1_min_minutes': 10.0, 'stage1_profit_threshold': 0.01},
-            'high_freq': {'stage1_min_minutes': 20.0, 'stage1_profit_threshold': 0.003},
+            'high_freq': {'stage1_min_minutes': 1.0, 'stage1_profit_threshold': 0.001},  # [FIX-20260712-S1] 60秒(原20分钟)
             'resonance': {'stage1_min_minutes': 3.0, 'stage1_profit_threshold': 0.005},
             'divergence': {'stage1_min_minutes': 15.0, 'stage1_profit_threshold': 0.003},
+            'intraday': {'stage1_min_minutes': 120.0, 'stage1_profit_threshold': 0.002},  # [FIX-20260712-S2] 2小时
         }
         _override = _TWO_STAGE_STRATEGY_OVERRIDES.get(_sg, {})
         try:

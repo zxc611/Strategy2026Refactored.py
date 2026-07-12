@@ -38,7 +38,7 @@ def _find_straddle_pair(self_or_signal, signal=None) -> Tuple[str, float, str]:
 
 class BoxSpringExecutorService:
 
-    OPEN_REASON = 'SPRING'
+    OPEN_REASON = 'BOX_SPRING'  # [FIX-20260712-S4-P0] 原'SPRING'不在_REASON_STRATEGY_MAP中，_resolve_strategy_group回退到'high_freq'→S4持仓错误映射到高频策略组(5min→60s)，改为'BOX_SPRING'使映射到'spring'策略组(5min持仓)
 
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         import threading

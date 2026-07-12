@@ -357,6 +357,27 @@ class CyclePredictionSnapshot(ToDictMixin):
     state_entropy: float = 0.5         # 状态熵[0,1]
 
 
+@dataclass(slots=True)
+class SortingTop5Item(ToDictMixin):
+    product: str = ""
+    tier: int = 4
+    primary_score: float = 0.0
+    global_rank: int = 0
+    global_percentile: float = 0.0
+    best_month: str = ""
+    scoring_scheme: str = "scheme_1"
+
+
+@dataclass(slots=True)
+class PipelineLatencySnapshot(ToDictMixin):
+    signal_generation_ms: float = 0.0
+    event_publish_ms: float = 0.0
+    dispatch_ms: float = 0.0
+    risk_check_ms: float = 0.0
+    order_send_ms: float = 0.0
+    total_p99_ms: float = 0.0
+    latency_budget_ms: float = 0.0
+
 
 @dataclass(slots=True)
 class RiskDimensionScores(ToDictMixin):
@@ -531,6 +552,12 @@ class MarketSnapshot:
     # 原capture()不接受order_info导致TypeError被静默吞掉，快照从未采集
     order_info: Optional[Dict[str, Any]] = None
 
+    # FIX-SNAPSHOT-SORTING-TOP5: 排序前五名(AlphaEngine→GlobalView→Tier过滤)
+    sorting_top5: List[SortingTop5Item] = field(default_factory=list)
+
+    # FIX-SNAPSHOT-PIPELINE-LATENCY: 全链路延迟快照
+    pipeline_latency: PipelineLatencySnapshot = field(default_factory=PipelineLatencySnapshot)
+
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d['trigger'] = self.trigger.value
@@ -548,10 +575,15 @@ class MarketSnapshot:
         for sub_key in ['hft_state', 'resonance_state', 'box_state', 'spring_state',
                         'arbitrage_state', 'market_making_state', 'divergence_state',
                         'ecosystem_state', 'shadow_alpha', 'safety_meta', 'cross_greeks',
-                        'life_expectancy', 'cycle_prediction', 'risk_dimensions']:
+                        'life_expectancy', 'cycle_prediction', 'risk_dimensions',
+                        'pipeline_latency']:
             sub = d.pop(sub_key, {})
             for k, v in sub.items():
                 d[f"{sub_key}_{k}"] = v
+        for i, item in enumerate(d.pop('sorting_top5', [])):
+            prefix = f"sorting_top5_{i}_"
+            for k, v in item.items():
+                d[f"{prefix}{k}"] = v
         return d
 
 
@@ -630,6 +662,8 @@ class MarketSnapshotCollector:
         cycle_prediction: Optional[CyclePredictionSnapshot] = None,
         risk_dimensions: Optional[RiskDimensionScores] = None,
         order_info: Optional[Dict[str, Any]] = None,
+        sorting_top5: Optional[List[SortingTop5Item]] = None,
+        pipeline_latency: Optional[PipelineLatencySnapshot] = None,
     ) -> MarketSnapshot:
         snap = MarketSnapshot(
             snapshot_id=self._generate_id(),
@@ -750,6 +784,18 @@ class MarketSnapshotCollector:
         # FIX-SNAPSHOT-ORDER-INFO: 开仓/平仓订单上下文填充
         if order_info is not None:
             snap.order_info = order_info
+
+        # FIX-SNAPSHOT-SORTING-TOP5: 排序前五名填充
+        if sorting_top5 is not None:
+            snap.sorting_top5 = sorting_top5
+        else:
+            self._auto_fill_sorting_top5(snap)
+
+        # FIX-SNAPSHOT-PIPELINE-LATENCY: 全链路延迟填充
+        if pipeline_latency is not None:
+            snap.pipeline_latency = pipeline_latency
+        else:
+            self._auto_fill_pipeline_latency(snap)
 
         self._snapshots.append(snap)
         self._maybe_auto_export()
@@ -875,6 +921,56 @@ class MarketSnapshotCollector:
             div_signal = abs(snap.divergence_state.div_reversal_signal)
             if div_signal > 0.3:
                 rd.d1_state_strength = max(0.2, rd.d1_state_strength - div_signal * 0.3)
+
+    def _auto_fill_sorting_top5(self, snap: MarketSnapshot) -> None:
+        try:
+            from ali2026v3_trading.data.width_cache_query_mixin import WidthCacheQueryMixin
+            from ali2026v3_trading.data.data_service import get_data_service
+            ds = get_data_service()
+            t_type = getattr(ds, '_ttype_service', None) or getattr(ds, 'ttype_service', None)
+            if t_type is None or not hasattr(t_type, 'select_otm_targets_signal_sources'):
+                return
+            signal_source = getattr(ds, '_signal_source', 'C')
+            if signal_source not in ('A', 'B', 'C'):
+                signal_source = 'C'
+            targets = t_type.select_otm_targets_signal_sources(signal_source=signal_source)
+            if not targets:
+                return
+            seen = set()
+            for t in targets[:10]:
+                product = str(t.get('product_id', t.get('instrument_id', '')))
+                if product in seen:
+                    continue
+                seen.add(product)
+                snap.sorting_top5.append(SortingTop5Item(
+                    product=product,
+                    tier=int(t.get('tier', 4)),
+                    primary_score=float(t.get('primary_score', t.get('net_score', 0.0))),
+                    global_rank=int(t.get('global_rank', 0)),
+                    global_percentile=float(t.get('global_percentile', 0.0) or 0.0),
+                    best_month=str(t.get('best_month', '')),
+                    scoring_scheme=str(t.get('signal_source', signal_source)),
+                ))
+                if len(snap.sorting_top5) >= 5:
+                    break
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _sort_err:
+            logging.debug("[MarketSnapshotCollector] sorting_top5 auto-fill failed: %s", _sort_err)
+
+    def _auto_fill_pipeline_latency(self, snap: MarketSnapshot) -> None:
+        try:
+            from ali2026v3_trading.strategy.strategy_config_layer import _pipeline_latency_monitor
+            pl = snap.pipeline_latency
+            pl.signal_generation_ms = _pipeline_latency_monitor.get('signal_generation', 0.0) * 1000.0
+            pl.event_publish_ms = _pipeline_latency_monitor.get('event_publish', 0.0) * 1000.0
+            pl.dispatch_ms = _pipeline_latency_monitor.get('dispatch', 0.0) * 1000.0
+            pl.risk_check_ms = _pipeline_latency_monitor.get('risk_check', 0.0) * 1000.0
+            pl.order_send_ms = _pipeline_latency_monitor.get('order_send', 0.0) * 1000.0
+            total = sum(v for v in _pipeline_latency_monitor.values())
+            pl.total_p99_ms = total * 1000.0
+            if snap.symbol and 'au' in snap.symbol.lower():
+                pl.latency_budget_ms = 150.0
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _lat_err:
+            logging.debug("[MarketSnapshotCollector] pipeline_latency auto-fill failed: %s", _lat_err)
 
     def set_life_estimator(self, estimator: Any) -> None:
         """注入行情寿命估计器（由task_scheduler或策略引擎在回测/实盘启动时调用）"""

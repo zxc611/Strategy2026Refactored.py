@@ -1581,7 +1581,7 @@ class PullbackManager:
         }
 
     def _compute_directional_retrace(self, direction: str) -> float:
-        if direction.upper() in ('CALL', 'BUY', 'LONG'):
+        if direction.upper() in ('CALL', 'BUY', 'LONG') or direction == '0':
             return self.retrace_pct_call if self.retrace_pct_call is not None else self.retrace_pct
         return self.retrace_pct_put if self.retrace_pct_put is not None else self.retrace_pct
 

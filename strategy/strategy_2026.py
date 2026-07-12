@@ -991,6 +991,38 @@ class Strategy2026(BaseStrategy, UIMixin):
                 except (ValueError, KeyError, TypeError, AttributeError):
                     pass
 
+                # FIX-20260712-P0: PQS失败时的CRM降级更新 — 确保_last_output不为None
+                # 根因: PQS.update_tick()失败时crm.update()从未被调用，_last_output永远为None，
+                # get_risk_surface()返回保守默认max_hold=1800s，与high_freq的1min hold_override冲突。
+                # 修复: PQS失败时用默认参数直接调用crm.update()，确保至少有基础风险曲面。
+                try:
+                    import importlib as _imp_fb
+                    _crm_mod = _imp_fb.import_module('ali2026v3_trading.param_pool.optimization.cycle_sharpe')
+                    _crm_inst = _crm_mod.get_cycle_resonance_module()
+                    if getattr(_crm_inst, '_last_output', None) is None:
+                        _crm_inst.update(
+                            hmm_state='NORMAL',
+                            hmm_posterior=(0.33, 0.34, 0.33),
+                            trend_scores=(0.0, 0.0, 0.0),
+                            trend_directions=(0.0, 0.0, 0.0),
+                            strength=0.5,
+                            imbalance=0.0,
+                        )
+                        _fb_count = getattr(self, '_crm_fallback_count', 0) + 1
+                        self._crm_fallback_count = _fb_count
+                        if _fb_count <= 3 or _fb_count % 100 == 0:
+                            logging.warning(
+                                "[FIX-20260712-P0] CRM降级更新(PQS失败fallback): count=%d, "
+                                "crm._last_output已设置为NORMAL默认值", _fb_count,
+                            )
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _crm_fb_err:
+                    _crm_fb_count = getattr(self, '_crm_fb_err_count', 0) + 1
+                    self._crm_fb_err_count = _crm_fb_count
+                    if _crm_fb_count <= 3 or _crm_fb_count % 100 == 0:
+                        logging.warning(
+                            "[FIX-20260712-P0] CRM降级更新也失败: %s (count=%d)", _crm_fb_err, _crm_fb_count,
+                        )
+
 
         except Exception as e:
             _tick_err_count = getattr(self, '_tick_err_count', 0) + 1

@@ -170,7 +170,7 @@ class PositionCommandService:
                             _candidates.append(_o)
                         # FIX-R32-ACTION-EMPTY: action为空时，通过direction与持仓方向推断
                         elif not _o_action:
-                            if (_o_dir == 'SELL' and _has_long_pos) or (_o_dir == 'BUY' and _has_short_pos):
+                            if (_o_dir in ('SELL', '1') and _has_long_pos) or (_o_dir in ('BUY', '0') and _has_short_pos):
                                 _candidates.append(_o)
                     if _candidates:
                         def _safe_ts(_o):
@@ -232,9 +232,10 @@ class PositionCommandService:
                             # 此时信任平台回调的原始direction/offset更安全。
                             _dir = _order.get('direction', '')
                             if _action:  # action非空才信任direction
-                                if _dir == 'BUY':
+                                # FIX-DIR-DUAL-TRACK: 兼容策略内部值('BUY'/'SELL')和平台规范值('0'/'1')
+                                if _dir in ('BUY', '0'):
                                     is_buy = True
-                                elif _dir == 'SELL':
+                                elif _dir in ('SELL', '1'):
                                     is_buy = False
                             else:
                                 _matched_by_closing_oid = False
@@ -264,9 +265,9 @@ class PositionCommandService:
                             if _fallback:
                                 is_open = False
                                 _fb_dir = _fallback.get('direction', '')
-                                if _fb_dir == 'BUY':
+                                if _fb_dir in ('BUY', '0'):
                                     is_buy = True
-                                elif _fb_dir == 'SELL':
+                                elif _fb_dir in ('SELL', '1'):
                                     is_buy = False
                                 logging.info("[R29b-on_trade] fallback匹配成功 inst=%s order_id=%s action=CLOSE -> is_open=False",
                                             inst_id, _fallback.get('order_id', ''))
@@ -303,9 +304,9 @@ class PositionCommandService:
                         if _fallback:
                             is_open = False
                             _fb_dir = _fallback.get('direction', '')
-                            if _fb_dir == 'BUY':
+                            if _fb_dir in ('BUY', '0'):
                                 is_buy = True
-                            elif _fb_dir == 'SELL':
+                            elif _fb_dir in ('SELL', '1'):
                                 is_buy = False
                             logging.info("[R29b-on_trade] 无order_id fallback匹配成功 inst=%s order_id=%s action=CLOSE -> is_open=False",
                                         inst_id, _fallback.get('order_id', ''))
@@ -737,7 +738,8 @@ class PositionCommandService:
                     remaining_close -= can_close
                     keys_to_remove.append(rec.position_id)
                     # FIX-R37-REALIZED-PNL: 按实际平仓量计算并累加已实现盈亏到服务级总计
-                    _pnl_mult = 1.0 if getattr(rec, 'direction', '') in ('long', 'BUY') else -1.0
+                    # FIX-DIR-DUAL-TRACK: 兼容record.direction的'long'/'short'和防御性兼容'BUY'/'0'
+                    _pnl_mult = 1.0 if getattr(rec, 'direction', '') in ('long', 'BUY', '0') else -1.0
                     _closed_pnl = _pnl_mult * (price - rec.open_price) * can_close
                     self._ps._total_realized_pnl = getattr(self._ps, '_total_realized_pnl', 0.0) + _closed_pnl
                 else:
@@ -746,7 +748,8 @@ class PositionCommandService:
                     else:
                         rec.volume += remaining_close
                     # FIX-R37-REALIZED-PNL: 部分平仓也累加已实现盈亏
-                    _pnl_mult = 1.0 if getattr(rec, 'direction', '') in ('long', 'BUY') else -1.0
+                    # FIX-DIR-DUAL-TRACK: 兼容record.direction的'long'/'short'和防御性兼容'BUY'/'0'
+                    _pnl_mult = 1.0 if getattr(rec, 'direction', '') in ('long', 'BUY', '0') else -1.0
                     _partial_pnl = _pnl_mult * (price - rec.open_price) * remaining_close
                     self._ps._total_realized_pnl = getattr(self._ps, '_total_realized_pnl', 0.0) + _partial_pnl
                     # FIX-R35-CLOSING-RESET: 部分平仓后必须重置_closing标志，
@@ -1123,7 +1126,8 @@ class PositionCommandService:
                     record.closing_order_id = _actual_oid
                     record._closing = True
                     record.close_reason = reason
-                    _pnl_mult = 1.0 if record.direction in ('long', 'BUY') else -1.0
+                    # FIX-DIR-DUAL-TRACK: 兼容record.direction的'long'/'short'和防御性兼容'BUY'/'0'
+                    _pnl_mult = 1.0 if record.direction in ('long', 'BUY', '0') else -1.0
                     record.realized_pnl = _pnl_mult * (price - record.open_price) * abs(record.volume)
                     logging.info("[PositionService._trigger_close_position] %s for %s vol=%d price=%.2f", reason, record.instrument_id, abs(record.volume), price)
                     try:

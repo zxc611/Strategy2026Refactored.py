@@ -138,6 +138,12 @@ class DrawdownMonitorService:
 
         self._daily_drawdown = 1.0
 
+        # FIX-20260712-P1: 记录hard_stop触发日期，用于跨日自动重置日志
+
+        from datetime import datetime as _dt
+
+        self._hard_stop_trigger_date = _dt.now().strftime('%Y-%m-%d')
+
         stats["negative_equity_triggers"] = stats.get("negative_equity_triggers", 0) + 1
 
         logging.critical(
@@ -283,13 +289,21 @@ class DrawdownMonitorService:
 
             if self._daily_hard_stop_triggered:
 
-                self._daily_new_open_blocked = True
+                # FIX-20260712-P1: 跨日hard_stop自动恢复 — 避免hard_stop永久阻断开仓
+                # 根因: hard_stop_triggered在跨日后仍为True，_daily_new_open_blocked=True，
+                # 导致所有新开仓被永久阻断(7/9触发→7/10仍生效→需手动confirm_daily_resume)。
+                # 修复: 新交易日自动重置hard_stop_triggered和_daily_new_open_blocked，
+                # 保留当日回撤监控，如有真实回撤会重新触发。
+                self._daily_hard_stop_triggered = False
+
+                self._daily_new_open_blocked = False
 
                 logging.warning(
 
-                    "[SafetyMetaLayer] 新交易日(%s)，日回撤硬停止仍然生效。"
-                    "必须调用confirm_daily_resume()经审批后才能恢复交易，",
-                    today
+                    "[SafetyMetaLayer] FIX-20260712-P1: 新交易日(%s)，"
+                    "跨日hard_stop已自动重置(原触发日期=%s)。"
+                    "当日回撤监控重新开始，如再次触及阈值将重新触发。",
+                    today, getattr(self, '_hard_stop_trigger_date', 'unknown')
                 )
 
             else:
@@ -540,6 +554,12 @@ class DrawdownMonitorService:
             self._daily_hard_stop_triggered = True
 
             self._daily_new_open_blocked = True
+
+            # FIX-20260712-P1: 记录hard_stop触发日期
+
+            from datetime import datetime as _dt_hs
+
+            self._hard_stop_trigger_date = _dt_hs.now().strftime('%Y-%m-%d')
 
             stats["daily_hard_stop_triggers"] += 1
 

@@ -139,10 +139,10 @@ class ComplianceChecker:
                         if pc:
                             limit_up = safe_float(pc.get('limit_up_price', 0))
                             limit_down = safe_float(pc.get('limit_down_price', 0))
-                            if limit_up > 0 and price >= limit_up and direction in ('BUY', '买', 'long'):
+                            if limit_up > 0 and price >= limit_up and direction in ('BUY', '买', 'long', '0'):
                                 price_limit_passed = False
                                 price_limit_detail = f"涨停价{limit_up:.2f}禁止买入: {instrument_id}"
-                            elif limit_down > 0 and price <= limit_down and direction in ('SELL', '卖', 'short'):
+                            elif limit_down > 0 and price <= limit_down and direction in ('SELL', '卖', 'short', '1'):
                                 price_limit_passed = False
                                 price_limit_detail = f"跌停价{limit_down:.2f}禁止卖出: {instrument_id}"
             checks.append({"check_item": "price_limit", "passed": price_limit_passed, "detail": price_limit_detail})

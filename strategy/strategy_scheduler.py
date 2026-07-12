@@ -342,11 +342,15 @@ class StrategyScheduler:
         
         try:
             # 注册 job
+            # FIX-20260712-P0: 添加max_instances=3，防止APScheduler默认max_instances=1
+            # 导致任务执行超时被跳过("maximum number of running instances reached (1)")
+            # 影响: position_risk_check(5s间隔)和trading_cycle(30s间隔)在执行>5s时被跳过
             self._scheduler.add_job(
                 func,
                 trigger,
                 id=job_id,
                 replace_existing=True,
+                max_instances=3,
                 **trigger_args
             )
             
@@ -539,9 +543,14 @@ class StrategyScheduler:
             # P1-05: 包装风控检查job，补充EventBus事件发布
             _orig_risk_check = check_position_risk
             def _risk_check_job_with_event():
-                # FIX-P0-23: 与trading_cycle job保持一致，添加_can_run_jobs()检查
+                # FIX-20260712-P0: 移除_can_run_jobs()检查 — 持仓风控必须在暂停/停止时继续执行
+                # 根因: _can_run_jobs()在_is_paused=True或_is_running=False时返回False，
+                # 导致check_position_risk被跳过，持仓无人看管(止盈止损/时间止损全部失效)。
+                # 7/10夜盘high_freq持仓370min未触发1min硬止损的根因。
+                # strategy_monitoring_layer.py已移除_is_running检查，此处调度层也必须保持一致。
+                # 仅检查_destroyed防止策略销毁后仍执行。
                 try:
-                    if not self._can_run_jobs():
+                    if getattr(self, '_destroyed', False):
                         return
                     _orig_risk_check()
                 finally:

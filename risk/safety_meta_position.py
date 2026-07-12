@@ -75,13 +75,14 @@ class HardTimeStopAndComplianceService:
 
 
     _STRATEGY_HARD_STOP_OVERRIDES = {
-        'spring': {'stage1_minutes': 180.0, 'stage2_minutes': 480.0, 'stage1_profit_threshold': 0.001},
+        'spring': {'stage1_minutes': 5.0, 'stage2_minutes': 15.0, 'stage1_profit_threshold': 0.001},  # [FIX-20260712-S4] 180→5min/480→15min(匹配弹簧短持仓特性)
         'box': {'stage1_minutes': 120.0, 'stage2_minutes': 360.0, 'stage1_profit_threshold': 0.001},
         'arbitrage': {'stage1_minutes': 60.0, 'stage2_minutes': 180.0, 'stage1_profit_threshold': 0.005},
         'market_making': {'stage1_minutes': 30.0, 'stage2_minutes': 120.0, 'stage1_profit_threshold': 0.01},
-        'high_freq': {'stage1_minutes': 20.0, 'stage2_minutes': 45.0, 'stage1_profit_threshold': 0.003},
+        'high_freq': {'stage1_minutes': 1.0, 'stage2_minutes': 1.0, 'stage1_profit_threshold': 0.001},  # [FIX-20260712-S1] 60秒硬止损(原20-45分钟)
         'resonance': {'stage1_minutes': 3.0, 'stage2_minutes': 5.0, 'stage1_profit_threshold': 0.005},
         'divergence': {'stage1_minutes': 45.0, 'stage2_minutes': 90.0, 'stage1_profit_threshold': 0.003},
+        'intraday': {'stage1_minutes': 120.0, 'stage2_minutes': 240.0, 'stage1_profit_threshold': 0.002},  # [FIX-20260712-S2] S2日内: 2-4小时
     }
 
     def check_position_hard_time_stop(self, position_id: str, open_time,

@@ -229,7 +229,7 @@ class RiskComputeService:
             except ImportError:
                 commission_per_lot = 0.0
 
-        if direction in ('BUY', 'buy', 'long'):
+        if direction in ('BUY', 'buy', 'long', '0'):
             raw_pnl = (exit_price - entry_price) * volume * multiplier
         else:
             raw_pnl = (entry_price - exit_price) * volume * multiplier

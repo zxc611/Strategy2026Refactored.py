@@ -247,7 +247,7 @@ class RiskCheckService:
 
         except ImportError:
 
-            logging.warning("[P2-6] AbnormalTradeDetector不可用", 跳过异常交易检查)
+            logging.warning("[P2-6] AbnormalTradeDetector不可用，跳过异常交易检查")  # [FIX-20260712-AUDIT-P1] 修正logging参数格式
             return {'action': 'none', 'anomaly_count': 0}
 
         results = [detector.detect_burst_trading(instrument_id)]

@@ -2220,7 +2220,7 @@ class DiagnosisProbeManager:
             if meta:
                 all_fields.update(meta.keys())
         key_fields = ['exchange', 'product', 'product_type', 'instrument_type', 'price_tick', 'multiplier',
-                      'trading_hours', 'underlying_symbol', 'underlying_id', 'min_price_tick', 'contract_size',
+                      'trading_hours', 'underlying_symbol', 'underlying_future_id', 'min_price_tick', 'contract_size',
                       'delivery_month', 'option_type', 'strike_price', 'expiration_date']
         key_fields = [f for f in key_fields if f in all_fields]
         logging.info(f"[OptionMetaDiff] 关键字段: {key_fields}")

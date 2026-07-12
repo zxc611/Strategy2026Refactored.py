@@ -616,6 +616,7 @@ _STATE_REASON_MAP = {
     'box': 'BOX_SPRING',
     'hft': 'HIGH_FREQ',
     'high_freq': 'HIGH_FREQ',
+    'intraday': 'INTRADAY',  # [FIX-20260712-S2] S2日内交易策略
     'arbitrage': 'ARBITRAGE',
     'market_making': 'MARKET_MAKING',
     'divergence_reversal': 'DIVERGENCE_REVERSAL',
@@ -692,6 +693,7 @@ STRATEGY_DEFAULTS = {
         'other': 0.5,
         'box_extreme': 0.3,
         'hft': 0.2,
+        'intraday': 0.5,  # [FIX-20260712-S2] S2日内交易止损比率
     },
     'max_signals_per_window': 5,
     'state_confirm_bars': 5,
