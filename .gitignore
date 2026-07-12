@@ -1,4 +1,42 @@
-# Python
+# ============================================================
+# 防膨胀白名单策略
+# 规则：默认忽略一切，只放行已追踪的目录结构
+# 新增文件必须 git add -f <file> 才能追踪（强制绕过忽略规则）
+# 已追踪文件不受影响（git已记录的文件始终可见）
+# ============================================================
+
+# === 默认忽略一切 ===
+*
+
+# === 放行已追踪的目录结构（仅目录，不含文件） ===
+!*/
+!strategy/**/
+!position/**/
+!signal/**/
+!order/**/
+!risk/**/
+!risk_engine/**/
+!infra/**/
+!config/**/
+!data/**/
+!lifecycle/**/
+!governance/**/
+!param_pool/**/
+!precompute/**/
+!strategy_judgment/**/
+!evaluation/**/
+!tools/**/
+!tests/**/
+!docs/**/
+!ee_layer_sort/**/
+!fra_archived/**/
+!scripts/**/
+
+# === 文件类型不放行 — 新增文件必须 git add -f ===
+# 已追踪文件不受影响（git已记录的文件始终可见）
+# 新增文件必须 git add -f <file> 才能追踪
+
+# === 重新忽略运行时产物（即使类型放行也不追踪） ===
 __pycache__/
 *.py[cod]
 *$py.class
@@ -33,21 +71,20 @@ env/
 *.swo
 *~
 
-# Testing
+# Testing runtime
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .nox/
 .mypy_cache/
+.hypothesis/
 
 # Logs and databases
 *.log
 *.db
 *.sqlite3
 logs/
-# data/ — 已移除：data/是M1生产系统核心子系统，源代码必须纳入版本控制
-# 如需忽略数据文件，请在data/下添加.gitignore精确匹配（如*.csv, *.parquet）
 
 # Local configuration
 .env
@@ -60,8 +97,6 @@ backup_*/
 backup_v*/
 _backup_*/
 
-# 升A路径T3.5: 备份目录不应存在于生产代码库
-
 # OS
 .DS_Store
 Thumbs.db
@@ -70,16 +105,16 @@ Thumbs.db
 *.pyc
 *.pyo
 
-# P2-R8-01修复: 运行时参数状态文件(含环境特定数据，不应提交)
+# P2-R8-01修复: 运行时参数状态文件
 **/state_param_sets.yaml
 
-# 运行时生成文件（WAL订单/熔断器状态等）
+# 运行时生成文件
 **/_wal_orders/
 **/.circuit_breaker_state.json
 **/idempotent_state.jsonl
 **/order_state.jsonl
 
-# 数据库文件（运行时生成）
+# 数据库文件
 *.duckdb
 *.duckdb.wal
 *.bak_before_*
@@ -87,8 +122,8 @@ Thumbs.db
 # WAL order logs
 *.wal
 
-# Signal logs (runtime generated)
+# Signal logs
 config/logs/signals.jsonl*
 
-# Lock files (runtime)
+# Lock files
 *.lock
