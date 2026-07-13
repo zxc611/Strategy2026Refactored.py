@@ -100,6 +100,46 @@ class CycleResonanceParams:
 
 
 @dataclass
+class BetterExitParams:
+    """更好平仓点预计算参数（7策略）。
+
+    定义：同一策略开仓后到下次开仓前比策略平仓点更好（多/空时平仓价更高/低）的位置点。
+    每个策略使用 signal_s1~s5 / div_reversal_signal 作为开仓/平仓信号。
+    """
+    # S1 (HFT/趋势共振)
+    s1_long_entry: float = 0.3
+    s1_short_entry: float = -0.3
+    s1_long_exit: float = -0.1
+    s1_short_exit: float = 0.1
+    # S2 (Spring/弹簧)
+    s2_long_entry: float = 0.4
+    s2_short_entry: float = -0.4
+    s2_exit_abs: float = 0.1
+    # S3 (Box/箱体边界)
+    s3_long_entry: float = 0.5
+    s3_short_entry: float = -0.5
+    s3_exit_abs: float = 0.2
+    # S4 (HF Momentum)
+    s4_long_entry: float = 0.4
+    s4_short_entry: float = -0.4
+    s4_long_exit: float = -0.1
+    s4_short_exit: float = 0.1
+    # S5 (Cross Period)
+    s5_long_entry: float = 0.5
+    s5_short_entry: float = -0.5
+    s5_exit_abs: float = 0.2
+    # S6 (Risk Circuit) - 仅作风控触发器
+    s6_risk_trigger: float = 0.7
+    # S7 (Divergence)
+    s7_long_entry: float = 0.3
+    s7_short_entry: float = -0.3
+    s7_long_exit: float = -0.1
+    s7_short_exit: float = 0.1
+    # 通用
+    enabled: bool = True
+
+
+@dataclass
 class PrecomputeParams:
     kl_rpd: KL_RPD_Params = field(default_factory=KL_RPD_Params)
     signal: SignalParams = field(default_factory=SignalParams)
@@ -112,6 +152,7 @@ class PrecomputeParams:
     pullback: PullbackParams = field(default_factory=PullbackParams)
     daily_pivot: DailyPivotParams = field(default_factory=DailyPivotParams)
     cycle_resonance: CycleResonanceParams = field(default_factory=CycleResonanceParams)
+    better_exit: BetterExitParams = field(default_factory=BetterExitParams)
     max_workers: int = 4
     batch_size: int = 50000
     db_path: str = "preprocessed.duckdb"
@@ -145,6 +186,8 @@ class PrecomputeParams:
             params.daily_pivot = DailyPivotParams(**d["daily_pivot"])
         if "cycle_resonance" in d:
             params.cycle_resonance = CycleResonanceParams(**d["cycle_resonance"])
+        if "better_exit" in d:
+            params.better_exit = BetterExitParams(**d["better_exit"])
         for k in ["max_workers", "batch_size", "db_path", "symbols"]:
             if k in d:
                 setattr(params, k, d[k])

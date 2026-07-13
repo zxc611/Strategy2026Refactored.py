@@ -277,6 +277,21 @@ class PrecomputeEngine:
             for col in div_df.columns:
                 df[col] = div_df[col].values
 
+            # FIX-20260713-BETTER-EXIT: 更好平仓点预计算（7策略 × 6列 = 42列）
+            # 定义：同一策略开仓后到下次开仓前比策略平仓点更好（多/空时平仓价更高/低）的位置点
+            # 输入：signal_s1~s5 + div_reversal_signal + close/high/low
+            # 输出：be_<s>_entry_price/direction/strategy_exit/hold_bars/better_price/gain_pct
+            try:
+                from ali2026v3_trading.precompute._better_exit import (
+                    compute_better_exit_vectorized,
+                )
+                better_exit_df = compute_better_exit_vectorized(df)
+                for col in better_exit_df.columns:
+                    df[col] = better_exit_df[col].values
+                logger.info("[better_exit] %s 列已写入 df", len(better_exit_df.columns))
+            except (ImportError, ValueError, RuntimeError) as _be_err:
+                logger.warning("[better_exit] 计算失败，跳过: %s", _be_err)
+
             v5_cols = list(SCHEMA_REQUIRED_COLUMNS_V5.keys())
             update_cols = [c for c in v5_cols if c in df.columns]
             df_update = df[["minute", "symbol"] + update_cols].copy()

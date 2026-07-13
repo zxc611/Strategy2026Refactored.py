@@ -72,6 +72,55 @@ SCHEMA_REQUIRED_COLUMNS_V5: Dict[str, str] = {
     "div_option_premium_coll": "DOUBLE DEFAULT 0.0",
     "div_option_near_itm": "DOUBLE DEFAULT 0.0",
     "div_reversal_signal": "DOUBLE DEFAULT 0.0",
+    # V5新增：更好平仓点预计算模块（7策略 × 6列 = 42列）
+    # be_<strategy>_entry_price: 开仓价
+    # be_<strategy>_direction: 持仓方向 (+1多头 / -1空头)
+    # be_<strategy>_strategy_exit: 策略平仓价
+    # be_<strategy>_hold_bars: 持仓bar数
+    # be_<strategy>_better_price: 更好平仓价
+    # be_<strategy>_gain_pct: 更好平仓点提升幅度(百分比)
+    "be_s1_entry_price": "DOUBLE DEFAULT 0.0",
+    "be_s1_direction": "INTEGER DEFAULT 0",
+    "be_s1_strategy_exit": "DOUBLE DEFAULT 0.0",
+    "be_s1_hold_bars": "INTEGER DEFAULT 0",
+    "be_s1_better_price": "DOUBLE DEFAULT 0.0",
+    "be_s1_gain_pct": "DOUBLE DEFAULT 0.0",
+    "be_s2_entry_price": "DOUBLE DEFAULT 0.0",
+    "be_s2_direction": "INTEGER DEFAULT 0",
+    "be_s2_strategy_exit": "DOUBLE DEFAULT 0.0",
+    "be_s2_hold_bars": "INTEGER DEFAULT 0",
+    "be_s2_better_price": "DOUBLE DEFAULT 0.0",
+    "be_s2_gain_pct": "DOUBLE DEFAULT 0.0",
+    "be_s3_entry_price": "DOUBLE DEFAULT 0.0",
+    "be_s3_direction": "INTEGER DEFAULT 0",
+    "be_s3_strategy_exit": "DOUBLE DEFAULT 0.0",
+    "be_s3_hold_bars": "INTEGER DEFAULT 0",
+    "be_s3_better_price": "DOUBLE DEFAULT 0.0",
+    "be_s3_gain_pct": "DOUBLE DEFAULT 0.0",
+    "be_s4_entry_price": "DOUBLE DEFAULT 0.0",
+    "be_s4_direction": "INTEGER DEFAULT 0",
+    "be_s4_strategy_exit": "DOUBLE DEFAULT 0.0",
+    "be_s4_hold_bars": "INTEGER DEFAULT 0",
+    "be_s4_better_price": "DOUBLE DEFAULT 0.0",
+    "be_s4_gain_pct": "DOUBLE DEFAULT 0.0",
+    "be_s5_entry_price": "DOUBLE DEFAULT 0.0",
+    "be_s5_direction": "INTEGER DEFAULT 0",
+    "be_s5_strategy_exit": "DOUBLE DEFAULT 0.0",
+    "be_s5_hold_bars": "INTEGER DEFAULT 0",
+    "be_s5_better_price": "DOUBLE DEFAULT 0.0",
+    "be_s5_gain_pct": "DOUBLE DEFAULT 0.0",
+    "be_s6_entry_price": "DOUBLE DEFAULT 0.0",
+    "be_s6_direction": "INTEGER DEFAULT 0",
+    "be_s6_strategy_exit": "DOUBLE DEFAULT 0.0",
+    "be_s6_hold_bars": "INTEGER DEFAULT 0",
+    "be_s6_better_price": "DOUBLE DEFAULT 0.0",
+    "be_s6_gain_pct": "DOUBLE DEFAULT 0.0",
+    "be_s7_entry_price": "DOUBLE DEFAULT 0.0",
+    "be_s7_direction": "INTEGER DEFAULT 0",
+    "be_s7_strategy_exit": "DOUBLE DEFAULT 0.0",
+    "be_s7_hold_bars": "INTEGER DEFAULT 0",
+    "be_s7_better_price": "DOUBLE DEFAULT 0.0",
+    "be_s7_gain_pct": "DOUBLE DEFAULT 0.0",
 }
 
 
