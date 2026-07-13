@@ -243,11 +243,17 @@ class SubscriptionWALService:
         self._event_bus = None
 
     def __getattr__(self, name):
-        # 递归保护: 防止facade双向委托导致无限递归
-        if '__getattr__recursing' in self.__dict__:
+        # FIX-20260713-THREADSAFE-GETATTR: 使用threading.local替代实例级flag
+        # 根因: 原递归保护flag存储在self.__dict__(跨线程共享),多线程并发时
+        #       thread A的flag阻断thread B,导致AttributeError
+        _local = self.__dict__.get('_getattr_tl')
+        if _local is None:
+            import threading as _t
+            _local = _t.local()
+            self.__dict__['_getattr_tl'] = _local
+        if getattr(_local, 'recursing', False):
             raise AttributeError(name)
-
-        self.__dict__['__getattr__recursing'] = True
+        _local.recursing = True
         try:
             _facade = self.__dict__.get('_facade')
             if _facade is not None:
@@ -259,7 +265,7 @@ class SubscriptionWALService:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
         finally:
-            self.__dict__.pop('__getattr__recursing', None)
+            _local.recursing = False
 
     def _init_wal(self):
         """初始化WAL文件"""
@@ -968,11 +974,15 @@ class SubscriptionCoreService:
             return lock
 
     def __getattr__(self, name):
-        # 递归保护: 防止facade双向委托导致无限递归
-        if '__getattr__recursing' in self.__dict__:
+        # FIX-20260713-THREADSAFE-GETATTR: 使用threading.local替代实例级flag
+        _local = self.__dict__.get('_getattr_tl')
+        if _local is None:
+            import threading as _t
+            _local = _t.local()
+            self.__dict__['_getattr_tl'] = _local
+        if getattr(_local, 'recursing', False):
             raise AttributeError(name)
-
-        self.__dict__['__getattr__recursing'] = True
+        _local.recursing = True
         try:
             _facade = self.__dict__.get('_facade')
             if _facade is not None:
@@ -984,7 +994,7 @@ class SubscriptionCoreService:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
         finally:
-            self.__dict__.pop('__getattr__recursing', None)
+            _local.recursing = False
 
     def _do_subscribe(self, instrument_id: str, data_type: str) -> bool:
         """
@@ -2072,10 +2082,15 @@ class SubscriptionManager:
         self._wal_service = SubscriptionWALService(self, config=config)
 
     def __getattr__(self, name):
-        if '__getattr__recursing' in self.__dict__:
+        # FIX-20260713-THREADSAFE-GETATTR: 使用threading.local替代实例级flag
+        _local = self.__dict__.get('_getattr_tl')
+        if _local is None:
+            import threading as _t
+            _local = _t.local()
+            self.__dict__['_getattr_tl'] = _local
+        if getattr(_local, 'recursing', False):
             raise AttributeError(name)
-
-        self.__dict__['__getattr__recursing'] = True
+        _local.recursing = True
         try:
             _ws = self.__dict__.get('_wal_service')
             if _ws is not None:
@@ -2098,7 +2113,7 @@ class SubscriptionManager:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
         finally:
-            self.__dict__.pop('__getattr__recursing', None)
+            _local.recursing = False
     @staticmethod
     def is_option(instrument_id: str) -> bool:
         return SubscriptionInstrumentService.is_option(instrument_id)

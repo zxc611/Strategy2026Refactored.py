@@ -161,9 +161,17 @@ class LifecycleCallbacks:
             _caller_stack_start,
         )
         with p._lock:
-            if p._state not in (StrategyState.INITIALIZING, StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.DEGRADED):
+            # FIX-20260713: 添加STOPPED到允许状态，支持从STOPPED状态重新启动
+            if p._state not in (StrategyState.INITIALIZING, StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.DEGRADED, StrategyState.STOPPED):
                 logging.warning(f"[StrategyCoreService.on_start] Cannot start in state: {p._state}")
                 return False
+            # FIX-20260713: STOPPED状态先转换到INITIALIZING
+            if p._state == StrategyState.STOPPED:
+                logging.info("[FIX-20260713] on_start: STOPPED→INITIALIZING 转换")
+                _lm = getattr(p, '_lifecycle_mgr', None)
+                if _lm is not None:
+                    _lm.state = StrategyState.INITIALIZING
+                p._state = StrategyState.INITIALIZING
             # FIX-20260709-PAUSE-ROOT-V2: 四元状态原子同步
             # 原代码遗漏 _is_trading=True，导致从PAUSED状态恢复后无法交易
             p._is_paused = False
@@ -770,32 +778,53 @@ class LifecycleCallbacks:
 
     def resume(self) -> bool:
         p = self.p
+        # FIX-20260713-RESUME-ROBUST: 入口日志+支持STOPPED状态恢复
+        # 根因1: 原仅接受PAUSED状态，STOPPED状态调用resume静默返回False
+        # 根因2: _resume_in_progress不在try/finally中，异常时标志残留导致PAUSE-GUARD永久放行
+        logging.critical(
+            "[FIX-20260713-RESUME] resume ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s",
+            p.strategy_id, p._state, p._is_running, p._is_paused,
+        )
         with p._lock:
-            if p._state != StrategyState.PAUSED:
+            # FIX-20260713: 允许从PAUSED和STOPPED状态恢复
+            if p._state == StrategyState.PAUSED:
+                pass  # 正常恢复路径
+            elif p._state == StrategyState.STOPPED:
+                # STOPPED → INITIALIZING → RUNNING 两步转换
+                logging.info("[FIX-20260713-RESUME] 从STOPPED状态恢复，先转换到INITIALIZING")
+                _lm = getattr(p, '_lifecycle_mgr', None)
+                if _lm is not None:
+                    _lm.state = StrategyState.INITIALIZING
+                p._state = StrategyState.INITIALIZING
+            else:
                 logging.warning(f"[StrategyCoreService] Cannot resume in state: {p._state}")
                 return False
             # FIX-20260711-PAUSE-GUARD: 设置_resume_in_progress标志，允许transition_to(RUNNING)通过暂停保护
+            # FIX-20260713: 使用try/finally确保标志一定被清除
             p._resume_in_progress = True
-            p._is_paused = False
-            p._is_running = True
-            # FIX-20260708-PAUSE-ROOT: 补全_is_trading=True，原代码遗漏导致恢复后无法交易
-            p._is_trading = True
-            _lm = getattr(p, '_lifecycle_mgr', None)
-            if _lm is not None:
-                _lm.is_paused = False
-                _lm.is_running = True
-            p.transition_to(StrategyState.RUNNING)
-            # FIX-20260711-PAUSE-GUARD: 清除_resume_in_progress标志
-            p._resume_in_progress = False
-            _ss = getattr(p, '_state_store', None)
-            if _ss is not None:
-                try:
-                    _ss.set('_is_running', True)
-                    _ss.set('_is_paused', False)
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    pass
-            logging.info(f"[StrategyCoreService] Resumed: {p.strategy_id} [R23-SM-01-FIX] _is_running同步为True")
-            p._publish_event('StrategyResumed', {'strategy_id': p.strategy_id})
+            try:
+                p._is_paused = False
+                p._is_running = True
+                # FIX-20260708-PAUSE-ROOT: 补全_is_trading=True，原代码遗漏导致恢复后无法交易
+                p._is_trading = True
+                _lm = getattr(p, '_lifecycle_mgr', None)
+                if _lm is not None:
+                    _lm.is_paused = False
+                    _lm.is_running = True
+                p.transition_to(StrategyState.RUNNING)
+                _ss = getattr(p, '_state_store', None)
+                if _ss is not None:
+                    try:
+                        _ss.set('_is_running', True)
+                        _ss.set('_is_paused', False)
+                        _ss.set('_is_trading', True)
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        pass
+                logging.info(f"[StrategyCoreService] Resumed: {p.strategy_id} [R23-SM-01-FIX] _is_running同步为True")
+                p._publish_event('StrategyResumed', {'strategy_id': p.strategy_id})
+            finally:
+                # FIX-20260713: 确保标志一定被清除，防止PAUSE-GUARD永久放行
+                p._resume_in_progress = False
         # FIX-20260711-PAUSE-ACTION: 恢复时必须逐个恢复暂停时关闭的工作
         # 对称于pause()中暂停scheduler和取消timer的操作
         try:

@@ -143,13 +143,22 @@ class ParamsService:
 
     def __getattr__(self, name):
 
-        # 递归保护: 防止ICS/AMS.__getattr__双向委托导致无限递归
+        # FIX-20260713-THREADSAFE-GETATTR: 使用threading.local替代实例级flag
+        # 根因: 原递归保护flag存储在self.__dict__(跨线程共享),当thread A在
+        #   __getattr__中执行ICS.get_instrument_meta(可能触发_lazy_load_from_db耗时操作)
+        #   期间,thread B调用__getattr__命中recursion guard,抛出AttributeError
+        #   导致SubscriptionManagerV2报错 get_instrument_meta失败
+        # 修复: 改用threading.local(),每个线程独立flag,互不干扰
+        _local = self.__dict__.get('_getattr_thread_local')
+        if _local is None:
+            import threading as _threading
+            _local = _threading.local()
+            self.__dict__['_getattr_thread_local'] = _local
 
-        if '__getattr__recursing' in self.__dict__:
-
+        if getattr(_local, 'recursing', False):
             raise AttributeError(name)
 
-        self.__dict__['__getattr__recursing'] = True
+        _local.recursing = True
 
         try:
 
@@ -181,7 +190,7 @@ class ParamsService:
 
         finally:
 
-            self.__dict__.pop('__getattr__recursing', None)
+            _local.recursing = False
 
 
 

@@ -586,13 +586,21 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
                 )
 
             # CHECKPOINT 确保持久化
+            # FIX-20260713-DUCKDB: 处理TransactionContext冲突
+            # 根因: 多线程环境下存在其他活跃写事务时CHECKPOINT失败
+            # 错误: _duckdb.TransactionException不在原捕获范围内导致初始化崩溃
+            # 修复: 1.使用FORCE CHECKPOINT等待活跃事务完成 2.扩展异常捕获到Exception
             checkpoint_conn = None
             try:
                 checkpoint_conn = data_service.get_connection()
-                checkpoint_conn.execute("CHECKPOINT")
-                logging.info("[ensure_products] 合约数据已持久化（CHECKPOINT）")
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as checkpoint_err:
-                logging.warning(f"[ensure_products] CHECKPOINT失败: {checkpoint_err}")
+                try:
+                    checkpoint_conn.execute("FORCE CHECKPOINT")
+                except Exception:
+                    # FORCE CHECKPOINT也可能失败(旧版DuckDB不支持)，回退到普通CHECKPOINT
+                    checkpoint_conn.execute("CHECKPOINT")
+                logging.info("[ensure_products] 合约数据已持久化（FORCE CHECKPOINT）")
+            except Exception as checkpoint_err:
+                logging.warning(f"[ensure_products] CHECKPOINT失败(非致命，数据已写入WAL): {checkpoint_err}")
             finally:
                 if checkpoint_conn is not None:
                     data_service._return_connection(checkpoint_conn)

@@ -49,7 +49,13 @@ class BoxSpringStrategy:
 
     def __init__(self, params: Dict[str, Any]):
         self._detector_service = BoxSpringDetectorService()
-        self._executor_service = BoxSpringExecutorService()
+        # [FIX-20260712-S4-P0] 将策略层参数透传给executor，否则executor使用自身默认值
+        # (stop_profit_ratio=1.8/max_loss_pct=0.5/max_risk_ratio=0.02/max_spring_hold_minutes=120)
+        # 与策略设计(stop_profit_ratio=5.0/max_loss_pct=0.95/max_spring_hold_minutes=5)严重不符。
+        _exec_params = dict(params) if isinstance(params, dict) else {}
+        if 'max_spring_hold_minutes' not in _exec_params:
+            _exec_params['max_spring_hold_minutes'] = 5
+        self._executor_service = BoxSpringExecutorService(_exec_params)
         # R13-P2-API-10修复: 外部dict参数验证
         if not isinstance(params, dict):
             logging.warning("[BoxSpringStrategy] params不是dict类型: %s，使用空dict", type(params))

@@ -100,7 +100,7 @@ class DivergenceReversalParams:
     primary_layer: str = "L3"        # 主信号层: "L3"(用户本意) / "L1L2L3"(三层综合)
     # [FIX-20260712-S7-V3-P2] 活跃度度量方式 + SQL缓存TTL
     activity_metric: str = "total_volume"  # "total_volume" / "last_bar_volume" / "combined"
-    sql_cache_ttl_sec: float = 60.0  # SQL查询缓存TTL(秒), 按kline_period自动调整
+    sql_cache_ttl_sec: float = 0.0  # SQL查询缓存TTL(秒), 0=按kline_period自动调整
 
     def __post_init__(self):
         # 确保 w_option_itm 满足权重守恒

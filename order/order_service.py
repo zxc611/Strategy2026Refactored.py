@@ -56,11 +56,23 @@ class OrderService(BaseService):
 
         # 递归保护: 防止损损query_service 双向委托导致无限递归
 
-        if '__getattr__recursing' in self.__dict__:
+        # FIX-20260713-THREADSAFE-GETATTR
+
+        _local = self.__dict__.get('_getattr_tl')
+
+        if _local is None:
+
+            import threading as _t
+
+            _local = _t.local()
+
+            self.__dict__['_getattr_tl'] = _local
+
+        if getattr(_local, 'recursing', False):
 
             raise AttributeError(name)
 
-        self.__dict__['__getattr__recursing'] = True
+        _local.recursing = True
 
         try:
 
@@ -90,7 +102,7 @@ class OrderService(BaseService):
 
         finally:
 
-            self.__dict__.pop('__getattr__recursing', None)
+            _local.recursing = False
 
 
 

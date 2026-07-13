@@ -470,7 +470,11 @@ def handle_arbitrage_signal(svc, arbitrage_signal: Dict[str, Any], instrument_id
                 from ali2026v3_trading.strategy.monitor.arbitrage_monitor import ArbitrageMonitor
                 _arb_monitor = ArbitrageMonitor.get_instance()
                 _arb_monitor.on_arbitrage_signal(arbitrage_signal)
-                _arb_monitor.save_snapshot(arbitrage_signal, instrument_id)
+                # FIX-20260713-S5S6-V1: V1 save_snapshot 仅接受 SimulatedArbitrageSignal，
+                # 通过 generate_simulated_signal 生成标准化信号并自动落盘快照。
+                _sim_signal = _arb_monitor.generate_simulated_signal()
+                if _sim_signal is not None:
+                    _arb_monitor.save_snapshot(_sim_signal)
                 logging.info("[S5-MONITOR] 套利信号模拟保存: %s dir=%s deviation=%.1fbps (不下单，仅监控)",
                              instrument_id, direction, deviation)
                 _last_arbitrage_signal['hft_consumed'] = True
@@ -624,6 +628,9 @@ class DynamicPursuitEngine:
         if strength_delta < self._surge_threshold:
             return None
         self._stats['surge_detected'] += 1
+        # FIX-20260712-S1-P0: 为每次追击信号生成唯一signal_id，防止HFT订单重复/追踪断裂
+        from ali2026v3_trading.infra.shared_utils import generate_prefixed_id as _gen_id
+        _signal_id = f"PURSUIT_SIG_{instrument_id}_{int(time.time()*1000)}_{_gen_id('', 8)}"
         with self._lock:
             pos = self._positions.get(instrument_id)
             if pos and pos.is_open:
@@ -651,12 +658,11 @@ class DynamicPursuitEngine:
                     'action': 'ADD_POSITION', 'instrument_id': instrument_id, 'direction': direction,
                     'volume': add_volume, 'price': current_price, 'new_stop_profit': new_stop_profit,
                     'total_volume': pos.total_volume, 'avg_price': pos.weighted_avg_price,
-                    'strength_delta': strength_delta,
+                    'strength_delta': strength_delta, 'signal_id': _signal_id,
                 }
             else:
                 stop_profit = self._calc_initial_stop(current_price, direction)
                 # FIX-R37-UNIQUE-ID: 增加随机熵，避免同毫秒同合约pos_id冲突导致持仓覆盖
-                from ali2026v3_trading.infra.shared_utils import generate_prefixed_id as _gen_id
                 pos = PursuitPosition(
                     position_id=f"PURSUIT_{instrument_id}_{int(time.time()*1000)}_{_gen_id('', 8)}",
                     instrument_id=instrument_id, direction=direction,
@@ -672,7 +678,7 @@ class DynamicPursuitEngine:
                 return {
                     'action': 'OPEN_POSITION', 'instrument_id': instrument_id, 'direction': direction,
                     'volume': 1, 'price': current_price, 'stop_profit': stop_profit,
-                    'strength_delta': strength_delta,
+                    'strength_delta': strength_delta, 'signal_id': _signal_id,
                 }
         return None
 

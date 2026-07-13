@@ -702,7 +702,13 @@ class StrategyEcosystem:
             state=SlotState.ACTIVE,
             capital_allocation=self.CAPITAL_ALLOC_MASTER_BASE,
         )
-        self._reverse = self._divergence
+        # FIX-20260713-ECOSYSTEM-INIT: 移除_reverse赋值行
+        # 根因: 原代码在此处将_reverse指向_divergence,但_divergence尚未赋值(在L731才赋值)
+        #       读取未赋值属性触发__getattr__,__getattr__在__init__期间检查service属性(尚未创建)
+        #       抛出AttributeError,导致StrategyEcosystem.__init__永远失败
+        #       get_strategy_ecosystem()每次重新尝试实例化都失败
+        #       _check_ecosystem_exclusion每分钟报错并暂停开仓300秒
+        # 修复: 删除此行(_reverse从未被引用,是死代码)
         self._other = StrategySlot(
             strategy_id='other',
             strategy_type='box_extreme',

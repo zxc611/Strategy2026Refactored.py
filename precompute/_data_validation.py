@@ -239,7 +239,8 @@ class DuckDBTickStorage:
                 self._conn.execute("CHECKPOINT")
                 self._write_count = 0
                 logger.info("[R10-P0-15] DuckDB WAL CHECKPOINT完成")
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as _e:
+            except Exception as _e:
+                # FIX-20260713-DUCKDB: 扩展到Exception捕获_duckdb.TransactionException
                 logger.warning("[R10-P0-15] CHECKPOINT失败: %s", _e)
 
     def bulk_import_parquet(self, parquet_path: str) -> int:
@@ -486,14 +487,16 @@ class DuckDBTickStorage:
         try:
             self._conn.execute("CHECKPOINT")
             logger.info("DuckDB CHECKPOINT完成")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as e:
+        except Exception as e:
+            # FIX-20260713-DUCKDB: 扩展到Exception捕获_duckdb.TransactionException
             logger.warning("CHECKPOINT失败: %s", e)
 
     def close(self) -> None:
         if self._conn is not None:
             try:
                 self._conn.execute("CHECKPOINT")
-            except (ValueError, KeyError, TypeError, AttributeError, IOError) as _e:
+            except Exception as _e:
+                # FIX-20260713-DUCKDB: 扩展到Exception捕获_duckdb.TransactionException
                 logging.debug("[R3-L2] CHECKPOINT on close failed: %s", _e)
                 pass
             self._conn.close()

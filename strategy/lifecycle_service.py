@@ -231,7 +231,10 @@ class LifecycleService:
             elif _new_key == 'paused':
                 _new_running, _new_paused, _new_trading = False, True, False
             elif _new_key in ('stopped', 'degraded_stop'):
-                _new_running, _new_paused, _new_trading = False, True, False
+                # FIX-20260713: STOPPED状态_is_paused应为False，原为True导致:
+                # 1. PAUSE-GUARD阻止后续RUNNING转换(暂停/删除后无法重启)
+                # 2. onTick检查_is_paused跳过策略决策(STOPPED状态不应被当作PAUSED)
+                _new_running, _new_paused, _new_trading = False, False, False
             elif _new_key == 'degraded':
                 _new_running, _new_paused, _new_trading = True, False, True
             elif _new_key == 'error':

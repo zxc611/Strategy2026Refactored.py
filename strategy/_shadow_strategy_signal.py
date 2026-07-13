@@ -56,15 +56,21 @@ class ShadowStrategySignalService:
     def __getattr__(self, name):
         if self._facade is not None:
             # 递归保护: 防止 facade 的 __getattr__ 又委托回 self 导致无限递归
-            if '__getattr__recursing' in self.__dict__:
+            # FIX-20260713-THREADSAFE-GETATTR
+            _local = self.__dict__.get('_getattr_tl')
+            if _local is None:
+                import threading as _t
+                _local = _t.local()
+                self.__dict__['_getattr_tl'] = _local
+            if getattr(_local, 'recursing', False):
                 raise AttributeError(name)
-            self.__dict__['__getattr__recursing'] = True
+            _local.recursing = True
             try:
                 return getattr(self._facade, name)
             except AttributeError:
                 pass
             finally:
-                self.__dict__.pop('__getattr__recursing', None)
+                _local.recursing = False
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def process_shadow_a_signal(

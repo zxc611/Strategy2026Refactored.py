@@ -1,7 +1,0 @@
-﻿.........F                                                               [100%]
-================================== FAILURES ===================================
-E   FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\infra\\_ops_framework.py'
-C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading\tests\test_r2_05_yaml_retry.py:11: FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\xu\\AppData\\Roaming\\InfiniTrader_SimulationX64\\pyStrategy\\demo\\ali2026v3_trading\\infra\\_ops_framework.py'
-=========================== short test summary info ===========================
-FAILED ali2026v3_trading\tests\test_r2_05_yaml_retry.py::test_all_modified_files_parseable
-1 failed, 9 passed in 1.18s

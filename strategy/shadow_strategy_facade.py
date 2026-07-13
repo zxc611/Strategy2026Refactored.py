@@ -48,9 +48,15 @@ class ShadowStrategyEngine:
         self._pnl_service._facade = self
 
     def __getattr__(self, name):
-        if '__getattr__recursing' in self.__dict__:
+        # FIX-20260713-THREADSAFE-GETATTR
+        _local = self.__dict__.get('_getattr_tl')
+        if _local is None:
+            import threading as _t
+            _local = _t.local()
+            self.__dict__['_getattr_tl'] = _local
+        if getattr(_local, 'recursing', False):
             raise AttributeError(name)
-        self.__dict__['__getattr__recursing'] = True
+        _local.recursing = True
         try:
             for svc_name in ('_core_service', '_signal_service', '_pnl_service'):
                 svc = self.__dict__.get(svc_name)
@@ -58,7 +64,7 @@ class ShadowStrategyEngine:
                     return getattr(svc, name)
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
         finally:
-            self.__dict__.pop('__getattr__recursing', None)
+            _local.recursing = False
 
     # ── 显式委托Core公共API（避免__getattr__性能开销） ──
     @property

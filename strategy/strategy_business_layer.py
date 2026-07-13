@@ -877,6 +877,8 @@ class StrategyBusinessLayer:
                     _dr_call_count = getattr(provider, '_dr_update_call_count', 0) + 1
                     provider._dr_update_call_count = _dr_call_count
                     if _dr_call_count % 10 == 1:
+                        if _dr_call_count <= 3 or _dr_call_count % 300 == 1:
+                            logging.info("[S7-V3-DIVREV] S7背离检测运行中(call=%d)", _dr_call_count)
                         try:
                             from ali2026v3_trading.data.data_service import get_data_service as _gds
                             _ds = _gds()
@@ -893,22 +895,42 @@ class StrategyBusinessLayer:
                                 if _use_cache:
                                     _dr_df = _dr_cached_df
                                 else:
+                                    # [FIX-20260712-S7-V3-P0] SQL必须使用UNION分别取期货K线和期权K线，
+                                    # 原JOIN LEFT JOIN会把期权行挂到期货symbol下，导致option_symbol实为期货代码、
+                                    # 期权价格用期货价格，交易标的全错。
                                     _dr_sql = (
                                         "SELECT fi.instrument_id AS symbol, kr.timestamp AS minute, "
                                         "kr.open, kr.high, kr.low, kr.close, kr.volume, "
-                                        "oi.option_type, oi.strike_price, fi2.last_price AS underlying_price "
+                                        "NULL AS option_type, NULL AS strike_price, lp.last_price AS underlying_price "
                                         "FROM klines_raw kr "
                                         "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
-                                        "LEFT JOIN option_instruments oi ON oi.underlying_future_id = fi.internal_id "
-                                        "LEFT JOIN (SELECT internal_id, last_price FROM latest_prices) fi2 ON fi2.internal_id = fi.internal_id "
+                                        # FIX-20260713-S7-SQL: latest_prices视图只有instrument_id列,无internal_id
+                                        # 根因: latest_prices视图定义SELECT instrument_id,last_price,timestamp FROM ticks_raw
+                                        #       原SQL JOIN ON lp.internal_id=fi.internal_id 报Binder Error
+                                        # 修复: 改为JOIN ON lp.instrument_id=fi.instrument_id
+                                        "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
                                         "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = ?) "
                                         "AND kr.period = ? "
-                                        "ORDER BY kr.timestamp DESC LIMIT 500"
+                                        "UNION ALL "
+                                        "SELECT oi.instrument_id AS symbol, kr.timestamp AS minute, "
+                                        "kr.open, kr.high, kr.low, kr.close, kr.volume, "
+                                        "oi.option_type, oi.strike_price, lp.last_price AS underlying_price "
+                                        "FROM klines_raw kr "
+                                        "JOIN option_instruments oi ON kr.internal_id = oi.internal_id "
+                                        "LEFT JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id "
+                                        "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
+                                        "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = ?) "
+                                        "AND kr.period = ? "
+                                        "ORDER BY minute DESC LIMIT 500"
                                     )
-                                    _dr_result = _ds.query(_dr_sql, [_dr_period, _dr_period])
+                                    _dr_result = _ds.query(_dr_sql, [_dr_period, _dr_period, _dr_period, _dr_period])
                                     if _dr_result is not None and len(_dr_result) > 0:
                                         import pandas as _pd
                                         _dr_df = _dr_result.to_pandas() if hasattr(_dr_result, 'to_pandas') else _pd.DataFrame(_dr_result.to_pylist())
+                                        # [S7-V3-P1] 查询结果按时间降序，但下游按'last'取末根成交量；
+                                        # 必须按时间升序排列，使.last()返回最新bar。
+                                        if 'minute' in _dr_df.columns:
+                                            _dr_df = _dr_df.sort_values('minute', ascending=True).reset_index(drop=True)
                                         # 更新缓存
                                         provider._dr_cached_df = _dr_df
                                         provider._dr_last_sql_ts = _now_ts
@@ -946,15 +968,15 @@ class StrategyBusinessLayer:
                                         provider._dr_last_signal = _dr_signal.to_dict()
                                         logging.info("[S7-V3-DIVREV] 背离信号已追加到targets (reason=DIVERGENCE_REVERSAL)")
                                     else:
-                                        # 无背离信号时保持静默(节流日志)
-                                        if _dr_call_count % 100 == 1:
+                                        # 无背离信号时节流日志
+                                        if _dr_call_count <= 3 or _dr_call_count % 300 == 1:
                                             logging.info("[S7-V3-DIVREV] 无背离信号(call=%d rows=%d)",
                                                          _dr_call_count, len(_dr_df))
                                         # 仍调用update()保持向后兼容(三层诊断输出)
                                         _dr_module.update(_dr_df)
                                 else:
-                                    if _dr_call_count % 100 == 1:
-                                        logging.debug("[S7-V3-DIVREV] klines_raw查询无数据(call=%d)", _dr_call_count)
+                                    if _dr_call_count <= 3 or _dr_call_count % 300 == 1:
+                                        logging.info("[S7-V3-DIVREV] klines_raw查询无数据(call=%d period=%s) — DuckDB中可能无对应周期K线", _dr_call_count, _dr_period)
                         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _dr_qry_err:
                             if _dr_call_count <= 3 or _dr_call_count % 100 == 0:
                                 logging.warning("[S7-V3-DIVREV] klines_raw查询失败(call=%d): %s",
@@ -965,6 +987,134 @@ class StrategyBusinessLayer:
                 if _dr_err_count <= 3 or _dr_err_count % 100 == 0:
                     logging.warning("[S7-V3-DIVREV] DivergenceReversalModule集成异常(第%d次): %s",
                                     _dr_err_count, _dr_err)
+            # [FIX-20260713-S5S6-FEED] S5/S6 monitor tick数据投喂 — 根因: on_tick()从未被调用
+            # 根因: S5/S6 monitor虽有on_tick()接口，但在onTick链中从未被调用
+            #       → monitor无价格历史 → 无信号生成 → 0模拟下单 → 其他模块无法参考
+            # 修复: 将tick数据投喂给S5/S6 monitor, 首次调用时注册默认配对/设置合约
+            try:
+                _s5s6_feed_count = getattr(provider, '_s5s6_feed_count', 0) + 1
+                provider._s5s6_feed_count = _s5s6_feed_count
+                if _s5s6_feed_count % 5 == 1:  # 每5tick投喂一次(性能)
+                    _feed_targets = (targets if targets else _fallback_instruments)[:5]
+                    # S5套利: 投喂tick + 首次注册默认配对
+                    try:
+                        from ali2026v3_trading.strategy.monitor.arbitrage_monitor import get_arbitrage_monitor, ArbitragePairConfig
+                        _s5_mon = get_arbitrage_monitor()
+                        if (not getattr(provider, '_s5_pairs_registered', False)) and len(_feed_targets) >= 2:
+                            _leg_a = _feed_targets[0].get('instrument_id', '')
+                            _leg_b = _feed_targets[1].get('instrument_id', '')
+                            if _leg_a and _leg_b and _leg_a != _leg_b:
+                                _s5_mon.register_pair(ArbitragePairConfig(leg_a=_leg_a, leg_b=_leg_b))
+                                provider._s5_pairs_registered = True
+                                logging.info("[S5-ARB-FEED] 注册默认套利对: %s:%s", _leg_a, _leg_b)
+                        for _t in _feed_targets:
+                            _inst = _t.get('instrument_id', '')
+                            _price = float(_t.get('price', 0.0) or 0.0)
+                            if _inst and _price > 0:
+                                _s5_mon.on_tick({
+                                    'instrument_id': _inst,
+                                    'last_price': _price,
+                                    'volume': float(_t.get('volume', 0.0) or 0.0),
+                                    'bid_price': float(_t.get('bid_price', 0.0) or 0.0),
+                                    'ask_price': float(_t.get('ask_price', 0.0) or 0.0),
+                                })
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s5_feed_e:
+                        logging.debug("[S5-ARB-FEED] 投喂异常: %s", _s5_feed_e)
+                    # S6做市: 投喂tick + 首次设置instrument_id
+                    try:
+                        from ali2026v3_trading.strategy.monitor.market_making_monitor import get_market_making_monitor
+                        _s6_mon = get_market_making_monitor()
+                        if (not getattr(provider, '_s6_instrument_set', False)) and _feed_targets:
+                            _s6_inst = _feed_targets[0].get('instrument_id', '')
+                            if _s6_inst:
+                                _s6_mon.instrument_id = _s6_inst
+                                provider._s6_instrument_set = True
+                                logging.info("[S6-MM-FEED] 设置做市合约: %s", _s6_inst)
+                        for _t in _feed_targets:
+                            _inst = _t.get('instrument_id', '')
+                            _price = float(_t.get('price', 0.0) or 0.0)
+                            if _inst and _price > 0:
+                                _s6_mon.on_tick({
+                                    'instrument_id': _inst,
+                                    'last_price': _price,
+                                    'volume': float(_t.get('volume', 0.0) or 0.0),
+                                    'bid_price': float(_t.get('bid_price', 0.0) or 0.0),
+                                    'ask_price': float(_t.get('ask_price', 0.0) or 0.0),
+                                })
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s6_feed_e:
+                        logging.debug("[S6-MM-FEED] 投喂异常: %s", _s6_feed_e)
+            except (ValueError, KeyError, TypeError, AttributeError) as _s5s6_feed_outer_e:
+                logging.debug("[S5S6-FEED] 投喂集成异常: %s", _s5s6_feed_outer_e)
+            # [FIX-20260713-S5S6-SIM-ORDER] S5套利/S6做市商模拟开仓/平仓信号接入订单链
+            # 根因: S5/S6虽内部生成信号和快照，但未接入targets → 无模拟下单日志 → 其他模块无法参考
+            # 修复: 将S5/S6最新信号追加到targets，capital_allocation=0.0确保不实际下单
+            #   dry_run模式会记录模拟下单日志，其他模块可通过targets感知S5/S6方向
+            try:
+                _s5s6_call_count = getattr(provider, '_s5s6_call_count', 0) + 1
+                provider._s5s6_call_count = _s5s6_call_count
+                if _s5s6_call_count % 50 == 1:  # 50tick采样一次
+                    # S5套利模拟信号 — 先触发信号生成(配对评估), 再读取最新信号
+                    try:
+                        from ali2026v3_trading.strategy.monitor.arbitrage_monitor import get_arbitrage_monitor
+                        _s5_mon = get_arbitrage_monitor()
+                        _s5_mon.generate_simulated_signal()
+                        _s5_sig = _s5_mon.get_last_simulated_signal()
+                        if _s5_sig is not None:
+                            _s5_last_recorded = getattr(provider, '_s5_last_recorded_sig_id', '')
+                            if _s5_sig.signal_id != _s5_last_recorded:
+                                _s5_target = {
+                                    'instrument_id': _s5_sig.instrument_id or _s5_sig.leg_a or 'S5_ARB',
+                                    'direction': _s5_sig.direction,
+                                    'price': _s5_sig.entry_price,
+                                    'signal_type': _s5_sig.signal_type,
+                                    'reason': 'S5_ARBITRAGE_SIMULATED',
+                                    'capital_allocation': 0.0,
+                                    'source': 's5_arbitrage_simulated',
+                                    'simulated': True,
+                                    'z_score': _s5_sig.z_score,
+                                    'hedge_ratio': _s5_sig.hedge_ratio,
+                                    'cointegration_pvalue': _s5_sig.cointegration_pvalue,
+                                }
+                                targets.append(_s5_target)
+                                provider._s5_last_recorded_sig_id = _s5_sig.signal_id
+                                logging.info("[S5-ARB-SIM] 模拟%s信号接入订单链: id=%s dir=%s z=%.2f hedge=%.3f",
+                                             _s5_sig.signal_type, _s5_sig.signal_id, _s5_sig.direction,
+                                             _s5_sig.z_score, _s5_sig.hedge_ratio)
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s5_e:
+                        logging.debug("[S5-ARB-SIM] S5套利模拟信号采集失败: %s", _s5_e)
+                    # S6做市商模拟信号
+                    try:
+                        from ali2026v3_trading.strategy.monitor.market_making_monitor import get_market_making_monitor
+                        _s6_mon = get_market_making_monitor()
+                        _s6_sig = _s6_mon.get_last_signal()
+                        if _s6_sig is not None:
+                            _s6_last_recorded = getattr(provider, '_s6_last_recorded_sig_id', '')
+                            _s6_sig_id = getattr(_s6_sig, 'signal_id', '') or str(getattr(_s6_sig, 'timestamp', 0))
+                            if _s6_sig_id != _s6_last_recorded:
+                                _s6_dir = getattr(_s6_sig, 'direction', 'BUY')
+                                _s6_target = {
+                                    'instrument_id': getattr(_s6_sig, 'instrument_id', 'S6_MM') or 'S6_MM',
+                                    'direction': _s6_dir,
+                                    'price': getattr(_s6_sig, 'mid_price', 0.0),
+                                    'signal_type': getattr(_s6_sig, 'signal_type', 'OPEN'),
+                                    'reason': 'S6_MARKET_MAKING_SIMULATED',
+                                    'capital_allocation': 0.0,
+                                    'source': 's6_market_making_simulated',
+                                    'simulated': True,
+                                    'bid_price': getattr(_s6_sig, 'bid_price', 0.0),
+                                    'ask_price': getattr(_s6_sig, 'ask_price', 0.0),
+                                    'spread_bps': getattr(_s6_sig, 'spread_bps', 0.0),
+                                    'inventory': getattr(_s6_sig, 'inventory', 0.0),
+                                }
+                                targets.append(_s6_target)
+                                provider._s6_last_recorded_sig_id = _s6_sig_id
+                                logging.info("[S6-MM-SIM] 模拟%s信号接入订单链: id=%s dir=%s spread=%.1fbps inv=%.2f",
+                                             getattr(_s6_sig, 'signal_type', 'OPEN'), _s6_sig_id, _s6_dir,
+                                             getattr(_s6_sig, 'spread_bps', 0.0), getattr(_s6_sig, 'inventory', 0.0))
+                    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s6_e:
+                        logging.debug("[S6-MM-SIM] S6做市商模拟信号采集失败: %s", _s6_e)
+            except (ValueError, KeyError, TypeError, AttributeError) as _s5s6_e:
+                logging.debug("[S5S6-SIM] S5/S6模拟信号集成异常: %s", _s5s6_e)
             # [FIX-20260712-S2-V2] S2日内交易四维信号组装 — 用户本意: 共振+订单流+希腊+三角
             # 冗余桥接模块已删除，此处直接在业务层组装四维信号(参照S7修复方式)
             # 条件(全部满足): 共振>0.75 + |订单流|>0.20 + 希腊>0.4 + 三角>0.5
@@ -973,14 +1123,6 @@ class StrategyBusinessLayer:
                 provider._s2_call_count = _s2_call_count
                 if _s2_call_count % 30 == 1:  # 30tick采样一次(S2日内不需要高频)
                     _s2_targets = targets if targets else _fallback_instruments
-                    # 获取订单流不平衡(从OrderFlowBridge)
-                    _s2_of_imbalance = 0.0
-                    try:
-                        from ali2026v3_trading.order.order_flow_bridge import OrderFlowBridge
-                        _s2_ofb = OrderFlowBridge()
-                        _s2_of_imbalance = _s2_ofb.get_instant_imbalance('') or 0.0
-                    except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-                        pass
                     # 获取希腊字母评分和三角评判评分(从RiskComputeService)
                     _s2_greeks_score = 0.5  # 默认中性
                     _s2_tri_score = 0.5     # 默认中性
@@ -1012,6 +1154,14 @@ class StrategyBusinessLayer:
                         _s2_dir_hint = t.get('direction', '')
                         if not _s2_inst or _s2_price <= 0:
                             continue
+                        # [FIX-20260712-S2-P0] 订单流必须按目标合约获取，空字符串返回全局/默认值。
+                        _s2_of_imbalance = 0.0
+                        try:
+                            from ali2026v3_trading.order.order_flow_bridge import OrderFlowBridge
+                            _s2_ofb = OrderFlowBridge()
+                            _s2_of_imbalance = _s2_ofb.get_instant_imbalance(_s2_inst) or 0.0
+                        except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                            pass
                         # 四维条件检查(全部满足才开仓)
                         if _s2_res < _S2_RESONANCE_THRESH:
                             continue

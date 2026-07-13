@@ -116,6 +116,8 @@ class SignalGenerator:
         '_filter_by_hft',
         '_filter_by_adaptive',
     ]
+    # [FIX-20260712-S5S6-P0] 关键硬约束filter异常时必须阻断，不能放行。
+    _CRITICAL_FILTERS = {'_filter_by_s5_s6_monitor'}
 
     def __init__(self, signal_service: Any):
         self._svc = signal_service
@@ -125,6 +127,13 @@ class SignalGenerator:
             try:
                 ctx = getattr(self, filter_name)(ctx)
             except Exception as e:
+                # [FIX-20260712-S5S6-P0] 硬约束filter异常时必须fail-safe阻断。
+                if filter_name in self._CRITICAL_FILTERS:
+                    logging.exception("[SignalService] 硬约束filter %s 异常, fail-safe阻断: %s", filter_name, e)
+                    ctx.rejected = True
+                    ctx.reject_reason = f'{filter_name}_exception: {e}'
+                    ctx.filter_name = filter_name
+                    return ctx
                 if not getattr(self, '_filter_exc_logged', False):
                     self._filter_exc_logged = True
                     logging.exception("[SignalService] filter %s exception, fail-safe pass: %s", filter_name, e)
@@ -214,7 +223,15 @@ class SignalGenerator:
             return ctx
 
         # 确定当前信号方向: BUY=开多, SELL=开空
-        _signal_dir = 'BUY' if ctx.signal_type == SignalType.BUY else 'SELL'
+        if ctx.signal_type == SignalType.BUY:
+            _signal_dir = 'BUY'
+        elif ctx.signal_type == SignalType.SELL:
+            _signal_dir = 'SELL'
+        else:
+            # [FIX-20260712-S5S6-P1] 非BUY/SELL信号不应被错误映射为SELL，跳过方向约束。
+            logging.debug("[S5S6-CHAIN] 非BUY/SELL信号跳过S5/S6方向约束: %s %s",
+                          ctx.instrument_id, ctx.signal_type)
+            return ctx
 
         # === S5套利硬约束 ===
         try:
@@ -241,7 +258,13 @@ class SignalGenerator:
                         ctx.filter_name = 's5_s6_monitor'
                         return ctx
         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s5_err:
-            logging.debug("[S5S6-CHAIN] S5套利监控查询失败(放行): %s", _s5_err)
+            # [FIX-20260712-S5S6-P0] 硬约束监控查询失败必须阻断，不能静默放行。
+            # 否则ArbitrageMonitor未初始化/导入失败时，所有信号都会绕过S5套利方向约束。
+            logging.error("[S5S6-CHAIN] S5套利监控查询失败(硬约束阻断): %s", _s5_err)
+            ctx.rejected = True
+            ctx.reject_reason = f's5_monitor_query_failure: {_s5_err}'
+            ctx.filter_name = 's5_s6_monitor'
+            return ctx
 
         # === S6做市商硬约束 ===
         try:
@@ -268,7 +291,12 @@ class SignalGenerator:
                         ctx.filter_name = 's5_s6_monitor'
                         return ctx
         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s6_err:
-            logging.debug("[S5S6-CHAIN] S6做市商监控查询失败(放行): %s", _s6_err)
+            # [FIX-20260712-S5S6-P0] 硬约束监控查询失败必须阻断，不能静默放行。
+            logging.error("[S5S6-CHAIN] S6做市商监控查询失败(硬约束阻断): %s", _s6_err)
+            ctx.rejected = True
+            ctx.reject_reason = f's6_monitor_query_failure: {_s6_err}'
+            ctx.filter_name = 's5_s6_monitor'
+            return ctx
 
         return ctx
 

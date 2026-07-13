@@ -456,6 +456,7 @@ class BoxSpringDetectorService:
             strike_price=strike_price,
             current_price=future_price,
             premium_price=premium_price,
+            open_reason='BOX_SPRING',  # [FIX-20260712-S4-P0] 必须设置，否则prevent_trend_conversion自锁
         )
 
         if is_very_compressed:
