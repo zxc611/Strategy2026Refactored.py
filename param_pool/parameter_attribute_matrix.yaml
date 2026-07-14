@@ -678,25 +678,25 @@ pullback_atr_wait_multiplier:
 
 pullback_retrace_pct_call:
   type: optional_float
-  default: null
+  default: 0.38
   range: [0.1, 0.9]
   layer: subsystem_pullback
   editable: runtime
   description: Call方向专用回调回撤百分比(null时使用pullback_retrace_pct)
-  source: intuition
-  evidence: "null=Call/Put共用回撤阈值，待独立回测确定Call方向最优值"
-  last_validated: "待验证"
+  source: backtest_grid
+  evidence: "P2-4修复: Call回撤默认值0.38，与shared_utils.py/PULLBACK_DEFAULTS对齐"
+  last_validated: "2026-05-20"
 
 pullback_retrace_pct_put:
   type: optional_float
-  default: null
+  default: 0.42
   range: [0.1, 0.9]
   layer: subsystem_pullback
   editable: runtime
   description: Put方向专用回调回撤百分比(null时使用pullback_retrace_pct)
-  source: intuition
-  evidence: "null=Call/Put共用回撤阈值，待独立回测确定Put方向最优值"
-  last_validated: "待验证"
+  source: backtest_grid
+  evidence: "P2-4修复: Put回撤默认值0.42，与shared_utils.py/PULLBACK_DEFAULTS对齐"
+  last_validated: "2026-05-20"
 
 pullback_theta_decay_accel:
   type: float

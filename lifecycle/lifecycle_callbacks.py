@@ -162,12 +162,14 @@ class LifecycleCallbacks:
         )
         with p._lock:
             # FIX-20260713: 添加STOPPED到允许状态，支持从STOPPED状态重新启动
-            if p._state not in (StrategyState.INITIALIZING, StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.DEGRADED, StrategyState.STOPPED):
+            # FIX-20260714-DEGRADED-STOP: 添加DEGRADED_STOP到允许状态，支持从降级停止恢复启动
+            if p._state not in (StrategyState.INITIALIZING, StrategyState.RUNNING, StrategyState.PAUSED, StrategyState.DEGRADED, StrategyState.STOPPED, StrategyState.DEGRADED_STOP):
                 logging.warning(f"[StrategyCoreService.on_start] Cannot start in state: {p._state}")
                 return False
             # FIX-20260713: STOPPED状态先转换到INITIALIZING
-            if p._state == StrategyState.STOPPED:
-                logging.info("[FIX-20260713] on_start: STOPPED→INITIALIZING 转换")
+            # FIX-20260714-DEGRADED-STOP: DEGRADED_STOP也先转换到INITIALIZING（合法转换，lifecycle_state_machine.py:55）
+            if p._state in (StrategyState.STOPPED, StrategyState.DEGRADED_STOP):
+                logging.info(f"[FIX-20260714] on_start: {p._state}→INITIALIZING 转换")
                 _lm = getattr(p, '_lifecycle_mgr', None)
                 if _lm is not None:
                     _lm.state = StrategyState.INITIALIZING
@@ -191,6 +193,20 @@ class LifecycleCallbacks:
                     pass
             p.transition_to(StrategyState.RUNNING)
             logging.info(f"[StrategyCoreService.on_start] Started: {p.strategy_id}")
+            # FIX-20260714-STOP-EVENTS: 创建线程停止事件（原代码遗漏，导致on_stop无法通知线程退出）
+            # 根因: _subscribe_retry_stop/_deferred_subscribe_stop/_historical_kline_stop/_bulk_subscribe_stop
+            #       从未被创建，on_stop()中set()的是None，线程无法被通知退出
+            # 修复: 在on_start()创建所有线程之前，统一创建4个stop event
+            import threading as _threading_stop
+            if not hasattr(p, '_bulk_subscribe_stop') or p._bulk_subscribe_stop is None:
+                p._bulk_subscribe_stop = _threading_stop.Event()
+            if not hasattr(p, '_subscribe_retry_stop') or p._subscribe_retry_stop is None:
+                p._subscribe_retry_stop = _threading_stop.Event()
+            if not hasattr(p, '_deferred_subscribe_stop') or p._deferred_subscribe_stop is None:
+                p._deferred_subscribe_stop = _threading_stop.Event()
+            if not hasattr(p, '_historical_kline_stop') or p._historical_kline_stop is None:
+                p._historical_kline_stop = _threading_stop.Event()
+            logging.info("[on_start] 4个线程stop event已创建: bulk/retry/deferred/kline")
             params = None
             if hasattr(p, '_runtime_strategy_host') and p._runtime_strategy_host:
                 params = getattr(p._runtime_strategy_host, 'params', None)
@@ -267,6 +283,10 @@ class LifecycleCallbacks:
                     _db_subscribe_args = (selected_futures_list, selected_options_dict)
                     def _async_db_subscribe(_sm_ref=_sm, _args=_db_subscribe_args, _p_ref=p):
                         try:
+                            # FIX-20260714-R4/R9: 启动阶段daemon线程支持pause/stop退出
+                            if getattr(_p_ref, '_bulk_subscribe_stop', None) is not None and _p_ref._bulk_subscribe_stop.is_set():
+                                logging.info("[Subscribe] db-subscribe线程收到停止事件，取消数据库登记")
+                                return
                             _cnt = _sm_ref.subscribe_all_instruments(*_args)
                             logging.info(f"[Subscribe] 数据库登记完成：{_cnt} 个合约")
                             _p_ref._e2e_counters['preregistered_instruments'] = _cnt
@@ -284,15 +304,23 @@ class LifecycleCallbacks:
                             # 重试失败订阅: 排空pending队列
                             _retry_max = 3
                             for _retry_idx in range(1, _retry_max + 1):
+                                # FIX-20260714-R4/R9: 重试期间检查停止事件
+                                if getattr(_p_ref, '_bulk_subscribe_stop', None) is not None and _p_ref._bulk_subscribe_stop.is_set():
+                                    logging.info("[Subscribe] db-subscribe重试阶段收到停止事件，终止")
+                                    return
                                 try:
                                     _pending = list(getattr(_sm_ref, '_pending_subscriptions', []) or [])
                                     if not _pending:
                                         break
+                                    _sleep_sec = _retry_idx * 2.0
                                     logging.info(
                                         "[Subscribe] 重试#%d: %d个失败订阅 (delay=%ds)",
-                                        _retry_idx, len(_pending), _retry_idx * 2,
+                                        _retry_idx, len(_pending), _sleep_sec,
                                     )
-                                    time.sleep(_retry_idx * 2.0)
+                                    # FIX-20260714-R9-INTERRUPT: 可中断sleep
+                                    if _p_ref._bulk_subscribe_stop.wait(_sleep_sec):
+                                        logging.info("[Subscribe] db-subscribe重试sleep期间收到停止事件，终止")
+                                        return
                                     _sm_ref._pending_subscriptions = []
                                     _retry_ok = 0
                                     _retry_fail = 0
@@ -359,7 +387,18 @@ class LifecycleCallbacks:
                     _self_ref = _weakref.ref(p)
                     def _retry_platform_subscribe():
                         for attempt in range(1, 4):
-                            time.sleep(5.0 * attempt)
+                            # FIX-20260714-R4/R9: 重试线程响应pause/stop退出事件
+                            _stop_evt = getattr(p, '_subscribe_retry_stop', None)
+                            if _stop_evt is not None and _stop_evt.is_set():
+                                logging.info("[Subscribe] subscribe-retry线程收到停止事件，终止")
+                                return
+                            # FIX-20260714-R9-INTERRUPT: 可中断sleep，避免stop期间阻塞
+                            if _stop_evt is not None:
+                                if _stop_evt.wait(5.0 * attempt):
+                                    logging.info("[Subscribe] subscribe-retry线程在sleep期间收到停止事件，终止")
+                                    return
+                            else:
+                                time.sleep(5.0 * attempt)
                             _self = _self_ref()
                             if _self is None:
                                 logging.debug("[Subscribe] 策略已销毁(weakref)，终止重试")
@@ -417,11 +456,14 @@ class LifecycleCallbacks:
                                 return
                             logging.warning("[Subscribe] 第%d次重试失败，API仍未就绪", attempt)
                         logging.error("[Subscribe] 平台API经3次重试始终未就绪，策略保持DEGRADED状态运行")
-                    threading.Thread(
+                    # FIX-20260714-R17: 保存subscribe-retry线程引用，供on_stop停止
+                    _retry_thread = threading.Thread(
                         target=_retry_platform_subscribe,
                         name=f"subscribe-retry[strategy:{p.strategy_id}]",
                         daemon=True
-                    ).start()
+                    )
+                    p._subscribe_retry_thread = _retry_thread
+                    _retry_thread.start()
                 logging.info(f"[SyncTicks] 跳过初始全量同步，依赖定时任务增量同步")
                 if _sm is None:
                     logging.warning("[Subscribe] 无 subscription_manager")
@@ -433,7 +475,18 @@ class LifecycleCallbacks:
                     _tts_deferred_count = sum(len(v) for v in _tts_deferred_chk['options_dict'].values()) if _tts_deferred_chk and _tts_deferred_chk.get('options_dict') else 0
                     logging.info("[Subscribe] 启动延迟合约异步加载: %d 个延迟合约 + %d 个延迟期权t_type 将在5秒后加载", _deferred_count, _tts_deferred_count)
                     def _load_deferred_instruments():
-                        time.sleep(5.0)
+                        # FIX-20260714-R9-INTERRUPT: 可中断sleep，前5秒内即可响应停止事件
+                        _stop_evt = getattr(p, '_deferred_subscribe_stop', None)
+                        if _stop_evt is not None:
+                            if _stop_evt.wait(5.0):
+                                logging.info("[Subscribe] deferred-subscribe线程在延迟期间收到停止事件，终止")
+                                return
+                        else:
+                            time.sleep(5.0)
+                        # FIX-20260714-R4/R9: 延迟加载线程响应pause/stop退出事件
+                        if _stop_evt is not None and _stop_evt.is_set():
+                            logging.info("[Subscribe] deferred-subscribe线程收到停止事件，终止")
+                            return
                         try:
                             from ali2026v3_trading.infra.subscription_service import SubscriptionManager
                             _deferred_futures = [x for x in _deferred if not SubscriptionManager.is_option(x)]
@@ -505,11 +558,14 @@ class LifecycleCallbacks:
                             # 这些合约无法被DLL处理，加入后会触发平台层错误
                         except Exception as _d_err:
                             logging.error("[Subscribe] 延迟合约加载失败: %s", _d_err)
-                    threading.Thread(
+                    # FIX-20260714-R17: 保存deferred-subscribe线程引用，供on_stop停止
+                    _deferred_thread = threading.Thread(
                         target=_load_deferred_instruments,
                         name=f"deferred-subscribe[strategy:{p.strategy_id}]",
                         daemon=True,
-                    ).start()
+                    )
+                    p._deferred_subscribe_thread = _deferred_thread
+                    _deferred_thread.start()
             else:
                 logging.warning("[Subscribe] 无合约可订阅")
             auto_load = bool(get_param_value(params, 'auto_load_history', True))
@@ -556,8 +612,11 @@ class LifecycleCallbacks:
             )
             # FIX-20260709-PAUSE-ROOT-V2: 四元状态原子同步
             # 原代码遗漏 _is_trading=False，违反PAUSE-SAFE四元同步规范
+            # FIX-20260714-R16: _is_paused应为False（STOPPED状态不是暂停状态）
+            # 根因R16: on_stop()设置_is_paused=True，但transition_to(STOPPED)会覆盖为False
+            #         竞态窗口内其他线程读取_is_paused得到错误值
             p._is_running = False
-            p._is_paused = True
+            p._is_paused = False
             p._is_trading = False
             # FIX-20260711-PAUSE-ACTION: 通知TickBufferFlushFallback线程退出
             _tick_svc = getattr(p, '_tick_svc', None)
@@ -569,19 +628,24 @@ class LifecycleCallbacks:
             _lm = getattr(p, '_lifecycle_mgr', None)
             if _lm is not None:
                 _lm.is_running = False
-                _lm.is_paused = True
+                _lm.is_paused = False
             _ss = getattr(p, '_state_store', None)
             if _ss is not None:
                 try:
                     _ss.set('_is_running', False)
-                    _ss.set('_is_paused', True)
+                    _ss.set('_is_paused', False)
                     _ss.set('_is_trading', False)
                 except (ValueError, KeyError, TypeError, AttributeError):
                     pass
         jobs_zero = True
         try:
+            # FIX-20260714-SCHED-SAFE: pause_scheduler添加SchedulerNotRunningError保护
+            # 根因: on_start失败时APScheduler未启动，on_stop调用pause_scheduler()崩溃
             if hasattr(p._scheduler_manager, 'pause_scheduler'):
-                p._scheduler_manager.pause_scheduler()
+                try:
+                    p._scheduler_manager.pause_scheduler()
+                except Exception as _pause_err:
+                    logging.warning(f"[on_stop] pause_scheduler失败(非致命，调度器可能未启动): {_pause_err}")
             if hasattr(p._scheduler_manager, 'remove_jobs_by_owner'):
                 removed = p._scheduler_manager.remove_jobs_by_owner(p.strategy_id)
                 logging.info(
@@ -612,14 +676,16 @@ class LifecycleCallbacks:
                 f"[run_id={run_id}] contract_watch stop error: {contract_watch_e}"
             )
         try:
+            # FIX-20260714-STOP-EVENT: 无论线程是否存活都设置停止事件，确保无绕过
+            _stop_event = getattr(p, '_platform_subscribe_stop', None)
+            if _stop_event is not None:
+                _stop_event.set()
+                logging.debug("[R22-RES-03-修复] _platform_subscribe_stop已设置")
             _sub_thread = getattr(p, '_platform_subscribe_thread', None)
             if _sub_thread is not None and _sub_thread.is_alive():
-                _stop_event = getattr(p, '_platform_subscribe_stop', None)
-                if _stop_event is not None:
-                    _stop_event.set()
                 _sub_thread.join(timeout=5.0)
-                p._platform_subscribe_thread = None
                 logging.debug("[R22-RES-03-修复] _platform_subscribe_thread已清理")
+            p._platform_subscribe_thread = None
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _cancel_err:
             logging.warning("[R22-RES-03] _platform_subscribe_thread清理失败: %s", _cancel_err)
         try:
@@ -628,6 +694,31 @@ class LifecycleCallbacks:
                 logging.debug("[R22-RES-03-修复] _cancel_all_timers()已调用")
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _timer_err:
             logging.warning("[R22-RES-03] _cancel_all_timers()调用失败: %s", _timer_err)
+        # FIX-20260714-R5/R9/R10/R17: 补全停止W7/W8/W9/W11线程（原on_stop漏停）
+        # 根因R5/R9/R17: on_stop()未停止_bulk_subscribe_thread/subscribe-retry/deferred-subscribe
+        # 根因R10: 历史K线加载线程无停止机制
+        # 修复: 先设置退出事件，再join（带超时），防止删除后继续运行访问已销毁资源
+        for _thread_attr, _stop_attr, _thread_desc in [
+            ('_bulk_subscribe_thread', '_bulk_subscribe_stop', 'db-subscribe'),
+            ('_subscribe_retry_thread', '_subscribe_retry_stop', 'subscribe-retry'),
+            ('_deferred_subscribe_thread', '_deferred_subscribe_stop', 'deferred-subscribe'),
+            ('_historical_kline_thread', '_historical_kline_stop', 'kline-load-async'),
+        ]:
+            try:
+                _stop_evt = getattr(p, _stop_attr, None)
+                if _stop_evt is not None:
+                    _stop_evt.set()
+                    logging.info("[on_stop] %s停止事件已设置", _thread_desc)
+                _t = getattr(p, _thread_attr, None)
+                if _t is not None and _t.is_alive():
+                    _t.join(timeout=3.0)
+                    if _t.is_alive():
+                        logging.warning("[on_stop] %s线程join超时(3s)，继续（daemon线程将自行退出）", _thread_desc)
+                    else:
+                        logging.info("[on_stop] %s线程已退出", _thread_desc)
+                    setattr(p, _thread_attr, None)
+            except (ValueError, KeyError, TypeError, AttributeError) as _join_err:
+                logging.warning("[on_stop] %s线程停止失败: %s", _thread_desc, _join_err)
         try:
             p._stop_scheduler()
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
@@ -774,6 +865,55 @@ class LifecycleCallbacks:
                     logging.info("[StrategyCoreService] pause: drain完成 %s", drain_result)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[StrategyCoreService] pause: drain失败: %s", e)
+        # FIX-20260714-PAUSE-STOP: 补全暂停时漏停的工作
+        # 根因R4: pause()漏停W6(DiagnosisProbeManager)/W10(_platform_subscribe_thread)/W14(TickBufferFlushFallback)
+        # 修复: 暂停时停止这3个工作（冻结后台活动，不销毁线程）
+        # W6: 停止合约监控（on_start使用DiagnosisProbeManager.start_contract_watch类方法启动）
+        try:
+            _diag_mgr = getattr(p, '_diagnosis_probe_manager', None)
+            if _diag_mgr is not None and hasattr(_diag_mgr, 'stop_contract_watch'):
+                _diag_mgr.stop_contract_watch()
+                logging.info("[StrategyCoreService] pause: DiagnosisProbeManager(_diagnosis_probe_manager)合约监控已停止")
+            else:
+                from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                DiagnosisProbeManager.stop_contract_watch()
+                logging.info("[StrategyCoreService] pause: DiagnosisProbeManager类方法合约监控已停止")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[StrategyCoreService] pause: stop_contract_watch失败: %s", e)
+        # FIX-20260714-R4/R9: 暂停时若W7/W8/W9仍在运行，设置退出标志让其自行退出
+        for _thread_attr, _stop_attr, _desc in [
+            ('_bulk_subscribe_thread', '_bulk_subscribe_stop', 'db-subscribe'),
+            ('_subscribe_retry_thread', '_subscribe_retry_stop', 'subscribe-retry'),
+            ('_deferred_subscribe_thread', '_deferred_subscribe_stop', 'deferred-subscribe'),
+        ]:
+            try:
+                _stop_evt = getattr(p, _stop_attr, None)
+                if _stop_evt is not None:
+                    _stop_evt.set()
+                    logging.info("[StrategyCoreService] pause: %s停止事件已设置", _desc)
+                _t = getattr(p, _thread_attr, None)
+                if _t is not None and _t.is_alive():
+                    _t.join(timeout=1.0)
+                    if _t.is_alive():
+                        logging.warning("[StrategyCoreService] pause: %s线程仍存活（daemon，将在后台自行退出）", _desc)
+            except (ValueError, KeyError, TypeError, AttributeError) as _pause_thread_err:
+                logging.warning("[StrategyCoreService] pause: %s线程停止失败: %s", _desc, _pause_thread_err)
+        # W10: 停止平台订阅线程（设置stop标志，让其自行退出）
+        try:
+            _stop_event = getattr(p, '_platform_subscribe_stop', None)
+            if _stop_event is not None:
+                _stop_event.set()
+                logging.info("[StrategyCoreService] pause: _platform_subscribe_stop已设置")
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            logging.warning("[StrategyCoreService] pause: _platform_subscribe_stop设置失败: %s", e)
+        # W14: 停止TickBufferFlushFallback线程
+        try:
+            _tick_svc = getattr(p, '_tick_svc', None)
+            if _tick_svc is not None and hasattr(_tick_svc, 'on_stop'):
+                _tick_svc.on_stop()
+                logging.info("[StrategyCoreService] pause: TickBufferFlushFallback已停止")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[StrategyCoreService] pause: _tick_svc.on_stop失败: %s", e)
         return True
 
     def resume(self) -> bool:
@@ -844,6 +984,60 @@ class LifecycleCallbacks:
                 logging.info("[StrategyCoreService] resume: 交易定时任务已重新注册")
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.warning("[StrategyCoreService] resume: ensure_trading_jobs失败: %s", e)
+        # FIX-20260714-RESUME-RESTART: 恢复pause()中停止的W6/W10/W14
+        # 根因: pause()停止了W6(DiagnosisProbeManager)/W10(_platform_subscribe_thread)/W14(TickBufferFlushFallback)
+        #       但resume()未重启它们→恢复后无平台订阅/无tick缓冲刷新/无合约监控
+        # 修复: resume()中重启这3个工作
+        # W10: 重置stop event + 重新启动平台订阅线程（需传instrument_ids参数）
+        try:
+            _stop_event = getattr(p, '_platform_subscribe_stop', None)
+            if _stop_event is not None:
+                _stop_event.clear()  # 重置stop event
+            _subscribed = getattr(p, '_subscribed_instruments', [])
+            if hasattr(p, '_start_platform_subscribe_async') and _subscribed:
+                p._start_platform_subscribe_async(_subscribed)
+                logging.info("[StrategyCoreService] resume: 平台订阅线程已重启(instruments=%d)", len(_subscribed))
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[StrategyCoreService] resume: 平台订阅重启失败: %s", e)
+        # W14: 重置_flush_stop_requested + 重启TickBufferFlushFallback线程
+        try:
+            _tick_svc = getattr(p, '_tick_svc', None)
+            if _tick_svc is not None:
+                _tick_svc._flush_stop_requested = False  # 重置停止标志
+                # 检查fallback线程是否存活，不存活则重启
+                _fallback_thread = getattr(_tick_svc, '_flush_fallback_thread', None)
+                if _fallback_thread is None or not _fallback_thread.is_alive():
+                    import threading as _threading_resume
+                    _flush_interval = float(getattr(_tick_svc, '_tick_buffer_flush_interval', 1.0))
+                    def _periodic_flush_fallback():
+                        while not getattr(_tick_svc, '_flush_stop_requested', False):
+                            try:
+                                import time as _time_flush
+                                _time_flush.sleep(_flush_interval)
+                                if getattr(_tick_svc, '_flush_stop_requested', False):
+                                    break
+                                if hasattr(_tick_svc, '_shard_buffers') and _tick_svc._shard_buffers:
+                                    from ali2026v3_trading.strategy.tick_processing_service import flush_tick_buffer
+                                    flush_tick_buffer(_tick_svc)
+                            except Exception as _flush_err:
+                                import logging as _logging_flush
+                                _logging_flush.debug("[RESUME] periodic_flush_fallback error: %s", _flush_err)
+                    _new_thread = _threading_resume.Thread(target=_periodic_flush_fallback, daemon=True, name='TickBufferFlushFallback[resume]')
+                    _new_thread.start()
+                    _tick_svc._flush_fallback_thread = _new_thread
+                    logging.info("[StrategyCoreService] resume: TickBufferFlushFallback线程已重启")
+                else:
+                    logging.info("[StrategyCoreService] resume: TickBufferFlushFallback线程仍存活，仅重置标志")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.warning("[StrategyCoreService] resume: TickBufferFlushFallback重启失败: %s", e)
+        # W6: 重启合约监控
+        try:
+            from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+            _host = getattr(p, '_runtime_strategy_host', None)
+            DiagnosisProbeManager.start_contract_watch(_host)
+            logging.info("[StrategyCoreService] resume: DiagnosisProbeManager合约监控已重启")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.warning("[StrategyCoreService] resume: 合约监控重启失败: %s", e)
         return True
 
     def destroy(self) -> bool:

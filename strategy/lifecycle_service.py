@@ -426,6 +426,26 @@ class LifecycleService:
                 p._platform_subscribe_thread = None
             except (AttributeError,):
                 pass
+        # FIX-20260714-R6: _cancel_all_timers扩展停止W7/W8/W9/W11启动阶段daemon线程
+        for _thread_attr, _stop_attr, _thread_desc in [
+            ('_bulk_subscribe_thread', '_bulk_subscribe_stop', 'db-subscribe'),
+            ('_subscribe_retry_thread', '_subscribe_retry_stop', 'subscribe-retry'),
+            ('_deferred_subscribe_thread', '_deferred_subscribe_stop', 'deferred-subscribe'),
+            ('_historical_kline_thread', '_historical_kline_stop', 'kline-load-async'),
+        ]:
+            try:
+                _stop_evt = getattr(p, _stop_attr, None)
+                if _stop_evt is not None:
+                    _stop_evt.set()
+                _t = getattr(p, _thread_attr, None)
+                if _t is not None and _t.is_alive():
+                    _t.join(timeout=2.0)
+                    try:
+                        setattr(p, _thread_attr, None)
+                    except (AttributeError,):
+                        pass
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass
 
     def _log_resource_ownership_table(self, phase='unknown'):
         return self._lc_callbacks._log_resource_ownership_table(phase)

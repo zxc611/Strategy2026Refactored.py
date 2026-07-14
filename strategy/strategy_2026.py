@@ -190,7 +190,11 @@ class Strategy2026(BaseStrategy, UIMixin):
 
     # R21-CC-P1-04修复: Timer取消机制 — stop时取消所有已注册的Timer
     def _cancel_all_timers(self) -> None:
-        """取消所有已注册的threading.Timer，防止stop后回调仍触发"""
+        """取消所有已注册的threading.Timer，防止stop后回调仍触发
+
+        FIX-20260714-R6: 扩展为同时停止启动阶段daemon线程(W7/W8/W9/W11)，
+        与ali2026v3_trading.strategy.lifecycle_service.LifecycleService._cancel_all_timers保持一致。
+        """
         _warm_timer = getattr(self, '_storage_warm_timer', None)
         if _warm_timer is not None:
             _warm_timer.cancel()
@@ -205,6 +209,26 @@ class Strategy2026(BaseStrategy, UIMixin):
             self._platform_subscribe_stop.set()
             _sub_thread.join(timeout=5.0)
             self._platform_subscribe_thread = None
+        # FIX-20260714-R6: 同步停止启动阶段daemon线程(W7/W8/W9/W11)
+        for _thread_attr, _stop_attr, _thread_desc in [
+            ('_bulk_subscribe_thread', '_bulk_subscribe_stop', 'db-subscribe'),
+            ('_subscribe_retry_thread', '_subscribe_retry_stop', 'subscribe-retry'),
+            ('_deferred_subscribe_thread', '_deferred_subscribe_stop', 'deferred-subscribe'),
+            ('_historical_kline_thread', '_historical_kline_stop', 'kline-load-async'),
+        ]:
+            try:
+                _stop_evt = getattr(self, _stop_attr, None)
+                if _stop_evt is not None:
+                    _stop_evt.set()
+                _t = getattr(self, _thread_attr, None)
+                if _t is not None and _t.is_alive():
+                    _t.join(timeout=2.0)
+                    try:
+                        setattr(self, _thread_attr, None)
+                    except (AttributeError,):
+                        pass
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass
 
     def is_market_open(self, exchange: str = 'AUTO') -> bool:
         from ali2026v3_trading.infra.scheduler_service import is_market_open as _is_market_open
@@ -229,7 +253,40 @@ class Strategy2026(BaseStrategy, UIMixin):
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             return any(_is_market_open(exch) for exch in ['CFFEX', 'SHFE', 'DCE', 'CZCE', 'INE', 'GFEX'])
 
+    def _sync_trading_to_outer_ref(self, trading_value: bool) -> None:
+        """FIX-20260714-OUTER-REF: 同步trading状态到t_type_bootstrap引导层
+
+        根因R2/R3/R7: auto_start设置Strategy2026.trading=True，但t_type_bootstrap.trading仍为False
+                     C++读取t_type_bootstrap.trading→UI显示"初始化"
+        修复: 通过_outer_ref同步trading到引导层（t_type_bootstrap注入的_outer_ref）
+        """
+        try:
+            _outer = getattr(self, '_outer_ref', None)
+            if _outer is not None:
+                _outer.trading = trading_value
+                logging.info("[Strategy2026] _sync_trading_to_outer_ref: trading=%s已同步到引导层", trading_value)
+        except (ValueError, KeyError, TypeError, AttributeError) as _sync_err:
+            logging.warning("[Strategy2026] _sync_trading_to_outer_ref同步失败(非致命): %s", _sync_err)
+
     def on_start(self):
+        # FIX-20260714-IDEMPOTENT: on_start()幂等性修复
+        # 根因R11: auto_start调用on_start()后，用户点击"执行"C++再调用on_start()
+        #         旧代码重置标志重新执行完整启动流程→重复订阅/重复初始化
+        # 修复: 如果策略已在RUNNING状态，直接返回True，不重复执行
+        try:
+            _current_state = getattr(self.strategy_core, '_state', None) if hasattr(self, 'strategy_core') else None
+            if _state_is(_current_state, StrategyState.RUNNING) and getattr(self, '_start_executed', False):
+                logging.info(
+                    "[Strategy2026.onStart] IDEMPOTENT SKIP: already RUNNING (run_id=%s), "
+                    "auto_start已启动→用户点击执行时安全跳过",
+                    self._lifecycle_run_id,
+                )
+                # 仍需同步trading到_outer_ref（防止首次auto_start时未同步）
+                self._sync_trading_to_outer_ref(True)
+                return True
+        except (ValueError, KeyError, TypeError, AttributeError) as _idem_err:
+            logging.debug("[Strategy2026.onStart] 幂等检查异常(非致命): %s", _idem_err)
+
         with self._lifecycle_lock:
             if self._start_executed:
                 logging.warning(
@@ -331,6 +388,11 @@ class Strategy2026(BaseStrategy, UIMixin):
     def _onStart_step_status_set(self, _init_steps):
         try:
             self.trading = True
+            # FIX-20260714-OUTER-REF: 同步trading到t_type_bootstrap（通过_outer_ref）
+            # 根因R2/R3/R7: auto_start设置Strategy2026.trading=True，但t_type_bootstrap.trading仍为False
+            #              C++读取t_type_bootstrap.trading→UI显示"初始化"
+            # 修复: 通过_outer_ref同步trading到引导层
+            self._sync_trading_to_outer_ref(True)
             logging.info("[Strategy2026] _onStart_step_status_set: about to call update_status_bar()")
             self.update_status_bar()
             logging.info("[Strategy2026] _onStart_step_status_set: update_status_bar() completed")
@@ -385,6 +447,13 @@ class Strategy2026(BaseStrategy, UIMixin):
                 is_running = getattr(self.strategy_core, '_is_running', False)
                 is_paused = getattr(self.strategy_core, '_is_paused', False)
                 logging.info("[Strategy2026] strategy_core 状态：state=%s, _is_running=%s, _is_paused=%s", current_state, is_running, is_paused)
+                # FIX-20260714-DEGRADED-STOP: DEGRADED_STOP先转为STOPPED，再走prepare_restart
+                # 根因: on_stop时jobs未清零→DEGRADED_STOP，用户点击执行时DEGRADED_STOP不在on_start允许列表
+                # 修复: DEGRADED_STOP→STOPPED(合法转换)→prepare_restart→INITIALIZING
+                if _state_is(current_state, StrategyState.DEGRADED_STOP) and hasattr(self.strategy_core, 'transition_to'):
+                    logging.info("[Strategy2026] strategy_core DEGRADED_STOP -> STOPPED 转换")
+                    self.strategy_core.transition_to(StrategyState.STOPPED)
+                    current_state = getattr(self.strategy_core, '_state', None)
                 if _state_is(current_state, StrategyState.STOPPED) and hasattr(self.strategy_core, 'prepare_restart'):
                     restart_ready = self.strategy_core.prepare_restart()
                     logging.info("[Strategy2026] strategy_core STOPPED -> prepare_restart=%s", restart_ready)
@@ -588,28 +657,33 @@ class Strategy2026(BaseStrategy, UIMixin):
 
             self.output("策略初始化完毕，等待平台启动")
 
-            # FIX-20260713-DELETE-ROOT: auto_start逻辑已移到t_type_bootstrap.on_init()
-            # 根因: Strategy2026.on_init()中调用 self.on_start() 时, self 是 Strategy2026 实例
-            #   调用的是 Strategy2026.on_start(), 而非 t_type_bootstrap.on_start()
-            #   导致 t_type_bootstrap.trading 保持 False
-            #   C++平台通过 t_type_bootstrap.trading 判断策略状态, 认为策略未运行
-            #   所以C++拒绝调用 on_stop/on_destroy → 暂停/删除无效
-            # 修复: auto_start逻辑由 t_type_bootstrap.on_init() 接管
-            #   t_type_bootstrap.on_init() 调用 self.on_start() (t_type_bootstrap.on_start())
-            #   正确设置 t_type_bootstrap.trading=True, 让C++平台感知策略已运行
-            #   Strategy2026.on_init() 仅负责初始化, 不负责 auto_start
+            # FIX-20260714-V5-AUTO-START-DELAYED: Timer延迟auto_start，解决C++状态机卡住问题
+            # 根因（V5报告确认）: auto_start在on_init()内部同步调用on_start()导致C++状态机卡住
+            #   - C++检测到on_start()在on_init()执行期间被调用
+            #   - C++认为策略已启动，自己不再调用on_start()
+            #   - 状态机卡住在"已初始化" → UI显示"初始化"但策略在运行 → 暂停/删除失效
+            # 修复: 通过Timer延迟调用on_start()，on_init()先返回
+            #   - on_init()返回 → C++状态变为"已初始化"（C++不卡住）
+            #   - Timer 0.1s后触发on_start() → 策略自动进入运行状态（auto_start功能保留）
+            #   - 用户点击执行按钮 → C++调用on_start() → IDEMPOTENT SKIP → C++状态推进到"执行中"
+            #   - 用户点击暂停/删除按钮 → C++调用on_stop()/on_destroy() → 正常工作
+            # 验证依据: 2026-07-13 16:20 auto_start延迟0.05s执行，C++正常调用on_start()/on_stop()
+            # 参见: ali2026v3_trading/docs/排查报告_auto_start延迟方案与暂停删除修复_V5_20260714.md
             try:
-                from ali2026v3_trading.config.params_service import get_param_value
-                _auto_start = bool(get_param_value(getattr(self, 'config', None), 'auto_start_after_init', False))
-            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-                _auto_start = False
-            # 存储auto_start配置供onTick自愈机制使用
-            self._auto_start_after_init = _auto_start
-            if _auto_start:
-                logging.info("[Strategy2026.on_init] auto_start_after_init=True (由t_type_bootstrap接管, 此处不调用on_start)")
-            else:
-                logging.info("[Strategy2026.on_init] auto_start_after_init=False, 等待手动启动")
-
+                # FIX-20260714-V6: Timer必须调用t_type_bootstrap.on_start()，而非Strategy2026.on_start()
+                # 根因: V5代码Timer调用self.on_start(Strategy2026.on_start)，绕过t_type_bootstrap.on_start()
+                #       导致C++不认为on_start被正式调用，状态机卡住，不调用on_start/on_stop/on_destroy
+                # 修复: 通过_outer_ref获取t_type_bootstrap实例，调用其on_start()
+                #       t_type_bootstrap.on_start()会: 1.调用real.on_start() 2.设置self.trading=True 3.日志
+                #       这与2026-07-13 16:20工作版本完全一致
+                _outer = getattr(self, '_outer_ref', None) or self
+                _auto_start_timer = threading.Timer(0.1, _outer.on_start)
+                _auto_start_timer.daemon = True
+                _auto_start_timer.start()
+                _target = "t_type_bootstrap" if _outer is not self else "Strategy2026(fallback)"
+                logging.info("[Strategy2026.on_init] auto_start已调度（0.1s后执行，目标=%s），策略将自动进入运行状态", _target)
+            except Exception as _auto_start_err:
+                logging.error("[Strategy2026.on_init] auto_start调度失败(非致命，用户可手动点击执行): %s", _auto_start_err)
             return None
         except Exception as e:
             # FIX-20260713: 扩大异常捕获范围，防止ImportError/OSError等导致on_init静默失败
@@ -660,6 +734,8 @@ class Strategy2026(BaseStrategy, UIMixin):
             _utils = None
             logging.warning("[DEP-04] pythongo.utils not available, using None fallback")
         self.trading = False
+        # FIX-20260714-OUTER-REF: on_stop同步trading=False到t_type_bootstrap
+        self._sync_trading_to_outer_ref(False)
         if _utils is not None:
             try:
                 _utils.Scheduler("PythonGO").stop()
@@ -906,63 +982,10 @@ class Strategy2026(BaseStrategy, UIMixin):
             last_price = getattr(tick, 'last_price', 0.0)
             logging.info("[Strategy2026.onTick] FIRST TICK RECEIVED: instrument=%s price=%.2f — 平台数据流入确认", instrument_id, last_price)
 
-        # FIX-20260713-DELETE-ROOT: onTick自愈机制 — 通过_outer_ref调用t_type_bootstrap.on_start()
-        # 根因: 原代码调用 self.on_start() (Strategy2026.on_start())
-        #   不会触发 t_type_bootstrap.on_start(), 导致 t_type_bootstrap.trading 保持 False
-        #   C++平台认为策略未运行 → 暂停/删除无效
-        # 修复: 通过 _outer_ref (t_type_bootstrap实例) 调用 on_start()
-        #   正确设置 t_type_bootstrap.trading=True, 让C++平台感知策略已运行
-        _auto_running_attempt = getattr(self, '_auto_running_attempt', 0)
-        _allow_self_heal = getattr(self, '_auto_start_after_init', False)  # 仅当auto_start_after_init=True时才自愈
-        if _allow_self_heal and _auto_running_attempt < 3:
-            try:
-                _current_state = getattr(self.strategy_core, '_state', None) if hasattr(self, 'strategy_core') else None
-                if _state_is(_current_state, (StrategyState.INITIALIZING,)):
-                    self._auto_running_attempt = _auto_running_attempt + 1
-                    logging.warning(
-                        "[FIX-20260713-AUTO-RUNNING] 检测到策略仍处于INITIALIZING状态(attempt=%d/3)，"
-                        "通过_outer_ref调用t_type_bootstrap.on_start()进入RUNNING",
-                        self._auto_running_attempt,
-                    )
-                    try:
-                        # 通过_outer_ref调用t_type_bootstrap.on_start()
-                        _outer = getattr(self, '_outer_ref', None)
-                        if _outer is not None:
-                            _outer.on_start()  # t_type_bootstrap.on_start() → 设置trading=True
-                        else:
-                            # fallback: 如果_outer_ref不存在, 降级调用self.on_start()
-                            logging.warning("[FIX-20260713-AUTO-RUNNING] _outer_ref为None, 降级调用self.on_start()")
-                            self.on_start()
-                        _post_state = getattr(self.strategy_core, '_state', None) if hasattr(self, 'strategy_core') else None
-                        logging.info(
-                            "[FIX-20260713-AUTO-RUNNING] on_start()完成, state=%s (attempt=%d)",
-                            _post_state, self._auto_running_attempt,
-                        )
-                        if _state_is(_post_state, StrategyState.RUNNING):
-                            logging.info("[FIX-20260713-AUTO-RUNNING] ASSERTION PASS: state=RUNNING")
-                            self._auto_running_attempt = 0
-                        else:
-                            logging.warning(
-                                "[FIX-20260713-AUTO-RUNNING] ASSERTION WARN: state=%s (期望RUNNING), 将在后续tick重试",
-                                _post_state,
-                            )
-                    except Exception as _auto_start_err:
-                        logging.error(
-                            "[FIX-20260713-AUTO-RUNNING] on_start()失败(attempt=%d): %s",
-                            self._auto_running_attempt, _auto_start_err, exc_info=True,
-                        )
-                elif _state_is(_current_state, (StrategyState.RUNNING, StrategyState.PARALLEL_RUNNING)):
-                    if _auto_running_attempt > 0:
-                        self._auto_running_attempt = 0
-            except (ValueError, KeyError, TypeError, AttributeError):
-                pass
-        elif _allow_self_heal and _auto_running_attempt == 3:
-            # FIX-20260713-AUDIT: 3次自愈耗尽后记录ERROR日志(仅首次耗尽时记录)
-            self._auto_running_attempt = 4  # 防止重复日志
-            logging.error(
-                "[FIX-20260713-AUTO-RUNNING] 自愈机制已耗尽(3/3次失败)，策略仍卡在INITIALIZING状态。"
-                "请检查on_init/on_start日志排查根因，或手动重启策略。"
-            )
+        # FIX-20260714-ROOT-CAUSE: 移除onTick自愈机制，回归C++平台正常状态管理
+        # 自愈机制(检测INITIALIZING状态自动调用on_start())绕过了C++平台状态机
+        # 导致Python层策略运行但C++状态仍是"已初始化" → 点击执行无效 + 暂停删除无效
+        # 正确流程: on_init()返回→已初始化, 用户点击执行→C++调用on_start()→运行中
 
         # R15-P0-RES-01修复: DEGRADED状态下阻断策略决策，但数据保存必须继续
         _is_degraded = False

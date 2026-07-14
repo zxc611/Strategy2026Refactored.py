@@ -420,14 +420,26 @@ class LifecycleBind:
                     logging.info("[KlineLoadAsync] 等待 %d 个订阅线程完成，避免并发C++ API调用导致DLL崩溃...",
                                  len(_threads_to_join))
                     for _name, _t in _threads_to_join:
-                        _t.join(timeout=_JOIN_TIMEOUT)
+                        # FIX-20260714-R10-INTERRUPT: join期间响应_historical_kline_stop，避免stop/destroy后阻塞
+                        _elapsed = 0.0
+                        _poll_interval = 0.5
+                        while _t.is_alive() and _elapsed < _JOIN_TIMEOUT:
+                            if p._historical_kline_stop.is_set():
+                                logging.info("[KlineLoadAsync] 停止事件已设置，中断等待订阅线程")
+                                break
+                            _t.join(timeout=_poll_interval)
+                            _elapsed += _poll_interval
                         if _t.is_alive():
-                            logging.warning("[KlineLoadAsync] %s join超时(%.0fs)，继续（风险：可能触发DLL崩溃）",
+                            logging.warning("[KlineLoadAsync] %s join超时(%.0fs)或收到停止事件，继续（风险：可能触发DLL崩溃）",
                                             _name, _JOIN_TIMEOUT)
                         else:
                             logging.info("[KlineLoadAsync] %s 已完成", _name)
                 else:
                     logging.warning("[KlineLoadAsync] 未检测到存活订阅线程，直接加载K线（可能已快速完成或未启动）")
+                # FIX-20260714-R10: 在真正加载前检查停止事件，避免stop/destroy后仍启动耗时操作
+                if p._historical_kline_stop.is_set():
+                    logging.info("[KlineLoadAsync] 停止事件已设置，取消历史K线加载")
+                    return
                 logging.info("[KlineLoadAsync] 后台历史K线加载开始...")
                 p._start_historical_kline_load()
                 logging.info("[KlineLoadAsync] 后台历史K线加载完成")
@@ -440,11 +452,14 @@ class LifecycleBind:
                             _stor._ext_kline_load_in_progress = False
                     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError):
                         pass
-        threading.Thread(
+        # FIX-20260714-R10: 保存历史K线线程引用并提供退出事件，供pause/on_stop停止
+        _kline_thread = threading.Thread(
             target=_kline_worker,
             name=f"kline-load-async[strategy:{p.strategy_id}]",
             daemon=True
-        ).start()
+        )
+        p._historical_kline_thread = _kline_thread
+        _kline_thread.start()
         logging.info("[KlineLoadAsync] 历史K线加载已调度到后台线程，onStart 不再阻塞")
 
     def _start_historical_kline_load(self, blocking: bool = False) -> None:

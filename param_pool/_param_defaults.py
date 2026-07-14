@@ -198,7 +198,7 @@ PARAM_DEFAULTS = {  # R21-MEM-P2-05修复: 模块级大字典，含多个PARAM_D
     "max_risk_per_trade": 0.05,
     "max_open_positions": 3,
     "lots_min": 3,
-    "max_signals_per_window": 5,
+    "max_signals_per_window": 10,  # R25对齐修复: 5→10与PAM/config_params.py CENTRALIZED_DEFAULTS对齐
     "signal_cooldown_sec": 60.0,
     "non_other_ratio_threshold": 0.65,
     "state_confirm_bars": 5,  # R24-P1-DF-01修复: 统一默认值为5
@@ -210,6 +210,12 @@ PARAM_DEFAULTS = {  # R21-MEM-P2-05修复: 模块级大字典，含多个PARAM_D
     "rate_limit_global_per_min": 60,
     "daily_loss_hard_stop_pct": 0.05,
     "logic_reversal_threshold": 1.5,
+    # 2026-07-14 补充: PAM中声明但PD缺失的参数, 补全三源对齐
+    "kline_snr_window": 50,  # K线信噪比窗口, PAM source=backtest_grid
+    "max_theta_ratio": 0.5,  # 最大Theta比例, PAM source=intuition
+    "min_profit_threshold": 0.002,  # 最小利润阈值, PAM source=intuition
+    "option_buy_lots_max": 100,  # 期权买入最大手数, PAM source=intuition
+    "option_width_min_threshold": 4.0,  # 期权宽度最小阈值, PAM source=intuition
     # P1-R11-05: 订单执行延迟配置(毫秒)，回测中模拟从信号生成到订单成交的延迟。
     # 默认50ms保证非零延迟，避免回测中零延迟导致的成交优化偏差。
     "execution_delay_ms": 50,

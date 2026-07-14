@@ -470,6 +470,12 @@ class StrategyConfigLayer:
         provider._platform_subscribe_thread = None
         provider._platform_subscribe_stop = threading.Event()
         provider._platform_subscribe_lock = threading.Lock()
+        # FIX-20260714-THREAD-STOP: 为启动阶段daemon线程提供统一退出事件
+        provider._bulk_subscribe_stop = threading.Event()
+        provider._subscribe_retry_stop = threading.Event()
+        provider._deferred_subscribe_stop = threading.Event()
+        provider._historical_kline_stop = threading.Event()
+        provider._historical_kline_thread = None
         provider._last_option_status_log_time = 0.0
         provider._option_status_log_interval = 180.0
 
