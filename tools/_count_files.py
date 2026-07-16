@@ -2,7 +2,7 @@
 """Count .py files by directory, excluding tests/tools/archive."""
 import os
 
-ROOT = r'c:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading'
+ROOT = r'c:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\demo'
 EXCLUDE_TOP = {'archive', '__pycache__', 'tools', 'tests', '_verify_logs', '_wal_orders', '.git', '.ci', 'docs', 'benchmarks'}
 
 details = {}

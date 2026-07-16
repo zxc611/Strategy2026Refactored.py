@@ -1,7 +1,7 @@
 # MODULE_ID: M2-412
 """Tests for evaluation.marquee_threshold module."""
 import pytest
-from ali2026v3_trading.evaluation.marquee_threshold import MarqueeThreshold
+from evaluation.marquee_threshold import MarqueeThreshold
 
 
 class TestMarqueeThreshold:

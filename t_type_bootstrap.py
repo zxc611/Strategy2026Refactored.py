@@ -99,9 +99,14 @@ class t_type_bootstrap(BaseStrategy):
         self.varMap = {}
 
     def on_init(self):
+        import threading
+        import traceback
+        _caller = ''.join(traceback.format_stack()[-4:-1])
+        logging.critical("[DIAG-LIFECYCLE] on_init() CALLED thread=%s trading_before=%s caller_stack:\n%s",
+                         threading.current_thread().name, self.trading, _caller)
         self._on_init_called = True
         if self._real_strategy is None:
-            from ali2026v3_trading.strategy.strategy_2026 import Strategy2026 as _Real
+            from strategy.strategy_2026 import Strategy2026 as _Real
             self._real_strategy = _Real(*self._init_args, **self._init_kwargs)
 
         # FIX-20260713-DELETE-ROOT: 强制同步strategy_id到_real_strategy
@@ -134,18 +139,17 @@ class t_type_bootstrap(BaseStrategy):
         result = self._real_strategy.on_init()
         self.inited = True
 
-        # FIX-20260714-V5: auto_start由Strategy2026.on_init()中的Timer延迟0.1s执行
-        # 设计原理:
-        #  1. on_init()先返回 → C++状态机正常推进到"已初始化"（C++不卡住）
-        #  2. Timer 0.1s后触发Strategy2026.on_start() → 策略自动进入运行状态（auto_start保留）
-        #  3. 用户点击执行 → C++调用t_type_bootstrap.on_start() → IDEMPOTENT SKIP → C++正常推进
-        #  4. 用户点击暂停/删除 → C++调用on_stop()/on_destroy() → 正常工作
-        # 状态同步: Strategy2026.on_start()通过_outer_ref同步trading=True到引导层
-        # 安全网: 立即检查_real_strategy.trading，若Timer已提前触发则同步（防止竞态）
-        if getattr(self._real_strategy, 'trading', False):
-            self.trading = True
-            logging.info("[t_type_bootstrap] auto_start已提前触发，trading=True已同步到引导层")
-        logging.info("[t_type_bootstrap] on_init完成, inited=%s, trading=%s (auto_start已调度, 0.1s后自动进入运行)", self.inited, self.trading)
+        # FIX-20260715-V5-P0-1: 彻底删除 auto_start Timer 误导性注释（V4附录I声称已实现但未落地）
+        # 根因: t_type_bootstrap.py:142-153 历史注释声称"auto_start由Timer延迟0.1s执行"，
+        #       但实际 strategy_2026.py:567-620 无 Timer 代码 → 注释与代码不符，
+        #       导致排查方向被误导到"Timer未触发"，真实根因是"Timer已被移除"
+        # 修复决策: 经用户确认不恢复 Timer，采用方案B删除误导性注释，明确告知需手动启动
+        # 状态同步: 仅当 C++ 平台调用 on_start() 时才设置 trading=True
+        logging.info("[t_type_bootstrap] on_init完成, inited=%s, trading=%s (auto_start已禁用，等待用户手动点击运行)",
+                     self.inited, self.trading)
+        import threading
+        logging.critical("[DIAG-LIFECYCLE] on_init() RETURN thread=%s trading=%s inited=%s",
+                         threading.current_thread().name, self.trading, self.inited)
         return result
 
     # FIX-20260713-AUDIT: on_start/on_stop/onTick/onOrder/onTrade添加None检查
@@ -153,20 +157,34 @@ class t_type_bootstrap(BaseStrategy):
     #       _real_strategy为None导致AttributeError崩溃
     # 修复: 使用_ensure_real_strategy()确保_real_strategy已创建或安全返回
     def on_start(self):
+        import threading
+        import traceback
+        _caller = ''.join(traceback.format_stack()[-4:-1])
+        logging.critical("[DIAG-LIFECYCLE] on_start() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
+                         threading.current_thread().name, self.trading, self.inited, _caller)
         real = self._ensure_real_strategy()
         if real is None:
             return None
         result = real.on_start()
-        # FIX-20260713-PLATFORM-STATE: on_start完成后设trading=True
-        # 平台C++宿主通过trading属性判断策略运行状态, on_start后必须为True
-        self.trading = True
-        # FIX-20260713-v2.8.6: 移除INFINIGO.startStrategy/resumeStrategy尝试
-        # 根因: INFINIGO API不存在这两个方法, 每次调用都走fallback浪费日志
-        # update_status_bar()已在Strategy2026._onStart_step_status_set()中调用
-        logging.info("[t_type_bootstrap] on_start完成, trading=True")
+        _actual_trading = getattr(real, 'trading', False)
+        if _actual_trading != self.trading:
+            logging.warning("[t_type_bootstrap] on_start后trading不一致: outer=%s, real=%s, 以real为准",
+                            self.trading, _actual_trading)
+        self.trading = _actual_trading
+        # FIX-20260715-STRATEGY-OBJ-PROBE: 记录关键状态供C++关联验证
+        _outer_ref_id = id(self)
+        _real_ref_id = id(real)
+        _sid = getattr(self, 'strategy_id', None)
+        logging.critical("[DIAG-LIFECYCLE] on_start() RETURN thread=%s trading=%s result=%s strategy_id=%s outer_id=%d real_id=%d",
+                         threading.current_thread().name, self.trading, result, _sid, _outer_ref_id, _real_ref_id)
         return result
 
     def on_stop(self):
+        import threading
+        import traceback
+        _caller = ''.join(traceback.format_stack()[-4:-1])
+        logging.critical("[DIAG-LIFECYCLE] on_stop() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
+                         threading.current_thread().name, self.trading, self.inited, _caller)
         real = self._ensure_real_strategy()
         if real is None:
             return None
@@ -175,6 +193,9 @@ class t_type_bootstrap(BaseStrategy):
         # 平台C++宿主通过trading属性判断策略运行状态, on_stop后必须为False
         self.trading = False
         logging.info("[t_type_bootstrap] on_stop完成, trading=False")
+        import threading
+        logging.critical("[DIAG-LIFECYCLE] on_stop() RETURN thread=%s trading=%s result=%s",
+                         threading.current_thread().name, self.trading, result)
         return result
 
     def onTick(self, tick):
@@ -223,7 +244,7 @@ class t_type_bootstrap(BaseStrategy):
                 return None
             logging.warning("[t_type_bootstrap] _real_strategy为None(on_init已调用)，尝试延迟创建")
             try:
-                from ali2026v3_trading.strategy.strategy_2026 import Strategy2026 as _Real
+                from strategy.strategy_2026 import Strategy2026 as _Real
                 real = _Real(*self._init_args, **self._init_kwargs)
                 self._real_strategy = real
                 # FIX-20260713-STRATEGY-ID-SYNC: 延迟创建时也同步strategy_id
@@ -240,7 +261,11 @@ class t_type_bootstrap(BaseStrategy):
         return real
 
     def pause(self):
-        logging.critical("[FIX-20260713-LIFECYCLE] pause() CALLED from platform")
+        import threading
+        import traceback
+        _caller = ''.join(traceback.format_stack()[-4:-1])
+        logging.critical("[DIAG-LIFECYCLE] pause() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
+                         threading.current_thread().name, self.trading, self.inited, _caller)
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] pause(): _real_strategy为None，操作被跳过")
@@ -262,7 +287,11 @@ class t_type_bootstrap(BaseStrategy):
         return real.on_pause()
 
     def on_destroy(self):
-        logging.critical("[FIX-20260713-LIFECYCLE] on_destroy() CALLED from platform")
+        import threading
+        import traceback
+        _caller = ''.join(traceback.format_stack()[-4:-1])
+        logging.critical("[DIAG-LIFECYCLE] on_destroy() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
+                         threading.current_thread().name, self.trading, self.inited, _caller)
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] on_destroy(): _real_strategy为None，操作被跳过")

@@ -27,8 +27,8 @@ import threading
 from typing import Any, Dict, List, Optional, Set, Tuple, Deque
 from collections import deque
 from dataclasses import dataclass, field
-from ali2026v3_trading.infra.shared_utils import utc_now as _utc_now, generate_prefixed_id
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra.shared_utils import utc_now as _utc_now, generate_prefixed_id
+from infra._helpers import get_logger  # R9-5
 
 _logger = get_logger(__name__)  # R9-5
 
@@ -60,7 +60,7 @@ class CausalChainTracker:
 
     @classmethod
     def get_instance(cls) -> "CausalChainTracker":
-        from ali2026v3_trading.infra.registry_service import SingletonRegistry
+        from infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('causal_chain_tracker')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -123,7 +123,7 @@ class ContaminationGuard:
 
     @classmethod
     def get_instance(cls) -> "ContaminationGuard":
-        from ali2026v3_trading.infra.registry_service import SingletonRegistry
+        from infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('contamination_guard')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -200,7 +200,7 @@ class CyclicDependencyGuard:
 
     @classmethod
     def get_instance(cls) -> "CyclicDependencyGuard":
-        from ali2026v3_trading.infra.registry_service import SingletonRegistry
+        from infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('cyclic_dependency_guard')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -256,7 +256,7 @@ class ParamIsolationGuard:
 
     @classmethod
     def get_instance(cls) -> "ParamIsolationGuard":
-        from ali2026v3_trading.infra.registry_service import SingletonRegistry
+        from infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('param_isolation_guard')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -359,7 +359,7 @@ class TradeRollbackManager:
 
     @classmethod
     def get_instance(cls) -> "TradeRollbackManager":
-        from ali2026v3_trading.infra.registry_service import SingletonRegistry
+        from infra.registry_service import SingletonRegistry
         _registry = SingletonRegistry.get_registry('trade_rollback_manager')
         _inst = _registry.get('instance')
         if _inst is None:
@@ -425,7 +425,7 @@ class TradeRollbackManager:
 
         # 步骤1: 撤销持仓
         try:
-            from ali2026v3_trading.position.position_service import get_position_service
+            from position.position_service import get_position_service
             pos_svc = get_position_service()
             instrument_id = snapshot.instrument_id
 
@@ -448,7 +448,7 @@ class TradeRollbackManager:
 
         # 步骤2: 重置风控状态
         try:
-            from ali2026v3_trading.risk.risk_service import get_risk_service
+            from risk.risk_service import get_risk_service
             risk_svc = get_risk_service()
             if risk_svc is not None and hasattr(risk_svc, '_consecutive_loss_counts'):
                 # 重置连亏计数（回滚的交易不应计入连亏）'

@@ -8,7 +8,7 @@ from enum import IntEnum
 import numpy as np
 import pandas as pd
 
-from ali2026v3_trading.infra._helpers import get_logger
+from infra._helpers import get_logger
 
 logger = get_logger(__name__)
 

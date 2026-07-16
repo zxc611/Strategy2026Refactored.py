@@ -8,19 +8,19 @@ SIM_BASE = r'C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\d
 LIVE_BASE = r'C:\Users\xu\AppData\Roaming\InfiniTrader_QhZijintianfengPythonX64\pyStrategy\demo'
 
 FILES = [
-    'ali2026v3_trading/config/tvf_param_loader.py',
-    'ali2026v3_trading/config/params.yaml',
-    'ali2026v3_trading/config/params_default.json',
-    'ali2026v3_trading/data/three_layer_sort/__init__.py',
-    'ali2026v3_trading/data/three_layer_sort/signal_source_a.py',
-    'ali2026v3_trading/data/three_layer_sort/resonance_engine.py',
-    'ali2026v3_trading/data/ds_schema_manager.py',
-    'ali2026v3_trading/data/width_cache_query_mixin.py',
-    'ali2026v3_trading/data/width_cache_state_mixin.py',
-    'ali2026v3_trading/param_pool/_param_grids.py',
-    'ali2026v3_trading/strategy/strategy_scheduler.py',
-    'ali2026v3_trading/tests/test_three_layer_sort_v2_7.py',
-    'ali2026v3_trading/docs/audit/三层期权五态排序方案_最终落地方案V2_20260624.md',
+    'demo/config/tvf_param_loader.py',
+    'demo/config/params.yaml',
+    'demo/config/params_default.json',
+    'demo/data/three_layer_sort/__init__.py',
+    'demo/data/three_layer_sort/signal_source_a.py',
+    'demo/data/three_layer_sort/resonance_engine.py',
+    'demo/data/ds_schema_manager.py',
+    'demo/data/width_cache_query_mixin.py',
+    'demo/data/width_cache_state_mixin.py',
+    'demo/param_pool/_param_grids.py',
+    'demo/strategy/strategy_scheduler.py',
+    'demo/tests/test_three_layer_sort_v2_7.py',
+    'demo/docs/audit/三层期权五态排序方案_最终落地方案V2_20260624.md',
 ]
 
 

@@ -13,7 +13,7 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
-from ali2026v3_trading.infra._helpers import get_logger
+from infra._helpers import get_logger
 
 logger = get_logger(__name__)
 
@@ -133,7 +133,7 @@ def _resample_corrected(df_1m: pd.DataFrame, bar_length: int) -> pd.DataFrame:
 
     if "iv" in result.columns and "close" in result.columns:
         try:
-            from ali2026v3_trading.precompute._kl_rpd import (
+            from precompute._kl_rpd import (
                 compute_kl_rpd_vectorized,
             )
             kl_rpd = compute_kl_rpd_vectorized(result)
@@ -145,7 +145,7 @@ def _resample_corrected(df_1m: pd.DataFrame, bar_length: int) -> pd.DataFrame:
     signal_required_cols = ["signal_s1", "kl_rpd_k", "strength", "imbalance", "close"]
     if all(c in result.columns for c in signal_required_cols):
         try:
-            from ali2026v3_trading.precompute._signals import (
+            from precompute._signals import (
                 compute_signals_vectorized,
             )
             signals = compute_signals_vectorized(result)

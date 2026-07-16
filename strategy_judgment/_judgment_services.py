@@ -6,7 +6,7 @@ import logging, math
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from .judgment_types import (_JudgmentDimension, JudgmentVerdict, SCORING_COEFFICIENTS, DIM_DISPLAY_NAMES,)
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 
@@ -36,25 +36,25 @@ def run_deep_validations(
     validation_degraded = False
 
     try:
-        from ali2026v3_trading.param_pool.validation.statistical_validation import (
+        from param_pool.validation.statistical_validation import (
             CounterfactualValidator, MonteCarloBankruptcyValidator,
         )
-        from ali2026v3_trading.param_pool.validation.statistical_validation import (
+        from param_pool.validation.statistical_validation import (
             MultipleComparisonCorrector, WalkForwardValidator,
         )
-        from ali2026v3_trading.param_pool.validation.statistical_validation import DeepValidationSuite
-        from ali2026v3_trading.param_pool.validation.adv_validation_misc import (
+        from param_pool.validation.statistical_validation import DeepValidationSuite
+        from param_pool.validation.adv_validation_misc import (
             OtherStateDefenseQuantifier,
             ParamTierManager, PARAM_TIERS, generate_hft_fidelity_warning,
             CrossPeriodOverlapValidator, ShadowParamIndependenceValidator,
             DifferentiatedAlphaChecker, ReverseStrategyValidator,
             OrderFlowFilterValidator, StateSwitchPositionPolicy,
         )
-        from ali2026v3_trading.param_pool.optimization.l2_optimizer import (
+        from param_pool.optimization.l2_optimizer import (
             L2Optimizer, TwelveStrategyRunner,
         )
         try:
-            from ali2026v3_trading.param_pool.optimization.sensitivity import (
+            from param_pool.optimization.sensitivity import (
                 TestDesignSuite, ConfigVersionControl, ExecutionChecklist,
                 MultiGranularityBacktest, ExecutionPathValidator,
                 ParameterTypeMutexChecker, KnownLimitations,
@@ -117,7 +117,7 @@ def run_deep_validations(
             logging.debug("[StrategyJudgmentEngine] P0-4 评判系数完整性验证异常: %s", _coeff_err)
             pass
         try:
-            from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge
+            from evaluation.cascade_judge import CascadeJudge
             _cj = CascadeJudge.from_config(capital_scale=capital_scale, params=None)
             _cascade_scoring_keys = {"profit_ratio_weight", "sortino_weight", "calmar_weight", "sharpe_weight"}
             conditions.append(f"[P0-5 三系统对齐] CascadeJudge默认配置加载成功")
@@ -156,7 +156,7 @@ def run_deep_validations(
             pass
 
         try:
-            from ali2026v3_trading.param_pool.validation.adv_validation_misc import MultiPeriodCrossValidator
+            from param_pool.validation.adv_validation_misc import MultiPeriodCrossValidator
             _mpcv = MultiPeriodCrossValidator(n_splits=5, method="sequential", min_test_sharpe=0.3)
             eq = diagnosis_report._equity_curve if diagnosis_report and hasattr(diagnosis_report, '_equity_curve') else []
             if eq and len(eq) >= 20:
@@ -173,7 +173,7 @@ def run_deep_validations(
             warnings.append(f"[P1-9 多周期交叉验证] 执行异常: {_mpcv_err}")
 
         try:
-            from ali2026v3_trading.param_pool.validation.statistical_validation import SurvivalBiasTest
+            from param_pool.validation.statistical_validation import SurvivalBiasTest
             _sbt = SurvivalBiasTest(n_permutations=1000, significance_level=0.05)
             _observed_sharpe = profitability_metrics.get('sharpe', 0) if profitability_metrics else 0
             _random_sharpes = diagnosis_report._random_sharpes if diagnosis_report and hasattr(diagnosis_report, '_random_sharpes') else []
@@ -239,7 +239,7 @@ def run_deep_validations(
             pass
 
         try:
-            from ali2026v3_trading.param_pool.backtest.backtest_config import validate_doomed_tests
+            from param_pool.backtest.backtest_config import validate_doomed_tests
             doomed = validate_doomed_tests(diagnosis_report)
             if doomed:
                 warnings.append(f"[P2-1 Doomed检测] {doomed}")
@@ -417,7 +417,7 @@ def run_deep_validations(
             pass
 
         try:
-            from ali2026v3_trading.governance.governance_engine import (
+            from governance.governance_engine import (
                 E12ReverseStrategyPseudoIndependenceDetector,
                 E13ShadowStrategyCollusionDetector,
                 WF6ToWF10EliminationChecker,
@@ -605,7 +605,7 @@ class ScoringHelper:
     @staticmethod
     def chicory_eviction_score(strategy_score, age_days, violation_count: int = 0) -> float:
         """三档权重驱逐评分 - P1-09修复: 委托evaluation模块"""
-        from ali2026v3_trading.evaluation.chicory_eviction import ChicoryEvictionPolicy
+        from evaluation.chicory_eviction import ChicoryEvictionPolicy
         try:
             _cep = ChicoryEvictionPolicy()
             _result = _cep.evaluate(strategy_id='', overall_score=strategy_score, dimensions={'age_days': age_days, 'violation_count': violation_count})
@@ -621,7 +621,7 @@ class ScoringHelper:
                                capacity_used_pct: float = 0.0,
                                recovery_days_history: List[float] = None) -> Dict[str, Any]:
         """四维度活跃度加权评分 - P1-09修复: 委托evaluation模块"""
-        from ali2026v3_trading.evaluation.activity_weighted_scorer import ActivityWeightedScorer
+        from evaluation.activity_weighted_scorer import ActivityWeightedScorer
         try:
             _aws = ActivityWeightedScorer()
             return _aws.calculate(strategy_id='', overall=0.5, dimensions={'sharpe_history': sharpe_history, 'regime_sharpes': regime_sharpes, 'capacity_used_pct': capacity_used_pct, 'recovery_days_history': recovery_days_history})
@@ -669,7 +669,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 # ── 从 judgment_scoring_helpers.py re-export（权威源已迁移） ──
-from ali2026v3_trading.strategy_judgment.judgment_scoring_helpers import (  # noqa: F401
+from strategy_judgment.judgment_scoring_helpers import (  # noqa: F401
     STRICT_MODE, ComponentFailurePolicy, CRITICAL_COMPONENTS,
     _handle_component_failure, _block_flag, was_blocked,
     chicory_eviction_score, activity_weighted_score,

@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 
 
@@ -1026,7 +1026,7 @@ import numpy as np
 
 
 
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 
 

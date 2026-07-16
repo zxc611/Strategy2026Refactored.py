@@ -30,25 +30,25 @@ from dataclasses import dataclass
 
 
 
-from ali2026v3_trading.infra.event_bus import RateLimiter
+from infra.event_bus import RateLimiter
 
-from ali2026v3_trading.infra.service_contracts import ServiceProtocol
+from infra.service_contracts import ServiceProtocol
 
-from ali2026v3_trading.infra.shared_utils import generate_prefixed_id
+from infra.shared_utils import generate_prefixed_id
 
-from ali2026v3_trading.order.order_risk_guard import OrderRiskGuard
+from order.order_risk_guard import OrderRiskGuard
 
-from ali2026v3_trading.order.order_chase_service import OrderChaseService
+from order.order_chase_service import OrderChaseService
 
-from ali2026v3_trading.order.order_state_manager import OrderStateManager
+from order.order_state_manager import OrderStateManager
 
-from ali2026v3_trading.order.order_wal_state_service import OrderWALStateService
+from order.order_wal_state_service import OrderWALStateService
 
 
 
 try:
 
-    from ali2026v3_trading.order.order_persistence import OrderPersistenceService
+    from order.order_persistence import OrderPersistenceService
 
     _HAS_PERSISTENCE_SERVICE = True
 
@@ -62,7 +62,7 @@ except ImportError:
 
 try:
 
-    from ali2026v3_trading.strategy_judgment.causal_chain_utils import CyclicDependencyGuard, ContaminationGuard
+    from strategy_judgment.causal_chain_utils import CyclicDependencyGuard, ContaminationGuard
 
     _HAS_CAUSAL_CHAIN = True
 
@@ -262,7 +262,7 @@ def get_order_service() -> Any:
 
             if _order_service_instance is None:
 
-                from ali2026v3_trading.order.order_service import OrderService
+                from order.order_service import OrderService
 
                 _order_service_instance = OrderService()
 
@@ -278,7 +278,7 @@ def init_order_service_attrs(svc, params=None):
 
     """OrderService.__init__属性初始化委托"""
 
-    from ali2026v3_trading.order.order_platform_auth import PlatformAuthenticator
+    from order.order_platform_auth import PlatformAuthenticator
 
     svc._platform_api_ready = False
 
@@ -312,7 +312,7 @@ def init_order_service_attrs(svc, params=None):
 
     try:
 
-        from ali2026v3_trading.config.params_service import get_params_service
+        from config.params_service import get_params_service
 
         _rate = get_params_service().get_int('rate_limit_global_per_min', 60) or 60
 
@@ -441,7 +441,7 @@ def init_order_service_attrs(svc, params=None):
     svc._dry_run_mode = False
     svc._dry_run_callback_delay_sec = 0.05
     try:
-        from ali2026v3_trading.config.params_service import get_params_service
+        from config.params_service import get_params_service
         _ps = get_params_service()
         svc._dry_run_mode = _ps.get_bool('dry_run_mode', False) or False
         svc._dry_run_callback_delay_sec = float(_ps.get('dry_run_callback_delay_sec', 0.05) or 0.05)
@@ -591,7 +591,7 @@ class OrderQueryService:
 
         try:
 
-            from ali2026v3_trading.config.params_service import get_params_service
+            from config.params_service import get_params_service
 
             rate = get_params_service().get_int('rate_limit_global_per_min', 60)
 

@@ -1,5 +1,5 @@
 import os
-base = r'C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading'
+base = r'C:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\demo'
 out = os.path.join(base, 'tools', '_line_count_results.txt')
 files = ['infra/_helpers.py','infra/_storage_checks_mixin.py','infra/_storage_catalog_mixin.py','infra/_storage_maintenance.py','infra/_ops_framework.py','infra/_disk_monitor.py','infra/_backup_restore.py','infra/_ops_knowledge_metrics.py','infra/_ops_automation.py','infra/maintenance_service.py']
 results = []

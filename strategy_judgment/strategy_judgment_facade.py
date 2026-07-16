@@ -22,10 +22,10 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
+from infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
-from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra.serialization_utils import yaml_safe_load
+from infra._helpers import get_logger  # R9-5
 
 from .judgment_types import (
     JudgmentVerdict,
@@ -230,7 +230,7 @@ class StrategyJudgmentEngine:
 
     def _resolve_scale_config(self, capital_scale: CapitalScale) -> Dict[str, Any]:
         try:
-            from ali2026v3_trading.governance.mode_engine import ModeEngine, CAPITAL_MODE_CONFIGS
+            from governance.mode_engine import ModeEngine, CAPITAL_MODE_CONFIGS
             _scale_map = {
                 CapitalScale.SMALL: 'small',
                 CapitalScale.MEDIUM: 'medium',

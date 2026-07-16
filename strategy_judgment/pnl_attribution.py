@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 from collections import defaultdict
 from datetime import datetime, time as dt_time
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 
@@ -672,14 +672,14 @@ P2-归因13: 归因方法论文档化
 import logging
 import math
 
-from ali2026v3_trading.infra.shared_utils import ANNUALIZE_FACTOR_DAILY, CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
+from infra.shared_utils import ANNUALIZE_FACTOR_DAILY, CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from datetime import datetime
 
 
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 
 

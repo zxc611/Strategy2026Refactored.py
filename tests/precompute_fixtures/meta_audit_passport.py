@@ -5,7 +5,7 @@ import re
 import traceback
 import warnings
 import logging
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 import numpy as np
 import pandas as pd
@@ -35,7 +35,7 @@ class SandboxExecutionAuditor:
 
     def create_poisoned_tick_stream(self, n_ticks: int = 1000,
                                      poison_tick_idx: int = 500) -> tuple:
-        from ali2026v3_trading.infra.shared_utils import set_global_seed  # P2-23: 统一入口
+        from infra.shared_utils import set_global_seed  # P2-23: 统一入口
         set_global_seed(42)
         prices = 100 + np.cumsum(np.random.randn(n_ticks) * 0.1)
         volumes = np.random.poisson(100, n_ticks)
@@ -517,10 +517,10 @@ class RestrictedExecLoader:
 # _INTERNAL: 本模块为子系统内部实现，外部请通过 __init__.py 的公共API访问
 
 # R9-2: 移除死代码 import hashlib（已全部使用compute_content_hash）
-from ali2026v3_trading.infra.shared_utils import compute_content_hash
+from infra.shared_utils import compute_content_hash
 import json
 import logging
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 import os
 
 import numpy as np
@@ -529,9 +529,9 @@ import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Callable, Optional, Any
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer
-from ali2026v3_trading.infra.shared_utils import atomic_replace_file  # R9-1
+from infra.shared_utils import CHINA_TZ
+from infra.serialization_utils import json_dumps, json_loads, json_default_serializer
+from infra.shared_utils import atomic_replace_file  # R9-1
 
 from .meta_audit_engine import (
     MetaAuditEngine, AuditIssue, Severity, VulnerabilityType, _norm_cdf,
@@ -616,7 +616,7 @@ class AuditPassport:
 
         logger.info("[6/9] Counterfactual Validation (Phase 3)")
         try:
-            from ali2026v3_trading.param_pool.validation.statistical_validation import CounterfactualValidator
+            from param_pool.validation.statistical_validation import CounterfactualValidator
             cf_validator = CounterfactualValidator()
             self.audit_results['counterfactual_available'] = True
             logger.info("  CounterfactualValidator loaded successfully")
@@ -626,7 +626,7 @@ class AuditPassport:
 
         logger.info("[7/9] Monte Carlo Bankruptcy Test (Phase 3)")
         try:
-            from ali2026v3_trading.param_pool.validation.statistical_validation import MonteCarloBankruptcyValidator
+            from param_pool.validation.statistical_validation import MonteCarloBankruptcyValidator
             mc_validator = MonteCarloBankruptcyValidator()
             self.audit_results['monte_carlo_available'] = True
             logger.info("  MonteCarloBankruptcyValidator loaded successfully")
@@ -636,7 +636,7 @@ class AuditPassport:
 
         logger.info("[8/9] Shadow Param Independence (Phase 4)")
         try:
-            from ali2026v3_trading.param_pool.validation.adv_validation_misc import ShadowParamIndependenceValidator
+            from param_pool.validation.adv_validation_misc import ShadowParamIndependenceValidator
             shadow_validator = ShadowParamIndependenceValidator()
             self.audit_results['shadow_param_validator_available'] = True
             logger.info("  ShadowParamIndependenceValidator loaded successfully")
@@ -646,7 +646,7 @@ class AuditPassport:
 
         logger.info("[9/9] Deep Validation Suite (Phase 5)")
         try:
-            from ali2026v3_trading.param_pool.validation.statistical_validation import DeepValidationSuite
+            from param_pool.validation.statistical_validation import DeepValidationSuite
             deep_suite = DeepValidationSuite()
             self.audit_results['deep_validation_available'] = True
             logger.info("  DeepValidationSuite loaded successfully (7 validators + 2 meta-audit)")

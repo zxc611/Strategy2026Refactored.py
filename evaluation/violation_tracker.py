@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 
 def _get_base_class():
-    from ali2026v3_trading.governance.governance_engine import StrategyViolationTracker as _SVT
+    from governance.governance_engine import StrategyViolationTracker as _SVT
     return _SVT
 
 

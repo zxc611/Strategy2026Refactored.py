@@ -7,14 +7,14 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.order.order_flow_analyzer import (
+from order.order_flow_analyzer import (
     MicrostructureAnalyzer,
     MicrostructureConfig,
     VolumeWeightedOrderFlow,
     LiquidityConsumptionTracker,
 )
 
-from ali2026v3_trading.order.order_flow_bridge_detectors import (
+from order.order_flow_bridge_detectors import (
     MicrostructureArbitrageDetector,
     CrossContractArbitrageDetector,
     SweepDetector,
@@ -288,7 +288,7 @@ class OrderFlowBridge:
             return self._product_cache[instrument_id]
 
         try:
-            from ali2026v3_trading.infra.shared_utils import extract_product_code
+            from infra.shared_utils import extract_product_code
             product = extract_product_code(instrument_id)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             product = ''

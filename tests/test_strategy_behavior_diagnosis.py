@@ -16,17 +16,17 @@ def _ensure_imports():
         return _IMPORTS
     # 清除可能被前面测试污染的 mock 模块缓存
     for _mod_name in [
-        'ali2026v3_trading.strategy_judgment.turning_point_analysis',
-        'ali2026v3_trading.strategy_judgment.market_snapshot_collector',
-        'ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis',
+        'strategy_judgment.turning_point_analysis',
+        'strategy_judgment.market_snapshot_collector',
+        'strategy_judgment.strategy_behavior_diagnosis',
     ]:
         if _mod_name in sys.modules:
             del sys.modules[_mod_name]
     try:
-        from ali2026v3_trading.strategy_judgment.strategy_behavior_diagnosis import (
+        from strategy_judgment.strategy_behavior_diagnosis import (
             StrategyBehaviorDiagnosis, DiagnosisSeverity, DimensionDiagnosis,
         )
-        from ali2026v3_trading.strategy_judgment.market_snapshot_collector import MarketSnapshot, StrategyStateSnapshot
+        from strategy_judgment.market_snapshot_collector import MarketSnapshot, StrategyStateSnapshot
         _IMPORTS = (StrategyBehaviorDiagnosis, DiagnosisSeverity, DimensionDiagnosis, MarketSnapshot, StrategyStateSnapshot)
         return _IMPORTS
     except Exception as e:

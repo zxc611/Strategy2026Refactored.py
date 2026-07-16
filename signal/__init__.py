@@ -7,10 +7,10 @@
     → signal_components.py（4合1）
 
 WARNING: 本包名 `signal` 与Python标准库 `signal` 冲突。
-  - 项目内引用本包必须使用完整路径: `from ali2026v3_trading.signal.xxx import ...`
+  - 项目内引用本包必须使用完整路径: `from signal.xxx import ...`
   - 需要标准库signal时必须使用: `import importlib; _stdlib_signal = importlib.import_module('signal')`
   - 运行pytest时必须加 `-p no:anyio` 参数（anyio内部import signal会被本包拦截）
-  - 运行pytest时必须从项目父目录运行（确保ali2026v3_trading作为包名前缀生效）
+  - 运行pytest时必须从项目父目录运行（确保demo作为包名前缀生效）
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def __getattr__(name: str):
         from .signal_components import SignalHistoryService
         return SignalHistoryService
     if name == "ModeEngine":
-        from ali2026v3_trading.governance.mode_engine import ModeEngine
+        from governance.mode_engine import ModeEngine
         return ModeEngine
     if name == "transition_signal_state":
         from .signal_components import SignalFilterChain

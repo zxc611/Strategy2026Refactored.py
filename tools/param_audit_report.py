@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
+from infra.serialization_utils import yaml_safe_load
 
 def _yaml_safe_load_file(path: str) -> Dict[str, Any]:
     """安全加载YAML文件，失败返回空字典"""
@@ -265,7 +265,7 @@ def collect_code_defaults() -> Dict[str, Any]:
         if str(_PROJECT_ROOT.parent) not in sys.path:
             sys.path.insert(0, str(_PROJECT_ROOT.parent))
 
-        from ali2026v3_trading.config.config_params import DEFAULT_PARAM_TABLE
+        from config.config_params import DEFAULT_PARAM_TABLE
         for k, v in DEFAULT_PARAM_TABLE.items():
             # 跳过不可序列化的值
             if isinstance(v, (int, float, bool, str, list, tuple, type(None))):

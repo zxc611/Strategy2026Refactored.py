@@ -2,7 +2,7 @@
 """Tests for evaluation.chicory_eviction module."""
 import os
 import pytest
-from ali2026v3_trading.evaluation.chicory_eviction import (
+from evaluation.chicory_eviction import (
     EvictionCode,
     EVICTION_REVIVAL_POLICY,
     COOLING_PERIOD_DAYS,

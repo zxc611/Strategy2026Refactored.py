@@ -8,7 +8,7 @@ import pytest
 import math
 import numpy as np
 
-from ali2026v3_trading.risk.crack_validation import (
+from risk.crack_validation import (
     validate_circuit_breaker_halts,
     validate_shadow_b_stability,
     apply_tick_rounding,

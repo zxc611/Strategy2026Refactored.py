@@ -73,7 +73,7 @@ def verify_bug1():
            _has_fix_tag(sbl_src, "FIX-20260710-DIVERGENCE-REVERSAL"),
            "strategy_business_layer.py中存在修复标签")
     _check("BUG1", "维1", "get_divergence_reversal_module导入",
-           "from ali2026v3_trading.strategy.divergence_reversal import get_divergence_reversal_module" in sbl_src,
+           "from strategy.divergence_reversal import get_divergence_reversal_module" in sbl_src,
            "导入语句已添加")
     _check("BUG1", "维1", "last_output读取",
            "_dr_module.last_output" in sbl_src,
@@ -99,7 +99,7 @@ def verify_bug1():
     # ── 维3: 方法存在 ──
     print("\n--- 维3: 方法存在 ---")
     try:
-        from ali2026v3_trading.strategy.divergence_reversal import (
+        from strategy.divergence_reversal import (
             DivergenceReversalModule, get_divergence_reversal_module,
             DivergenceReversalOutput, DivergenceReversalParams,
         )
@@ -256,9 +256,9 @@ def verify_bug2():
     # ── 维3: 方法存在 ──
     print("\n--- 维3: 方法存在 ---")
     try:
-        from ali2026v3_trading.strategy.box_spring_detector import BoxSpringDetectorService
-        from ali2026v3_trading.strategy.box_spring_executor import BoxSpringExecutorService
-        from ali2026v3_trading.strategy.box_spring_strategy_impl import BoxSpringStrategy
+        from strategy.box_spring_detector import BoxSpringDetectorService
+        from strategy.box_spring_executor import BoxSpringExecutorService
+        from strategy.box_spring_strategy_impl import BoxSpringStrategy
 
         _check("BUG2", "维3", "BoxSpringDetectorService.detect_spring存在",
                hasattr(BoxSpringDetectorService, "detect_spring"))

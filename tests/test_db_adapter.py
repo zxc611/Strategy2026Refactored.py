@@ -1,7 +1,7 @@
 # MODULE_ID: M2-332
 """测试: data/db_adapter.py"""
 import pytest
-from ali2026v3_trading.data.db_adapter import (
+from data.db_adapter import (
     connect, connect_in_memory, execute, fetchone, fetchall, fetchdf,
     register_df, close, table_exists, get_duckdb_module, connect_duckdb,
     ConnectionConfig, get_connection_pool, release_connection,

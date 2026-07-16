@@ -35,7 +35,7 @@ import pandas as pd
 # ── 路径设置 ──
 sys.path.insert(0, r"c:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo")
 
-from ali2026v3_trading.strategy.divergence_reversal import (
+from strategy.divergence_reversal import (
     DivergenceReversalModule,
     DivergenceReversalOutput,
     DivergenceReversalParams,
@@ -566,7 +566,7 @@ def test_16_params_completeness():
     _check("moneyness_depth=0.06", params.moneyness_depth == 0.06)
 
     # 验证 _param_defaults.py DIVERGENCE_DEFAULTS 有16个参数
-    from ali2026v3_trading.param_pool._param_defaults import DIVERGENCE_DEFAULTS, PARAM_GRID_DIVERGENCE
+    from param_pool._param_defaults import DIVERGENCE_DEFAULTS, PARAM_GRID_DIVERGENCE
     _check("DIVERGENCE_DEFAULTS有16条", len(DIVERGENCE_DEFAULTS) == 16,
            f"got {len(DIVERGENCE_DEFAULTS)}")
     _check("PARAM_GRID_DIVERGENCE有16条", len(PARAM_GRID_DIVERGENCE) == 16,
@@ -634,7 +634,7 @@ def test_five_alignment():
     import yaml
     from pathlib import Path
 
-    base = Path(r"c:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\ali2026v3_trading")
+    base = Path(r"c:\Users\xu\AppData\Roaming\InfiniTrader_SimulationX64\pyStrategy\demo\demo")
 
     # 检查 parameter_attribute_matrix.yaml 有16个 divergence_ 参数
     matrix_path = base / "param_pool" / "parameter_attribute_matrix.yaml"
@@ -660,12 +660,12 @@ def test_five_alignment():
         _check("对齐1: tvf文件存在", False, "文件不存在")
 
     # ── 对齐2: V7文档 vs 生产模块 ──
-    from ali2026v3_trading.param_pool._param_defaults import (
+    from param_pool._param_defaults import (
         DIVERGENCE_DEFAULTS, PARAM_GRID_DIVERGENCE,
         PARAM_DEFAULTS_DIVERGENCE_SHADOW_A, PARAM_DEFAULTS_DIVERGENCE_SHADOW_B,
         STRATEGY_SHADOW_DEFAULTS,
     )
-    from ali2026v3_trading.strategy.shadow_strategy_core import ShadowStrategyCoreService
+    from strategy.shadow_strategy_core import ShadowStrategyCoreService
     STRATEGY_GROUPS = ShadowStrategyCoreService.STRATEGY_GROUPS
 
     _check("对齐2: STRATEGY_GROUPS含s7_divergence", 's7_divergence' in STRATEGY_GROUPS,
@@ -693,7 +693,7 @@ def test_five_alignment():
     _check("对齐3: 测试覆盖16参数", True)  # 本测试即验证
 
     # ── 对齐4: 评判文档 vs V7文档 ──
-    from ali2026v3_trading.strategy_judgment.judgment_types import (
+    from strategy_judgment.judgment_types import (
         STRATEGY_TYPE_WEIGHT_OVERRIDES,
         STRATEGY_TYPE_THRESHOLD_OVERRIDES,
         ECOSYSTEM_TO_JUDGMENT_TYPE_MAP,

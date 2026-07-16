@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .judgment_types import (_JudgmentDimension, DIM_RISK_BUDGET_COMPLIANCE, DIM_EXTREME_SURVIVAL, DIM_DISPLAY_NAMES, SCORING_COEFFICIENTS)
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 
@@ -164,7 +164,7 @@ class RiskJudger:
         else:
             # 从d1-d11按权重计算
             try:
-                from ali2026v3_trading.risk.risk_service import RiskService
+                from risk.risk_service import RiskService
                 weights = RiskService.RISK_DIMENSION_DEFAULTS
             except (ImportError, ValueError, KeyError, AttributeError) as _weights_err:
                 # R15-P1-DEAD-04修复: RiskService权重导入失败添加日志

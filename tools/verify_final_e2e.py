@@ -82,14 +82,14 @@ check("已删除存根文件无残留引用", stub_ref_count == 0,
 
 # 1.2 合并后模块可导入
 MERGED_MODULES = [
-    'ali2026v3_trading.infra.shared_utils',
-    'ali2026v3_trading.infra.health_monitor',
-    'ali2026v3_trading.infra.event_bus',
-    'ali2026v3_trading.infra.resilience',
-    'ali2026v3_trading.config.config_service',
-    'ali2026v3_trading.config.config_params',
-    'ali2026v3_trading.config.state_param',
-    'ali2026v3_trading.strategy_judgment.judgment_types',
+    'infra.shared_utils',
+    'infra.health_monitor',
+    'infra.event_bus',
+    'infra.resilience',
+    'config.config_service',
+    'config.config_params',
+    'config.state_param',
+    'strategy_judgment.judgment_types',
 ]
 
 for mod in MERGED_MODULES:
@@ -109,7 +109,7 @@ print("=" * 70)
 
 # 2.1 CascadeJudge V7.5 对齐
 try:
-    from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge
+    from evaluation.cascade_judge import CascadeJudge
     check("CascadeJudge 可导入", True)
     check("CascadeJudge.from_config 存在", hasattr(CascadeJudge, 'from_config'))
 except ImportError as e:
@@ -117,7 +117,7 @@ except ImportError as e:
 
 # 2.2 BLOCK/DEGRADE/WARN 模式
 try:
-    from ali2026v3_trading.strategy_judgment._judgment_services import (
+    from strategy_judgment._judgment_services import (
         ComponentFailurePolicy, _handle_component_failure, CRITICAL_COMPONENTS
     )
     check("ComponentFailurePolicy 可导入", True)
@@ -286,7 +286,7 @@ print("=" * 70)
 
 # E2E-1: 安全检查函数调用链
 try:
-    from ali2026v3_trading.risk.risk_service import RiskService
+    from risk.risk_service import RiskService
     check("RiskService.check_regulatory_compliance 存在",
           hasattr(RiskService, 'check_regulatory_compliance'))
     check("RiskService.check_capital_sufficiency 存在",
@@ -298,40 +298,40 @@ except ImportError as e:
 
 # E2E-2: 影子策略隔离
 try:
-    from ali2026v3_trading.strategy import ShadowStrategyEngine
+    from strategy import ShadowStrategyEngine
     check("ShadowStrategyEngine 可导入(从strategy包)", True)
 except ImportError as e:
     check("ShadowStrategyEngine 可导入", False, f"导入失败: {e}")
 
 try:
-    from ali2026v3_trading.strategy.shadow_strategy_facade import ShadowStrategyEngine
+    from strategy.shadow_strategy_facade import ShadowStrategyEngine
     check("ShadowStrategyEngine 可导入(从facade模块)", True)
 except ImportError as e:
     check("ShadowStrategyEngine 可导入(从facade模块)", False, f"导入失败: {e}")
 
 # E2E-3: Governance引擎
 try:
-    from ali2026v3_trading.governance.governance_engine import get_governance_engine
+    from governance.governance_engine import get_governance_engine
     check("get_governance_engine 可导入", True)
 except ImportError as e:
     check("get_governance_engine 可导入", False, f"导入失败: {e}")
 
 # E2E-4: 评判引擎
 try:
-    from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge
+    from evaluation.cascade_judge import CascadeJudge
     check("CascadeJudge 可导入", True)
 except ImportError as e:
     check("CascadeJudge 可导入", False, f"导入失败: {e}")
 
 try:
-    from ali2026v3_trading.strategy_judgment import judge_backtest_result
+    from strategy_judgment import judge_backtest_result
     check("judge_backtest_result 可导入", True)
 except ImportError as e:
     check("judge_backtest_result 可导入", False, f"导入失败: {e}")
 
 # E2E-5: 健康检查
 try:
-    from ali2026v3_trading.infra.health_monitor import (
+    from infra.health_monitor import (
         HealthMonitor, get_health_monitor, HealthCheckAPI,
         HealthCheckAggregator, CodeQualityMetrics
     )
@@ -345,13 +345,13 @@ except ImportError as e:
 
 # E2E-6: 配置服务
 try:
-    from ali2026v3_trading.config.config_service import ConfigService
+    from config.config_service import ConfigService
     check("ConfigService 可导入", True)
 except ImportError as e:
     check("ConfigService 可导入", False, f"导入失败: {e}")
 
 try:
-    from ali2026v3_trading.config.state_param import get_state_param_manager
+    from config.state_param import get_state_param_manager
     check("get_state_param_manager 可导入", True)
 except ImportError as e:
     check("get_state_param_manager 可导入", False, f"导入失败: {e}")

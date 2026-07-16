@@ -2,7 +2,7 @@
 """测试: risk/risk_check_engine.py"""
 import pytest
 from unittest.mock import MagicMock
-from ali2026v3_trading.risk.risk_check_engine import (
+from risk.risk_check_engine import (
     RiskCheckEngine, RiskRule, PositionLimitRule, DailyDrawdownRule,
     create_default_risk_check_engine, RiskContext,
 )

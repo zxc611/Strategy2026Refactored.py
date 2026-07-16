@@ -23,7 +23,7 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from infra.shared_utils import CHINA_TZ
 
 
 class AnalyticsManager:

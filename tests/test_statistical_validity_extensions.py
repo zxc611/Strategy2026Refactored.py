@@ -10,7 +10,7 @@ import numpy as np
 
 def _ensure_imports():
     try:
-        from ali2026v3_trading.strategy_judgment import statistical_validity_extensions as sve
+        from strategy_judgment import statistical_validity_extensions as sve
         return sve
     except Exception as e:
         pytest.skip(f"Import failed: {e}")

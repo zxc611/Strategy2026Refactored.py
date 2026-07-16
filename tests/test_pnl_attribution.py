@@ -3,7 +3,7 @@
 import pytest, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from ali2026v3_trading.strategy_judgment.pnl_attribution import (
+from strategy_judgment.pnl_attribution import (
     PnLAttributor, AttributionEngine, TradeRecord, AttributionResult,
     CostAttribution, RiskAttribution, Direction, TimeSegment,
     classify_time_segment, classify_direction,
@@ -25,7 +25,7 @@ class TestClassifyHelpers:
 
     def test_classify_time_segment(self):
         from datetime import datetime
-        from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+        from infra.shared_utils import CHINA_TZ
         ts = datetime(2025, 1, 2, 10, 0, tzinfo=CHINA_TZ)
         result = classify_time_segment(ts)
         assert result is not None

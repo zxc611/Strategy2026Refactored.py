@@ -18,9 +18,9 @@ import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.infra.shared_utils import ANNUALIZE_FACTOR_DAILY, DEFAULT_RISK_FREE_RATE
-from ali2026v3_trading.infra.resilience import compute_sharpe_stable
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra.shared_utils import ANNUALIZE_FACTOR_DAILY, DEFAULT_RISK_FREE_RATE
+from infra.resilience import compute_sharpe_stable
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 

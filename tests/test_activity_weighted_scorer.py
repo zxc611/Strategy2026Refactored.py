@@ -1,7 +1,7 @@
 # MODULE_ID: M2-300
 """Tests for evaluation.activity_weighted_scorer module."""
 import pytest
-from ali2026v3_trading.evaluation.activity_weighted_scorer import ActivityWeightedScorer
+from evaluation.activity_weighted_scorer import ActivityWeightedScorer
 
 
 class TestActivityWeightedScorer:

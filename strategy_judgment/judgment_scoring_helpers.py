@@ -55,7 +55,7 @@ def was_blocked() -> bool:
 
 def chicory_eviction_score(strategy_score: float, age_days: int, violation_count: int = 0) -> float:
     """Chicory淘汰评分 - P1-09修复: 委托evaluation.chicory_eviction.ChicoryEvictionPolicy"""
-    from ali2026v3_trading.evaluation.chicory_eviction import ChicoryEvictionPolicy
+    from evaluation.chicory_eviction import ChicoryEvictionPolicy
     try:
         _cep = ChicoryEvictionPolicy()
         _result = _cep.evaluate(strategy_id='', overall_score=strategy_score, dimensions={'age_days': age_days, 'violation_count': violation_count})
@@ -70,7 +70,7 @@ def chicory_eviction_score(strategy_score: float, age_days: int, violation_count
 
 def activity_weighted_score(sharpe_history=None, regime_sharpes=None, capacity_used_pct=0.0, recovery_days_history=None):
     """活动加权评分 - P1-09修复: 委托evaluation.activity_weighted_scorer.ActivityWeightedScorer"""
-    from ali2026v3_trading.evaluation.activity_weighted_scorer import ActivityWeightedScorer
+    from evaluation.activity_weighted_scorer import ActivityWeightedScorer
     try:
         _aws = ActivityWeightedScorer()
         _aws.calculate(strategy_id='', overall=0.5, dimensions={'sharpe_history': sharpe_history, 'regime_sharpes': regime_sharpes, 'capacity_used_pct': capacity_used_pct, 'recovery_days_history': recovery_days_history})
@@ -111,7 +111,7 @@ def run_ecosystem_integrations(
     _blocked = False
 
     try:
-        from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
+        from evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
         if profitability_metrics is not None:
             _train_r = dict(profitability_metrics)
             _key_map = {'win_loss_ratio': 'profit_loss_ratio', 'profit_factor': 'profit_loss_ratio', 'win_rate': 'win_rate'}
@@ -131,7 +131,7 @@ def run_ecosystem_integrations(
         warnings.append(f"[CascadeJudge] 集成异常: {_ce02}")
 
     try:
-        from ali2026v3_trading.governance.governance_engine import get_governance_engine
+        from governance.governance_engine import get_governance_engine
         ge = get_governance_engine()
         logging.info("[E-04] 启动治理引擎检查...")
         governance_results = ge.run_all_checkers({'strategy_id': strategy_id, 'profitability': profitability_metrics, 'diagnosis': diagnosis_report})
@@ -143,7 +143,7 @@ def run_ecosystem_integrations(
             _blocked = True
 
     try:
-        from ali2026v3_trading.evaluation.parameter_drift_detector import ParameterDriftDetector
+        from evaluation.parameter_drift_detector import ParameterDriftDetector
         pdd = ParameterDriftDetector()
         drift_result = pdd.detect(strategy_id, parameter_stability_result)
         if drift_result.get('drift_detected', False):
@@ -153,7 +153,7 @@ def run_ecosystem_integrations(
             _blocked = True
 
     try:
-        from ali2026v3_trading.evaluation.chicory_eviction import ChicoryEvictionPolicy
+        from evaluation.chicory_eviction import ChicoryEvictionPolicy
         cep = ChicoryEvictionPolicy()
         try:
             _audit_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs', 'eviction_audit')
@@ -168,7 +168,7 @@ def run_ecosystem_integrations(
             _blocked = True
 
     try:
-        from ali2026v3_trading.evaluation.marquee_threshold import MarqueeThreshold
+        from evaluation.marquee_threshold import MarqueeThreshold
         mt = MarqueeThreshold()
         threshold_check = mt.check(strategy_id, overall, dimensions)
         if not threshold_check.get('passed', True):
@@ -178,7 +178,7 @@ def run_ecosystem_integrations(
             _blocked = True
 
     try:
-        from ali2026v3_trading.evaluation.violation_tracker import StrategyViolationTracker
+        from evaluation.violation_tracker import StrategyViolationTracker
         svt = StrategyViolationTracker()
         violations = svt.track(strategy_id, verdict, blockers)
         if violations:
@@ -188,7 +188,7 @@ def run_ecosystem_integrations(
             _blocked = True
 
     try:
-        from ali2026v3_trading.evaluation.activity_weighted_scorer import ActivityWeightedScorer
+        from evaluation.activity_weighted_scorer import ActivityWeightedScorer
         aws = ActivityWeightedScorer()
         weighted_score = aws.calculate(strategy_id, overall, dimensions)
         conditions.append(f"[E-12] 活动加权评分: {weighted_score:.4f}")
@@ -196,7 +196,7 @@ def run_ecosystem_integrations(
         warnings.append(f"[E-12] activity_weighted_score集成失败(非致命): {_e12_err}")
 
     try:
-        from ali2026v3_trading.evaluation.state_density_decay import StateEDensityDecayTracker
+        from evaluation.state_density_decay import StateEDensityDecayTracker
         sedt = StateEDensityDecayTracker()
         decay_result = sedt.track(strategy_id, diagnosis_report)
         if decay_result.get('decay_detected', False):
@@ -221,7 +221,7 @@ def run_ecosystem_integrations(
         warnings.append(f"[Alpha-CI] CI消费异常(非致命): {_e_ci}")
 
     try:
-        from ali2026v3_trading.governance.governance_engine import get_governance_engine
+        from governance.governance_engine import get_governance_engine
         ge = get_governance_engine()
         feedback = ge.submit_feedback(strategy_id, verdict, dimensions, blockers)
         if not feedback.get('submitted', False):
@@ -230,7 +230,7 @@ def run_ecosystem_integrations(
         warnings.append(f"[E-06] governance反馈通道集成失败(非致命): {_e06_err}")
 
     try:
-        from ali2026v3_trading.strategy_judgment.judgment_types import SURVIVED_THRESHOLD
+        from strategy_judgment.judgment_types import SURVIVED_THRESHOLD
         if overall < SURVIVED_THRESHOLD:
             conditions.append(f"[E-08] 综合评分{overall:.4f}低于survived阈值{SURVIVED_THRESHOLD}")
     except ImportError as _e08_err:
@@ -250,7 +250,7 @@ def run_ecosystem_integrations(
     warnings.extend(deep_w)
 
     try:
-        from ali2026v3_trading.param_pool.sensitivity_analysis import SensitivityAnalyzer
+        from param_pool.sensitivity_analysis import SensitivityAnalyzer
         main_params = profitability_metrics if profitability_metrics else {}
         if not hasattr(engine, '_cached_sa') or engine._cached_sa is None:
             _sa_config = engine.SCORING_COEFFICIENTS.get("sensitivity_analysis", {})

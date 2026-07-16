@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 setup(
-    name='ali2026v3_trading',
+    name='',
     version='7.1.0',
     packages=find_packages(),
     install_requires=[

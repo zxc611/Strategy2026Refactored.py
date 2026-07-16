@@ -4,13 +4,13 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.order.order_flow_data_structures import MicrostructureConfig, FootprintBar, ProductMicroData
+from order.order_flow_data_structures import MicrostructureConfig, FootprintBar, ProductMicroData
 
 logger = logging.getLogger(__name__)
 
 
 try:
-    from ali2026v3_trading.infra.shared_utils import extract_product_code
+    from infra.shared_utils import extract_product_code
     _HAS_EXTRACT_PRODUCT = True
 except ImportError:
     _HAS_EXTRACT_PRODUCT = False
@@ -54,7 +54,7 @@ class MicrostructureAnalyzer:
 
         """提取品种代码"""
 
-        from ali2026v3_trading.infra.shared_utils import extract_product_code
+        from infra.shared_utils import extract_product_code
 
         return extract_product_code(instrument_id)
 

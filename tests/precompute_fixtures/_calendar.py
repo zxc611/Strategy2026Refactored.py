@@ -182,7 +182,7 @@ class ChinaTradingCalendar:
         self._makeup_days = set(self._MAKEUP_DAYS)
         if holidays_file and Path(holidays_file).exists():
             with open(holidays_file, "r") as f:
-                from ali2026v3_trading.infra.serialization_utils import json_loads
+                from infra.serialization_utils import json_loads
                 data = json_loads(f.read())
             self._holidays.update(data.get("holidays", []))
             self._makeup_days.update(data.get("makeup_days", []))

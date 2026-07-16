@@ -16,7 +16,7 @@ import time
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.config.tvf_param_loader import (
+from config.tvf_param_loader import (
     MONTH_WEIGHTS_5,
     ASYMMETRIC_DECAY,
     TIER1_WILSON_THRESHOLD,
@@ -272,7 +272,7 @@ class IntraProductSorter:
 # 信号源B：联动品种簇排序（合入自 signal_source_b.py）
 # ============================================================================
 
-from ali2026v3_trading.config.tvf_param_loader import (
+from config.tvf_param_loader import (
     RESONANCE_VETO_THRESHOLD,
     RESONANCE_MODE,
     LAYER2_WEIGHT_SCORE1,

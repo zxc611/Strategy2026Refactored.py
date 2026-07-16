@@ -7,21 +7,21 @@ from unittest.mock import MagicMock
 # Mock modules that may cause circular import issues before importing target modules
 _mock_tp = MagicMock()
 _mock_tp.ResonanceTurningPointMarker = MagicMock
-sys.modules['ali2026v3_trading.strategy_judgment.turning_point_analysis'] = _mock_tp
+sys.modules['strategy_judgment.turning_point_analysis'] = _mock_tp
 
 _mock_msc = MagicMock()
 _mock_msc.MarketSnapshotCollector = MagicMock
 _mock_msc.MarketSnapshot = MagicMock
 _mock_msc.SnapshotTrigger = MagicMock
-sys.modules['ali2026v3_trading.strategy_judgment.market_snapshot_collector'] = _mock_msc
+sys.modules['strategy_judgment.market_snapshot_collector'] = _mock_msc
 
-import ali2026v3_trading.infra._helpers as _logging_utils
+import infra._helpers as _logging_utils
 _logging_utils.get_logger = MagicMock(return_value=MagicMock())
 
-from ali2026v3_trading.strategy_judgment.judgment_types import (
+from strategy_judgment.judgment_types import (
     _JudgmentDimension, SCORING_COEFFICIENTS,
 )
-from ali2026v3_trading.strategy_judgment.judgment_calibration import CalibrationJudger
+from strategy_judgment.judgment_calibration import CalibrationJudger
 
 
 def _make_instance():

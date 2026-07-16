@@ -3,7 +3,7 @@
 import time
 import pytest
 from unittest.mock import MagicMock
-from ali2026v3_trading.risk.safety_meta_circuit import CircuitBreakerService
+from risk.safety_meta_circuit import CircuitBreakerService
 
 
 class TestCircuitBreakerServiceDeep:
@@ -18,7 +18,7 @@ class TestCircuitBreakerServiceDeep:
 
     def test_is_trading_paused_during_pause(self):
         svc = self._make()
-        from ali2026v3_trading.risk.safety_meta_circuit import CircuitBreakerHalfOpen
+        from risk.safety_meta_circuit import CircuitBreakerHalfOpen
         svc._risk_cb_half_open = CircuitBreakerHalfOpen()
         svc._risk_cb_half_open.force_open(open_duration_sec=3600)
         svc._pause_reason = "test_circuit"

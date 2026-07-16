@@ -7,12 +7,12 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 def _ensure_imports():
     for _mod_name in [
-        'ali2026v3_trading.data.data_service',
-        'ali2026v3_trading.data.ds_realtime_cache',
+        'data.data_service',
+        'data.ds_realtime_cache',
     ]:
         if _mod_name in sys.modules:
             del sys.modules[_mod_name]
-    from ali2026v3_trading.data import data_service as ds
+    from data import data_service as ds
     return ds
 
 
@@ -112,7 +112,7 @@ class TestDataServiceMethods:
     def test_params_service_lazy(self):
         svc = self._make_svc()
         svc._products_loaded = True
-        with patch("ali2026v3_trading.config.params_service.get_params_service") as mock_get:
+        with patch("config.params_service.get_params_service") as mock_get:
             mock_ps = MagicMock()
             mock_get.return_value = mock_ps
             ps = svc.params_service

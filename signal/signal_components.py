@@ -395,7 +395,7 @@ class SignalHistoryService:
                                      market_close_hour: int = 15,
                                      market_close_minute_start: int = 15,
                                      market_close_minute_end: int = 20) -> Optional[str]:
-        from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+        from infra.shared_utils import CHINA_TZ
         if date is None:
             date = datetime.now(CHINA_TZ).strftime("%Y-%m-%d")
         if self._daily_report_generated.get(date):
@@ -463,7 +463,7 @@ class SignalHistoryService:
             }
             with open(json_file, 'w', encoding='utf-8') as f:
                 try:
-                    from ali2026v3_trading.infra.serialization_utils import json_dumps
+                    from infra.serialization_utils import json_dumps
                     f.write(json_dumps(report_data, indent=2))
                 except ImportError:
                     def _fallback_default(obj):
@@ -491,7 +491,7 @@ class SignalHistoryService:
                                        market_close_hour: int = 15,
                                        market_close_minute_start: int = 15,
                                        market_close_minute_end: int = 20) -> Optional[str]:
-        from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+        from infra.shared_utils import CHINA_TZ
         now = datetime.now(CHINA_TZ)
         current_time = now.time()
         from datetime import time as dt_time

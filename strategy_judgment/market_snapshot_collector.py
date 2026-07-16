@@ -32,8 +32,8 @@ from collections import deque
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
-from ali2026v3_trading.infra.shared_utils import ToDictMixin  # R3-4修复
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra.shared_utils import ToDictMixin  # R3-4修复
+from infra._helpers import get_logger  # R9-5
 
 import numpy as np
 
@@ -924,8 +924,8 @@ class MarketSnapshotCollector:
 
     def _auto_fill_sorting_top5(self, snap: MarketSnapshot) -> None:
         try:
-            from ali2026v3_trading.data.width_cache_query_mixin import WidthCacheQueryMixin
-            from ali2026v3_trading.data.data_service import get_data_service
+            from data.width_cache_query_mixin import WidthCacheQueryMixin
+            from data.data_service import get_data_service
             ds = get_data_service()
             t_type = getattr(ds, '_ttype_service', None) or getattr(ds, 'ttype_service', None)
             if t_type is None or not hasattr(t_type, 'select_otm_targets_signal_sources'):
@@ -958,7 +958,7 @@ class MarketSnapshotCollector:
 
     def _auto_fill_pipeline_latency(self, snap: MarketSnapshot) -> None:
         try:
-            from ali2026v3_trading.strategy.strategy_config_layer import _pipeline_latency_monitor
+            from strategy.strategy_config_layer import _pipeline_latency_monitor
             pl = snap.pipeline_latency
             pl.signal_generation_ms = _pipeline_latency_monitor.get('signal_generation', 0.0) * 1000.0
             pl.event_publish_ms = _pipeline_latency_monitor.get('event_publish', 0.0) * 1000.0
@@ -1174,8 +1174,8 @@ class MarketSnapshotCollector:
 
     def export_to_duckdb(self, db_path: str, table_name: str = "market_snapshots") -> None:
         try:
-            from ali2026v3_trading.data.data_access import get_data_access
-            from ali2026v3_trading.data.db_adapter import connect
+            from data.data_access import get_data_access
+            from data.db_adapter import connect
         except ImportError:
             logger.error("导出DuckDB需要duckdb库，请执行: pip install duckdb")
             return
@@ -1206,7 +1206,7 @@ class MarketSnapshotCollector:
             return
         flat_dicts = [snap.to_flat_dict() for snap in self._snapshots]
         df = pd.DataFrame(flat_dicts)
-        from ali2026v3_trading.infra.serialization_utils import safe_dataframe_to_parquet
+        from infra.serialization_utils import safe_dataframe_to_parquet
         safe_dataframe_to_parquet(df, file_path, preserve_index=False)
 
     _auto_export_interval_sec = 300
@@ -1219,7 +1219,7 @@ class MarketSnapshotCollector:
             return
         self._auto_export_counter = 0
         try:
-            from ali2026v3_trading.config._params_canary_env import DEFAULT_LOG_DIR
+            from config._params_canary_env import DEFAULT_LOG_DIR
             import os
             db_path = os.path.join(DEFAULT_LOG_DIR, 'market_snapshots_auto.duckdb')
             self.export_to_duckdb(db_path)

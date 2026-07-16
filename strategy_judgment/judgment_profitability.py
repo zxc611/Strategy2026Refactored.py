@@ -12,7 +12,7 @@ from .judgment_types import (
     _JudgmentDimension, _safe_float, _safe_clip_score,
     CapitalScale, SCORING_COEFFICIENTS, CAPITAL_SCALE_CONFIGS,
 )
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 
@@ -124,7 +124,7 @@ class ProfitabilityJudger:
 
     def resolve_scale_config(self, capital_scale: CapitalScale) -> Dict[str, Any]:
         try:
-            from ali2026v3_trading.governance.mode_engine import ModeEngine, CAPITAL_MODE_CONFIGS
+            from governance.mode_engine import ModeEngine, CAPITAL_MODE_CONFIGS
             _scale_map = {
                 CapitalScale.SMALL: 'small',
                 CapitalScale.MEDIUM: 'medium',

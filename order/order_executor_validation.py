@@ -40,17 +40,17 @@ from dataclasses import dataclass, field
 
 
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from infra.shared_utils import CHINA_TZ
 
-from ali2026v3_trading.order.order_base import OrderResult
+from order.order_base import OrderResult
 
-from ali2026v3_trading.infra.shared_utils import TradeAction, TradeDirection, VALID_TRADE_DIRECTIONS
+from infra.shared_utils import TradeAction, TradeDirection, VALID_TRADE_DIRECTIONS
 
 
 
 try:
 
-    from ali2026v3_trading.strategy_judgment.causal_chain_utils import CyclicDependencyGuard
+    from strategy_judgment.causal_chain_utils import CyclicDependencyGuard
 
     _HAS_CAUSAL_CHAIN = True
 
@@ -283,7 +283,7 @@ class _OrderExecutorBase:
                 if _provider_ref is None:
                     # 回退2: 通过get_cached_params查找strategy对象
                     try:
-                        from ali2026v3_trading.config.config_service import get_cached_params as _gcp_v
+                        from config.config_service import get_cached_params as _gcp_v
                         _strategy_obj = _gcp_v().get('strategy', None)
                         if _strategy_obj is not None:
                             _core = getattr(_strategy_obj, 'strategy_core', None)
@@ -328,7 +328,7 @@ class _OrderExecutorBase:
                 if not _exchange:
                     # 从instrument_id推断exchange
                     try:
-                        from ali2026v3_trading.config.params_service import get_params_service
+                        from config.params_service import get_params_service
                         _ps_svc = get_params_service()
                         if _ps_svc is not None:
                             _meta = _ps_svc.get_instrument_meta(_instrument_id) if hasattr(_ps_svc, 'get_instrument_meta') else None
@@ -568,7 +568,7 @@ class _OrderExecutorBase:
 
                     try:
 
-                        from ali2026v3_trading.infra.event_bus import EventBus
+                        from infra.event_bus import EventBus
 
                         EventBus.get_instance().publish("self_trade_detected", {
 

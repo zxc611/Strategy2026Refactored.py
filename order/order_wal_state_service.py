@@ -38,17 +38,17 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 
-from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads
+from infra.serialization_utils import json_dumps, json_loads
 
-from ali2026v3_trading.infra.serialization_utils import safe_jsonl_append_line
+from infra.serialization_utils import safe_jsonl_append_line
 
-from ali2026v3_trading.infra.resilience import is_disk_full_error
+from infra.resilience import is_disk_full_error
 
-from ali2026v3_trading.infra.shared_utils import atomic_replace_file, sanitize_filename
+from infra.shared_utils import atomic_replace_file, sanitize_filename
 
 
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from infra.shared_utils import CHINA_TZ
 
 
 
@@ -70,7 +70,7 @@ class OrderWALStateService:
 
         try:
 
-            from ali2026v3_trading.order.order_persistence import OrderPersistenceService
+            from order.order_persistence import OrderPersistenceService
 
             wal_dir = getattr(provider, '_wal_dir', 'orders_wal')
 
@@ -340,7 +340,7 @@ class OrderWALStateService:
 
     def _rotate_jsonl_if_needed(self, filepath: str) -> None:
 
-        from ali2026v3_trading.infra.serialization_utils import rotate_jsonl_if_needed as _rotate
+        from infra.serialization_utils import rotate_jsonl_if_needed as _rotate
 
         _rotate(filepath, self._ORDER_STATE_MAX_BYTES, self._ORDER_STATE_BACKUP_COUNT)
 

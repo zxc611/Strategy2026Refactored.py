@@ -15,7 +15,7 @@ class TestTimedDuckDBConnection:
 
     def test_successful_query(self):
         """正常查询通过"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_result = MagicMock()
         mock_conn.execute = MagicMock(return_value=mock_result)
@@ -25,7 +25,7 @@ class TestTimedDuckDBConnection:
 
     def test_execute_with_parameters(self):
         """带参数查询"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_result = MagicMock()
         mock_conn.execute = MagicMock(return_value=mock_result)
@@ -36,7 +36,7 @@ class TestTimedDuckDBConnection:
 
     def test_timeout_marks_unhealthy(self):
         """超时后标记连接不健康"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_conn.execute = MagicMock(side_effect=lambda *a, **k: time.sleep(5))
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=0.1)
@@ -46,7 +46,7 @@ class TestTimedDuckDBConnection:
 
     def test_unhealthy_connection_raises(self):
         """不健康连接直接抛ConnectionError"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
         timed._unhealthy = True
@@ -55,7 +55,7 @@ class TestTimedDuckDBConnection:
 
     def test_unhealthy_fetchall_raises(self):
         """不健康连接fetchall抛ConnectionError"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
         timed._unhealthy = True
@@ -64,7 +64,7 @@ class TestTimedDuckDBConnection:
 
     def test_unhealthy_fetchone_raises(self):
         """不健康连接fetchone抛ConnectionError"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
         timed._unhealthy = True
@@ -73,7 +73,7 @@ class TestTimedDuckDBConnection:
 
     def test_fetchall_delegates(self):
         """fetchall委托给底层连接"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_conn.fetchall = MagicMock(return_value=[(1, 2)])
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
@@ -81,7 +81,7 @@ class TestTimedDuckDBConnection:
 
     def test_fetchone_delegates(self):
         """fetchone委托给底层连接"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_conn.fetchone = MagicMock(return_value=(1,))
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
@@ -89,7 +89,7 @@ class TestTimedDuckDBConnection:
 
     def test_executemany_delegates(self):
         """executemany委托给底层连接"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_conn.executemany = MagicMock(return_value=None)
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
@@ -98,7 +98,7 @@ class TestTimedDuckDBConnection:
 
     def test_close_shuts_down_executor(self):
         """close关闭executor"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
         timed.close()
@@ -106,7 +106,7 @@ class TestTimedDuckDBConnection:
 
     def test_getattr_delegates_to_conn(self):
         """__getattr__委托给底层连接"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_conn.custom_method = MagicMock(return_value="custom")
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
@@ -114,7 +114,7 @@ class TestTimedDuckDBConnection:
 
     def test_getattr_private_raises(self):
         """__getattr__私有属性抛AttributeError"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
         with pytest.raises(AttributeError):
@@ -122,7 +122,7 @@ class TestTimedDuckDBConnection:
 
     def test_last_used_time_updated(self):
         """查询更新新last_used_time"""
-        from ali2026v3_trading.data.ds_db_connection import _TimedDuckDBConnection
+        from data.ds_db_connection import _TimedDuckDBConnection
         mock_conn = MagicMock()
         mock_conn.execute = MagicMock(return_value=None)
         timed = _TimedDuckDBConnection(mock_conn, timeout_sec=30.0)
@@ -141,14 +141,14 @@ class TestDuckDBConnectionContextManager:
 
     def test_enter_returns_conn(self):
         """__enter__返回连接"""
-        from ali2026v3_trading.data.ds_db_connection import _DuckDBConnectionContextManager
+        from data.ds_db_connection import _DuckDBConnectionContextManager
         mock_conn = MagicMock()
         cm = _DuckDBConnectionContextManager(mock_conn)
         assert cm.__enter__() is mock_conn
 
     def test_exit_closes_conn(self):
         """__exit__关闭连接"""
-        from ali2026v3_trading.data.ds_db_connection import _DuckDBConnectionContextManager
+        from data.ds_db_connection import _DuckDBConnectionContextManager
         mock_conn = MagicMock()
         cm = _DuckDBConnectionContextManager(mock_conn)
         cm.__exit__(None, None, None)
@@ -156,7 +156,7 @@ class TestDuckDBConnectionContextManager:
 
     def test_exit_with_exception_marks_unhealthy(self):
         """异常时标记不健康"""
-        from ali2026v3_trading.data.ds_db_connection import _DuckDBConnectionContextManager
+        from data.ds_db_connection import _DuckDBConnectionContextManager
         mock_conn = MagicMock()
         mock_owner = MagicMock()
         mock_owner._thread_local = MagicMock()
@@ -175,17 +175,17 @@ class TestDBConnectionMixin:
 
     def test_is_fatal_database_error_fatal(self):
         """FATAL错误检测"""
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         assert DBConnectionMixin._is_fatal_database_error(Exception("FATAL: database error")) is True
 
     def test_is_fatal_database_error_invalidated(self):
         """数据库失效检测"""
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         assert DBConnectionMixin._is_fatal_database_error(Exception("database has been invalidated")) is True
 
     def test_is_fatal_database_error_normal(self):
         """普通错误不是FATAL"""
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         assert DBConnectionMixin._is_fatal_database_error(Exception("normal error")) is False
 
     def test_try_fallback_to_memory_db(self):
@@ -194,7 +194,7 @@ class TestDBConnectionMixin:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         mixin = DBConnectionMixin()
         conn = mixin._try_fallback_to_memory_db()
         assert conn is not None
@@ -208,7 +208,7 @@ class TestDBConnectionMixin:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin, _TimedDuckDBConnection
+        from data.ds_db_connection import DBConnectionMixin, _TimedDuckDBConnection
         mixin = DBConnectionMixin()
         conn = mixin._connect_with_timeout(':memory:')
         assert isinstance(conn, _TimedDuckDBConnection)
@@ -220,7 +220,7 @@ class TestDBConnectionMixin:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         mixin = DBConnectionMixin()
         conn = duckdb.connect(':memory:')
         # 同版本不应报错
@@ -233,7 +233,7 @@ class TestDBConnectionMixin:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         mixin = DBConnectionMixin()
         conn = duckdb.connect(':memory:')
         # 从0.9迁移到1.0
@@ -242,14 +242,14 @@ class TestDBConnectionMixin:
 
     def test_set_max_pool_size(self):
         """动态调整连接池上限"""
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         mixin = DBConnectionMixin()
         mixin.set_max_pool_size(10)
         assert mixin._MAX_POOL_SIZE == 10
 
     def test_set_max_pool_size_invalid(self):
         """无效大小不调整"""
-        from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin
+        from data.ds_db_connection import DBConnectionMixin
         mixin = DBConnectionMixin()
         original = mixin._MAX_POOL_SIZE
         mixin.set_max_pool_size(0)

@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .judgment_types import (_JudgmentDimension, SCORING_COEFFICIENTS)
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 

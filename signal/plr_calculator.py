@@ -41,7 +41,7 @@ class ProfitLossRatioCalculator:
         self._strategy_stats: Dict[str, Dict[str, Any]] = {}
         # R32-P1-18修复: 通过ConfigService消费plr_thresholds(原getter零消费)
         try:
-            from ali2026v3_trading.config.config_service import get_config_service
+            from config.config_service import get_config_service
             _cs = get_config_service()
             if _cs is not None:
                 _plr_cfg = _cs.get_plr_thresholds()
@@ -231,7 +231,7 @@ class ProfitLossRatioCalculator:
             }
             # DFG-P1-12修复: PLR质量评估结果通过EventBus发布，供风控和诊断服务消费
             try:
-                from ali2026v3_trading.infra.event_bus import get_global_event_bus
+                from infra.event_bus import get_global_event_bus
                 _bus = get_global_event_bus()
                 if _bus is not None:
                     _bus.publish('plr.quality_assessed', {
@@ -258,7 +258,7 @@ def get_plr_calculator(default_target_plr: float = 2.0) -> ProfitLossRatioCalcul
             _plr_calculator_instance = ProfitLossRatioCalculator(default_target_plr=default_target_plr)
             # AP-03: SingletonRegistry注册
             try:
-                from ali2026v3_trading.infra.registry_service import SingletonRegistry
+                from infra.registry_service import SingletonRegistry
                 registry = SingletonRegistry.get_registry("plr_calculator")
                 registry.register_singleton("plr_calculator.instance", _plr_calculator_instance)
             except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:

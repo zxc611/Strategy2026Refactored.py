@@ -2,7 +2,7 @@
 """测试: data/query_data_export.py"""
 import pytest
 from unittest.mock import MagicMock, patch
-from ali2026v3_trading.data.query_data_export import DataExportService
+from data.query_data_export import DataExportService
 
 
 class TestDataExportService:

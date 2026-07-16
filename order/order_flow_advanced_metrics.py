@@ -6,7 +6,7 @@ from collections import deque
 import math
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.order.order_flow_data_structures import MicrostructureConfig
+from order.order_flow_data_structures import MicrostructureConfig
 
 
 class VolumeWeightedOrderFlow:

@@ -16,46 +16,46 @@ from typing import Any
 
 class TestStrategy2026Instantiation(unittest.TestCase):
     def test_basic_instantiation(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026()
         self.assertIsNotNone(s)
 
     def test_has_strategy_id(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026(strategy_id="test_2026_001")
         self.assertEqual(s.strategy_id, "test_2026_001")
 
     def test_has_strategy_core(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026(strategy_id="test_core_ref")
         self.assertIsNotNone(s.strategy_core)
 
     def test_strategy_core_is_correct_type(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026, StrategyCoreService
+        from strategy.strategy_core_service import Strategy2026, StrategyCoreService
         s = Strategy2026(strategy_id="test_core_type")
         self.assertIsInstance(s.strategy_core, StrategyCoreService)
 
     def test_auto_trading_disabled_initially(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026(strategy_id="test_auto_trading")
         self.assertFalse(s.auto_trading_enabled)
 
 
 class TestStrategy2026Inheritance(unittest.TestCase):
     def test_inherits_base_strategy(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
-        from ali2026v3_trading.strategy.strategy_2026 import BaseStrategy
+        from strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_2026 import BaseStrategy
         self.assertTrue(issubclass(Strategy2026, BaseStrategy))
 
     def test_inherits_ui_mixin(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
-        from ali2026v3_trading.config.ui_service import UIMixin
+        from strategy.strategy_core_service import Strategy2026
+        from config.ui_service import UIMixin
         self.assertTrue(issubclass(Strategy2026, UIMixin))
 
 
 class TestStrategy2026RequiredMethods(unittest.TestCase):
     def setUp(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         self.s = Strategy2026(strategy_id="test_methods_2026")
 
     def test_has_log_warning(self):
@@ -81,30 +81,30 @@ class TestStrategy2026RequiredMethods(unittest.TestCase):
 
 class TestStrategy2026Attributes(unittest.TestCase):
     def test_has_config(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026(strategy_id="test_config")
         self.assertTrue(hasattr(s, 'config'))
         self.assertIsInstance(s.config, dict)
 
     def test_has_params(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026(strategy_id="test_params")
         self.assertTrue(hasattr(s, 'params'))
 
     def test_is_real_strategy_flag(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026(strategy_id="test_real_flag")
         self.assertTrue(s._is_real_strategy)
 
     def test_stop_requested_initially_false(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         s = Strategy2026(strategy_id="test_stop_flag")
         self.assertFalse(s._stop_requested)
 
 
 class TestStrategy2026LogMethods(unittest.TestCase):
     def setUp(self):
-        from ali2026v3_trading.strategy.strategy_core_service import Strategy2026
+        from strategy.strategy_core_service import Strategy2026
         self.s = Strategy2026(strategy_id="test_log_methods")
 
     def test_log_warning_does_not_raise(self):

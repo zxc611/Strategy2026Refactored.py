@@ -8,7 +8,7 @@ StrategyJudgmentEngine.judge()所需的输入参数，
 使参数池的参数扫描结果能被策略评判系统自动评判。
 
 用法:
-  from ali2026v3_trading.strategy_judgment.parameter_pool_adapter import judge_backtest_result
+  from strategy_judgment.parameter_pool_adapter import judge_backtest_result
 
   result = run_backtest(params, bar_data)
   report = judge_backtest_result("resonance", "rb888", "2025-01~06", result)
@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from .strategy_judgment_facade import StrategyJudgmentEngine
 from .judgment_types import JudgmentReport, ECOSYSTEM_TO_JUDGMENT_TYPE_MAP, CapitalScale
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 

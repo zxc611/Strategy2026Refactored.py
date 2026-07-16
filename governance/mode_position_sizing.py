@@ -14,8 +14,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.governance.mode_config import ModeConfig
-from ali2026v3_trading.config.config_params import (
+from governance.mode_config import ModeConfig
+from config.config_params import (
     STRATEGY_MODE_CORRECT_TRENDING, STRATEGY_MODE_INCORRECT_REVERSAL,
     STRATEGY_MODE_OTHER,
 )
@@ -262,7 +262,7 @@ class PredictiveStateEngine:
             self._transition_history = self._transition_history[-self._max_history:]
         # DFG-P1-03修复: PredictiveStateEngine状态转换结果通过EventBus传播
         try:
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
             _bus = get_global_event_bus()
             if _bus is not None:
                 _bus.publish('pse.state_transition', {

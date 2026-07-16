@@ -9,7 +9,7 @@ R2-2: 手册V7.5架构对齐命名
   L3 影子隐形  ← 小资金约束+影子EV(驾驶座) → gate_l3_shadow_stealth()
 
 与参数池优化脚本的集成方式：
-  from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
+  from evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
   judge = CascadeJudge()
   adapted = adapt_backtest_result(train_result, test_result, params)
   report = judge.judge(adapted)
@@ -24,16 +24,16 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 import logging
 
-from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
+from infra.serialization_utils import yaml_safe_load
 from typing import List, Optional, Dict, Any
 import math
 import os
-from ali2026v3_trading.infra.shared_utils import ANNUALIZE_FACTOR_DAILY, ANNUALIZE_FACTOR_MINUTE, CHINA_TZ as _CHINA_TZ, get_annualize_factor as _get_annualize_factor  # P2-13: 统一CHINA_TZ
+from infra.shared_utils import ANNUALIZE_FACTOR_DAILY, ANNUALIZE_FACTOR_MINUTE, CHINA_TZ as _CHINA_TZ, get_annualize_factor as _get_annualize_factor  # P2-13: 统一CHINA_TZ
 
 __all__ = ['CascadeJudge', 'CascadeReport', 'GateReport', 'GateResult', 'BacktestMetrics', 'adapt_backtest_result', 'CascadeJudgeError']
 
 try:
-    from ali2026v3_trading.strategy_judgment.causal_chain_utils import ParamIsolationGuard
+    from strategy_judgment.causal_chain_utils import ParamIsolationGuard
     _HAS_CAUSAL_CHAIN = True
 except ImportError:
     _HAS_CAUSAL_CHAIN = False
@@ -58,7 +58,7 @@ class GateResult(Enum):
 def gate_result_to_risk_level(gate_result: GateResult):
     """GateResult→RiskLevel映射函数，确保评判结果可直接映射到生产风控等级"""
     try:
-        from ali2026v3_trading.risk.risk_service import RiskLevel
+        from risk.risk_service import RiskLevel
         _MAPPING = {
             GateResult.PASS: RiskLevel.LOW,
             GateResult.WARN: RiskLevel.MEDIUM,
@@ -457,7 +457,7 @@ class CascadeJudge:
         self._report_history_maxlen: int = 1000
         # R32-P1-18修复: 通过ConfigService消费cascade_threshold_grid(原getter零消费)
         try:
-            from ali2026v3_trading.config.config_service import get_config_service
+            from config.config_service import get_config_service
             _cs = get_config_service()
             if _cs is not None:
                 _grid = _cs.get_cascade_threshold_grid()
@@ -591,7 +591,7 @@ class CascadeJudge:
         """
         try:
             if conn is None:
-                from ali2026v3_trading.data.db_adapter import get_db_adapter
+                from data.db_adapter import get_db_adapter
                 conn = get_db_adapter()
             result = conn.execute("""
                 SELECT
@@ -704,7 +704,7 @@ class CascadeJudge:
         if l3_invisibility <= 0:
             # 当隐形度未计算时，尝试从ShadowStrategyEngine获取实际验证结果
             try:
-                from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
+                from strategy.shadow_strategy_facade import get_shadow_strategy_engine
                 _shadow_engine = get_shadow_strategy_engine()
                 if _shadow_engine is not None:
                     shadow_orders = getattr(_shadow_engine, '_shadow_order_log', None)
@@ -890,7 +890,7 @@ class CascadeJudge:
         """
         # R7-M-13修复: 从config_params读取全局sigmoid归一化参数
         try:
-            from ali2026v3_trading.config.config_params import get_param
+            from config.config_params import get_param
             _alpha = get_param('sigmoid_alpha', 1.0)
             _beta = get_param('sigmoid_beta', 0.0)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:

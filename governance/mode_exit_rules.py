@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from ali2026v3_trading.governance.mode_config import TakeProfitMethod, StopLossMethod, DrawdownAction
+from governance.mode_config import TakeProfitMethod, StopLossMethod, DrawdownAction
 
 class ExitRuleEngine:
     def __init__(self, method: TakeProfitMethod, stop_method: StopLossMethod):
@@ -105,7 +105,7 @@ class DrawdownManager:
         确保治理层决策与风控层硬停止状态一致。
         """
         try:
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
             bus = get_global_event_bus()
             if bus is not None:
                 bus.subscribe_weak('DailyDrawdownHaltEvent', self._on_daily_hard_stop_event)

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 
 def _get_base_class():
-    from ali2026v3_trading.governance.governance_engine import ParameterDriftDetector as _PDD
+    from governance.governance_engine import ParameterDriftDetector as _PDD
     return _PDD
 
 
@@ -18,7 +18,7 @@ class ParameterDriftDetector:
                 param_history = parameter_stability_result["snapshots"]
         if not param_history:
             try:
-                from ali2026v3_trading.governance.governance_engine import get_governance_engine
+                from governance.governance_engine import get_governance_engine
                 _engine = get_governance_engine()
                 param_history = _engine._param_snapshot_history
             except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:

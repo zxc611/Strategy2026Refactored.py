@@ -14,7 +14,7 @@ class TestDynamicPursuitEngineOpen:
 
     def test_surge_detection_open_buy(self):
         """BUY方向强度突增开仓"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         assert result is not None
@@ -24,7 +24,7 @@ class TestDynamicPursuitEngineOpen:
 
     def test_surge_detection_open_sell(self):
         """SELL方向强度突增开仓"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'SELL')
         assert result is not None
@@ -33,42 +33,42 @@ class TestDynamicPursuitEngineOpen:
 
     def test_no_surge_below_threshold(self):
         """强度增量低于阈值不触发"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.4, 0.3, 100.0, 'BUY')
         assert result is None
 
     def test_invalid_direction_rejected(self):
         """无效方向被拒绝"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'INVALID')
         assert result is None
 
     def test_zero_price_rejected(self):
         """价格为0被拒绝"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, 0.0, 'BUY')
         assert result is None
 
     def test_negative_price_rejected(self):
         """负价格被拒绝"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, -1.0, 'BUY')
         assert result is None
 
     def test_open_has_stop_profit(self):
         """开仓结果包含止盈价"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         assert 'stop_profit' in result
 
     def test_open_has_strength_delta(self):
         """开仓结果包含强度增量"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         assert 'strength_delta' in result
@@ -76,7 +76,7 @@ class TestDynamicPursuitEngineOpen:
 
     def test_open_volume_is_one(self):
         """初始开仓数量为1"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         result = engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         assert result['volume'] == 1
@@ -91,7 +91,7 @@ class TestDynamicPursuitEngineAdd:
 
     def test_add_position_on_surge(self):
         """已有仓位时追仓"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, max_add_positions=3, add_volume_ratio=0.5)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.evaluate_surge('test_inst', 1.2, 0.8, 105.0, 'BUY')
@@ -101,7 +101,7 @@ class TestDynamicPursuitEngineAdd:
 
     def test_max_add_positions_limit(self):
         """追仓次数达到上限"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, max_add_positions=1, add_volume_ratio=0.5)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         engine.evaluate_surge('test_inst', 1.2, 0.8, 105.0, 'BUY')
@@ -111,7 +111,7 @@ class TestDynamicPursuitEngineAdd:
 
     def test_opposite_direction_rejected(self):
         """已有仓位方向不同时拒绝"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.evaluate_surge('test_inst', 1.2, 0.8, 105.0, 'SELL')
@@ -119,7 +119,7 @@ class TestDynamicPursuitEngineAdd:
 
     def test_add_updates_total_volume(self):
         """追仓更新总仓位"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, max_add_positions=3, add_volume_ratio=1.0)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.evaluate_surge('test_inst', 1.2, 0.8, 105.0, 'BUY')
@@ -127,7 +127,7 @@ class TestDynamicPursuitEngineAdd:
 
     def test_add_updates_avg_price(self):
         """追仓更新加权平均价"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, max_add_positions=3, add_volume_ratio=1.0)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.evaluate_surge('test_inst', 1.2, 0.8, 110.0, 'BUY')
@@ -136,7 +136,7 @@ class TestDynamicPursuitEngineAdd:
 
     def test_add_has_new_stop_profit(self):
         """追仓结果包含新止盈价"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, max_add_positions=3, add_volume_ratio=0.5)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.evaluate_surge('test_inst', 1.2, 0.8, 105.0, 'BUY')
@@ -152,7 +152,7 @@ class TestDynamicPursuitEngineExit:
 
     def test_check_exit_take_profit_buy(self):
         """BUY仓位止盈退出"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, stop_profit_trail_ratio=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         pos = engine._positions['test_inst']
@@ -164,7 +164,7 @@ class TestDynamicPursuitEngineExit:
 
     def test_check_exit_stop_loss_buy(self):
         """BUY仓位止损退出"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, tight_stop_loss_pct=0.15)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         pos = engine._positions['test_inst']
@@ -175,7 +175,7 @@ class TestDynamicPursuitEngineExit:
 
     def test_check_exit_take_profit_sell(self):
         """SELL仓位止盈退出"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, stop_profit_trail_ratio=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'SELL')
         pos = engine._positions['test_inst']
@@ -187,7 +187,7 @@ class TestDynamicPursuitEngineExit:
 
     def test_check_exit_stop_loss_sell(self):
         """SELL仓位止损退出"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, tight_stop_loss_pct=0.15)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'SELL')
         pos = engine._positions['test_inst']
@@ -198,14 +198,14 @@ class TestDynamicPursuitEngineExit:
 
     def test_check_exit_no_position(self):
         """无仓位时返回None"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine()
         result = engine.check_exit('nonexistent', 100.0)
         assert result is None
 
     def test_check_exit_unconfirmed_short_wait(self):
         """未确认仓位短时间内不退出"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         # 未确认仓位，刚创建
@@ -214,7 +214,7 @@ class TestDynamicPursuitEngineExit:
 
     def test_check_exit_result_has_pnl(self):
         """退出结果包含PnL"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, stop_profit_trail_ratio=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         pos = engine._positions['test_inst']
@@ -225,7 +225,7 @@ class TestDynamicPursuitEngineExit:
 
     def test_check_exit_result_has_close_direction(self):
         """退出结果包含平仓方向"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, stop_profit_trail_ratio=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         pos = engine._positions['test_inst']
@@ -244,7 +244,7 @@ class TestDynamicPursuitEngineTrailingStop:
 
     def test_update_trailing_stop_buy(self):
         """BUY仓位追踪止盈提高"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, stop_profit_trail_ratio=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         pos = engine._positions['test_inst']
@@ -255,14 +255,14 @@ class TestDynamicPursuitEngineTrailingStop:
 
     def test_update_trailing_stop_no_position(self):
         """无仓位时返回None"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine()
         result = engine.update_trailing_stop('nonexistent', 100.0)
         assert result is None
 
     def test_update_trailing_stop_buy_price_below_avg(self):
         """BUY仓位价格低于均价时不更新"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.update_trailing_stop('test_inst', 99.0)
@@ -278,7 +278,7 @@ class TestDynamicPursuitEngineConfirm:
 
     def test_confirm_position_on_platform(self):
         """确认平台仓位"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.confirm_position_on_platform('test_inst', 'order_123')
@@ -289,14 +289,14 @@ class TestDynamicPursuitEngineConfirm:
 
     def test_confirm_nonexistent_position(self):
         """确认不存在的仓位返回False"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine()
         result = engine.confirm_position_on_platform('nonexistent', 'order_123')
         assert result is False
 
     def test_add_platform_order_id(self):
         """添加平台订单ID"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         result = engine.add_platform_order_id('test_inst', 'order_456')
@@ -314,7 +314,7 @@ class TestDynamicPursuitEngineStats:
 
     def test_get_stats_structure(self):
         """统计信息结构"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         stats = engine.get_stats()
@@ -325,7 +325,7 @@ class TestDynamicPursuitEngineStats:
 
     def test_stats_after_close(self):
         """关闭仓位后统计更新"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine(surge_threshold=0.3, stop_profit_trail_ratio=0.3)
         engine.evaluate_surge('test_inst', 0.8, 0.3, 100.0, 'BUY')
         pos = engine._positions['test_inst']
@@ -338,7 +338,7 @@ class TestDynamicPursuitEngineStats:
 
     def test_stats_no_entries(self):
         """无入场时统计"""
-        from ali2026v3_trading.strategy.tick_hft import DynamicPursuitEngine
+        from strategy.tick_hft import DynamicPursuitEngine
         engine = DynamicPursuitEngine()
         stats = engine.get_stats()
         assert stats['total_pursuit_entries'] == 0
@@ -355,7 +355,7 @@ class TestPursuitPosition:
 
     def test_creation(self):
         """创建PursuitPosition"""
-        from ali2026v3_trading.strategy.tick_hft import PursuitPosition
+        from strategy.tick_hft import PursuitPosition
         pos = PursuitPosition(
             position_id="test_001", instrument_id="test_inst",
             direction="BUY", entries=[], total_volume=1,
@@ -369,7 +369,7 @@ class TestPursuitPosition:
 
     def test_default_values(self):
         """默认值"""
-        from ali2026v3_trading.strategy.tick_hft import PursuitPosition
+        from strategy.tick_hft import PursuitPosition
         pos = PursuitPosition(
             position_id="test", instrument_id="test", direction="BUY",
             entries=[], total_volume=0, weighted_avg_price=0.0,
@@ -388,42 +388,42 @@ class TestPyramidAddPositionEngine:
 
     def test_calc_add_volume_level0(self):
         """第0级加仓量"""
-        from ali2026v3_trading.strategy.tick_hft import PyramidAddPositionEngine
+        from strategy.tick_hft import PyramidAddPositionEngine
         engine = PyramidAddPositionEngine(max_levels=4, pyramid_ratio=0.5)
         vol = engine.calc_add_volume('inst', 10, 0)
         assert vol == 10  # 10 * 0.5^0 = 10
 
     def test_calc_add_volume_level1(self):
         """第1级加仓量"""
-        from ali2026v3_trading.strategy.tick_hft import PyramidAddPositionEngine
+        from strategy.tick_hft import PyramidAddPositionEngine
         engine = PyramidAddPositionEngine(max_levels=4, pyramid_ratio=0.5)
         vol = engine.calc_add_volume('inst', 10, 1)
         assert vol == 5  # 10 * 0.5^1 = 5
 
     def test_calc_add_volume_level2(self):
         """第2级加仓量"""
-        from ali2026v3_trading.strategy.tick_hft import PyramidAddPositionEngine
+        from strategy.tick_hft import PyramidAddPositionEngine
         engine = PyramidAddPositionEngine(max_levels=4, pyramid_ratio=0.5)
         vol = engine.calc_add_volume('inst', 10, 2)
         assert vol == 2  # int(10 * 0.25) = 2
 
     def test_calc_add_volume_max_level(self):
         """超过最大级别返回0"""
-        from ali2026v3_trading.strategy.tick_hft import PyramidAddPositionEngine
+        from strategy.tick_hft import PyramidAddPositionEngine
         engine = PyramidAddPositionEngine(max_levels=4, pyramid_ratio=0.5)
         vol = engine.calc_add_volume('inst', 10, 4)
         assert vol == 0
 
     def test_calc_add_volume_plr_blocked(self):
         """PLR过低阻止加仓"""
-        from ali2026v3_trading.strategy.tick_hft import PyramidAddPositionEngine
+        from strategy.tick_hft import PyramidAddPositionEngine
         engine = PyramidAddPositionEngine(min_plr_for_add=1.5)
         vol = engine.calc_add_volume('inst', 10, 0, current_plr=1.0)
         assert vol == 0
 
     def test_get_stats(self):
         """统计信息"""
-        from ali2026v3_trading.strategy.tick_hft import PyramidAddPositionEngine
+        from strategy.tick_hft import PyramidAddPositionEngine
         engine = PyramidAddPositionEngine()
         stats = engine.get_stats()
         assert stats['service_name'] == 'PyramidAddPositionEngine'

@@ -1,12 +1,12 @@
 # MODULE_ID: M1-169
 # [M1-135] 元审计引擎
 from __future__ import annotations
-from ali2026v3_trading.infra.exceptions import FutureLeakException
-from ali2026v3_trading.governance.greeks_calculator import _norm_cdf
+from infra.exceptions import FutureLeakException
+from governance.greeks_calculator import _norm_cdf
 
 import ast
 import logging
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 import numpy as np
 
@@ -418,7 +418,7 @@ class MetaAuditEngine:
 import traceback
 import warnings
 import logging
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 import numpy as np
 import pandas as pd

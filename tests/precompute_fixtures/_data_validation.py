@@ -5,7 +5,7 @@ from __future__ import annotations
 # ── DuckDB Tick Storage ──
 
 import logging
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 import os
 import re
 from dataclasses import dataclass, field
@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, date
 
 try:
-    from ali2026v3_trading.data.data_access import get_data_access
-    from ali2026v3_trading.data.db_adapter import connect, get_duckdb_module
+    from data.data_access import get_data_access
+    from data.db_adapter import connect, get_duckdb_module
     duckdb = get_duckdb_module()
 except ImportError:
     duckdb = None
@@ -509,11 +509,11 @@ class DuckDBTickStorage:
 # ── External Validation Pipeline ──
 
 import logging
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from infra.shared_utils import CHINA_TZ
 from enum import Enum
 
 import numpy as np

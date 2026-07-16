@@ -39,7 +39,7 @@ class TestApplyTickRounding:
     @given(price=small_float, tick_size=positive_float, direction=direction_str)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_idempotent(self, price, tick_size, direction):
-        from ali2026v3_trading.risk.crack_validation import apply_tick_rounding
+        from risk.crack_validation import apply_tick_rounding
         r1 = apply_tick_rounding(price, tick_size, direction)
         r2 = apply_tick_rounding(r1, tick_size, direction)
         assert math.isclose(r1, r2, rel_tol=1e-6, abs_tol=tick_size)
@@ -47,21 +47,21 @@ class TestApplyTickRounding:
     @given(price=small_float, tick_size=positive_float)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_up_gte_price(self, price, tick_size):
-        from ali2026v3_trading.risk.crack_validation import apply_tick_rounding
+        from risk.crack_validation import apply_tick_rounding
         result = apply_tick_rounding(price, tick_size, 'up')
         assert result >= price - tick_size * 1e-9
 
     @given(price=small_float, tick_size=positive_float)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_down_lte_price(self, price, tick_size):
-        from ali2026v3_trading.risk.crack_validation import apply_tick_rounding
+        from risk.crack_validation import apply_tick_rounding
         result = apply_tick_rounding(price, tick_size, 'down')
         assert result <= price + tick_size * 1e-9
 
     @given(price=small_float, tick_size=positive_float, direction=direction_str)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_tick_size_multiple(self, price, tick_size, direction):
-        from ali2026v3_trading.risk.crack_validation import apply_tick_rounding
+        from risk.crack_validation import apply_tick_rounding
         result = apply_tick_rounding(price, tick_size, direction)
         remainder = result / tick_size
         assert math.isclose(remainder, round(remainder), rel_tol=1e-6, abs_tol=1e-9)
@@ -77,7 +77,7 @@ class TestApplyLotRounding:
     @given(lots=st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_floor_nonneg(self, lots):
-        from ali2026v3_trading.risk.crack_validation import apply_lot_rounding
+        from risk.crack_validation import apply_lot_rounding
         result = apply_lot_rounding(lots, 'floor')
         assert result >= 0
 
@@ -85,14 +85,14 @@ class TestApplyLotRounding:
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_ceil_at_least_one(self, lots):
         assume(lots > 0)
-        from ali2026v3_trading.risk.crack_validation import apply_lot_rounding
+        from risk.crack_validation import apply_lot_rounding
         result = apply_lot_rounding(lots, 'ceil')
         assert result >= 1
 
     @given(lots=st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_floor_le_ceil(self, lots):
-        from ali2026v3_trading.risk.crack_validation import apply_lot_rounding
+        from risk.crack_validation import apply_lot_rounding
         f = apply_lot_rounding(lots, 'floor')
         c = apply_lot_rounding(lots, 'ceil')
         assert f <= c
@@ -110,7 +110,7 @@ class TestComputeCascadeSlippage:
            cap=st.floats(min_value=1.0, max_value=1000.0, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_result_bounded(self, base, close_vol, avg_vol, mult, cap):
-        from ali2026v3_trading.risk.crack_validation import compute_cascade_slippage
+        from risk.crack_validation import compute_cascade_slippage
         result = compute_cascade_slippage(base, close_vol, avg_vol, mult, cap)
         assert 0.0 <= result <= cap
 
@@ -119,7 +119,7 @@ class TestComputeCascadeSlippage:
            cap=st.floats(min_value=1.0, max_value=1000.0, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_monotonic_in_close_vol(self, base, avg_vol, mult, cap):
-        from ali2026v3_trading.risk.crack_validation import compute_cascade_slippage
+        from risk.crack_validation import compute_cascade_slippage
         r1 = compute_cascade_slippage(base, 100.0, avg_vol, mult, cap)
         r2 = compute_cascade_slippage(base, 10000.0, avg_vol, mult, cap)
         assert r2 >= r1 - 1e-9
@@ -137,7 +137,7 @@ class TestComputeDiscreteEquity:
            gains=st.lists(nonneg_float, min_size=0, max_size=20))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_length_and_first(self, capital, losses, gains):
-        from ali2026v3_trading.risk.crack_validation import compute_discrete_equity
+        from risk.crack_validation import compute_discrete_equity
         result = compute_discrete_equity(capital, losses, gains)
         n = min(len(losses), len(gains))
         assert len(result) == 1 + n
@@ -148,7 +148,7 @@ class TestComputeDiscreteEquity:
            gains=st.lists(nonneg_float, min_size=0, max_size=20))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_nonneg(self, capital, losses, gains):
-        from ali2026v3_trading.risk.crack_validation import compute_discrete_equity
+        from risk.crack_validation import compute_discrete_equity
         result = compute_discrete_equity(capital, losses, gains)
         assert all(e >= -1e-9 for e in result)
 
@@ -163,7 +163,7 @@ class TestComputeKLDivergence:
     @given(p=st.lists(st.floats(min_value=0.01, max_value=100.0, allow_nan=False), min_size=1, max_size=10))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_nonneg_same_length(self, p):
-        from ali2026v3_trading.risk.crack_validation import compute_kl_divergence
+        from risk.crack_validation import compute_kl_divergence
         q = [v * 2.0 + 0.1 for v in p]
         result = compute_kl_divergence(np.array(p), np.array(q))
         assert result >= -1e-6
@@ -171,7 +171,7 @@ class TestComputeKLDivergence:
     @given(p=st.lists(st.floats(min_value=0.01, max_value=100.0, allow_nan=False), min_size=1, max_size=10))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_self_divergence_zero(self, p):
-        from ali2026v3_trading.risk.crack_validation import compute_kl_divergence
+        from risk.crack_validation import compute_kl_divergence
         arr = np.array(p)
         result = compute_kl_divergence(arr, arr)
         assert math.isclose(result, 0.0, abs_tol=1e-6)
@@ -187,18 +187,18 @@ class TestNormalCDF:
     @given(x=st.floats(min_value=-10.0, max_value=10.0, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_range_0_1(self, x):
-        from ali2026v3_trading.risk.crack_validation import _normal_cdf
+        from risk.crack_validation import _normal_cdf
         result = _normal_cdf(x)
         assert 0.0 <= result <= 1.0
 
     @given(x=st.floats(min_value=-10.0, max_value=10.0, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_symmetry(self, x):
-        from ali2026v3_trading.risk.crack_validation import _normal_cdf
+        from risk.crack_validation import _normal_cdf
         assert math.isclose(_normal_cdf(x), 1.0 - _normal_cdf(-x), rel_tol=1e-6, abs_tol=1e-9)
 
     def test_zero_is_half(self):
-        from ali2026v3_trading.risk.crack_validation import _normal_cdf
+        from risk.crack_validation import _normal_cdf
         assert math.isclose(_normal_cdf(0.0), 0.5, abs_tol=1e-10)
 
 
@@ -214,7 +214,7 @@ class TestComputeSharpeCI:
            z=st.floats(min_value=0.1, max_value=5.0, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_ci_contains_sharpe(self, sharpe, n, z):
-        from ali2026v3_trading.risk.crack_validation import compute_sharpe_ci
+        from risk.crack_validation import compute_sharpe_ci
         low, high = compute_sharpe_ci(sharpe, n, z)
         assert low <= sharpe + 1e-9
         assert high >= sharpe - 1e-9
@@ -224,7 +224,7 @@ class TestComputeSharpeCI:
            z=st.floats(min_value=0.1, max_value=5.0, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_symmetric(self, sharpe, n, z):
-        from ali2026v3_trading.risk.crack_validation import compute_sharpe_ci
+        from risk.crack_validation import compute_sharpe_ci
         low, high = compute_sharpe_ci(sharpe, n, z)
         assert math.isclose(sharpe - low, high - sharpe, rel_tol=1e-9)
 
@@ -239,21 +239,21 @@ class TestStableEWMA:
     @given(c=finite_float, n=finite_float)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_alpha_zero_returns_current(self, c, n):
-        from ali2026v3_trading.infra.resilience import stable_ewma
+        from infra.resilience import stable_ewma
         result = stable_ewma(c, n, 0.0)
         assert math.isclose(result, c, rel_tol=1e-3, abs_tol=abs(n - c) * 1e-10 + 1e-6)
 
     @given(c=finite_float, n=finite_float)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_alpha_one_returns_new(self, c, n):
-        from ali2026v3_trading.infra.resilience import stable_ewma
+        from infra.resilience import stable_ewma
         result = stable_ewma(c, n, 1.0)
         assert math.isclose(result, n, rel_tol=1e-6, abs_tol=1e-6)
 
     @given(c=finite_float, n=finite_float)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_alpha_half_is_average(self, c, n):
-        from ali2026v3_trading.infra.resilience import stable_ewma
+        from infra.resilience import stable_ewma
         result = stable_ewma(c, n, 0.5)
         expected = (c + n) / 2.0
         assert math.isclose(result, expected, rel_tol=1e-6, abs_tol=1e-6)
@@ -269,14 +269,14 @@ class TestSafeDivide:
     @given(numerator=finite_float, default=finite_float)
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_zero_denom_returns_default(self, numerator, default):
-        from ali2026v3_trading.infra.resilience import safe_divide
+        from infra.resilience import safe_divide
         result = safe_divide(numerator, 0.0, default)
         assert result == default
 
     @given(numerator=finite_float, denominator=st.floats(min_value=1.0, max_value=1e8, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_large_denom_equals_division(self, numerator, denominator):
-        from ali2026v3_trading.infra.resilience import safe_divide
+        from infra.resilience import safe_divide
         result = safe_divide(numerator, denominator)
         expected = numerator / denominator
         assert math.isclose(result, expected, rel_tol=1e-9)
@@ -292,16 +292,16 @@ class TestSafeFloatToInt:
     @given(n=st.integers(min_value=-1000000, max_value=1000000))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_integer_input_unchanged(self, n):
-        from ali2026v3_trading.infra.resilience import safe_float_to_int
+        from infra.resilience import safe_float_to_int
         result = safe_float_to_int(float(n))
         assert result == n
 
     def test_half_rounds_up(self):
-        from ali2026v3_trading.infra.resilience import safe_float_to_int
+        from infra.resilience import safe_float_to_int
         assert safe_float_to_int(0.5) == 1
 
     def test_neg_half_rounds_to_zero(self):
-        from ali2026v3_trading.infra.resilience import safe_float_to_int
+        from infra.resilience import safe_float_to_int
         assert safe_float_to_int(-0.5) == 0
 
 
@@ -315,13 +315,13 @@ class TestDeterministicRound:
     @given(value=small_float, ndigits=st.integers(min_value=-4, max_value=4))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_deterministic(self, value, ndigits):
-        from ali2026v3_trading.infra.resilience import deterministic_round
+        from infra.resilience import deterministic_round
         r1 = deterministic_round(value, ndigits)
         r2 = deterministic_round(value, ndigits)
         assert r1 == r2
 
     def test_half_rounds_up(self):
-        from ali2026v3_trading.infra.resilience import deterministic_round
+        from infra.resilience import deterministic_round
         assert deterministic_round(0.5) == 1.0
         assert deterministic_round(1.5) == 2.0
 
@@ -339,7 +339,7 @@ class TestSafeNormalizeWeights:
         min_size=1, max_size=8))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_sums_to_one(self, weights):
-        from ali2026v3_trading.infra.resilience import safe_normalize_weights
+        from infra.resilience import safe_normalize_weights
         result = safe_normalize_weights(weights)
         assert math.isclose(sum(result.values()), 1.0, rel_tol=1e-6)
 
@@ -349,7 +349,7 @@ class TestSafeNormalizeWeights:
         min_size=1, max_size=8))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_keys_preserved(self, weights):
-        from ali2026v3_trading.infra.resilience import safe_normalize_weights
+        from infra.resilience import safe_normalize_weights
         result = safe_normalize_weights(weights)
         assert result.keys() == weights.keys()
 
@@ -365,14 +365,14 @@ class TestEstimateCommissionSimple:
            rate=st.floats(min_value=0.0, max_value=0.01, allow_nan=False, allow_infinity=False))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow], deadline=None)
     def test_nonneg(self, price, quantity, rate):
-        from ali2026v3_trading.infra.commission_utils import estimate_commission_simple
+        from infra.commission_utils import estimate_commission_simple
         result = estimate_commission_simple(price, quantity, rate)
         assert result >= -1e-9
 
     @given(price=positive_float, quantity=st.integers(min_value=1, max_value=10000))
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_zero_rate_is_zero(self, price, quantity):
-        from ali2026v3_trading.infra.commission_utils import estimate_commission_simple
+        from infra.commission_utils import estimate_commission_simple
         result = estimate_commission_simple(price, quantity, 0.0)
         assert result == 0.0
 
@@ -381,7 +381,7 @@ class TestEstimateCommissionSimple:
     @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
     def test_linear_in_quantity(self, price, quantity, rate):
         assume(quantity > 0 and quantity * 2 <= 10000)
-        from ali2026v3_trading.infra.commission_utils import estimate_commission_simple
+        from infra.commission_utils import estimate_commission_simple
         r1 = estimate_commission_simple(price, quantity, rate)
         r2 = estimate_commission_simple(price, quantity * 2, rate)
         assert math.isclose(r2, 2 * r1, rel_tol=1e-9)
@@ -397,14 +397,14 @@ class TestCheckSafetyMetaLayer:
     @given(cb=st.booleans(), ts=st.booleans())
     @settings(max_examples=50)
     def test_can_close_always_true(self, cb, ts):
-        from ali2026v3_trading.risk.crack_validation import check_safety_meta_layer
+        from risk.crack_validation import check_safety_meta_layer
         _, can_close = check_safety_meta_layer(cb, ts)
         assert can_close is True
 
     @given(cb=st.booleans(), ts=st.booleans())
     @settings(max_examples=50)
     def test_any_trigger_blocks_open(self, cb, ts):
-        from ali2026v3_trading.risk.crack_validation import check_safety_meta_layer
+        from risk.crack_validation import check_safety_meta_layer
         can_open, _ = check_safety_meta_layer(cb, ts)
         if cb or ts:
             assert can_open is False

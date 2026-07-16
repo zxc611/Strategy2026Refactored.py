@@ -7,7 +7,7 @@ import os
 import argparse
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# BASE_DIR is ali2026v3_trading/tools/.. = ali2026v3_trading/
+# BASE_DIR is demo/tools/.. = demo/
 PROJECT_DIR = BASE_DIR
 TOOLS_DIR = os.path.join(BASE_DIR, "tools")
 
@@ -51,15 +51,15 @@ def _check_import_chain():
     """导入链完整性检查"""
     errors = []
     critical_modules = [
-        "ali2026v3_trading.infra.shared_utils",
-        "ali2026v3_trading.infra.resilience",
-        "ali2026v3_trading.infra.health_monitor",
-        "ali2026v3_trading.infra.event_bus",
-        "ali2026v3_trading.config.config_service",
-        "ali2026v3_trading.lifecycle.lifecycle_state_machine",
-        "ali2026v3_trading.strategy_judgment.judgment_scoring_helpers",
-        "ali2026v3_trading.evaluation.cascade_judge",
-        "ali2026v3_trading.governance.governance_engine",
+        "infra.shared_utils",
+        "infra.resilience",
+        "infra.health_monitor",
+        "infra.event_bus",
+        "config.config_service",
+        "lifecycle.lifecycle_state_machine",
+        "strategy_judgment.judgment_scoring_helpers",
+        "evaluation.cascade_judge",
+        "governance.governance_engine",
     ]
     # 确保父目录在 sys.path 中以支持包导入
     parent_dir = os.path.dirname(BASE_DIR)

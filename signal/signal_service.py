@@ -12,18 +12,18 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.infra.shared_utils import SignalType, VALID_SIGNAL_TYPES, OPEN_SIGNAL_TYPES, CLOSE_SIGNAL_TYPES
-from ali2026v3_trading.infra.shared_utils import generate_prefixed_id  # R9-3
-from ali2026v3_trading.signal.signal_components import (
+from infra.shared_utils import CHINA_TZ
+from infra.shared_utils import SignalType, VALID_SIGNAL_TYPES, OPEN_SIGNAL_TYPES, CLOSE_SIGNAL_TYPES
+from infra.shared_utils import generate_prefixed_id  # R9-3
+from signal.signal_components import (
     KalmanFilter1D, EMASignalFilter, SignalTimingFilter, AdaptiveSignalThreshold, SignalHistoryService,
 )
 try:
-    from ali2026v3_trading.governance.mode_engine import ModeEngine
+    from governance.mode_engine import ModeEngine
 except ImportError:
     ModeEngine = None
 try:
-    from ali2026v3_trading.infra.event_bus import EventBus, get_global_event_bus
+    from infra.event_bus import EventBus, get_global_event_bus
     _HAS_EVENT_BUS = True
 except ImportError:
     _HAS_EVENT_BUS = False
@@ -117,24 +117,43 @@ class SignalGenerator:
         '_filter_by_adaptive',
     ]
     # [FIX-20260712-S5S6-P0] 关键硬约束filter异常时必须阻断，不能放行。
-    _CRITICAL_FILTERS = {'_filter_by_s5_s6_monitor'}
+    # FIX-6/15 RC-7/16: _CRITICAL_FILTERS空集合化，S5/S6硬约束改为分层fail-open/fail-safe
+    # 根因: dry_run模拟下单模式下，ArbitrageMonitor/MarketMakingMonitor未初始化导致
+    #       _filter_by_s5_s6_monitor抛ImportError/AttributeError，进而触发fail-safe
+    #       永久阻断所有信号，造成S1/S3的0订单。
+    # 修复: 异常分支内部分层处理(见_filter_by_s5_s6_monitor)，避免使用_CRITICAL_FILTERS全局阻断
+    _CRITICAL_FILTERS: set = set()
 
     def __init__(self, signal_service: Any):
         self._svc = signal_service
+
+    def _is_dry_run(self) -> bool:
+        """FIX-6/15: 检测当前是否处于dry_run模式（模拟下单）"""
+        try:
+            from config.params_service import get_params_service as _gps
+            if _gps().get_bool('dry_run_mode', False):
+                return True
+        except Exception:
+            pass
+        return bool(getattr(self._svc, '_dry_run_active', False))
 
     def generate_signal(self, ctx: SignalContext) -> SignalContext:
         for filter_name in self._FILTER_CHAIN:
             try:
                 ctx = getattr(self, filter_name)(ctx)
             except Exception as e:
-                # [FIX-20260712-S5S6-P0] 硬约束filter异常时必须fail-safe阻断。
-                if filter_name in self._CRITICAL_FILTERS:
-                    logging.exception("[SignalService] 硬约束filter %s 异常, fail-safe阻断: %s", filter_name, e)
-                    ctx.rejected = True
-                    ctx.reject_reason = f'{filter_name}_exception: {e}'
-                    ctx.filter_name = filter_name
-                    return ctx
-                if not getattr(self, '_filter_exc_logged', False):
+                # FIX-6/15 RC-7/16: 硬约束filter异常分层处理(dry_run=fail-open, 实盘=fail-safe)
+                if filter_name in ('_filter_by_s5_s6_monitor',):
+                    _dry = self._is_dry_run()
+                    if _dry:
+                        logging.warning("[SignalService] 硬约束filter %s 异常, dry_run fail-open放行: %s", filter_name, e)
+                    else:
+                        logging.exception("[SignalService] 硬约束filter %s 异常, 实盘 fail-safe本周期阻断: %s", filter_name, e)
+                        ctx.rejected = True
+                        ctx.reject_reason = f'{filter_name}_exception: {e}'
+                        ctx.filter_name = filter_name
+                        return ctx
+                elif not getattr(self, '_filter_exc_logged', False):
                     self._filter_exc_logged = True
                     logging.exception("[SignalService] filter %s exception, fail-safe pass: %s", filter_name, e)
                 else:
@@ -175,7 +194,7 @@ class SignalGenerator:
 
     def _filter_by_mode_engine(self, ctx: SignalContext) -> SignalContext:
         try:
-            from ali2026v3_trading.governance.mode_engine import ModeEngine
+            from governance.mode_engine import ModeEngine
             _me = ModeEngine.get_instance()
             _passed, _reason = _me.filter_signal_by_mode(
                 ctx.signal_type, estimated_plr=ctx.estimated_plr,
@@ -235,7 +254,7 @@ class SignalGenerator:
 
         # === S5套利硬约束 ===
         try:
-            from ali2026v3_trading.strategy.monitor.arbitrage_monitor import ArbitrageMonitor
+            from strategy.monitor.arbitrage_monitor import ArbitrageMonitor
             _arb = ArbitrageMonitor.get_instance()
             _last_sig = _arb.get_last_simulated_signal()
             if _last_sig is not None:
@@ -258,17 +277,22 @@ class SignalGenerator:
                         ctx.filter_name = 's5_s6_monitor'
                         return ctx
         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s5_err:
-            # [FIX-20260712-S5S6-P0] 硬约束监控查询失败必须阻断，不能静默放行。
-            # 否则ArbitrageMonitor未初始化/导入失败时，所有信号都会绕过S5套利方向约束。
-            logging.error("[S5S6-CHAIN] S5套利监控查询失败(硬约束阻断): %s", _s5_err)
-            ctx.rejected = True
-            ctx.reject_reason = f's5_monitor_query_failure: {_s5_err}'
-            ctx.filter_name = 's5_s6_monitor'
-            return ctx
+            # FIX-6 RC-7: S5套利监控查询失败分层处理
+            # 根因: dry_run模拟下单模式ArbitrageMonitor未初始化会抛AttributeError/ImportError
+            #       原fail-safe永久阻断导致S1/S3的0订单。改为dry_run=fail-open放行，实盘=fail-safe仅本周期阻断。
+            _dry = self._is_dry_run()
+            if _dry:
+                logging.warning("[S5S6-CHAIN] S5套利监控查询失败, dry_run fail-open放行: %s", _s5_err)
+            else:
+                logging.error("[S5S6-CHAIN] S5套利监控查询失败, 实盘 fail-safe本周期阻断: %s", _s5_err)
+                ctx.rejected = True
+                ctx.reject_reason = f's5_monitor_query_failure: {_s5_err}'
+                ctx.filter_name = 's5_s6_monitor'
+                return ctx
 
         # === S6做市商硬约束 ===
         try:
-            from ali2026v3_trading.strategy.monitor.market_making_monitor import MarketMakingMonitor
+            from strategy.monitor.market_making_monitor import MarketMakingMonitor
             # FIX-20260711-S6-TOP-TIER: P2 多合约registry — 按instrument_id获取实例
             _mmm = MarketMakingMonitor.get_instance(instrument_id=ctx.instrument_id)
             _preferred = str(_mmm.get_preferred_side()).lower()
@@ -291,12 +315,18 @@ class SignalGenerator:
                         ctx.filter_name = 's5_s6_monitor'
                         return ctx
         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s6_err:
-            # [FIX-20260712-S5S6-P0] 硬约束监控查询失败必须阻断，不能静默放行。
-            logging.error("[S5S6-CHAIN] S6做市商监控查询失败(硬约束阻断): %s", _s6_err)
-            ctx.rejected = True
-            ctx.reject_reason = f's6_monitor_query_failure: {_s6_err}'
-            ctx.filter_name = 's5_s6_monitor'
-            return ctx
+            # FIX-15 RC-16: S6做市商监控查询失败分层处理
+            # 根因: dry_run模拟下单模式MarketMakingMonitor未初始化会抛AttributeError/ImportError
+            #       原fail-safe永久阻断导致S1/S3的0订单。改为dry_run=fail-open放行，实盘=fail-safe仅本周期阻断。
+            _dry = self._is_dry_run()
+            if _dry:
+                logging.warning("[S5S6-CHAIN] S6做市商监控查询失败, dry_run fail-open放行: %s", _s6_err)
+            else:
+                logging.error("[S5S6-CHAIN] S6做市商监控查询失败, 实盘 fail-safe本周期阻断: %s", _s6_err)
+                ctx.rejected = True
+                ctx.reject_reason = f's6_monitor_query_failure: {_s6_err}'
+                ctx.filter_name = 's5_s6_monitor'
+                return ctx
 
         return ctx
 
@@ -331,7 +361,7 @@ class SignalGenerator:
                 ctx.filter_name = 'decision_score'
         else:
             try:
-                from ali2026v3_trading.risk.risk_service import get_risk_service
+                from risk.risk_service import get_risk_service
                 rs = get_risk_service()
                 ctx.decision_result = rs.compute_decision_score(
                     ctx.signal_strength, self._svc._default_order_flow_consistency, **_dim_kwargs,
@@ -407,7 +437,7 @@ class SignalGenerator:
 
     @staticmethod
     def validate_signal(signal: Dict[str, Any]) -> tuple:
-        from ali2026v3_trading.infra.shared_utils import VALID_SIGNAL_TYPES
+        from infra.shared_utils import VALID_SIGNAL_TYPES
         required_fields = ['instrument_id', 'signal_type', 'price', 'volume']
         for field in required_fields:
             if field not in signal:
@@ -422,7 +452,7 @@ class SignalGenerator:
     def collect_decision_dimensions(instrument_id: str) -> Dict[str, Any]:
         kwargs = {}
         try:
-            from ali2026v3_trading.risk.risk_service import get_risk_service
+            from risk.risk_service import get_risk_service
             rs = get_risk_service()
             if hasattr(rs, 'get_greeks_dashboard'):
                 try:
@@ -447,7 +477,7 @@ class SignalGenerator:
             pass
             pass
         try:
-            from ali2026v3_trading.strategy.shadow_strategy_facade import get_shadow_strategy_engine
+            from strategy.shadow_strategy_facade import get_shadow_strategy_engine
             _sse = get_shadow_strategy_engine()
             if _sse and hasattr(_sse, 'alpha_ratio'):
                 kwargs['alpha_ratio'] = _sse.alpha_ratio
@@ -456,7 +486,7 @@ class SignalGenerator:
             pass
             pass
         try:
-            from ali2026v3_trading.config.state_param import get_state_param_manager
+            from config.state_param import get_state_param_manager
             spm = get_state_param_manager()
             if spm and hasattr(spm, 'current_state'):
                 kwargs['hmm_state'] = str(spm.current_state)
@@ -465,7 +495,7 @@ class SignalGenerator:
             pass
             pass
         try:
-            from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
+            from strategy.strategy_ecosystem import get_strategy_ecosystem
             se = get_strategy_ecosystem()
             if se and hasattr(se, 'cross_correlation'):
                 kwargs['cross_correlation'] = se.cross_correlation
@@ -475,7 +505,7 @@ class SignalGenerator:
             pass
         # FIX-20260711-S5S6-CHAIN: 收集S5套利/S6做市商维度（与7模块做相同处理）
         try:
-            from ali2026v3_trading.strategy.monitor.arbitrage_monitor import ArbitrageMonitor
+            from strategy.monitor.arbitrage_monitor import ArbitrageMonitor
             _arb = ArbitrageMonitor.get_instance()
             _last_arb = _arb.get_last_simulated_signal()
             if _last_arb is not None:
@@ -490,7 +520,7 @@ class SignalGenerator:
             logging.debug("[R3-L2] S5套利维度收集失败", exc_info=True)
             pass
         try:
-            from ali2026v3_trading.strategy.monitor.market_making_monitor import MarketMakingMonitor
+            from strategy.monitor.market_making_monitor import MarketMakingMonitor
             # FIX-20260711-S6-TOP-TIER: P2 多合约registry — 按instrument_id获取实例
             _mmm = MarketMakingMonitor.get_instance(instrument_id=instrument_id)
             kwargs['s6_market_making_state'] = {
@@ -521,7 +551,7 @@ class SignalGenerator:
                                      s6_market_making_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         # [FIX-20260712-S1S2-P1] 吸收S5/S6维度，避免 **kwargs 传入未知参数触发 fail-safe 阻断
         try:
-            from ali2026v3_trading.risk.risk_service import get_risk_service
+            from risk.risk_service import get_risk_service
             rs = get_risk_service()
             result = rs.compute_decision_score(
                 state_strength, order_flow_consistency,
@@ -568,12 +598,12 @@ class SignalGenerator:
         svc._plr_filter_enabled = False
         svc._hft_signal_filter = None
         svc._hft_filter_enabled = False
-        from ali2026v3_trading.signal.signal_components import SignalFilterChain, CooldownManager
+        from signal.signal_components import SignalFilterChain, CooldownManager
         svc._filter_chain = SignalFilterChain(svc)
         svc._cooldown_mgr = CooldownManager()
         svc._decision_score_filter_enabled = True
         svc._adaptive_threshold = None
-        from ali2026v3_trading.config._params_canary_env import DEFAULT_LOG_DIR
+        from config._params_canary_env import DEFAULT_LOG_DIR
         svc._log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), DEFAULT_LOG_DIR)
         svc._history_service.set_log_dir(svc._log_dir)
         svc._daily_report_generated = {}
@@ -582,7 +612,7 @@ class SignalGenerator:
     @staticmethod
     def init_from_config(svc: Any) -> None:
         try:
-            from ali2026v3_trading.config.config_service import get_cached_params
+            from config.config_service import get_cached_params
             _params = get_cached_params()
             if isinstance(_params, dict):
                 if 'signal_max_age_sec' in _params:
@@ -594,7 +624,7 @@ class SignalGenerator:
             pass
             pass
         try:
-            from ali2026v3_trading.config.config_service import get_config_service
+            from config.config_service import get_config_service
             _cfg = get_config_service()
             _cooldown_cfg = _cfg.get(svc._CONFIG_COOLDOWN_KEY, None) if hasattr(_cfg, 'get') else None
             _cleanup_cfg = _cfg.get(svc._CONFIG_CLEANUP_KEY, None) if hasattr(_cfg, 'get') else None
@@ -607,7 +637,7 @@ class SignalGenerator:
             pass
             pass
         try:
-            from ali2026v3_trading.config.config_service import get_config_service
+            from config.config_service import get_config_service
             _cfg = get_config_service()
             if getattr(_cfg, 'trading', None) and getattr(_cfg.trading, 'enable_hft_filter', None):
                 svc.enable_hft_filter()
@@ -620,12 +650,12 @@ class SignalGenerator:
             pass
             pass
         try:
-            from ali2026v3_trading.signal.signal_service import AdaptiveSignalThreshold
+            from signal.signal_service import AdaptiveSignalThreshold
             svc._adaptive_threshold = AdaptiveSignalThreshold()
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             svc._adaptive_threshold = None
         try:
-            from ali2026v3_trading.infra.health_monitor import StructuredJsonlLogger
+            from infra.health_monitor import StructuredJsonlLogger
             svc._structured_logger = StructuredJsonlLogger(log_dir=svc._log_dir)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             svc._structured_logger = None
@@ -690,7 +720,7 @@ class SignalService:
     def transition_signal_state(self, signal_id, new_state): return self._filter_chain.transition_signal_state(signal_id,new_state,self._signal_states,SIGNAL_STATE_TRANSITIONS)
     def expire_stale_signals(self):
         # P2-08/P2-13修复: 委托 SignalExpiryManager 统一过期管理
-        from ali2026v3_trading.infra.resilience import SignalExpiryManager
+        from infra.resilience import SignalExpiryManager
         if not hasattr(self, '_expiry_mgr'):
             self._expiry_mgr = SignalExpiryManager(default_ttl_sec=self._signal_max_age_sec)
         # 1) SignalExpiryManager 清理过期缓存

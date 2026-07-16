@@ -9,8 +9,8 @@ import pytest
 
 def _ensure_imports():
     try:
-        from ali2026v3_trading.strategy_judgment.judgment_risk import RiskJudger
-        from ali2026v3_trading.strategy_judgment.judgment_types import (
+        from strategy_judgment.judgment_risk import RiskJudger
+        from strategy_judgment.judgment_types import (
             _JudgmentDimension, DIM_RISK_BUDGET_COMPLIANCE, DIM_EXTREME_SURVIVAL, DIM_DISPLAY_NAMES, SCORING_COEFFICIENTS,
         )
         return RiskJudger, _JudgmentDimension, DIM_RISK_BUDGET_COMPLIANCE, DIM_EXTREME_SURVIVAL, DIM_DISPLAY_NAMES, SCORING_COEFFICIENTS

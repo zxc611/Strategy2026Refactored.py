@@ -13,7 +13,7 @@ PARENT_DIR = os.path.dirname(BASE_DIR)
 if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ  # 五唯一性修复：统一 CHINA_TZ
+from infra.shared_utils import CHINA_TZ  # 五唯一性修复：统一 CHINA_TZ
 
 # 审计维度定义
 AUDIT_DIMENSIONS = {
@@ -52,13 +52,13 @@ AUDIT_DIMENSIONS = {
 def _check_import_chain():
     errors = []
     critical_modules = [
-        'ali2026v3_trading.infra.shared_utils',
-        'ali2026v3_trading.infra.resilience',
-        'ali2026v3_trading.infra.health_monitor',
-        'ali2026v3_trading.infra.event_bus',
-        'ali2026v3_trading.config.config_service',
-        'ali2026v3_trading.evaluation.cascade_judge',
-        'ali2026v3_trading.governance.governance_engine',
+        'infra.shared_utils',
+        'infra.resilience',
+        'infra.health_monitor',
+        'infra.event_bus',
+        'config.config_service',
+        'evaluation.cascade_judge',
+        'governance.governance_engine',
     ]
     for mod in critical_modules:
         try:
@@ -71,7 +71,7 @@ def _check_call_chain():
     errors = []
     # Check RiskService has safety methods
     try:
-        from ali2026v3_trading.risk.risk_service import RiskService
+        from risk.risk_service import RiskService
         for method in ['check_regulatory_compliance', 'check_capital_sufficiency', 'check_exchange_status']:
             if not hasattr(RiskService, method):
                 errors.append(f"RiskService缺少{method}")
@@ -146,7 +146,7 @@ def _check_api_whitelist():
 def _check_component_failure_policy():
     errors = []
     try:
-        from ali2026v3_trading.strategy_judgment._judgment_services import CRITICAL_COMPONENTS, ComponentFailurePolicy
+        from strategy_judgment._judgment_services import CRITICAL_COMPONENTS, ComponentFailurePolicy
         # Verify BLOCK components exist
         block_components = [k for k, v in CRITICAL_COMPONENTS.items() if v == ComponentFailurePolicy.BLOCK]
         if len(block_components) < 2:

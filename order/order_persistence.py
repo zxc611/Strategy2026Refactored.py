@@ -30,11 +30,11 @@ from collections import defaultdict
 
 
 
-from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads
+from infra.serialization_utils import json_dumps, json_loads
 
-from ali2026v3_trading.infra.shared_utils import atomic_replace_file, sanitize_filename
+from infra.shared_utils import atomic_replace_file, sanitize_filename
 
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 
 
@@ -182,7 +182,7 @@ class NetworkRetryManager:
 
     def execute_with_retry(self, operation_id: str, func, *args, **kwargs) -> Any:
 
-        from ali2026v3_trading.infra.resilience import BoundedRetry as _BoundedRetry
+        from infra.resilience import BoundedRetry as _BoundedRetry
 
         br = _BoundedRetry(
 
@@ -424,7 +424,7 @@ class OrderPersistenceService:
 
     def rotate_jsonl_if_needed(self, filepath: str) -> None:
 
-        from ali2026v3_trading.infra.serialization_utils import rotate_jsonl_if_needed as _rotate
+        from infra.serialization_utils import rotate_jsonl_if_needed as _rotate
 
         _rotate(filepath, self._ORDER_STATE_MAX_BYTES, self._ORDER_STATE_BACKUP_COUNT)
 

@@ -6,11 +6,11 @@
 拆分为7个独立过滤器方法 + SignalContext数据类。现已反向合并回signal_service.py，
 消除间接调用开销。signal_generator.py仅保留为重导出垫片。
 
-规范源：ali2026v3_trading.signal.signal_service
+规范源：signal.signal_service
 """
 from __future__ import annotations
 
-from ali2026v3_trading.signal.signal_service import (
+from signal.signal_service import (
     SignalContext,
     SignalGenerator,
 )

@@ -8,12 +8,12 @@ from unittest.mock import MagicMock, patch
 
 def _ensure_imports():
     for _mod_name in [
-        'ali2026v3_trading.config.config_exchange',
-        'ali2026v3_trading.infra.subscription_service',
+        'config.config_exchange',
+        'infra.subscription_service',
     ]:
         if _mod_name in sys.modules:
             del sys.modules[_mod_name]
-    from ali2026v3_trading.config.config_exchange import (
+    from config.config_exchange import (
         ExchangeConfig,
         build_exchange_mapping,
         resolve_product_exchange,
@@ -131,27 +131,27 @@ class TestBuildExchangeMapping:
 class TestResolveProductExchange:
     def test_future_product(self):
         _, _, resolve_product_exchange, *_ = _ensure_imports()
-        with patch("ali2026v3_trading.config.config_exchange.SubscriptionManager") as MockSub:
+        with patch("config.config_exchange.SubscriptionManager") as MockSub:
             MockSub.is_option.return_value = False
             MockSub.parse_future.return_value = {"product": "RB"}
             assert resolve_product_exchange("RB2410") == "SHFE"
 
     def test_option_product(self):
         _, _, resolve_product_exchange, *_ = _ensure_imports()
-        with patch("ali2026v3_trading.config.config_exchange.SubscriptionManager") as MockSub:
+        with patch("config.config_exchange.SubscriptionManager") as MockSub:
             MockSub.is_option.return_value = True
             MockSub.parse_option.return_value = {"product": "IO"}
             assert resolve_product_exchange("IO2406C4000") == "CFFEX"
 
     def test_fallback_default(self):
         _, _, resolve_product_exchange, *_ = _ensure_imports()
-        with patch("ali2026v3_trading.config.config_exchange.SubscriptionManager") as MockSub:
+        with patch("config.config_exchange.SubscriptionManager") as MockSub:
             MockSub.is_option.side_effect = ValueError("err")
             assert resolve_product_exchange("UNKNOWN") == "CFFEX"
 
     def test_custom_default(self):
         _, _, resolve_product_exchange, *_ = _ensure_imports()
-        with patch("ali2026v3_trading.config.config_exchange.SubscriptionManager") as MockSub:
+        with patch("config.config_exchange.SubscriptionManager") as MockSub:
             MockSub.is_option.return_value = False
             MockSub.parse_future.return_value = {"product": "ZZ"}
             assert resolve_product_exchange("ZZ", default_exchange="DCE") == "DCE"
@@ -171,14 +171,14 @@ class TestMakePlatformFutureId:
 class TestHelpers:
     def test_get_option_underlying_product_fallback(self):
         _, _, _, _, _get_option_underlying_product, *_ = _ensure_imports()
-        with patch("ali2026v3_trading.lifecycle.product_initializer._get_option_underlying_product") as mock_impl:
+        with patch("lifecycle.product_initializer._get_option_underlying_product") as mock_impl:
             mock_impl.side_effect = ImportError("mock")
             assert _get_option_underlying_product("IO2406C4000") == "IO"
         assert isinstance(_get_option_underlying_product("IO2406C4000"), str)
 
     def test_ensure_products_with_retry_fallback(self):
         _, _, _, _, _, ensure_products_with_retry, *_ = _ensure_imports()
-        with patch("ali2026v3_trading.lifecycle.product_initializer.ensure_products_with_retry") as mock_impl:
+        with patch("lifecycle.product_initializer.ensure_products_with_retry") as mock_impl:
             mock_impl.side_effect = ImportError("mock")
             assert ensure_products_with_retry(None) == {}
 

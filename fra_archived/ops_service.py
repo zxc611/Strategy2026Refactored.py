@@ -31,17 +31,17 @@ from datetime import datetime
 
 
 
-from ali2026v3_trading.infra.serialization_utils import safe_jsonl_append_line
+from infra.serialization_utils import safe_jsonl_append_line
 
-from ali2026v3_trading.infra.shared_utils import generate_prefixed_id
+from infra.shared_utils import generate_prefixed_id
 
-from ali2026v3_trading.infra._helpers import _CHINA_TZ
+from infra._helpers import _CHINA_TZ
 
-from ali2026v3_trading.infra._helpers import get_disk_space_monitor
+from infra._helpers import get_disk_space_monitor
 
-from ali2026v3_trading.infra._backup_restore import get_backup_service
+from infra._backup_restore import get_backup_service
 
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 
 
@@ -762,7 +762,7 @@ class OpsOperationManager:
 
         """
 
-        from ali2026v3_trading.infra.resilience import (
+        from infra.resilience import (
 
             TimeoutGuard as _TimeoutGuard,
 
@@ -902,7 +902,7 @@ class OpsOperationManager:
 
         try:
 
-            from ali2026v3_trading.infra.health_monitor import HealthCheckAPI
+            from infra.health_monitor import HealthCheckAPI
 
             api = HealthCheckAPI()
 
@@ -980,7 +980,7 @@ class OpsOperationManager:
 
         try:
 
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus, OpsOperationEvent
+            from infra.event_bus import get_global_event_bus, OpsOperationEvent
 
             bus = get_global_event_bus()
 
@@ -1597,7 +1597,7 @@ def ops_health_check() -> Dict[str, Any]:
 
     try:
 
-        from ali2026v3_trading.infra.event_bus import get_global_event_bus
+        from infra.event_bus import get_global_event_bus
 
         bus = get_global_event_bus()
 
@@ -1621,7 +1621,7 @@ def ops_health_check() -> Dict[str, Any]:
 
     try:
 
-        from ali2026v3_trading.config.config_service import get_config
+        from config.config_service import get_config
 
         config = get_config()
 
@@ -1643,7 +1643,7 @@ def ops_health_check() -> Dict[str, Any]:
 
     try:
 
-        from ali2026v3_trading.config.config_service import check_logging_health
+        from config.config_service import check_logging_health
 
         log_health = check_logging_health()
 
@@ -1755,7 +1755,7 @@ def ops_run_diagnostic(category: str = "all") -> Dict[str, Any]:
 
         try:
 
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
 
             bus = get_global_event_bus()
 
@@ -1859,7 +1859,7 @@ def ops_auto_repair(issue_type: str) -> Dict[str, Any]:
 
         try:
 
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
 
             bus = get_global_event_bus()
 
@@ -1891,7 +1891,7 @@ def ops_auto_repair(issue_type: str) -> Dict[str, Any]:
 
         try:
 
-            from ali2026v3_trading.config.config_service import get_config_query_facade, get_config_command_facade
+            from config.config_service import get_config_query_facade, get_config_command_facade
 
             query_facade = get_config_query_facade()
 
@@ -1987,7 +1987,7 @@ def generate_ops_report(report_type: str = "daily") -> Dict[str, Any]:
 
     try:
 
-        from ali2026v3_trading.infra.event_bus import get_global_event_bus
+        from infra.event_bus import get_global_event_bus
 
         bus = get_global_event_bus()
 
@@ -2072,7 +2072,7 @@ def estimate_ops_cost() -> Dict[str, Any]:
     # 估算数据库大。'
     try:
 
-        from ali2026v3_trading.config.config_service import get_default_db_path
+        from config.config_service import get_default_db_path
 
         db_path = get_default_db_path()
 

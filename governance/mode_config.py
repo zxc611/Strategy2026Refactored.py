@@ -124,7 +124,7 @@ _DEFAULT_TVF_PARAMS = None
 def _get_default_tvf_params():
     global _DEFAULT_TVF_PARAMS
     if _DEFAULT_TVF_PARAMS is None:
-        from ali2026v3_trading.config.tvf_param_loader import TVF_DEFAULT_PARAMS
+        from config.tvf_param_loader import TVF_DEFAULT_PARAMS
         _DEFAULT_TVF_PARAMS = TVF_DEFAULT_PARAMS
     return _DEFAULT_TVF_PARAMS
 
@@ -313,7 +313,7 @@ def _make_mode_config(
     # R14-P1-DOC-P1-02修复: YAML加载后被硬编码ModeConfig覆盖(P0-20集成: TVFParamLoader参数池加载，失败回退到。DEFAULT_TVF_PARAMS)
     _tvf_kwargs = dict(_get_default_tvf_params())
     try:
-        from ali2026v3_trading.config.tvf_param_loader import get_tvf_param_loader
+        from config.tvf_param_loader import get_tvf_param_loader
         _tvf_loader = get_tvf_param_loader()
         _tvf_params = _tvf_loader.get_params()
         if _tvf_params:

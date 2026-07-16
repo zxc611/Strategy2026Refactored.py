@@ -6,7 +6,7 @@ still load `main.py` directly.
 
 Note: This is now a PURE EXPORT LAYER - it only re-exports symbols from
 t_type_bootstrap for backward compatibility. All actual implementations
-are in t_type_bootstrap.py and ali2026v3_trading service modules.
+are in t_type_bootstrap.py and demo service modules.
 
 Important: Uses lazy imports via __getattr__ to avoid circular import issues.
 The export list is defined in __all__ and _LAZY_IMPORTS must be consistent.
@@ -47,7 +47,7 @@ from __future__ import annotations
 import threading
 
 # Lazy imports to break circular dependencies:
-# main.py → t_type_bootstrap.py → ali2026v3_trading.* → (back to main.py)
+# main.py → t_type_bootstrap.py → * → (back to main.py)
 # 
 # By using __getattr__, we delay the import until the symbol is actually accessed,
 # which breaks the circular dependency chain.
@@ -55,15 +55,15 @@ import threading
 # Single source of truth for exports - used by both __getatr__ and __all__
 # P1-29[v6] Plan: change _LAZY_IMPORTS from hardcoded dict to dynamically generated from __init__.py __all__
 _LAZY_IMPORTS = {
-    'Strategy2026': ('ali2026v3_trading.strategy.strategy_core_service', 'Strategy2026'),
-    'ServiceContainer': ('ali2026v3_trading.infra.service_container', 'ServiceContainer'),
-    'InstrumentDataManager': ('ali2026v3_trading', 'InstrumentDataManager'),
-    'OrderService': ('ali2026v3_trading.order.order_service', 'OrderService'),
-    'RiskService': ('ali2026v3_trading.risk.risk_service', 'RiskService'),
-    'ParamsService': ('ali2026v3_trading.config.params_service', 'ParamsService'),
-    'StrategyCore': ('ali2026v3_trading.strategy.strategy_core_service', 'StrategyCoreService'),
-    'StrategyState': ('ali2026v3_trading.lifecycle.lifecycle_state_machine', 'StrategyState'),
-    'ConfigService': ('ali2026v3_trading.config.config_service', 'ConfigService'),
+    'Strategy2026': ('strategy.strategy_core_service', 'Strategy2026'),
+    'ServiceContainer': ('infra.service_container', 'ServiceContainer'),
+    'InstrumentDataManager': ('', 'InstrumentDataManager'),
+    'OrderService': ('order.order_service', 'OrderService'),
+    'RiskService': ('risk.risk_service', 'RiskService'),
+    'ParamsService': ('config.params_service', 'ParamsService'),
+    'StrategyCore': ('strategy.strategy_core_service', 'StrategyCoreService'),
+    'StrategyState': ('lifecycle.lifecycle_state_machine', 'StrategyState'),
+    'ConfigService': ('config.config_service', 'ConfigService'),
 }
 
 _IMPORT_CACHE: dict = {}  # R21-MEM-P2-10修复: 模块导入缓存无TTL/大小限制，但模块导入后不会变化，无需TTL；条目数有限(<=_LAZY_IMPORTS长度)无需max_size

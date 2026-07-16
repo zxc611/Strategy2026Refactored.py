@@ -31,17 +31,17 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 from collections import defaultdict
 import functools
 
-from ali2026v3_trading.infra.shared_utils import (
+from infra.shared_utils import (
     CHINA_TZ, TRADING_DAYS_PER_YEAR_CHINA as TRADING_DAYS_PER_YEAR,
     DEFAULT_RISK_FREE_RATE, DAYS_PER_YEAR_CALENDAR,
 )
 # R27-P1-FP-04修复: 引入浮点稳定计算替代内置sum/divide
 try:
-    from ali2026v3_trading.infra.resilience import stable_sum, safe_divide
+    from infra.resilience import stable_sum, safe_divide
 except ImportError:
     stable_sum = sum
     safe_divide = lambda a, b, default=0.0: a / b if b != 0 else default
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 
@@ -62,7 +62,7 @@ def _norm_pdf(x: float) -> float:
 
 def _normalize_option_type(opt_type: str) -> str:
     """ID唯一: 委托shared_utils.normalize_option_type, 不再独立实现"""
-    from ali2026v3_trading.infra.shared_utils import normalize_option_type
+    from infra.shared_utils import normalize_option_type
     return normalize_option_type(opt_type)
 
 
@@ -326,7 +326,7 @@ class MonteCarloPricer:
             return intrinsic, 0.0
 
         if seed is not None:
-            from ali2026v3_trading.infra.shared_utils import set_global_seed  # P2-23: 统一入口
+            from infra.shared_utils import set_global_seed  # P2-23: 统一入口
             set_global_seed(seed)
 
         # P0-R9-19修复: historical bootstrap分布
@@ -720,7 +720,7 @@ class GreeksCalculator:
         Delegates to SubscriptionManager.parse_option to extract strike_price.
         """
         try:
-            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
+            from infra.subscription_service import SubscriptionManager
             parsed = SubscriptionManager.parse_option(instrument_id)
             strike = parsed.get('strike_price')
             return float(strike) if strike is not None else None
@@ -1079,7 +1079,7 @@ class GreeksCalculator:
     @staticmethod
     def _parse_option_month(inst_id):
         try:
-            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
+            from infra.subscription_service import SubscriptionManager
             parsed = SubscriptionManager.parse_option(inst_id)
             return parsed.get('year_month', '')
         except (ValueError, KeyError, TypeError):
@@ -1101,28 +1101,28 @@ class GreeksCalculator:
         # P0-GR-001修复: 优先从参数池读取约束阈值,异常时回退硬编码默认值
         if delta_limit is None:
             try:
-                from ali2026v3_trading.config.params_service import get_params_service
+                from config.params_service import get_params_service
                 _ps = get_params_service()
                 delta_limit = _ps.get_float('max_net_delta_pct', 0.30) * 1000
             except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 delta_limit = 300
         if gamma_limit is None:
             try:
-                from ali2026v3_trading.config.params_service import get_params_service
+                from config.params_service import get_params_service
                 _ps = get_params_service()
                 gamma_limit = _ps.get_float('max_net_gamma_pct', 0.08) * 625
             except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 gamma_limit = 50
         if theta_min is None:
             try:
-                from ali2026v3_trading.config.params_service import get_params_service
+                from config.params_service import get_params_service
                 _ps = get_params_service()
                 theta_min = -_ps.get_float('max_theta_ratio', 0.5) * 1000
             except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                 theta_min = -500
         if vega_limit is None:
             try:
-                from ali2026v3_trading.config.params_service import get_params_service
+                from config.params_service import get_params_service
                 _ps = get_params_service()
                 vega_limit = _ps.get_float('max_net_vega_bps', 0.02) * 10000
             except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:

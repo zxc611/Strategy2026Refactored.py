@@ -7,10 +7,10 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.infra.shared_utils import safe_float
+from infra.shared_utils import safe_float
 
 try:
-    from ali2026v3_trading.governance.regulatory_compliance import (
+    from governance.regulatory_compliance import (
         RegulatoryCompliance, ComplianceEngine, ComplianceContext,
         create_default_compliance_engine, MaxPositionRule, ConcentrationRule, CrossMarketRule,
     )
@@ -86,7 +86,7 @@ class ComplianceChecker:
             violations.append(f"position_limit: error={e}")
 
         try:
-            from ali2026v3_trading.order.order_service import get_order_service
+            from order.order_service import get_order_service
             _os = get_order_service()
             if _os:
                 now = time.time()
@@ -106,7 +106,7 @@ class ComplianceChecker:
             checks.append({"check_item": "cancel_rate", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
-            from ali2026v3_trading.order.order_service import get_order_service
+            from order.order_service import get_order_service
             _os = get_order_service()
             if _os:
                 with _os._lock:
@@ -130,7 +130,7 @@ class ComplianceChecker:
                 price = position_data.get('price', 0)
                 direction = position_data.get('direction', 'BUY')
                 if instrument_id and price > 0:
-                    from ali2026v3_trading.config.params_service import get_params_service
+                    from config.params_service import get_params_service
                     ps = get_params_service()
                     meta = ps.get_instrument_meta_by_id(instrument_id)
                     if meta:
@@ -152,7 +152,7 @@ class ComplianceChecker:
             checks.append({"check_item": "price_limit", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
-            from ali2026v3_trading.infra.scheduler_service import is_market_open
+            from infra.scheduler_service import is_market_open
             market_open = is_market_open()
             tm_passed = market_open
             tm_detail = "市场开盘中" if market_open else "市场已收盘"
@@ -188,7 +188,7 @@ class ComplianceChecker:
             checks.append({"check_item": "record_retention", "passed": True, "detail": f"检查跳过: {e}"})
 
         try:
-            from ali2026v3_trading.order.order_service import get_order_service
+            from order.order_service import get_order_service
             _os = get_order_service()
             if _os and position_data:
                 volume = position_data.get('volume', 0)
@@ -209,7 +209,7 @@ class ComplianceChecker:
             algo_passed = True
             algo_detail = "算法交易报备正常"
             try:
-                from ali2026v3_trading.strategy.hft_enhancements import HFTEnhancementEngine
+                from strategy.hft_enhancements import HFTEnhancementEngine
                 algo_detail = "HFT增强引擎已注册"
             except ImportError:
                 algo_detail = "HFT增强引擎未加载(可接受)"

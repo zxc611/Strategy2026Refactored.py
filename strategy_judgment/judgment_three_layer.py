@@ -32,7 +32,7 @@ from .judgment_types import (
     DIM_DISPLAY_NAMES,
     SCORING_COEFFICIENTS,
 )
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 

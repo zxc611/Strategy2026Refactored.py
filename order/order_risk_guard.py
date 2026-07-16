@@ -42,9 +42,9 @@ from typing import Dict, Optional
 
 
 
-from ali2026v3_trading.infra.shared_utils import compute_slippage_bps
+from infra.shared_utils import compute_slippage_bps
 
-from ali2026v3_trading.risk.risk_service import get_risk_service
+from risk.risk_service import get_risk_service
 
 
 
@@ -116,7 +116,7 @@ class OrderRiskGuard:
 
         try:
 
-            from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
+            from strategy.strategy_ecosystem import get_strategy_ecosystem
 
             _eco = get_strategy_ecosystem()
 
@@ -186,7 +186,7 @@ class OrderRiskGuard:
 
         try:
 
-            from ali2026v3_trading.config.params_service import get_params_service
+            from config.params_service import get_params_service
 
             params_svc = get_params_service()
 
@@ -228,7 +228,7 @@ class OrderRiskGuard:
 
         try:
 
-            from ali2026v3_trading.data.query_service import get_query_service
+            from data.query_service import get_query_service
 
             qs = get_query_service()
 

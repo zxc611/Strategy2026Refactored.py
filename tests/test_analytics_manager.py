@@ -2,7 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-# mock optuna before importing ali2026v3_trading to avoid SystemExit
+# mock optuna before importing demo to avoid SystemExit
 import types
 from unittest.mock import MagicMock
 _optuna = types.ModuleType('optuna')
@@ -17,7 +17,7 @@ import threading
 from io import StringIO
 import json
 
-from ali2026v3_trading.strategy_judgment.analytics_manager import AnalyticsManager
+from strategy_judgment.analytics_manager import AnalyticsManager
 
 
 def test_analytics_manager_new_bypass_init():

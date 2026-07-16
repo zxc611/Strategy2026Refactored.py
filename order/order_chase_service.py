@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional
 
 
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ, TradeAction, TradeDirection
+from infra.shared_utils import CHINA_TZ, TradeAction, TradeDirection
 
 
 
@@ -232,7 +232,7 @@ class OrderChaseService:
                     # 否则止盈止损/时间止损检查时_closing=False会重复触发平仓。
                     # 通过PositionService查找对应持仓并设置_closing。
                     try:
-                        from ali2026v3_trading.position.position_service import get_position_service
+                        from position.position_service import get_position_service
                         _pos_svc = get_position_service()
                         if _pos_svc:
                             with _pos_svc._get_instrument_lock(instrument_id):
@@ -253,7 +253,7 @@ class OrderChaseService:
 
                     _emergency_ref_price = 0.0
                     try:
-                        from ali2026v3_trading.position.position_service import get_position_service
+                        from position.position_service import get_position_service
                         _pos_svc_tmp = get_position_service()
                         if _pos_svc_tmp:
                             with _pos_svc_tmp._get_instrument_lock(instrument_id):
@@ -297,7 +297,7 @@ class OrderChaseService:
                         # FIX-R37-UNIQUE-CLOSE(D1): 同时设置 close_method/close_reason/realized_pnl
                         try:
                             _actual_oid = getattr(close_result, 'order_id', '') or oid
-                            from ali2026v3_trading.position.position_service import get_position_service
+                            from position.position_service import get_position_service
                             _pos_svc = get_position_service()
                             if _pos_svc:
                                 with _pos_svc._get_instrument_lock(instrument_id):
@@ -319,7 +319,7 @@ class OrderChaseService:
 
                         # FIX-R37-UNIQUE-CLOSE(A1): 紧急平仓失败时重置 _closing 标志，避免持仓卡死
                         try:
-                            from ali2026v3_trading.position.position_service import get_position_service
+                            from position.position_service import get_position_service
                             _pos_svc = get_position_service()
                             if _pos_svc:
                                 with _pos_svc._get_instrument_lock(instrument_id):
@@ -420,7 +420,7 @@ class OrderChaseService:
         _action = original_order.get('action', '')
         if _action == 'CLOSE':
             try:
-                from ali2026v3_trading.position.position_service import get_position_service
+                from position.position_service import get_position_service
                 _pos_svc = get_position_service()
                 if _pos_svc:
                     with _pos_svc._get_instrument_lock(instrument_id):
@@ -511,7 +511,7 @@ class OrderChaseService:
                          original_order['order_id'], _oid, retry_count, original_order['price'], new_price)
             if _action == 'CLOSE':
                 try:
-                    from ali2026v3_trading.position.position_service import get_position_service
+                    from position.position_service import get_position_service
                     _pos_svc = get_position_service()
                     if _pos_svc:
                         with _pos_svc._get_instrument_lock(instrument_id):
@@ -552,7 +552,7 @@ class OrderChaseService:
 
         try:
 
-            from ali2026v3_trading.order.order_split_models import SmartOrderSplitter
+            from order.order_split_models import SmartOrderSplitter
 
             splitter = SmartOrderSplitter()
 

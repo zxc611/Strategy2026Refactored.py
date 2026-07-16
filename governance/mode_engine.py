@@ -24,7 +24,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.governance.mode_config import (
+from governance.mode_config import (
     CapitalMode,
     TakeProfitMethod,
     StopLossMethod,
@@ -44,18 +44,18 @@ from ali2026v3_trading.governance.mode_config import (
     BALANCED_CONFIG,
     CAPITAL_MODE_CONFIGS,
 )
-from ali2026v3_trading.governance.mode_exit_rules import (
+from governance.mode_exit_rules import (
     ExitRuleEngine,
     DrawdownManager,
     DefensiveDrawdownChecker,
 )
-from ali2026v3_trading.governance.mode_position_sizing import (
+from governance.mode_position_sizing import (
     SixDimPositionAdjustmentFactor,
     kelly_fraction,
     kelly_position_size,
     PredictiveStateEngine,
 )
-from ali2026v3_trading.governance.mode_engine_propagation import ModeEnginePropagationService, ModeEnginePropagationMixin
+from governance.mode_engine_propagation import ModeEnginePropagationService, ModeEnginePropagationMixin
 
 __all__ = [
     'ModeEngine',
@@ -191,7 +191,7 @@ class ModeEngine:
                 old_scale, scale_str, config.mode.name, propagated, reason,
             )
             try:
-                from ali2026v3_trading.infra.health_monitor import StructuredJsonlLogger
+                from infra.health_monitor import StructuredJsonlLogger
                 _sjl = StructuredJsonlLogger()
                 _sjl.log_strategy_switch(old_scale or 'unknown', scale_str, reason)
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _sjl_err:
@@ -345,7 +345,7 @@ class ModeEngine:
         if self._config is None:
             return None
         try:
-            from ali2026v3_trading.evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
+            from evaluation.cascade_judge import CascadeJudge, adapt_backtest_result
             judge = CascadeJudge.from_config(capital_scale=capital_scale, params=params)
             metrics = adapt_backtest_result(train_result, test_result, params, strategy_type=params.get('strategy_type', '') if params else '')
             return judge.judge(metrics)
@@ -361,7 +361,7 @@ class ModeEngine:
             logging.warning("[ModeEngine] reload_tvf_params被非授权调用方拒绝: caller_id=%s", caller_id)
             return {'success': False, 'error': f'Unauthorized caller: {caller_id}'}
         try:
-            from ali2026v3_trading.config.tvf_param_loader import get_tvf_param_loader
+            from config.tvf_param_loader import get_tvf_param_loader
             loader = get_tvf_param_loader()
             yaml_params = loader.reload(config_path)
             with self._propagation_lock:
@@ -410,7 +410,7 @@ class ModeEngine:
 
     def _get_active_params(self) -> Dict[str, Any]:
         try:
-            from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
+            from strategy.strategy_ecosystem import get_strategy_ecosystem
             eco = get_strategy_ecosystem()
             active = eco.get_active_strategy()
             if active == 'reverse':
@@ -423,7 +423,7 @@ class ModeEngine:
 
     def _sync_params_to_ecosystem(self) -> None:
         try:
-            from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
+            from strategy.strategy_ecosystem import get_strategy_ecosystem
             eco = get_strategy_ecosystem()
             active = eco.get_active_strategy()
             current_mode = getattr(self, '_current_mode', None)

@@ -23,8 +23,8 @@ try:
 except ImportError:
     duckdb = None
 
-from ali2026v3_trading.infra.serialization_utils import safe_dataframe_to_parquet
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra.serialization_utils import safe_dataframe_to_parquet
+from infra._helpers import get_logger  # R9-5
 logger = get_logger(__name__)
 
 
@@ -58,7 +58,7 @@ def check_minute_boundary_integrity(tick_df: pd.DataFrame,
 
 # ── Preprocess Validation ──
 import logging
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 import numpy as np
 import pandas as pd
@@ -499,7 +499,7 @@ def _bs_greeks_scalar(S: float, K: float, T: float, r: float, q: float,
 
 
 # _norm_cdf: 直接re-export，避免def重复定义被源码扫描误判
-from ali2026v3_trading.governance.greeks_calculator import _norm_cdf, _bs_price, _bs_greeks  # noqa: F401
+from governance.greeks_calculator import _norm_cdf, _bs_price, _bs_greeks  # noqa: F401
 
 # _compute_greeks_fallback: 别名，与审bs_greeks_scalar功能相同
 _compute_greeks_fallback = _bs_greeks_scalar

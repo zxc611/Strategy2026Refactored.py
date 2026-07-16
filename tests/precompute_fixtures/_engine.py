@@ -15,19 +15,19 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from ali2026v3_trading.infra._helpers import get_logger
-from ali2026v3_trading.precompute._schema import (
+from infra._helpers import get_logger
+from precompute._schema import (
     SCHEMA_REQUIRED_COLUMNS_V5,
     sync_db_schema_v5,
 )
-from ali2026v3_trading.precompute._params import PrecomputeParams
+from precompute._params import PrecomputeParams
 
 logger = get_logger(__name__)
 
 
 def _validate_crm_vectorized_vs_perrow(df, cr_result, n, hmm_state, hmm_posterior, trend_scores, trend_directions, strength, imbalance):
     try:
-        from ali2026v3_trading.param_pool.optimization.cycle_sharpe import CycleResonanceModule, Phase
+        from param_pool.optimization.cycle_sharpe import CycleResonanceModule, Phase
         crm = CycleResonanceModule()
         hmm_names = {0: "LOW_VOL", 1: "NORMAL", 2: "HIGH_VOL"}
         phase_map = {"CHARGE": 0, "RELEASE": 1, "EXHAUST": 2, "CHAOS": 3}
@@ -58,10 +58,10 @@ def _validate_crm_vectorized_vs_perrow(df, cr_result, n, hmm_state, hmm_posterio
 def _enrich_bars_with_cycle_resonance(
     df: pd.DataFrame, use_vectorized: bool = True
 ) -> pd.DataFrame:
-    from ali2026v3_trading.precompute._hmm import (
+    from precompute._hmm import (
         compute_hmm_state_vectorized,
     )
-    from ali2026v3_trading.precompute._trend_scores import (
+    from precompute._trend_scores import (
         compute_trend_scores_vectorized,
     )
 
@@ -102,7 +102,7 @@ def _enrich_bars_with_cycle_resonance(
 
     if use_vectorized:
         try:
-            from ali2026v3_trading.precompute._cycle_resonance_vec import (
+            from precompute._cycle_resonance_vec import (
                 compute_cycle_resonance_vectorized,
             )
             cr_result = compute_cycle_resonance_vectorized(df, phase_params=self._params.cycle_resonance if hasattr(self._params, 'cycle_resonance') else None)
@@ -118,7 +118,7 @@ def _enrich_bars_with_cycle_resonance(
                 "vectorized CRM failed, fallback to per-row: %s", exc
             )
 
-    from ali2026v3_trading.param_pool.optimization.cycle_sharpe import (
+    from param_pool.optimization.cycle_sharpe import (
         CycleResonanceModule,
         Phase,
     )
@@ -176,7 +176,7 @@ class PrecomputeEngine:
         if progress_path.exists():
             try:
                 with open(progress_path, "r") as f:
-                    from ali2026v3_trading.infra.serialization_utils import json_loads
+                    from infra.serialization_utils import json_loads
                     return json_loads(f.read())
             except (OSError, ValueError, KeyError):
                 pass
@@ -187,12 +187,12 @@ class PrecomputeEngine:
         self._progress["last_run"] = datetime.now().isoformat()
         with open(self.PROGRESS_FILE, "w") as f:
             portalocker.lock(f, portalocker.LOCK_EX)
-            from ali2026v3_trading.infra.serialization_utils import json_dumps
+            from infra.serialization_utils import json_dumps
             f.write(json_dumps(self._progress, indent=2))
             portalocker.unlock(f)
 
     def _precompute_symbol(self, symbol: str, since_date: Optional[str] = None) -> int:
-        from ali2026v3_trading.data.db_adapter import connect
+        from data.db_adapter import connect
 
         con = connect(self._db_path)
         try:
@@ -211,13 +211,13 @@ class PrecomputeEngine:
             if df.empty:
                 return 0
 
-            from ali2026v3_trading.precompute._kl_rpd import (
+            from precompute._kl_rpd import (
                 compute_kl_rpd_vectorized,
             )
-            from ali2026v3_trading.precompute._obos import (
+            from precompute._obos import (
                 compute_obos_vectorized,
             )
-            from ali2026v3_trading.precompute._pullback import (
+            from precompute._pullback import (
                 compute_pullback_vectorized,
             )
 
@@ -237,7 +237,7 @@ class PrecomputeEngine:
 
             df = _enrich_bars_with_cycle_resonance(df)
 
-            from ali2026v3_trading.precompute._signals import (
+            from precompute._signals import (
                 compute_signals_vectorized,
             )
 
@@ -245,13 +245,13 @@ class PrecomputeEngine:
             for col in signals.columns:
                 df[col] = signals[col].values
 
-            from ali2026v3_trading.precompute._l0_state import (
+            from precompute._l0_state import (
                 compute_l0_state_vectorized,
             )
-            from ali2026v3_trading.precompute._signal_decay import (
+            from precompute._signal_decay import (
                 compute_decay_and_linkage_vectorized,
             )
-            from ali2026v3_trading.precompute._position_decision import (
+            from precompute._position_decision import (
                 compute_position_decision_vectorized,
             )
 
@@ -267,7 +267,7 @@ class PrecomputeEngine:
             for col in position.columns:
                 df[col] = position[col].values
 
-            from ali2026v3_trading.strategy.divergence_reversal import (
+            from strategy.divergence_reversal import (
                 DivergenceReversalModule,
             )
 
@@ -355,8 +355,8 @@ class PrecomputeEngine:
             logger.info("Skipping daily pivot precompute (skip_daily_pivot=True)")
 
     def run_daily_pivot_precompute(self) -> None:
-        from ali2026v3_trading.data.db_adapter import connect
-        from ali2026v3_trading.precompute._daily_pivot import (
+        from data.db_adapter import connect
+        from precompute._daily_pivot import (
             compute_daily_pivots_for_symbol,
             ensure_daily_key_pivots_table,
         )

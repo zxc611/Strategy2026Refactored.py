@@ -5,7 +5,7 @@
 import sys
 import os
 
-# 添加工作区根目录到路径，确保可导入 ali2026v3_trading 包
+# 添加工作区根目录到路径，确保可导入 demo 包
 package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 workspace_root = os.path.dirname(package_root)
 sys.path.insert(0, workspace_root)
@@ -16,9 +16,9 @@ def verify_instrument_id_consistency():
     print("阶段三：instrument_id标准化一致性验证")
     print("="*80)
     
-    from ali2026v3_trading.config.params_service import get_params_service
-    from ali2026v3_trading.infra.instrument_parser import strip_exchange_prefix
-    from ali2026v3_trading.infra.shared_utils import normalize_instrument_id
+    from config.params_service import get_params_service
+    from infra.instrument_parser import strip_exchange_prefix
+    from infra.shared_utils import normalize_instrument_id
     
     try:
         ps = get_params_service()
@@ -67,7 +67,7 @@ def audit_cache_key_format():
     print("阶段四：cache键格式审计（A-01验证）")
     print("="*80)
     
-    from ali2026v3_trading.config.params_service import get_params_service
+    from config.params_service import get_params_service
     
     try:
         ps = get_params_service()
@@ -107,7 +107,7 @@ def verify_parse_option_call_put():
     print("A-03验证：parse_option支持Call/Put全称格式")
     print("="*80)
     
-    from ali2026v3_trading.infra.instrument_parser import parse_option
+    from infra.instrument_parser import parse_option
     
     test_cases = [
         ('m2607-C-2700', True),
@@ -151,7 +151,7 @@ def verify_width_cache_conservation():
     print("="*80)
     
     try:
-        from ali2026v3_trading.data.t_type_service import get_t_type_service
+        from data.t_type_service import get_t_type_service
         tts = get_t_type_service()
         wc = tts._width_cache if hasattr(tts, '_width_cache') else None
         if wc is None:
@@ -186,9 +186,9 @@ def verify_tick_route_audit():
     print("="*80)
     
     try:
-        from ali2026v3_trading.infra.subscription_service import SubscriptionCoreService
+        from infra.subscription_service import SubscriptionCoreService
         # 尝试获取已存在的实例
-        from ali2026v3_trading.data.data_service import get_existing_data_service
+        from data.data_service import get_existing_data_service
         ds = get_existing_data_service()
         if ds is None:
             print("⚠️ DataService未初始化，跳过此验证")

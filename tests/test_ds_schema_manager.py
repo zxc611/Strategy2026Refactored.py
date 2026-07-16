@@ -14,18 +14,18 @@ class TestSchemaVersion:
 
     def test_schema_version_is_2_0(self):
         """Schema版本为2.0"""
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
         mixin = SchemaManagerMixin()
         assert mixin.get_schema_version() == '2.0'
 
     def test_data_schema_version(self):
         """DATA_SCHEMA_VERSION为1.0"""
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
         assert SchemaManagerMixin.DATA_SCHEMA_VERSION == '1.0'
 
     def test_checkpoint_schema_version(self):
         """CHECKPOINT_SCHEMA_VERSION为1.0"""
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
         assert SchemaManagerMixin.CHECKPOINT_SCHEMA_VERSION == '1.0'
 
 
@@ -42,7 +42,7 @@ class TestEnsureTicksRawSchema:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         conn.execute("""
@@ -70,7 +70,7 @@ class TestEnsureTicksRawSchema:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         conn.execute("""
@@ -95,7 +95,7 @@ class TestEnsureTicksRawSchema:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         conn.execute("""
@@ -121,7 +121,7 @@ class TestEnsureTicksRawSchema:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         conn.execute("""
@@ -154,7 +154,7 @@ class TestCreateEmptyTable:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         mixin = SchemaManagerMixin()
@@ -170,7 +170,7 @@ class TestCreateEmptyTable:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         mixin = SchemaManagerMixin()
@@ -189,7 +189,7 @@ class TestCreateEmptyTable:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         mixin = SchemaManagerMixin()
@@ -217,7 +217,7 @@ class TestExecuteBackfillBatch:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         conn.execute("""
@@ -250,7 +250,7 @@ class TestVerifyReferentialIntegrity:
             import duckdb
         except ImportError:
             pytest.skip("duckdb not installed")
-        from ali2026v3_trading.data.ds_schema_manager import SchemaManagerMixin
+        from data.ds_schema_manager import SchemaManagerMixin
 
         conn = duckdb.connect(':memory:')
         # 创建必要表

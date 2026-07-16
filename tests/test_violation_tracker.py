@@ -2,7 +2,7 @@
 """Tests for evaluation.violation_tracker module."""
 import pytest
 from unittest.mock import patch, MagicMock
-from ali2026v3_trading.evaluation.violation_tracker import StrategyViolationTracker
+from evaluation.violation_tracker import StrategyViolationTracker
 
 
 class TestStrategyViolationTracker:
@@ -32,7 +32,7 @@ class TestStrategyViolationTracker:
 
     def test_getattr_delegation(self):
         vt = StrategyViolationTracker()
-        with patch("ali2026v3_trading.evaluation.violation_tracker._get_base_class") as mock_get:
+        with patch("evaluation.violation_tracker._get_base_class") as mock_get:
             mock_cls = MagicMock()
             mock_instance = MagicMock()
             mock_instance.some_method.return_value = 42

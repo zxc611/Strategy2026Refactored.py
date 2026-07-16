@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import logging
-from ali2026v3_trading.infra._helpers import get_logger
+from infra._helpers import get_logger
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.infra.serialization_utils import safe_dataframe_to_parquet
+from infra.shared_utils import CHINA_TZ
+from infra.serialization_utils import safe_dataframe_to_parquet
 import numpy as np
 import pandas as pd
 
@@ -360,7 +360,7 @@ class BayesianShrinkageLifeEstimator:
         return dict(self._life_dict)
 
 _TRIPLE_TRUTH_DEFAULT_SEED = 42
-from ali2026v3_trading.infra.shared_utils import set_global_seed as _set_global_seed
+from infra.shared_utils import set_global_seed as _set_global_seed
 _set_global_seed(_TRIPLE_TRUTH_DEFAULT_SEED)
 
 @dataclass(slots=True)

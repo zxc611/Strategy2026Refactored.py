@@ -28,7 +28,7 @@ from collections import deque
 
 
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from infra.shared_utils import CHINA_TZ
 
 
 
@@ -114,7 +114,7 @@ class OrderStateManager:
 
         from datetime import datetime
 
-        from ali2026v3_trading.order.order_service import _validate_order_status_transition
+        from order.order_service import _validate_order_status_transition
 
         try:
 
@@ -326,7 +326,7 @@ class OrderStateManager:
 
                         try:
 
-                            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+                            from infra.event_bus import get_global_event_bus
 
                             _bus = get_global_event_bus()
 

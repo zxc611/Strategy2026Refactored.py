@@ -9,7 +9,7 @@ ProductionQuantSystem.py - 量化核心系统 V3 门面
 - ProductionQuantSystem.py : 门面类+模块级单例+主程序入口
 
 主程序入口用法：
-    python -m ali2026v3_trading.ProductionQuantSystem --config config.json --symbols IF,IH,IM
+    python -m ProductionQuantSystem --config config.json --symbols IF,IH,IM
 """
 from __future__ import annotations
 
@@ -34,18 +34,18 @@ try:
     )
     # FIX-20260709-PQS-IMPORT: singleton_registry.py已合并到registry_service.py
     # 根因: from .infra.singleton_registry import SingletonRegistry 失败
-    #       (ModuleNotFoundError: No module named 'ali2026v3_trading.infra.singleton_registry')
+    #       (ModuleNotFoundError: No module named 'infra.singleton_registry')
     #       导致L29-34的全部import被回滚，PQS整个模块无法加载
     from .infra.registry_service import SingletonRegistry
 except ImportError:
     # FIX-20260709-PQS-IMPORT: fallback路径也需使用正确包名
-    from ali2026v3_trading.data.quant_infra import NumpyRingBuffer, ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor, MultiPeriodTrendScorer, IVSurfacePCA, VolatilityRegimeFilter
-    from ali2026v3_trading.data.quant_hmm import AdaptiveHMM
-    from ali2026v3_trading.data.quant_cointegration import CointegrationScanner, SurvivalAnalyzer
-    from ali2026v3_trading.data.quant_services import (
+    from data.quant_infra import NumpyRingBuffer, ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor, MultiPeriodTrendScorer, IVSurfacePCA, VolatilityRegimeFilter
+    from data.quant_hmm import AdaptiveHMM
+    from data.quant_cointegration import CointegrationScanner, SurvivalAnalyzer
+    from data.quant_services import (
         LightweightPersistence, HotConfigManager, numba_helper, HAS_NUMBA,
     )
-    from ali2026v3_trading.infra.registry_service import SingletonRegistry
+    from infra.registry_service import SingletonRegistry
 from collections import deque
 
 
@@ -59,8 +59,8 @@ class ProductionQuantSystem:
 
         # P1-01修复: 统一健康检查入口到HealthCheckAggregator
         try:
-            from ali2026v3_trading.infra.health_monitor import HealthCheckAPI
-            from ali2026v3_trading.infra.health_monitor import HealthCheckAggregator
+            from infra.health_monitor import HealthCheckAPI
+            from infra.health_monitor import HealthCheckAggregator
             self.health_check_api = HealthCheckAPI(config=cfg)
             self.health_check_aggregator = HealthCheckAggregator
             logging.info("[ProductionQuantSystem] 健康检查API和Aggregator已集成")
@@ -176,7 +176,17 @@ class ProductionQuantSystem:
                     timestamp_ms: Optional[int] = None,
                     cum_volume: int = 0) -> Dict[str, Any]:
         if not self._initialized:
-            return {}
+            # FIX-20260715-V5-P1-3: 首次tick自动初始化PQS（V4附录声称已修复但未落地）
+            # 根因: ProductionQuantSystem.py:178-179 直接 return {}，
+            #       即使策略进入运行态，PQS永远不产出信号 → "运行中但不下单"
+            # 修复: 首次tick触发 initialize()，失败则返回 {} 不影响后续tick
+            try:
+                _init_symbols = [symbol] if symbol else (self._symbols or [])
+                logging.info("[PQS] 首次tick触发自动初始化: symbol=%s symbols=%s", symbol, _init_symbols)
+                self.initialize(_init_symbols if _init_symbols else None)
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _init_err:
+                logging.warning("[PQS] 自动初始化失败，本次tick返回空: %s", _init_err)
+                return {}
         t0 = time.perf_counter()
         # R27-P0-DR-04修复: 每个策略模块调用加异常隔离，防止单策略崩溃影响全局
         trend_result = {}
@@ -233,7 +243,7 @@ class ProductionQuantSystem:
             try:
                 if self._crm is None:
                     import importlib  # R21-CC-P2-03修复: 动态导入 — 每次tick都可能触发，应缓存模块引用
-                    crm_module = importlib.import_module('ali2026v3_trading.param_pool.optimization.cycle_sharpe')
+                    crm_module = importlib.import_module('param_pool.optimization.cycle_sharpe')
                     self._crm = crm_module.get_cycle_resonance_module()
                 hmm_label = hmm_result.get('state_label', 'NORMAL') if isinstance(hmm_result, dict) else 'NORMAL'
                 hmm_posterior = tuple(hmm_result.get('posterior', [0.33, 0.34, 0.33])) if isinstance(hmm_result, dict) else (0.33, 0.34, 0.33)
@@ -311,7 +321,7 @@ class ProductionQuantSystem:
             analysis_result: update_tick()返回的分析结果字典
         """
         try:
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
             _bus = get_global_event_bus()
             if _bus is None or getattr(_bus, '_shutdown', False):
                 return
@@ -440,7 +450,7 @@ class ProductionQuantSystem:
                 logging.warning("[R22-RES-04] structured_logger.close()失败: %s", _sl_err)
         # R33-P0-03修复: EventBus线程池生命周期管理 — 在系统shutdown时主动关闭
         try:
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
             _eb = get_global_event_bus()
             if hasattr(_eb, 'shutdown'):
                 _eb.shutdown(wait=False)
@@ -487,7 +497,7 @@ def shutdown_quant_system() -> None:
 
 def _load_config_from_file(config_path: str) -> Dict[str, Any]:
     """从JSON文件加载配置"""
-    from ali2026v3_trading.infra.serialization_utils import json_loads
+    from infra.serialization_utils import json_loads
     with open(config_path, 'r', encoding='utf-8') as f:
         return json_loads(f.read())  # R5-1
 
@@ -498,7 +508,7 @@ def _build_config_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
     # 1. 尝试从统一配置中心加载
     try:
-        from ali2026v3_trading.config.config_service import get_config_service
+        from config.config_service import get_config_service
         cs = get_config_service()
         cfg['log_dir'] = cs.paths.log_dir
         cfg['exchange'] = cs.exchanges.exchanges[0] if cs.exchanges.exchanges else 'DCE'
@@ -533,8 +543,8 @@ def main() -> int:
     """ProductionQuantSystem 主程序入口
 
     用法示例:
-        python -m ali2026v3_trading.ProductionQuantSystem --symbols IF,IH,IM
-        python -m ali2026v3_trading.ProductionQuantSystem --config quant_config.json
+        python -m ProductionQuantSystem --symbols IF,IH,IM
+        python -m ProductionQuantSystem --config quant_config.json
     """
     parser = argparse.ArgumentParser(
         description='ProductionQuantSystem V3 - 量化核心系统主程序',
@@ -569,7 +579,7 @@ def main() -> int:
 
     # P2-05修复: 委托统一日志入口, 不再独立basicConfig
     try:
-        from ali2026v3_trading.config.config_logging import setup_logging
+        from config.config_logging import setup_logging
         setup_logging()
     except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
         logging.basicConfig(

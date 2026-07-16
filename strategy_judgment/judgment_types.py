@@ -24,9 +24,9 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 from datetime import datetime
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
+from infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
 
-from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer, yaml_safe_load
+from infra.serialization_utils import json_dumps, json_loads, json_default_serializer, yaml_safe_load
 
 from .strategy_behavior_diagnosis import (
     StrategyBehaviorDiagnosis, BehaviorConsistencyScore,
@@ -56,7 +56,7 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-from ali2026v3_trading.infra.commission_utils import CONTRACT_MULTIPLIER_MAP
+from infra.commission_utils import CONTRACT_MULTIPLIER_MAP
 
 
 def _get_contract_multiplier(instrument_id: str) -> float:

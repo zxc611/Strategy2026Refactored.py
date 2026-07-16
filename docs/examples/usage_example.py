@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from datetime import datetime, timedelta
 
-from ali2026v3_trading.strategy_judgment import (
+from strategy_judgment import (
     BacktestIntegrationHooks,
     HookConfig,
     TurningPointMicroscope,
@@ -80,7 +80,7 @@ def example_minimal_integration():
 def example_with_cycle_resonance():
     """带周期共振模块的完整集成"""
 
-    from ali2026v3_trading.param_pool.optimization.cycle_sharpe import (
+    from param_pool.optimization.cycle_sharpe import (
         CycleResonanceModule, CRParams,
     )
 
@@ -131,8 +131,8 @@ def example_from_preprocessed_data():
     """从preprocess_ticks.py输出直接构建"""
 
     try:
-        from ali2026v3_trading.data.data_access import get_data_access
-        from ali2026v3_trading.data.db_adapter import connect
+        from data.data_access import get_data_access
+        from data.db_adapter import connect
         import pandas as pd
     except ImportError:
         print("需要duckdb和pandas")
@@ -319,7 +319,7 @@ def example_standalone_diagnosis():
         strategy_type="high_freq",
     )
 
-    from ali2026v3_trading.strategy_judgment.market_snapshot_collector import MarketSnapshot
+    from strategy_judgment.market_snapshot_collector import MarketSnapshot
 
     extreme_snaps = []
     for i in range(50):

@@ -26,8 +26,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
-from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads, json_default_serializer
+from infra._helpers import get_logger  # R9-5
+from infra.serialization_utils import json_dumps, json_loads, json_default_serializer
 
 from .turning_point_analysis import TurningPointMicroscope, EnhancedBar, ExtremeRegion
 from .turning_point_analysis import ResonanceTurningPointMarker, TurningPointRecord

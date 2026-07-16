@@ -9,7 +9,7 @@ import pytest
 
 def _ensure_imports():
     try:
-        from ali2026v3_trading.strategy_judgment import judgment_scoring_helpers as jsh
+        from strategy_judgment import judgment_scoring_helpers as jsh
         return jsh
     except Exception as e:
         pytest.skip(f"Import failed: {e}")

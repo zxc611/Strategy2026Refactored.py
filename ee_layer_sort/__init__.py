@@ -13,7 +13,7 @@ three_layer_sort — 期权五态排序并列信号源实现
 
 合并说明 (2026-06-30): 信号源B/C合入signal_source_a.py，本文件改为统一re-export
 """
-from ali2026v3_trading.data.three_layer_sort.signal_source_a import (
+from data.three_layer_sort.signal_source_a import (
     IntraProductSorter,
     AsymmetricDecay,
     GreeksHardFilter,

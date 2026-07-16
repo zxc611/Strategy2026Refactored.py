@@ -2,7 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-# mock optuna before importing ali2026v3_trading to avoid SystemExit
+# mock optuna before importing demo to avoid SystemExit
 import types
 from unittest.mock import MagicMock
 _optuna = types.ModuleType('optuna')
@@ -16,7 +16,7 @@ sys.modules['optuna.pruners'] = _optuna.pruners
 import math
 from unittest.mock import patch
 
-from ali2026v3_trading.strategy_judgment.causal_chain_utils import (
+from strategy_judgment.causal_chain_utils import (
     CausalEvent,
     CausalChainTracker,
     ContaminationGuard,
@@ -260,12 +260,12 @@ def test_capture_and_rollback_snapshot():
     assert snapshot.position_id == "pos_001"
 
     # 首次回滚应成功
-    with patch('ali2026v3_trading.strategy_judgment.causal_chain_utils._logger'):
+    with patch('strategy_judgment.causal_chain_utils._logger'):
         result = mgr.rollback_trade("pos_001", reason="test")
     assert result is True
 
     # 重复回滚应失败
-    with patch('ali2026v3_trading.strategy_judgment.causal_chain_utils._logger'):
+    with patch('strategy_judgment.causal_chain_utils._logger'):
         result = mgr.rollback_trade("pos_001", reason="test")
     assert result is False
 
@@ -279,7 +279,7 @@ def test_rollback_missing_snapshot():
     mgr = object.__new__(TradeRollbackManager)
     mgr.__init__()
 
-    with patch('ali2026v3_trading.strategy_judgment.causal_chain_utils._logger'):
+    with patch('strategy_judgment.causal_chain_utils._logger'):
         result = mgr.rollback_trade("nonexistent", reason="test")
     assert result is False
 

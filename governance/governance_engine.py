@@ -7,16 +7,16 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 # R27-P1修复: 导入共享状态注册表、浮点工具
-from ali2026v3_trading.infra.resilience import (
+from infra.resilience import (
     SharedStateRegistry, stable_sum, stable_mean, stable_variance,
     KahanSummation, safe_divide, compute_sharpe_stable,
     PRICE_TOLERANCE,
 )
-from ali2026v3_trading.config.config_params import (
+from config.config_params import (
     STRATEGY_MODE_CORRECT_TRENDING, STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE,
     STRATEGY_MODE_INCORRECT_REVERSAL, STRATEGY_MODE_OTHER,
 )
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import get_logger  # R9-5
 
 logger = get_logger(__name__)  # R9-5
 
@@ -105,7 +105,7 @@ class E13ShadowStrategyCollusionDetector:
         source_independent = True
         source_detail = {}
         try:
-            from ali2026v3_trading.param_pool.backtest.backtest_config import PARAM_SOURCE_ANNOTATION
+            from param_pool.backtest.backtest_config import PARAM_SOURCE_ANNOTATION
             main_sources = set()
             shadow_sources = set()
             for k in key_params:
@@ -488,13 +488,13 @@ class E11QuantitativeSourceChecker:
 
 
 # P1-22修复: mark_module_loaded/mark_module_failed直接导入(无fallback)
-from ali2026v3_trading.infra.metrics_registry import mark_module_loaded, mark_module_failed
+from infra.metrics_registry import mark_module_loaded, mark_module_failed
 
 # CORE-DEPENDENCY: evaluation模块是治理引擎的核心依赖
 # P1-16修复: 直接导入evaluation类(延迟导入已在parameter_drift_detector.py中打破循环)
-from ali2026v3_trading.evaluation.parameter_drift_detector import ParameterDriftDetector as _EvalParameterDriftDetector
-from ali2026v3_trading.evaluation.violation_tracker import StrategyViolationTracker as _EvalStrategyViolationTracker
-from ali2026v3_trading.evaluation.state_density_decay import StateEDensityDecayTracker as _EvalStateEDensityDecayTracker
+from evaluation.parameter_drift_detector import ParameterDriftDetector as _EvalParameterDriftDetector
+from evaluation.violation_tracker import StrategyViolationTracker as _EvalStrategyViolationTracker
+from evaluation.state_density_decay import StateEDensityDecayTracker as _EvalStateEDensityDecayTracker
 StateEDensityDecayTracker = _EvalStateEDensityDecayTracker
 ParameterDriftDetector = _EvalParameterDriftDetector
 StrategyViolationTracker = _EvalStrategyViolationTracker
@@ -547,7 +547,7 @@ class GovernanceEngine:
     def capture_param_snapshot(self) -> Dict[str, float]:
         snapshot: Dict[str, float] = {}
         try:
-            from ali2026v3_trading.config.config_service import get_cached_params
+            from config.config_service import get_cached_params
             cached = get_cached_params()
             _float_keys = [
                 "close_take_profit_ratio", "close_stop_loss_ratio",
@@ -565,7 +565,7 @@ class GovernanceEngine:
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _e:
             logger.debug("[P0-24] config_params不可用: %s", _e)
         try:
-            from ali2026v3_trading.tvf_param_loader import TVF_DEFAULT_PARAMS
+            from tvf_param_loader import TVF_DEFAULT_PARAMS
             for k, v in TVF_DEFAULT_PARAMS.items():
                 try:
                     snapshot[f"tvf_{k}"] = float(v)
@@ -657,7 +657,7 @@ def get_governance_engine(config: Optional[Dict[str, Any]] = None) -> Governance
         _governance_engine_instance.add_checker(MultiStateSwitchBacktestScenario())
         # AP-03: SingletonRegistry注册
         try:
-            from ali2026v3_trading.infra.registry_service import SingletonRegistry
+            from infra.registry_service import SingletonRegistry
             registry = SingletonRegistry.get_registry("governance_engine")
             registry.register_singleton("governance_engine.instance", _governance_engine_instance)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:

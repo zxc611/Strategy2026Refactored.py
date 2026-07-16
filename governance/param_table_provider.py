@@ -10,7 +10,7 @@ import logging
 import threading
 import functools
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
-from ali2026v3_trading.infra.serialization_utils import json_dumps, json_loads
+from infra.serialization_utils import json_dumps, json_loads
 
 
 @runtime_checkable
@@ -126,7 +126,7 @@ def get_param_table_provider() -> ParamTableProvider:
         with _provider_lock:
             if _provider_instance is None:
                 try:
-                    from ali2026v3_trading.config.config_params import DEFAULT_PARAM_TABLE
+                    from config.config_params import DEFAULT_PARAM_TABLE
                     _provider_instance = CachedParamTableProvider(
                         DefaultParamTableProvider(DEFAULT_PARAM_TABLE)
                     )

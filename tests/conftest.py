@@ -12,8 +12,8 @@ import numpy as np
 
 logging.raiseExceptions = False
 
-# 确保从ali2026v3_trading目录内运行测试时，父目录也在sys.path中
-# 这样ali2026v3_trading包的根级模块（如strategy_core_service.py等重导出模块）可以被正确导入
+# 确保从demo目录内运行测试时，父目录也在sys.path中
+# 这样demo包的根级模块（如strategy_core_service.py等重导出模块）可以被正确导入
 _project_root = os.path.join(os.path.dirname(__file__), '..', '..')
 _project_root = os.path.abspath(_project_root)
 if _project_root not in sys.path:
@@ -21,10 +21,10 @@ if _project_root not in sys.path:
 
 
 def _reset_all_singletons():
-    """强制重置所有ali2026v3_trading模块的全局单例"""
+    """强制重置所有demo模块的全局单例"""
     modules_to_reset = [
         k for k in sys.modules
-        if k.startswith('ali2026v3_trading') and k != 'ali2026v3_trading.tests.conftest'
+        if k.startswith('') and k != 'tests.conftest'
     ]
     singleton_attrs = [
         '_global_instance', '_instance', '_global_signal_service',
@@ -53,7 +53,7 @@ def _cleanup_circuit_breaker_state():
     """删除SafetyMetaLayer持久化状态文件"""
     import glob
     _risk_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              '..', '..', 'ali2026v3_trading', 'risk')
+                              '..', '..', '', 'risk')
     _risk_dir = os.path.abspath(_risk_dir)
     for pattern in ['.circuit_breaker_state.json', '.circuit_breaker_state.json.tmp']:
         _path = os.path.join(_risk_dir, pattern)
@@ -71,14 +71,14 @@ def _isolate_global_state():
     _reset_all_singletons()
     # AP-03: SingletonRegistry全局重置
     try:
-        from ali2026v3_trading.infra.registry_service import SingletonRegistry
+        from infra.registry_service import SingletonRegistry
         SingletonRegistry.reset_all()
     except (ValueError, KeyError, TypeError, AttributeError):
         pass
     yield
     _reset_all_singletons()
     try:
-        from ali2026v3_trading.infra.registry_service import SingletonRegistry
+        from infra.registry_service import SingletonRegistry
         SingletonRegistry.reset_all()
     except (ValueError, KeyError, TypeError, AttributeError):
         pass
@@ -96,5 +96,5 @@ def seeded_random():
     用法: 在测试函数参数中声明 seeded_random 即可自动设置种子。'
     返回值为种子值(int)，方便需要传递种子的场景。
     """
-    from ali2026v3_trading.param_pool.backtest.backtest_runner_utils import set_global_random_seed
+    from param_pool.backtest.backtest_runner_utils import set_global_random_seed
     return set_global_random_seed(_DEFAULT_TEST_SEED)

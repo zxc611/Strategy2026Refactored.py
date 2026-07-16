@@ -38,7 +38,7 @@ from typing import Any, Dict, List
 
 
 
-from ali2026v3_trading.infra.shared_utils import TradeDirection, CHINA_TZ
+from infra.shared_utils import TradeDirection, CHINA_TZ
 
 
 

@@ -26,7 +26,7 @@ def extract_yaml_params():
                 try:
                     with open(path, 'r', encoding='utf-8') as fh:
                         # P2-30修复: 使用yaml_safe_load统一入口，消除直接yaml.safe_load
-                        from ali2026v3_trading.infra.serialization_utils import yaml_safe_load
+                        from infra.serialization_utils import yaml_safe_load
                         data = yaml_safe_load(fh)
                         if isinstance(data, dict):
                             for k, v in _flatten_dict(data, prefix=''):

@@ -11,11 +11,11 @@ from typing import Any, Dict, List, Optional
 
 from datetime import datetime
 
-from ali2026v3_trading.infra._helpers import _CHINA_TZ
-from ali2026v3_trading.infra._helpers import get_disk_space_monitor
-from ali2026v3_trading.infra._backup_restore import get_backup_service
-from ali2026v3_trading.tests.infra_archived._ops_framework import get_ops_operation_manager
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
+from infra._helpers import _CHINA_TZ
+from infra._helpers import get_disk_space_monitor
+from infra._backup_restore import get_backup_service
+from tests.infra_archived._ops_framework import get_ops_operation_manager
+from infra._helpers import get_logger  # R9-5
 
 
 logger = get_logger(__name__)  # R9-5
@@ -47,7 +47,7 @@ def ops_health_check() -> Dict[str, Any]:
 
     # 妫€鏌ventBus
     try:
-        from ali2026v3_trading.infra.event_bus import get_global_event_bus
+        from infra.event_bus import get_global_event_bus
         bus = get_global_event_bus()
         bus_stats = bus.get_stats()
         components['event_bus'] = {
@@ -59,7 +59,7 @@ def ops_health_check() -> Dict[str, Any]:
 
     # 妫€鏌ラ厤缃湇鍔?
     try:
-        from ali2026v3_trading.config.config_service import get_config
+        from config.config_service import get_config
         config = get_config()
         components['config'] = {
             'status': 'OK',
@@ -70,7 +70,7 @@ def ops_health_check() -> Dict[str, Any]:
 
     # LG-06淇: 妫€鏌ユ棩蹇楃郴缁熷仴搴?
     try:
-        from ali2026v3_trading.config.config_service import check_logging_health
+        from config.config_service import check_logging_health
         log_health = check_logging_health()
         components['logging'] = {
             'status': 'OK' if log_health.get('healthy') else 'ERROR',
@@ -126,7 +126,7 @@ def ops_run_diagnostic(category: str = "all") -> Dict[str, Any]:
 
     if category in ('all', 'eventbus'):
         try:
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
             bus = get_global_event_bus()
             stats = bus.get_stats()
             if stats.get('dropped_events', 0) > 0:
@@ -178,7 +178,7 @@ def ops_auto_repair(issue_type: str) -> Dict[str, Any]:
 
     elif issue_type == 'eventbus_stuck':
         try:
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
             bus = get_global_event_bus()
             stats = bus.get_stats()
             pending = stats.get('pending_events', 0)
@@ -194,7 +194,7 @@ def ops_auto_repair(issue_type: str) -> Dict[str, Any]:
 
     elif issue_type == 'config_stale':
         try:
-            from ali2026v3_trading.config.config_service import get_config_query_facade, get_config_command_facade
+            from config.config_service import get_config_query_facade, get_config_command_facade
             query_facade = get_config_query_facade()
             if query_facade.need_reload():
                 command_facade = get_config_command_facade()
@@ -242,7 +242,7 @@ def generate_ops_report(report_type: str = "daily") -> Dict[str, Any]:
 
     # EventBus缁熻
     try:
-        from ali2026v3_trading.infra.event_bus import get_global_event_bus
+        from infra.event_bus import get_global_event_bus
         bus = get_global_event_bus()
         report['sections']['event_bus'] = bus.get_stats()
     except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
@@ -285,7 +285,7 @@ def estimate_ops_cost() -> Dict[str, Any]:
 
     # 浼扮畻鏁版嵁搴撳ぇ灏?
     try:
-        from ali2026v3_trading.config.config_service import get_default_db_path
+        from config.config_service import get_default_db_path
         db_path = get_default_db_path()
         if os.path.exists(db_path):
             storage_cost['db_size_mb'] = round(os.path.getsize(db_path) / (1024 * 1024), 2)

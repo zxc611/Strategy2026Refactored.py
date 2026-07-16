@@ -6,9 +6,9 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.order.order_base import OrderResult
-from ali2026v3_trading.order.order_executor_validation import OrderContext
+from infra.shared_utils import CHINA_TZ
+from order.order_base import OrderResult
+from order.order_executor_validation import OrderContext
 
 
 # 继续OrderExecutor的方法（在order_executor_validation.py中已定义类）
@@ -182,7 +182,7 @@ class _OrderExecutorPlatformMethods:
             # 检查4: get_cached_params兜底
             if not _dry_run:
                 try:
-                    from ali2026v3_trading.config.config_params import get_cached_params as _gcp_dr
+                    from config.config_params import get_cached_params as _gcp_dr
                     if _gcp_dr().get('dry_run_mode', False):
                         _dry_run = True
                 except (ValueError, KeyError, TypeError, AttributeError, ImportError):
@@ -217,7 +217,7 @@ class _OrderExecutorPlatformMethods:
 
                 try:
 
-                    from ali2026v3_trading.config.config_service import resolve_product_exchange
+                    from config.config_service import resolve_product_exchange
 
                     if not ctx.exchange:
 
@@ -458,7 +458,7 @@ class _OrderExecutorPlatformMethods:
 
         try:
 
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus
+            from infra.event_bus import get_global_event_bus
 
             _bus = get_global_event_bus()
 
@@ -533,9 +533,9 @@ class _OrderExecutorPlatformMethods:
 
     ) -> List[str]:
 
-        from ali2026v3_trading.infra.shared_utils import VALID_TRADE_DIRECTIONS
+        from infra.shared_utils import VALID_TRADE_DIRECTIONS
 
-        from ali2026v3_trading.order.order_compliance import check_self_trade_across_splits
+        from order.order_compliance import check_self_trade_across_splits
 
         svc = self._svc
 
@@ -654,7 +654,7 @@ class _OrderExecutorPlatformMethods:
 
         # P2-04修复: 委托 SmartOrderSplitter 统一拆单逻辑
 
-        from ali2026v3_trading.order.order_split_models import SmartOrderSplitter, OrderSplitStrategy
+        from order.order_split_models import SmartOrderSplitter, OrderSplitStrategy
 
         try:
 
@@ -716,7 +716,7 @@ class _OrderExecutorPlatformMethods:
 
     def execute_by_ranking(self, targets: List[Dict[str, Any]], direction: str = 'BUY', action: str = 'OPEN') -> List[str]:
 
-        from ali2026v3_trading.infra.shared_utils import TradeDirection
+        from infra.shared_utils import TradeDirection
 
         svc = self._svc
 
@@ -911,7 +911,7 @@ class _OrderExecutorPlatformMethods:
         # 读取回调延迟参数(默认50ms模拟CTP本地回报往返)
         _delay = 0.05
         try:
-            from ali2026v3_trading.config.config_service import get_cached_params as _gcp_d
+            from config.config_service import get_cached_params as _gcp_d
             _delay = float(_gcp_d().get('dry_run_callback_delay_sec', 0.05))
         except (ValueError, KeyError, TypeError, AttributeError, ImportError):
             pass
@@ -955,7 +955,7 @@ class _OrderExecutorPlatformMethods:
                         _bl = getattr(_host, '_business_layer', None)
                 if _bl is None:
                     try:
-                        from ali2026v3_trading.config.config_service import get_cached_params as _gcp_bl
+                        from config.config_service import get_cached_params as _gcp_bl
                         _strategy_obj = _gcp_bl().get('strategy', None)
                         if _strategy_obj is not None:
                             _core3 = getattr(_strategy_obj, 'strategy_core', None)

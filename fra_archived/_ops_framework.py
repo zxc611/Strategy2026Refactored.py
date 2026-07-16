@@ -13,10 +13,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from datetime import datetime
 
-from ali2026v3_trading.infra.serialization_utils import safe_jsonl_append_line
-from ali2026v3_trading.infra._helpers import _CHINA_TZ
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5
-from ali2026v3_trading.infra.shared_utils import generate_prefixed_id
+from infra.serialization_utils import safe_jsonl_append_line
+from infra._helpers import _CHINA_TZ
+from infra._helpers import get_logger  # R9-5
+from infra.shared_utils import generate_prefixed_id
 
 
 logger = get_logger(__name__)  # R9-5
@@ -355,7 +355,7 @@ class OpsOperationManager:
         P2-12修复: 委托到 TimeoutGuard + BoundedRetry。
         语义: 超时不重试(直接返回失败), 异常才重试。
         """
-        from ali2026v3_trading.infra.resilience import (
+        from infra.resilience import (
             TimeoutGuard as _TimeoutGuard,
             BoundedRetry as _BoundedRetry,
         )
@@ -425,7 +425,7 @@ class OpsOperationManager:
         }
         # 尝试获取系统关键状态
         try:
-            from ali2026v3_trading.infra.health_monitor import HealthCheckAPI
+            from infra.health_monitor import HealthCheckAPI
             api = HealthCheckAPI()
             snapshot['health_status'] = api.get_health_status()
         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
@@ -464,7 +464,7 @@ class OpsOperationManager:
                        status: str, message: str) -> None:
         """OPS-P1-12: 通过EventBus发布运维操作事件"""
         try:
-            from ali2026v3_trading.infra.event_bus import get_global_event_bus, OpsOperationEvent
+            from infra.event_bus import get_global_event_bus, OpsOperationEvent
             bus = get_global_event_bus()
             event = OpsOperationEvent(
                 operation_id=operation.operation_id,

@@ -2,7 +2,7 @@ from .cascade_judge import CascadeJudge, CascadeReport, GateReport, GateResult, 
 
 # NEW-P1-06修复: 引入模块加载状态管理
 # P1-22: 删除fallback定义，直接从module_load_status导入
-from ali2026v3_trading.infra.metrics_registry import mark_module_loaded, mark_module_failed
+from infra.metrics_registry import mark_module_loaded, mark_module_failed
 
 # CORE-DEPENDENCY: parameter_drift_detector是评判系统的核心组件
 try:

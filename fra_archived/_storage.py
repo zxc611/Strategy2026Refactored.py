@@ -9,9 +9,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from datetime import datetime, timedelta
 
-from ali2026v3_trading.infra.serialization_utils import json_dumps
-from ali2026v3_trading.infra.shared_utils import sanitize_sql_identifier, sanitize_sql_value
-from ali2026v3_trading.infra._helpers import (
+from infra.serialization_utils import json_dumps
+from infra.shared_utils import sanitize_sql_identifier, sanitize_sql_value
+from infra._helpers import (
     _CHINA_TZ,
     _HAS_DATA_SERVICE,
     _result_to_pylist,
@@ -21,8 +21,8 @@ from ali2026v3_trading.infra._helpers import (
     DEFAULT_OPTION_SPEC,
     get_data_service,
 )
-from ali2026v3_trading.infra._backup_restore import get_backup_service
-from ali2026v3_trading.infra._helpers import get_logger  # R9-5: 统一logger
+from infra._backup_restore import get_backup_service
+from infra._helpers import get_logger  # R9-5: 统一logger
 
 logger = get_logger(__name__)
 
@@ -175,7 +175,7 @@ class StorageCatalogService:
         """补齐并激活 option_products 中缺失的真实期权品种配置。"""
 
         try:
-            from ali2026v3_trading.config.config_service import ExchangeConfig
+            from config.config_service import ExchangeConfig
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as exc:
             logging.warning("[StorageMaintenance] 加载 ExchangeConfig 失败，跳过 option_products 补齐: %s", exc)
             return 0
@@ -437,9 +437,9 @@ class StorageCatalogService:
                 result['error'] = '未配置数据库路径'
                 return result
 
-            from ali2026v3_trading.data.data_access import get_data_access
+            from data.data_access import get_data_access
             _da = get_data_access()
-            from ali2026v3_trading.data.db_adapter import connect
+            from data.db_adapter import connect
             conn = connect(db_path, read_only=False)
             try:
                 # 统计待归档行数
@@ -532,7 +532,7 @@ class StorageChecksService:
         self.manager = manager
         # RES-P2-03/05/06修复: 集成容错配置
         try:
-            from ali2026v3_trading.config.config_params import DEGRADATION_FEATURES, SLA_CONFIG, ALARM_LEVELS
+            from config.config_params import DEGRADATION_FEATURES, SLA_CONFIG, ALARM_LEVELS
             self._degradation_features = DEGRADATION_FEATURES
             self._sla_config = SLA_CONFIG
             self._alarm_levels = ALARM_LEVELS
@@ -639,7 +639,7 @@ class StorageChecksService:
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as fallback_exc:
                 logging.warning("[StorageMaintenance] 全量检查也失败: %s", fallback_exc)
         try:
-            from ali2026v3_trading.config.config_params import _data_quality_score
+            from config.config_params import _data_quality_score
             _tick_count = 0
             if _HAS_DATA_SERVICE:
                 try:
@@ -658,7 +658,7 @@ class StorageChecksService:
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _dq_err:
             logging.debug("[DATA-P2-09] 数据质量评分计算失败: %s", _dq_err)
         try:
-            from ali2026v3_trading.ops_documentation import get_fault_tolerance_summary
+            from ops_documentation import get_fault_tolerance_summary
             _ft_summary = get_fault_tolerance_summary() if callable(getattr(get_fault_tolerance_summary, '__call__', None)) else str(get_fault_tolerance_summary)
             logging.info("[RES-P2-02] 容错策略: %s", _ft_summary[:200])
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
@@ -736,7 +736,7 @@ class StorageChecksService:
             if position_service is None or exchange_query_fn is None:
                 logging.debug("[R26-P0-DI-01] 对账跳过: position_service或exchange_query_fn未提供")
                 return result
-            from ali2026v3_trading.position.position_service import reconcile_positions_with_exchange
+            from position.position_service import reconcile_positions_with_exchange
             local_positions = {}
             if hasattr(position_service, '_positions'):
                 for _iid, _pdata in position_service._positions.items():
@@ -750,7 +750,7 @@ class StorageChecksService:
             logging.error("[R26-P0-DI-01] 定时对账异常: %s", e)
         # R27-P2: 集成bar/tick一致性校验
         try:
-            from ali2026v3_trading.data.ds_data_writer import verify_bar_tick_consistency
+            from data.ds_data_writer import verify_bar_tick_consistency
             _ds = getattr(self, '_data_service', None)
             if _ds and hasattr(_ds, '_get_connection'):
                 _conn = _ds._get_connection()
@@ -766,7 +766,7 @@ class StorageChecksService:
             logging.debug("[R27-P1-DI-03] bar/tick一致性校验跳过: %s", e)
         # R27-P1: 孤立函数调用——sync_order_status_with_exchange
         try:
-            from ali2026v3_trading.order.order_service import sync_order_status_with_exchange
+            from order.order_service import sync_order_status_with_exchange
             _os = getattr(self, '_order_service', None)
             if _os and hasattr(_os, 'get_pending_orders'):
                 for _oid in list(_os.get_pending_orders().keys())[:5]:
@@ -778,7 +778,7 @@ class StorageChecksService:
             logging.debug("[R27-P1] 订单状态同步跳过: %s", e)
         # R27-P1: 孤立函数调用——verify_referential_integrity
         try:
-            from ali2026v3_trading.data.ds_schema_manager import DsSchemaManager
+            from data.ds_schema_manager import DsSchemaManager
             _ds = getattr(self, '_data_service', None)
             if _ds and hasattr(_ds, '_schema_manager'):
                 _sm = _ds._schema_manager
@@ -790,7 +790,7 @@ class StorageChecksService:
             logging.debug("[R27-P1] 引用完整性校验跳过: %s", e)
         # R27-P1: 孤立函数调用——get_hot_reload_status
         try:
-            from ali2026v3_trading.config.config_params import get_hot_reload_status
+            from config.config_params import get_hot_reload_status
             _hr = get_hot_reload_status()
             _unsupported = _hr.get('unsupported', [])
             if _unsupported:
@@ -808,7 +808,7 @@ class StorageChecksService:
         """
         # RES-P2-10: 灾难恢复手册引用
         try:
-            from ali2026v3_trading.ops_documentation import DISASTER_RECOVERY_PROCEDURES
+            from ops_documentation import DISASTER_RECOVERY_PROCEDURES
             logging.info("[RES-P2-10] 灾难恢复手册已加载: %d条流程", len(DISASTER_RECOVERY_PROCEDURES) if isinstance(DISASTER_RECOVERY_PROCEDURES, (list, dict)) else 1)
         except ImportError:
             logging.debug("[RES-P2-10] ops_documentation不可用")

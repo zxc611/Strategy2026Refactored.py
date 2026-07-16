@@ -1,7 +1,7 @@
 # MODULE_ID: M2-607
 """测试: data/width_cache_types.py"""
 import pytest
-from ali2026v3_trading.data.width_cache_types import (
+from data.width_cache_types import (
     SortEntry, _NoOpDiagnosisProbeManager,
     MAX_OPTION_CACHE_SIZE, MAX_INSTRUMENT_ID_MAP_SIZE, MAX_FUTURE_CACHE_SIZE,
     MAX_STATUS_COUNTS_SIZE, MAX_SORT_BUCKETS_FUTURES,

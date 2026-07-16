@@ -5,9 +5,9 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.governance.mode_config import ModeConfig
+from governance.mode_config import ModeConfig
 
-from ali2026v3_trading.governance.mode_position_sizing import PredictiveStateEngine
+from governance.mode_position_sizing import PredictiveStateEngine
 
 
 class ModeEnginePropagationService:
@@ -28,7 +28,7 @@ class ModeEnginePropagationService:
         try:
             rs = self._component_registry.get('RiskService')
             if rs is None:
-                from ali2026v3_trading.risk.risk_service import get_risk_service
+                from risk.risk_service import get_risk_service
                 rs = get_risk_service()
             rs.set_capital_scale(scale_str)
             try:
@@ -59,10 +59,10 @@ class ModeEnginePropagationService:
     def _auto_register_known_components(self) -> None:
         """在。_init__中尝试自动注册所有已知组件，避免仅注册单个组件"""
         _known_components = [
-            ('RiskService', 'ali2026v3_trading.risk.risk_service', 'get_risk_service'),
-            ('SignalService', 'ali2026v3_trading.signal.signal_service', 'get_signal_service'),
-            ('StateParamManager', 'ali2026v3_trading.config.state_param', 'get_state_param_manager'),
-            ('BoxSpringStrategy', 'ali2026v3_trading.strategy.box_spring_strategy_impl', 'get_box_spring_strategy'),
+            ('RiskService', 'risk.risk_service', 'get_risk_service'),
+            ('SignalService', 'signal.signal_service', 'get_signal_service'),
+            ('StateParamManager', 'config.state_param', 'get_state_param_manager'),
+            ('BoxSpringStrategy', 'strategy.box_spring_strategy_impl', 'get_box_spring_strategy'),
         ]
         for name, module_path, factory_name in _known_components:
             if name in self._component_registry:
@@ -94,7 +94,7 @@ class ModeEnginePropagationService:
         try:
             ss = self._component_registry.get('SignalService')
             if ss is None:
-                from ali2026v3_trading.signal.signal_service import get_signal_service
+                from signal.signal_service import get_signal_service
                 ss = get_signal_service()
             if config.plr_filter_enabled and config.min_estimated_plr > 0:
                 ss.enable_plr_filter(min_estimated_plr=config.min_estimated_plr)
@@ -112,7 +112,7 @@ class ModeEnginePropagationService:
         try:
             spm = self._component_registry.get('StateParamManager')
             if spm is None:
-                from ali2026v3_trading.config.state_param import get_state_param_manager
+                from config.state_param import get_state_param_manager
                 spm = get_state_param_manager()
             spm.set_capital_scale(scale_str)
             propagated.append('StateParamManager')
@@ -127,7 +127,7 @@ class ModeEnginePropagationService:
         try:
             bss = self._component_registry.get('BoxSpringStrategy')
             if bss is None:
-                from ali2026v3_trading.strategy.box_spring_strategy_impl import get_box_spring_strategy
+                from strategy.box_spring_strategy_impl import get_box_spring_strategy
                 bss = get_box_spring_strategy()
             if hasattr(bss, 'set_capital_scale') and callable(getattr(bss, 'set_capital_scale')):
                 bss.set_capital_scale(scale_str)
@@ -148,7 +148,7 @@ class ModeEnginePropagationService:
                 if comp == 'RiskService':
                     rs = self._component_registry.get('RiskService')
                     if rs is None:
-                        from ali2026v3_trading.risk.risk_service import get_risk_service
+                        from risk.risk_service import get_risk_service
                         rs = get_risk_service()
                     rs.set_capital_scale(old_scale)
                 elif comp == 'SignalService':
@@ -156,7 +156,7 @@ class ModeEnginePropagationService:
                         continue
                     ss = self._component_registry.get('SignalService')
                     if ss is None:
-                        from ali2026v3_trading.signal.signal_service import get_signal_service
+                        from signal.signal_service import get_signal_service
                         ss = get_signal_service()
                     if old_config.plr_filter_enabled:
                         ss.enable_plr_filter(min_estimated_plr=old_config.min_estimated_plr)
@@ -165,13 +165,13 @@ class ModeEnginePropagationService:
                 elif comp == 'StateParamManager':
                     spm = self._component_registry.get('StateParamManager')
                     if spm is None:
-                        from ali2026v3_trading.config.state_param import get_state_param_manager
+                        from config.state_param import get_state_param_manager
                         spm = get_state_param_manager()
                     spm.set_capital_scale(old_scale)
                 elif comp == 'BoxSpringStrategy':
                     bss = self._component_registry.get('BoxSpringStrategy')
                     if bss is None:
-                        from ali2026v3_trading.strategy.box_spring_strategy_impl import get_box_spring_strategy
+                        from strategy.box_spring_strategy_impl import get_box_spring_strategy
                         bss = get_box_spring_strategy()
                     if hasattr(bss, 'set_capital_scale') and callable(getattr(bss, 'set_capital_scale')):
                         bss.set_capital_scale(old_scale)
@@ -202,7 +202,7 @@ class ModeEnginePropagationService:
         try:
             rs = self._component_registry.get('RiskService')
             if rs is None:
-                from ali2026v3_trading.risk.risk_service import get_risk_service
+                from risk.risk_service import get_risk_service
                 rs = get_risk_service()
             safety = getattr(rs, '_safety_meta_layer', None)
             if safety is not None:

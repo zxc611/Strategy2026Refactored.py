@@ -11,13 +11,13 @@ import numpy as np
 def _ensure_imports():
     # 清除可能被前面测试污染的 mock 模块缓存
     for _mod_name in [
-        'ali2026v3_trading.strategy_judgment.turning_point_analysis',
-        'ali2026v3_trading.strategy_judgment.market_snapshot_collector',
+        'strategy_judgment.turning_point_analysis',
+        'strategy_judgment.market_snapshot_collector',
     ]:
         if _mod_name in sys.modules:
             del sys.modules[_mod_name]
     try:
-        from ali2026v3_trading.strategy_judgment.turning_point_analysis import (
+        from strategy_judgment.turning_point_analysis import (
             TurningPointMicroscope, ResonanceTurningPointMarker,
             EnhancedBar, ExtremeRegion, MAAlignment, TurningPointType, _ResonancePhase,
         )

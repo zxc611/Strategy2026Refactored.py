@@ -12,7 +12,7 @@ class TestValidateShadowParamIndependence:
 
     def _make_service(self):
         """创建一个可测试的ShadowStrategyCoreService实例(不调用例例init__)"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import ShadowStrategyCoreService
+        from strategy.shadow_strategy_core import ShadowStrategyCoreService
         svc = object.__new__(ShadowStrategyCoreService)
         return svc
 
@@ -167,7 +167,7 @@ class TestShadowTradeRecord:
 
     def test_to_dict(self):
         """to_dict返回完整字典"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import ShadowTradeRecord
+        from strategy.shadow_strategy_core import ShadowTradeRecord
         record = ShadowTradeRecord(
             trade_id="test_001", shadow_type="shadow_a", timestamp="2026-01-01T00:00:00"
         )
@@ -178,7 +178,7 @@ class TestShadowTradeRecord:
 
     def test_default_values(self):
         """默认值"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import ShadowTradeRecord
+        from strategy.shadow_strategy_core import ShadowTradeRecord
         record = ShadowTradeRecord(
             trade_id="test_001", shadow_type="shadow_a", timestamp="2026-01-01"
         )
@@ -197,7 +197,7 @@ class TestAlphaMetrics:
 
     def test_to_dict(self):
         """to_dict返回完整字典"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import AlphaMetrics
+        from strategy.shadow_strategy_core import AlphaMetrics
         metrics = AlphaMetrics(timestamp="2026-01-01")
         d = metrics.to_dict()
         assert d['timestamp'] == "2026-01-01"
@@ -206,7 +206,7 @@ class TestAlphaMetrics:
 
     def test_default_values(self):
         """默认值"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import AlphaMetrics
+        from strategy.shadow_strategy_core import AlphaMetrics
         metrics = AlphaMetrics(timestamp="2026-01-01")
         assert metrics.alpha_ratio == 0.0
         assert metrics.degradation_triggered is False
@@ -222,7 +222,7 @@ class TestShadowParamsSnapshot:
 
     def test_to_dict(self):
         """to_dict返回完整字典"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import ShadowParamsSnapshot
+        from strategy.shadow_strategy_core import ShadowParamsSnapshot
         snapshot = ShadowParamsSnapshot(
             shadow_type='shadow_a', locked_at='2026-01-01',
             param_set={'key': 'value'}, param_hash='abc123'
@@ -234,7 +234,7 @@ class TestShadowParamsSnapshot:
 
     def test_default_values(self):
         """默认值"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import ShadowParamsSnapshot
+        from strategy.shadow_strategy_core import ShadowParamsSnapshot
         snapshot = ShadowParamsSnapshot(shadow_type='shadow_a', locked_at='2026-01-01')
         assert snapshot.param_set == {}
         assert snapshot.param_yaml_path == ""
@@ -250,11 +250,11 @@ class TestConfigError:
 
     def test_is_runtime_error(self):
         """ConfigError是RuntimeError子类"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import ConfigError
+        from strategy.shadow_strategy_core import ConfigError
         assert issubclass(ConfigError, RuntimeError)
 
     def test_can_be_raised(self):
         """可以抛出和捕获"""
-        from ali2026v3_trading.strategy.shadow_strategy_core import ConfigError
+        from strategy.shadow_strategy_core import ConfigError
         with pytest.raises(ConfigError, match="test error"):
             raise ConfigError("test error")

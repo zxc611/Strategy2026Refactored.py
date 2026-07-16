@@ -8,19 +8,19 @@ if PARENT_DIR not in sys.path:
     sys.path.insert(0, PARENT_DIR)
 
 CRITICAL_MODULES = [
-    'ali2026v3_trading.infra.shared_utils',
-    'ali2026v3_trading.infra.resilience',
-    'ali2026v3_trading.infra.health_monitor',
-    'ali2026v3_trading.infra.event_bus',
-    'ali2026v3_trading.config.config_service',
-    'ali2026v3_trading.lifecycle.lifecycle_state_machine',
-    'ali2026v3_trading.strategy_judgment.judgment_scoring_helpers',
-    'ali2026v3_trading.evaluation.cascade_judge',
-    'ali2026v3_trading.governance.governance_engine',
-    'ali2026v3_trading.risk.risk_service',
-    'ali2026v3_trading.order.order_service',
-    'ali2026v3_trading.position.position_service',
-    'ali2026v3_trading.strategy.shadow_strategy_facade',
+    'infra.shared_utils',
+    'infra.resilience',
+    'infra.health_monitor',
+    'infra.event_bus',
+    'config.config_service',
+    'lifecycle.lifecycle_state_machine',
+    'strategy_judgment.judgment_scoring_helpers',
+    'evaluation.cascade_judge',
+    'governance.governance_engine',
+    'risk.risk_service',
+    'order.order_service',
+    'position.position_service',
+    'strategy.shadow_strategy_facade',
 ]
 
 def check():
