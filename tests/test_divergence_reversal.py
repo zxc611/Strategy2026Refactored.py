@@ -672,10 +672,10 @@ def test_five_alignment():
            f"groups={STRATEGY_GROUPS}")
     _check("对齐2: STRATEGY_GROUPS有7组", len(STRATEGY_GROUPS) == 7,
            f"got {len(STRATEGY_GROUPS)}")
-    _check("对齐2: STRATEGY_SHADOW_DEFAULTS含divergence", 'divergence' in STRATEGY_SHADOW_DEFAULTS)
-    _check("对齐2: divergence shadow_a有take_profit",
+    _check("对齐2: STRATEGY_SHADOW_DEFAULTS含s7_divergence", 's7_divergence' in STRATEGY_SHADOW_DEFAULTS)
+    _check("对齐2: s7_divergence shadow_a有take_profit",
            'divergence_take_profit_ratio' in PARAM_DEFAULTS_DIVERGENCE_SHADOW_A)
-    _check("对齐2: divergence shadow_b有take_profit",
+    _check("对齐2: s7_divergence shadow_b有take_profit",
            'divergence_take_profit_ratio' in PARAM_DEFAULTS_DIVERGENCE_SHADOW_B)
 
     # 验证DIVERGENCE_DEFAULTS与DivergenceReversalParams默认值对齐
@@ -698,15 +698,15 @@ def test_five_alignment():
         STRATEGY_TYPE_THRESHOLD_OVERRIDES,
         ECOSYSTEM_TO_JUDGMENT_TYPE_MAP,
     )
-    _check("对齐4: WEIGHT_OVERRIDES含divergence", 'divergence' in STRATEGY_TYPE_WEIGHT_OVERRIDES)
-    _check("对齐4: THRESHOLD_OVERRIDES含divergence", 'divergence' in STRATEGY_TYPE_THRESHOLD_OVERRIDES)
+    _check("对齐4: WEIGHT_OVERRIDES含s7_divergence", 's7_divergence' in STRATEGY_TYPE_WEIGHT_OVERRIDES)
+    _check("对齐4: THRESHOLD_OVERRIDES含s7_divergence", 's7_divergence' in STRATEGY_TYPE_THRESHOLD_OVERRIDES)
     _check("对齐4: ECOSYSTEM_MAP含divergence_reversal",
            'divergence_reversal' in ECOSYSTEM_TO_JUDGMENT_TYPE_MAP)
 
     # ── 对齐5: 评判脚本 vs V7文档 ──
-    # 验证divergence评判阈值合理性
-    div_thresholds = STRATEGY_TYPE_THRESHOLD_OVERRIDES.get('divergence', {})
-    _check("对齐5: divergence有4个阈值维度", len(div_thresholds) == 4,
+    # 验证s7_divergence评判阈值合理性
+    div_thresholds = STRATEGY_TYPE_THRESHOLD_OVERRIDES.get('s7_divergence', {})
+    _check("对齐5: s7_divergence有4个阈值维度", len(div_thresholds) == 4,
            f"got {len(div_thresholds)}: {list(div_thresholds.keys())}")
     _check("对齐5: behavior_consistency阈值=0.60",
            div_thresholds.get('behavior_consistency') == 0.60)

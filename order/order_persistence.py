@@ -86,6 +86,9 @@ class SelfTradeDetector:
 
     def check_self_trade(self, new_order: OrderRecord) -> Tuple[bool, Optional[str]]:
 
+        if getattr(new_order, 'order_id', '').startswith('DRY_'):
+            return False, None
+
         # FIX-R29: CLOSE订单(平仓)与OPEN订单(开仓)不构成自交易，跳过检测
         if getattr(new_order, 'action', 'OPEN') == 'CLOSE':
             return False, None
@@ -112,6 +115,14 @@ class SelfTradeDetector:
 
                 if price_match:
 
+                    # FIX-81: SELF-TRADE-ALERT日志分级
+                    # 根因: 多策略系统(S2/S3/S7)可能对同一合约下达相反方向OPEN订单
+                    #       如S2买@305.2在14:47，S7卖@305.0在15:02(相隔15分钟)
+                    #       这是跨策略的正常行为，不应标记为ERROR
+                    # 修复: 订单间隔>60s降级为WARNING(跨策略正常交易)
+                    #       订单间隔≤60s保持ERROR(可能是同一策略的自交易)
+                    _time_gap = abs(new_order.timestamp - existing.timestamp)
+                    _log_level = logger.warning if _time_gap > 60.0 else logger.error
                     alert_msg = (
 
                         f"[SELF-TRADE-ALERT] instrument={instrument} "
@@ -120,9 +131,11 @@ class SelfTradeDetector:
 
                         f"vs existing={existing.order_id}({existing.direction}@{existing.price})"
 
+                        f" gap={_time_gap:.1f}s"
+
                     )
 
-                    logger.error(alert_msg)
+                    _log_level(alert_msg)
 
                     self._self_trade_history.append({
 

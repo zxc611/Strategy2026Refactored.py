@@ -8,7 +8,7 @@
 升级内容（vs v1.0-beta）：
   1. 细粒度4子项拆解：信号衰减一致性/仓位平滑度/Greeks合理性/盈亏路径质量
      评判引擎直接访问子项分数，不再依赖黑箱聚合
-  2. 六大策略预设逻辑映射：high_freq/resonance/box/spring/arbitrage/market_making各有独立预期行为
+  2. 六大策略预设逻辑映射：s1_hft/s2_resonance/s3_box/s4_spring/s5_arbitrage/s6_market_making各有独立预期行为
   3. 行为一致性评分直接由4子项加权产生，可审计可追溯
   4. 样本量要求提升：min_samples=30
   5. 预设逻辑规则细化：区分高点/低点、区分趋势延续/反转
@@ -123,7 +123,7 @@ class DiagnosisReport:
 
 
 _STRATEGY_EXPECTED_LOGIC = {
-    "high_freq": {
+    "s1_hft": {
         "at_high": {"signal_should_decay": True, "signal_should_reverse": False,
                     "position_should_decrease": True, "pnl_should_small_retrace": True,
                     "reason": "趋势延续策略：高点处动量衰减但方向保持"},
@@ -131,7 +131,7 @@ _STRATEGY_EXPECTED_LOGIC = {
                    "position_should_decrease": True, "pnl_should_small_retrace": True,
                    "reason": "趋势延续策略：低点处动量衰减但方向保持"},
     },
-    "resonance": {
+    "s2_resonance": {
         "at_high": {"signal_should_decay": True, "signal_should_reverse": False,
                     "position_should_decrease": True, "pnl_should_small_retrace": True,
                     "reason": "共振跟随策略：高点处共振减弱+仓位收缩; pullback_enabled时延迟至权利金回撤达标再入场"},
@@ -139,7 +139,7 @@ _STRATEGY_EXPECTED_LOGIC = {
                    "position_should_decrease": True, "pnl_should_small_retrace": True,
                    "reason": "共振跟随策略：低点处共振减弱+仓位收缩; pullback_enabled时延迟至权利金回撤达标再入场"},
     },
-    "box": {
+    "s3_box": {
         "at_high": {"signal_should_decay": False, "signal_should_reverse": True,
                     "position_should_decrease": True, "pnl_should_small_retrace": True,
                     "reason": "箱体极值策略：高点处发出反向信号(做空); pullback_enabled时延迟至权利金回撤达标再入场"},
@@ -147,7 +147,7 @@ _STRATEGY_EXPECTED_LOGIC = {
                    "position_should_decrease": True, "pnl_should_small_retrace": True,
                    "reason": "箱体极值策略：低点处发出反向信号(做多); pullback_enabled时延迟至权利金回撤达标再入场"},
     },
-    "spring": {
+    "s4_spring": {
         "at_high": {"signal_should_decay": False, "signal_should_reverse": True,
                     "position_should_decrease": True, "pnl_should_small_retrace": True,
                     "reason": "弹簧策略：高点处弹簧触发→买Put/卖Call; pullback_enabled时延迟至权利金回撤达标再入场"},
@@ -155,7 +155,7 @@ _STRATEGY_EXPECTED_LOGIC = {
                    "position_should_decrease": True, "pnl_should_small_retrace": True,
                    "reason": "弹簧策略：低点处弹簧触发→买Call/卖Put; pullback_enabled时延迟至权利金回撤达标再入场"},
     },
-    "arbitrage": {
+    "s5_arbitrage": {
         "at_high": {"signal_should_decay": True, "signal_should_reverse": True,
                     "position_should_decrease": True, "pnl_should_small_retrace": True,
                     "reason": "套利策略：高点处价格偏离公允价值→反向套利开仓+快速平仓; pullback_enabled时延迟至权利金回撤达标再入场"},
@@ -163,7 +163,7 @@ _STRATEGY_EXPECTED_LOGIC = {
                    "position_should_decrease": True, "pnl_should_small_retrace": True,
                    "reason": "套利策略：低点处价格偏离公允价值→反向套利开仓+快速平仓; pullback_enabled时延迟至权利金回撤达标再入场"},
     },
-    "market_making": {
+    "s6_market_making": {
         "at_high": {"signal_should_decay": True, "signal_should_reverse": False,
                     "position_should_decrease": True, "pnl_should_small_retrace": True,
                     "reason": "做市策略：高点处挂卖单增多+仓位收缩，方向不反转; pullback_enabled时延迟至权利金回撤达标再入场"},

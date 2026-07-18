@@ -92,7 +92,7 @@ def run_deep_validations(
             tsr = TwelveStrategyRunner()
             if hasattr(tsr, 'run'):
                 _tsr_config = {
-                    "strategies": ["master", "reverse", "other", "spring", "arbitrage", "market_making"],
+                    "strategies": ["s1_hft", "s2_resonance", "s3_box", "s4_spring", "s5_arbitrage", "s6_market_making", "s7_divergence"],
                     "min_sharpe": scoring_coefficients.get("l2_accuracy_threshold", 0.6),
                 }
                 tsr_output = tsr.run(_tsr_config)
@@ -410,7 +410,7 @@ def run_deep_validations(
 
         try:
             msepv = MultiStrategyExecutionPathValidator()
-            msepv_result = msepv.validate(['s1_hft', 's2_minute', 's3_box', 's4_spring', 's5_arbitrage', 's6_market_making']) if hasattr(msepv, 'validate') else {}
+            msepv_result = msepv.validate(['s1_hft', 's2_resonance', 's3_box', 's4_spring', 's5_arbitrage', 's6_market_making', 's7_divergence']) if hasattr(msepv, 'validate') else {}  # FIX-AA R12-1: s2_minute→s2_resonance + 补s7_divergence
             conditions.append(f"[S1-S6 多策略执行路径] {'全部验证通过' if msepv_result else '已验证'}")
         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _e:
             logging.info("[R3-L2] S1-S6 多策略执行路径 异常已忽略")

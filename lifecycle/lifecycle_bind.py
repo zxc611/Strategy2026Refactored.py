@@ -10,7 +10,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 
-from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
+from lifecycle.lifecycle_state_machine import StrategyState
 
 
 class LifecycleBind:
@@ -28,7 +28,20 @@ class LifecycleBind:
     def _do_bind_platform_apis(self, strategy_obj: Any) -> None:
         p = self.p
         p._runtime_strategy_host = strategy_obj
-        from ali2026v3_trading.config.config_service import resolve_product_exchange
+        from config.config_service import resolve_product_exchange
+        # FIX-20260715-STRATEGY-OBJ: 使用t_type_bootstrap实例作为strategy_obj
+        # 根因: BaseStrategy.sub_market_data()内部调用infini.sub_market_data(strategy_obj=self)
+        #   当strategy_obj=Strategy2026时，C++通过StrategyObj关联策略实例
+        #   但C++持有的是t_type_bootstrap实例的引用（import_strategy返回t_type_bootstrap类）
+        #   StrategyObj与C++持有的实例不匹配→C++无法正确关联→暂停/删除失效
+        # 修复: 获取t_type_bootstrap实例（通过_outer_ref），用其作为strategy_obj
+        #   使INFINIGO.subMarketData(StrategyObj=t_type_bootstrap)与C++持有的实例匹配
+        _outer_ref = getattr(strategy_obj, '_outer_ref', None)
+        _platform_strategy_obj = _outer_ref if _outer_ref is not None else strategy_obj
+        logging.critical("[FIX-20260715-STRATEGY-OBJ] bind_platform_apis: strategy_obj=%s(id=%d) outer_ref=%s(id=%d) platform_strategy_obj=%s(id=%d)",
+                         type(strategy_obj).__name__, id(strategy_obj),
+                         type(_outer_ref).__name__ if _outer_ref else 'None', id(_outer_ref) if _outer_ref else 0,
+                         type(_platform_strategy_obj).__name__, id(_platform_strategy_obj))
         sub = getattr(strategy_obj, 'sub_market_data', None)
         unsub = getattr(strategy_obj, 'unsub_market_data', None)
         if callable(sub):
@@ -40,21 +53,14 @@ class LifecycleBind:
             _sub_min_interval_sec = 0.0
             _STACK_PRESSURE_BATCH = 500
             _STACK_PRESSURE_PAUSE_SEC = 0.3
-            # FIX-M4: _subscribe 包装器接受 data_type 但不传递 → 'kline_1min' 订阅退化为 tick 订阅
-            # 修复:
-            #   1) 探测平台 sub() 是否接受 data_type 参数(签名长度>=3)
-            #   2) 接受则透传, 不接受则按 data_type 走 fallback (直接调用 sub(exchange, instrument_id))
-            #   3) 始终记录 data_type 到日志, 便于追踪订阅类型丢失问题
-            import inspect as _inspect_m4
-            try:
-                _sub_sig = _inspect_m4.signature(sub)
-                _sub_accepts_data_type = len(_sub_sig.parameters) >= 3
-            except (ValueError, TypeError):
-                _sub_accepts_data_type = False
-            # FIX-20260704-OPTION-ID: 使用 instrument_parser.is_option 替代局部正则
-            # 根因: r'[CP]\d{4,5}$' 会把期货 IC2609/IC2607 误判为期权(C+数字结尾)
-            # 同时漏认 FG608P900(行权价3位)、HO2609-C-2900(带横杠)等真实期权
-            from ali2026v3_trading.infra.instrument_parser import is_option as _is_option_id
+            from infra.instrument_parser import is_option as _is_option_id
+            # FIX-20260715-STRATEGY-OBJ: 直接调用infini.sub_market_data，传入t_type_bootstrap实例
+            # 根因: BaseStrategy.sub_market_data()用self(Strategy2026)作为strategy_obj
+            #   C++通过StrategyObj关联策略实例，但C++持有t_type_bootstrap引用
+            #   StrategyObj不匹配→C++无法正确关联→暂停/删除失效
+            # 修复: 直接调用infini.sub_market_data(strategy_obj=_platform_strategy_obj)
+            #   _platform_strategy_obj是t_type_bootstrap实例，与C++持有的引用匹配
+            from pythongo import infini as _infini_mod
             def _subscribe(instrument_id: str, data_type: str = 'tick') -> None:
                 exchange = resolve_product_exchange(instrument_id)
                 dedupe_key = (str(instrument_id).strip(), str(data_type or 'tick').strip())
@@ -79,22 +85,9 @@ class LifecycleBind:
                         _sub_time.sleep(_STACK_PRESSURE_PAUSE_SEC)
                 _is_opt = _is_option_id(instrument_id)
                 if _call_no <= 20 or (_is_opt and _call_no % 1000 == 0):
-                    logging.debug(f"[PROBE_SUB] #{_call_no} exchange={exchange} instrument_id={instrument_id} data_type={data_type} is_option={_is_opt} platform_accepts_data_type={_sub_accepts_data_type}")
-                # FIX-M4: 透传 data_type (如果平台支持), 否则退化调用并显式 warning
+                    logging.debug(f"[PROBE_SUB] #{_call_no} exchange={exchange} instrument_id={instrument_id} data_type={data_type} is_option={_is_opt}")
                 try:
-                    if _sub_accepts_data_type:
-                        try:
-                            sub(exchange, instrument_id, data_type)
-                            return
-                        except TypeError:
-                            # 平台签名探测失败, 退化为 2-arg 调用
-                            pass
-                    if data_type != 'tick':
-                        logging.warning(
-                            "[FIX-M4] platform sub() 不支持 data_type 参数, 订阅 %s 退化为 tick 订阅: inst=%s data_type=%s",
-                            instrument_id, instrument_id, data_type,
-                        )
-                    sub(exchange, instrument_id)
+                    _infini_mod.sub_market_data(strategy_obj=_platform_strategy_obj, exchange=exchange, instrument_id=instrument_id)
                 except Exception:
                     with _sub_rate_lock:
                         _sub_seen.discard(dedupe_key)
@@ -103,27 +96,16 @@ class LifecycleBind:
         else:
             p.subscribe = None
         if callable(unsub):
-            # FIX-M4: 同步处理 unsub 的 data_type
-            import inspect as _inspect_m4_un
-            try:
-                _unsub_sig = _inspect_m4_un.signature(unsub)
-                _unsub_accepts_data_type = len(_unsub_sig.parameters) >= 3
-            except (ValueError, TypeError):
-                _unsub_accepts_data_type = False
+
+            # FIX-20260715-STRATEGY-OBJ: 同样使用t_type_bootstrap实例作为strategy_obj
             def _unsubscribe(instrument_id: str, data_type: str = 'tick') -> None:
                 exchange = resolve_product_exchange(instrument_id)
-                if _unsub_accepts_data_type:
-                    try:
-                        unsub(exchange, instrument_id, data_type)
-                        return
-                    except TypeError:
-                        pass
-                unsub(exchange, instrument_id)
+                _infini_mod.unsub_market_data(strategy_obj=_platform_strategy_obj, exchange=exchange, instrument_id=instrument_id)
             p.unsubscribe = _unsubscribe
         else:
             p.unsubscribe = None
         p.get_instrument = getattr(strategy_obj, 'get_instrument', None)
-        from ali2026v3_trading.config.params_service import _read_param
+        from config.params_service import _read_param
         p._platform_insert_order = _read_param(strategy_obj, 'insert_order') or _read_param(strategy_obj, 'make_order_req')
         p._platform_cancel_order = _read_param(strategy_obj, 'cancel_order')
         p._platform_get_position = getattr(strategy_obj, 'get_position', None)
@@ -148,7 +130,7 @@ class LifecycleBind:
         p._kline_ready = callable(p.get_kline)
         _data_service = None
         try:
-            from ali2026v3_trading.data.data_service import get_data_service
+            from data.data_service import get_data_service
             _data_service = get_data_service()
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
             logging.warning("[bind_platform_apis] get_data_service failed: %s", e)
@@ -171,7 +153,7 @@ class LifecycleBind:
                         _sm._core_service.data_manager = _bind_target
                 logging.info("[bind_platform_apis] SubscriptionManager.data_manager bound to %s", type(_bind_target).__name__)
         try:
-            from ali2026v3_trading.data.data_service import DataService
+            from data.data_service import DataService
             DataService.bind_subscribe_api(p.subscribe, p.unsubscribe)
             if _data_service is not None:
                 _data_service.bind_data_manager(_data_service)
@@ -249,13 +231,13 @@ class LifecycleBind:
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
             logging.error("[Context] Inject failed: %s", e)
         try:
-            from ali2026v3_trading.config.config_service import update_cached_params
+            from config.config_service import update_cached_params
             update_cached_params({'strategy': strategy_obj}, caller_id='_inject_runtime_context')
             logging.info(f"[LifecycleBind._inject_runtime_context] update_cached_params called with strategy={type(strategy_obj).__name__}")
         except Exception as e:
             logging.error("[Context] update_cached_params failed: %s", e)
         try:
-            from ali2026v3_trading.infra.health_monitor import set_runtime_strategy_ref
+            from infra.health_monitor import set_runtime_strategy_ref
             set_runtime_strategy_ref(strategy_obj)
             logging.info(f"[LifecycleBind._inject_runtime_context] set_runtime_strategy_ref called with strategy={type(strategy_obj).__name__}")
         except Exception as e:

@@ -97,7 +97,16 @@ class OrderChaseService:
                 try:
 
                     if not isinstance(platform_id, int):
-                        logging.warning("[OrderChaseService] platform_id非int，平台撤单跳过: %s order_id=%s", platform_id, order_id)
+                        # FIX-29 RC-37: dry_run订单platform_id为空或"DRY_ORD_xxx"格式，无需平台撤单
+                        # 根因: FIX-27仅检查platform_id前缀，但dry_run订单platform_id为None→空字符串→startswith('DRY_ORD')=False→8750次WARNING
+                        # 修复: platform_id为空时fallback到order_id前缀检查，覆盖dry_run订单无真实平台ID的场景
+                        _pid_str = str(platform_id) if platform_id else ''
+                        _oid_str = str(order_id) if order_id else ''
+                        if _pid_str.startswith('DRY_ORD') or _pid_str.startswith('ORD_') or \
+                           _oid_str.startswith('DRY_ORD') or _oid_str.startswith('ORD_'):
+                            logging.debug("[OrderChaseService] dry_run订单跳过平台撤单: %s", order_id)
+                        else:
+                            logging.warning("[OrderChaseService] platform_id非int，平台撤单跳过: %s order_id=%s", platform_id, order_id)
                         # FIX-R32-CANCEL: 平台撤单失败时，不标记CANCELLED，保持TIMEOUT状态
                         # 返回True允许追单，但平台回调返回成交时仍能找到订单（status=TIMEOUT）
                     else:

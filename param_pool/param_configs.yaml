@@ -1,0 +1,3210 @@
+format_version: '1.0'
+parameter_attributes:
+  format_version: '1.0'
+  circuit_breaker_trigger_sigma:
+    type: float
+    default: 3.0
+    range:
+    - 1.0
+    - 10.0
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 速率断路器触发阈值(σ倍数)
+    source: goldilocks
+    evidence: σ=3.0覆盖99.7%正态分布，经典统计控制限
+    last_validated: '2026-05-10'
+  circuit_breaker_pause_sec:
+    type: float
+    default: 180.0
+    range:
+    - 30.0
+    - 3600.0
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 断路器暂停时长(秒)
+    source: goldilocks
+    evidence: 3分钟暂停≈1个交易周期最小单位，允许流动性恢复
+    last_validated: '2026-05-10'
+  circuit_breaker_calm_period_sec:
+    type: float
+    default: 600.0
+    range:
+    - 60.0
+    - 7200.0
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 断路器冷静期(秒)，冷静期内禁止新开仓
+    source: goldilocks
+    evidence: 10分钟冷静期=3×暂停时长，避免连环触发
+    last_validated: '2026-05-10'
+  daily_loss_hard_stop_pct:
+    type: float
+    default: 0.05
+    range:
+    - 0.01
+    - 0.2
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 日最大回撤硬停止比例
+    source: stress_scenario
+    evidence: 5%日回撤≈2.5×日均波动，2020-2025历史回测验证
+    last_validated: '2026-05-10'
+  daily_drawdown_multiplier:
+    type: float
+    default: 2.0
+    range:
+    - 1.0
+    - 5.0
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 日回撤放大系数(补丁二b)
+    source: backtest_grid
+    evidence: 'Round1网格回测: multiplier=2.0在训练集夏普最优'
+    last_validated: '2026-05-10'
+  hft_hard_time_stop_ms:
+    type: int
+    default: 1000
+    range:
+    - 100
+    - 5000
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: HFT硬时间止损(毫秒)，物理依据：订单簿半衰期50-200ms
+    source: physical
+    evidence: 订单簿半衰期约50-200ms，HFT持仓不应超过5s
+    last_validated: '2026-05-21'
+  spring_hard_time_stop_sec:
+    type: int
+    default: 30
+    range:
+    - 1
+    - 120
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 弹簧硬时间止损(秒)，物理依据：Gamma峰值持续10-60s
+    source: physical
+    evidence: Gamma脉冲峰值持续约10-60s，持仓不应超过2min
+    last_validated: '2026-05-21'
+  resonance_hard_time_stop_min:
+    type: int
+    default: 5
+    range:
+    - 1
+    - 15
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 共振硬时间止损(分钟)，统计依据：分钟级趋势持续性5-30min
+    source: statistical
+    evidence: 分钟级趋势持续性约5-30min，共振持仓不应超过15min
+    last_validated: '2026-05-21'
+  box_hard_time_stop_min:
+    type: int
+    default: 30
+    range:
+    - 15
+    - 60
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 箱体硬时间止损(分钟)，统计依据：箱体形成周期30-120min
+    source: statistical
+    evidence: 箱体形成周期约30-120min，箱体持仓不应超过60min
+    last_validated: '2026-05-21'
+  min_profit_threshold:
+    type: float
+    default: 0.002
+    range:
+    - 0.0
+    - 0.05
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 最小盈利阈值(补丁二b)
+    source: intuition
+    evidence: 0.2%≈1个tick最小跳动的权益占比，待金发姑娘测试
+    last_validated: 待验证
+  max_net_delta_pct:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.6
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 组合净Delta上限(%)
+    source: stress_scenario
+    evidence: '情景压力库: Delta>30%在极端行情下亏损超日回撤硬限'
+    last_validated: '2026-05-10'
+  max_net_gamma_pct:
+    type: float
+    default: 0.08
+    range:
+    - 0.03
+    - 0.2
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 组合净Gamma上限(%)
+    source: stress_scenario
+    evidence: '情景压力库: Gamma>8%在波动率飙升3σ时亏损超硬限'
+    last_validated: '2026-05-10'
+  max_net_vega_bps:
+    type: float
+    default: 0.02
+    range:
+    - 0.001
+    - 0.1
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 组合净Vega上限(bps)
+    source: stress_scenario
+    evidence: '情景压力库: Vega>2bps在IV±50%时亏损超硬限'
+    last_validated: '2026-05-10'
+  max_theta_ratio:
+    type: float
+    default: 0.5
+    range:
+    - 0.05
+    - 2.0
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: Theta比率上限
+    source: intuition
+    evidence: 0.5=时间衰减不超过权利金50%，待压力库验证
+    last_validated: 待验证
+  state_confirm_bars:
+    type: int
+    default: 5
+    range:
+    - 1
+    - 10
+    layer: L0_diagnosis
+    editable: restart_required
+    lock_mode: hyperparameter
+    description: 状态切换确认bar数
+    source: backtest_grid
+    evidence: 'UPG-03修复: 统一为5，与state_param_sets.yaml/state_switch对齐'
+    last_validated: '2026-05-25'
+  state_check_interval_sec:
+    type: float
+    default: 180.0
+    range:
+    - 30.0
+    - 600.0
+    layer: L0_diagnosis
+    editable: restart_required
+    description: 状态检查间隔(秒)
+    source: design
+    evidence: 180s=半交易小时，平衡时效性与计算开销
+    last_validated: '2026-05-10'
+  min_state_hold_seconds:
+    type: float
+    default: 600.0
+    range:
+    - 60.0
+    - 3600.0
+    layer: L0_diagnosis
+    editable: restart_required
+    description: 状态最短保持时间(秒)，防抖
+    source: goldilocks
+    evidence: 10min=3×检查间隔，保证至少3次确认机会
+    last_validated: '2026-05-10'
+  option_width_min_threshold:
+    type: float
+    default: 4.0
+    range:
+    - 1.0
+    - 10.0
+    layer: L0_diagnosis
+    editable: runtime_with_confirm
+    description: 期权宽度最小阈值
+    source: intuition
+    evidence: 4.0=2个行权价间距，待独立数据集验证
+    last_validated: 待验证
+  non_other_ratio_threshold:
+    type: float
+    default: 0.65
+    range:
+    - 0.3
+    - 0.9
+    layer: L1_trading
+    editable: runtime
+    state_routed: true
+    description: 非other状态占比阈值(correct+incorrect占比>=此值时启用状态路由增强)
+    source: backtest_grid
+    evidence: 'Round2辅助参数精扫: 0.65在样本外状态路由触发率最优(过低→噪声，过高→漏触发); 扩展至0.30覆盖极端行情低占比场景'
+    last_validated: '2026-05-17'
+    state_overrides:
+      correct_trending: 0.55
+      incorrect_reversal: 0.7
+      other: 0.8
+  logic_reversal_threshold:
+    type: float
+    default: 1.5
+    range:
+    - 1.0
+    - 5.0
+    layer: L1_trading
+    editable: runtime
+    description: 逻辑反转平仓阈值(wrong_pct > correct_pct * threshold时平仓)
+    source: backtest_grid
+    evidence: 'Round2: 1.5倍在样本外避免过早起跳，2.0倍过晚(回撤增30%)'
+    last_validated: '2026-05-10'
+  signal_cooldown_sec:
+    type: float
+    default: 60.0
+    range:
+    - 0.0
+    - 600.0
+    layer: L1_trading
+    editable: runtime
+    state_routed: true
+    description: 信号冷却时间(秒)
+    source: backtest_grid
+    evidence: 'Round1: 60s在训练集夏普最优，0s次优但过拟合风险高'
+    last_validated: '2026-05-10'
+    state_overrides:
+      correct_trending: 15.0
+      incorrect_reversal: 120.0
+      other: 300.0
+  close_take_profit_ratio:
+    type: float
+    default: 1.8
+    range:
+    - 0.5
+    - 5.0
+    layer: L1_trading
+    editable: runtime
+    state_routed: true
+    description: 止盈倍数
+    source: quantified
+    evidence: 'R24-P1-DF-07修复: 全局兜底默认值从1.5→1.8与V7手册S1对齐; Round1+Round2网格+反事实1000次打乱检验p<0.05'
+    last_validated: '2026-05-27'
+    state_overrides:
+      correct_trending: 2.5
+      incorrect_reversal: 1.3
+      other: 1.1
+    reason_overrides:
+      CORRECT_RESONANCE: 1.5
+      CORRECT_DIVERGENCE: 1.2
+      INCORRECT_REVERSAL: 1.3
+      OTHER_SCALP: 1.1
+      BOX_SPRING: 5.0
+  close_stop_loss_ratio:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.99
+    layer: L1_trading
+    editable: runtime
+    state_routed: true
+    description: 止损比例
+    source: quantified
+    evidence: 'R24-P0-DF-03修复: 默认值从0.5→0.3与V7.0手册§9.1对齐; Round1+Round2网格+反事实1000次打乱检验p<0.05'
+    last_validated: '2026-05-27'
+    state_overrides:
+      correct_trending: 0.4
+      incorrect_reversal: 0.6
+      other: 0.8
+    reason_overrides:
+      CORRECT_RESONANCE: 0.5
+      CORRECT_DIVERGENCE: 0.4
+      INCORRECT_REVERSAL: 0.6
+      OTHER_SCALP: 0.3
+      BOX_SPRING: 0.95
+  max_risk_ratio:
+    type: float
+    default: 0.8
+    range:
+    - 0.05
+    - 1.0
+    layer: L1_trading
+    editable: runtime
+    state_routed: true
+    description: 最大风险比例
+    source: backtest_grid
+    evidence: 'R24-P0-DF-01修复: 全局兜底默认值从0.3→0.8与V7手册对齐; 0.8训练集最优'
+    last_validated: '2026-05-27'
+    state_overrides:
+      correct_trending: 0.8
+      incorrect_reversal: 0.3
+      other: 0.2
+  lots_min:
+    type: int
+    default: 3
+    range:
+    - 1
+    - 50
+    layer: L1_trading
+    editable: runtime
+    state_routed: true
+    description: 最小开仓手数
+    source: backtest_grid
+    evidence: 'Round1: lots=3在训练集最优(流动性vs收益平衡)'
+    last_validated: '2026-05-10'
+    state_overrides:
+      correct_trending: 5
+      incorrect_reversal: 2
+      other: 1
+  max_signals_per_window:
+    type: int
+    default: 10
+    range:
+    - 1
+    - 50
+    layer: L1_trading
+    editable: runtime
+    state_routed: true
+    description: 窗口内最大信号数
+    source: backtest_grid
+    evidence: 'R25对齐修复: default从5→10与config_params.py CENTRALIZED_DEFAULTS/DEFAULT_PARAM_TABLE对齐'
+    last_validated: '2026-05-10'
+    state_overrides:
+      correct_trending: 10
+      incorrect_reversal: 3
+      other: 2
+  option_buy_lots_min:
+    type: int
+    default: 1
+    range:
+    - 1
+    - 10
+    layer: L1_trading
+    editable: runtime
+    description: 期权最小买入手数
+    source: design
+    evidence: 交易所最小交易单位=1手
+    last_validated: '2026-05-10'
+  option_buy_lots_max:
+    type: int
+    default: 100
+    range:
+    - 1
+    - 500
+    layer: L1_trading
+    editable: runtime
+    description: 期权最大买入手数
+    source: intuition
+    evidence: 100手=5%账户权益的典型上限，待流动性压力测试
+    last_validated: 待验证
+  rate_limit_global_per_min:
+    type: int
+    default: 60
+    range:
+    - 10
+    - 300
+    layer: L2_rate
+    editable: runtime
+    description: 全局下单速率限制(次/分钟)
+    source: backtest_grid
+    evidence: 'Round2: 60/min最优，120/min过激(OOS衰减>35%)'
+    last_validated: '2026-05-10'
+  rate_limit_min_interval_sec:
+    type: float
+    default: 1.0
+    range:
+    - 0.1
+    - 10.0
+    layer: L2_rate
+    editable: runtime
+    description: 最小下单间隔(秒)
+    source: design
+    evidence: 1秒=交易所订单处理最小周期
+    last_validated: '2026-05-10'
+  stage1_min_minutes:
+    type: float
+    default: 90.0
+    range:
+    - 30.0
+    - 240.0
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 两阶段硬时间止损-阶段1最小持仓分钟数
+    source: backtest_grid
+    evidence: 与resonance_hard_time_stop_min对齐，5min覆盖分钟级趋势确认窗口
+    last_validated: '2026-05-10'
+  stage1_profit_threshold:
+    type: float
+    default: 0.002
+    range:
+    - 0.0005
+    - 0.01
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 两阶段硬时间止损-阶段1最大浮盈阈值(>=此值才进入阶段2)
+    source: goldilocks
+    evidence: 0.2%≈1tick最小跳动权益占比，金发姑娘测试确认0.05%-1%为有效区间
+    last_validated: '2026-05-10'
+  stage2_slope_window:
+    type: int
+    default: 10
+    range:
+    - 2
+    - 30
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 两阶段硬时间止损-阶段2浮盈斜率监控窗口(Bar数)
+    source: backtest_grid
+    evidence: 10Bar=10分钟，覆盖最近价格趋势方向判断
+    last_validated: '2026-05-10'
+  stage2_slope_threshold:
+    type: float
+    default: 0.0
+    range:
+    - -0.005
+    - 0.005
+    layer: L_minus1_safety
+    editable: runtime_readonly
+    description: 两阶段硬时间止损-阶段2浮盈斜率阈值(斜率<此值触发平仓)
+    source: goldilocks
+    evidence: 0.0=中性阈值(浮盈不再增长即平仓)，负值允许浮盈小幅回撤后继续持有
+    last_validated: '2026-05-10'
+  shadow_alpha_threshold:
+    type: float
+    default: 0.1
+    range:
+    - -1.0
+    - 1.0
+    layer: subsystem_shadow
+    editable: runtime
+    description: 影子策略Alpha阈值
+    source: intuition
+    evidence: 0.0=中性门槛，待影子策略独立回测验证最优阈值
+    last_validated: 待验证
+  shadow_absolute_ev_floor:
+    type: float
+    default: -0.5
+    range:
+    - -2.0
+    - 0.0
+    layer: subsystem_shadow
+    editable: runtime
+    description: 影子策略绝对EV底线
+    source: backtest_grid
+    evidence: 'Round2辅助参数精扫: -0.5在样本外EV排名最优'
+    last_validated: '2026-05-10'
+  capital_route_master_base:
+    type: float
+    default: 0.6
+    range:
+    - 0.3
+    - 0.8
+    layer: subsystem_ecosystem
+    editable: restart_required
+    description: 主策略资金分配基数
+    source: backtest_grid
+    evidence: 'Round1: 0.60在训练集主策略夏普/总夏普比值最优'
+    last_validated: '2026-05-10'
+    constraint: capital_route_master_base + capital_route_reverse_base + capital_route_other_base
+      = 1.0
+  capital_route_reverse_base:
+    type: float
+    default: 0.25
+    range:
+    - 0.1
+    - 0.4
+    layer: subsystem_ecosystem
+    editable: restart_required
+    description: 反向策略资金分配基数
+    source: backtest_grid
+    evidence: 'Round1: 0.25配合master=0.60时总组合夏普最优'
+    last_validated: '2026-05-10'
+    constraint: 同上
+  capital_route_other_base:
+    type: float
+    default: 0.15
+    range:
+    - 0.05
+    - 0.3
+    layer: subsystem_ecosystem
+    editable: restart_required
+    description: 震荡策略资金分配基数
+    source: design
+    evidence: 1 - master - reverse = 0.15，受资金守恒约束
+    last_validated: '2026-05-10'
+    constraint: 同上
+  spring_iv_low_percentile:
+    type: float
+    default: 5.0
+    range:
+    - 1.0
+    - 30.0
+    layer: subsystem_spring
+    editable: runtime
+    description: 弹簧策略IV低百分位阈值
+    source: goldilocks
+    evidence: 5%分位=IV分布左尾极端低波动，金发姑娘测试确认3-10%为有效区间
+    last_validated: '2026-05-10'
+  spring_stop_profit_ratio:
+    type: float
+    default: 5.0
+    range:
+    - 2.0
+    - 12.0
+    layer: subsystem_spring
+    editable: runtime
+    description: 弹簧策略止盈倍数
+    source: backtest_grid
+    evidence: 'Round2精扫: 5.0倍在弹簧子策略样本外夏普最优'
+    last_validated: '2026-05-10'
+  spring_max_loss_pct:
+    type: float
+    default: 0.95
+    range:
+    - 0.5
+    - 1.0
+    layer: subsystem_spring
+    editable: runtime
+    description: 弹簧策略最大亏损比例(接受归零)
+    source: design
+    evidence: 0.95=接受权利金几乎归零，期权买方最大亏损=权利金100%
+    last_validated: '2026-05-10'
+  spring_max_position_pct:
+    type: float
+    default: 0.015
+    range:
+    - 0.005
+    - 0.05
+    layer: subsystem_spring
+    editable: runtime
+    description: 弹簧策略最大仓位占比
+    source: backtest_grid
+    evidence: 'Round2: 1.5%在弹簧子策略样本外收益/回撤比最优'
+    last_validated: '2026-05-10'
+  pullback_enabled:
+    type: bool
+    default: false
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调入场策略开关
+    source: backtest_grid
+    evidence: 'Round1+Round2网格: pullback_enabled=True时夏普提升0.12但交易频率降40%'
+    last_validated: '2026-05-10'
+  pullback_wait_bars:
+    type: int
+    default: 5
+    range:
+    - 2
+    - 10
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调等待bar数(确认回调深度)
+    source: backtest_grid
+    evidence: 'Round1: wait_bars=5在训练集回调捕获率最优(2过短→噪声，10过长→错过入场)'
+    last_validated: '2026-05-10'
+  pullback_retrace_pct:
+    type: float
+    default: 0.15
+    range:
+    - 0.1
+    - 0.9
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调回撤百分比阈值(Call/Put共用)
+    source: backtest_grid
+    evidence: 'Round1: 0.15在训练集回调入场盈率最优，0.5以上过深回调≈趋势反转'
+    last_validated: '2026-05-10'
+  pullback_iv_min_percentile:
+    type: float
+    default: 20.0
+    range:
+    - 1.0
+    - 80.0
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调入场IV最低百分位(低于此值禁止回调入场)
+    source: goldilocks
+    evidence: 20%分位=排除IV极低区(流动性不足)，金发姑娘测试确认10-40%为有效区间
+    last_validated: '2026-05-10'
+  pullback_iv_max_percentile:
+    type: float
+    default: 80.0
+    range:
+    - 20.0
+    - 99.0
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调入场IV最高百分位(高于此值禁止回调入场)
+    source: goldilocks
+    evidence: 80%分位=排除IV极高区(隐含波动率飙升≈事件风险)，金发姑娘测试确认60-90%为有效区间
+    last_validated: '2026-05-10'
+  pullback_ref_mode:
+    type: str
+    default: peak
+    range:
+    - peak
+    - atr
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调参考模式(peak=峰值参考, atr=ATR动态参考)
+    source: backtest_grid
+    evidence: 'Round2: peak模式在趋势行情夏普最优，atr模式在震荡行情更稳健'
+    last_validated: '2026-05-10'
+  pullback_atr_wait_multiplier:
+    type: float
+    default: 0.0
+    range:
+    - 0.0
+    - 10.0
+    layer: subsystem_pullback
+    editable: runtime
+    description: ATR等待乘数(仅atr模式下生效，0=不使用ATR等待)
+    source: backtest_grid
+    evidence: 'Round2: 0.0=禁用ATR等待，2.0和5.0在atr模式下有差异化收益'
+    last_validated: '2026-05-10'
+  pullback_retrace_pct_call:
+    type: optional_float
+    default: null
+    range:
+    - 0.1
+    - 0.9
+    layer: subsystem_pullback
+    editable: runtime
+    description: Call方向专用回调回撤百分比(null时使用pullback_retrace_pct)
+    source: intuition
+    evidence: null=Call/Put共用回撤阈值，待独立回测确定Call方向最优值
+    last_validated: 待验证
+  pullback_retrace_pct_put:
+    type: optional_float
+    default: null
+    range:
+    - 0.1
+    - 0.9
+    layer: subsystem_pullback
+    editable: runtime
+    description: Put方向专用回调回撤百分比(null时使用pullback_retrace_pct)
+    source: intuition
+    evidence: null=Call/Put共用回撤阈值，待独立回测确定Put方向最优值
+    last_validated: 待验证
+  pullback_theta_decay_accel:
+    type: float
+    default: 0.0
+    range:
+    - 0.0
+    - 2.0
+    layer: subsystem_pullback
+    editable: runtime
+    description: Theta衰减加速因子(>0时时间衰减加速回调入场判定)
+    source: backtest_grid
+    evidence: 'Round2辅助参数精扫: 0.0=禁用衰减加速，0.5和1.0在末日周期有差异化收益'
+    last_validated: '2026-05-10'
+  pullback_min_retrace_abs:
+    type: float
+    default: 0.0
+    range:
+    - 0.0
+    - 2.0
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调最小绝对回撤(点数，0=不设下限)
+    source: backtest_grid
+    evidence: 'Round2辅助参数精扫: 0.0=不设下限，0.5和1.0过滤微小回调噪声'
+    last_validated: '2026-05-10'
+  pullback_max_valid_bars:
+    type: int
+    default: 24
+    range:
+    - 5
+    - 60
+    layer: subsystem_pullback
+    editable: runtime
+    description: 回调信号最大有效等待bar数(超过则信号过期失效)
+    source: backtest_grid
+    evidence: '物理约束: max_valid_bars>=wait_bars+2且<=resonance_hard_time_stop_min/10;
+      24≈4小时(6min/bar)覆盖半日回调窗口'
+    last_validated: '2026-05-17'
+    depends_on:
+    - param: pullback_wait_bars
+      constraint: max_valid_bars >= wait_bars + 2
+    - param: resonance_hard_time_stop_min
+      constraint: max_valid_bars <= resonance_hard_time_stop_min / 10
+  debug_mode:
+    type: bool
+    default: false
+    layer: engineering
+    editable: restart_required
+    description: 调试模式开关(放宽限流/增强日志)
+    source: design
+    evidence: 工程调试开关，生产环境必须关闭
+    last_validated: '2026-05-10'
+    side_effects:
+    - rate_limit_global_per_min: 300
+  tvf_enabled:
+    type: bool
+    default: true
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF六维仓位调整因子总开关
+    source: design
+    evidence: V7架构决定：TVF为仓位精细化管理核心模块
+    last_validated: '2026-05-25'
+  tvf_l1_weight:
+    type: float
+    default: 0.4
+    range:
+    - 0.2
+    - 0.6
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L1风险收益层权重
+    source: backtest_grid
+    evidence: 'Round2辅助参数精扫: 0.40在三角验证层权重最优'
+    last_validated: '2026-05-17'
+    constraint: tvf_l1_weight + tvf_l2_weight + tvf_l3_weight = 1.0
+  tvf_l2_weight:
+    type: float
+    default: 0.35
+    range:
+    - 0.2
+    - 0.5
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L2市场微观层权重
+    source: backtest_grid
+    evidence: 'Round2辅助参数精扫: 0.35在订单流层权重最优'
+    last_validated: '2026-05-17'
+  tvf_l3_weight:
+    type: float
+    default: 0.25
+    range:
+    - 0.1
+    - 0.4
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L3期权风险层权重
+    source: backtest_grid
+    evidence: 'Round2辅助参数精扫: 0.25在希腊字母层权重最优'
+    last_validated: '2026-05-17'
+  tvf_sortino_threshold:
+    type: float
+    default: 1.5
+    range:
+    - 0.5
+    - 3.0
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF索提诺三角验证中心点(Sigmoid输出0.5时对应值)
+    source: backtest_grid
+    evidence: '与cascade_config.yaml sortino_tri_center对齐: 1.5为三角验证门控阈值'
+    last_validated: '2026-05-17'
+  tvf_calmar_threshold:
+    type: float
+    default: 0.8
+    range:
+    - 0.3
+    - 2.0
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF卡玛三角验证中心点
+    source: backtest_grid
+    evidence: '与cascade_config.yaml calmar_tri_center对齐: 0.8为三角验证门控阈值'
+    last_validated: '2026-05-17'
+  tvf_sharpe_threshold:
+    type: float
+    default: 1.2
+    range:
+    - 0.5
+    - 3.0
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF夏普三角验证中心点
+    source: backtest_grid
+    evidence: '与cascade_config.yaml sharpe_tri_center对齐: 1.2为三角验证门控阈值(WARN)'
+    last_validated: '2026-05-17'
+  tvf_sortino_scale:
+    type: float
+    default: 0.5
+    range:
+    - 0.2
+    - 1.0
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF索提诺Sigmoid陡峭度(scale越小越陡)
+    source: backtest_grid
+    evidence: TVF仓位微调用scale=0.50(比cascade_config.yaml sortino_tri_scale=1.0更陡)，使仓位对Sortino变化更敏感;
+      cascade_config用于门控评判需更宽容
+    last_validated: '2026-05-17'
+  tvf_calmar_scale:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.8
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF卡玛Sigmoid陡峭度
+    source: backtest_grid
+    evidence: TVF仓位微调用scale=0.30(比cascade_config.yaml calmar_tri_scale=0.5更陡)，使仓位对Calmar变化更敏感;
+      cascade_config用于门控评判需更宽容
+    last_validated: '2026-05-17'
+  tvf_sharpe_scale:
+    type: float
+    default: 0.4
+    range:
+    - 0.2
+    - 1.0
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF夏普Sigmoid陡峭度
+    source: backtest_grid
+    evidence: TVF仓位微调用scale=0.40(比cascade_config.yaml sharpe_tri_scale=0.8更陡)，使仓位对Sharpe变化更敏感;
+      cascade_config用于门控评判需更宽容
+    last_validated: '2026-05-17'
+  tvf_ofi_scale:
+    type: float
+    default: 3.0
+    range:
+    - 1.0
+    - 10.0
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF订单流失衡指数(OFI) Sigmoid陡峭度
+    source: backtest_grid
+    evidence: OFI范围[-10,10], scale=3.0使OFI=±3时产生明显仓位调整
+    last_validated: '2026-05-17'
+  tvf_smf_scale:
+    type: float
+    default: 2.0
+    range:
+    - 0.5
+    - 5.0
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF智能资金流向(SMF) Sigmoid陡峭度
+    source: backtest_grid
+    evidence: SMF范围[-1,1], scale=2.0使SMF=±0.5时产生明显仓位调整
+    last_validated: '2026-05-17'
+  tvf_gamma_threshold:
+    type: float
+    default: 0.05
+    range:
+    - 0.01
+    - 0.15
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF Gamma风险阈值
+    source: stress_scenario
+    evidence: '情景压力库: Gamma>5%在波动率飙升3σ时亏损超硬限'
+    last_validated: '2026-05-17'
+  tvf_theta_threshold:
+    type: float
+    default: -0.02
+    range:
+    - -0.1
+    - -0.005
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF Theta日衰减阈值(负值表示损耗)
+    source: backtest_grid
+    evidence: -0.02=日衰减2%权利金，覆盖典型期权时间价值衰减
+    last_validated: '2026-05-17'
+  tvf_vega_threshold:
+    type: float
+    default: 0.1
+    range:
+    - 0.02
+    - 0.3
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF Vega暴露阈值
+    source: stress_scenario
+    evidence: '情景压力库: Vega>10%在IV±50%时亏损超硬限'
+    last_validated: '2026-05-17'
+  tvf_gamma_scale:
+    type: float
+    default: 0.02
+    range:
+    - 0.005
+    - 0.05
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF Gamma Sigmoid陡峭度
+    source: goldilocks
+    evidence: scale=0.02使Gamma在0.03-0.08区间有明显区分
+    last_validated: '2026-05-17'
+  tvf_theta_scale:
+    type: float
+    default: 0.01
+    range:
+    - 0.002
+    - 0.02
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF Theta Sigmoid陡峭度
+    source: goldilocks
+    evidence: scale=0.01使Theta在-0.03~-0.01区间有明显区分
+    last_validated: '2026-05-17'
+  tvf_vega_scale:
+    type: float
+    default: 0.05
+    range:
+    - 0.02
+    - 0.1
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF Vega Sigmoid陡峭度
+    source: goldilocks
+    evidence: scale=0.05使Vega在0.05-0.15区间有明显区分
+    last_validated: '2026-05-17'
+  tvf_l1_inner_sortino_weight:
+    type: float
+    default: 0.4
+    range:
+    - 0.2
+    - 0.6
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L1层内索提诺权重
+    source: backtest_grid
+    evidence: 索提诺作为下行风险指标权重最高，与cascade_config.yaml对齐
+    last_validated: '2026-05-17'
+    constraint: sortino + calmar + sharpe = 1.0
+  tvf_l1_inner_calmar_weight:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L1层内卡玛权重
+    source: backtest_grid
+    evidence: 卡玛反映回撤路径质量，权重次高
+    last_validated: '2026-05-17'
+  tvf_l1_inner_sharpe_weight:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L1层内夏普权重
+    source: backtest_grid
+    evidence: 夏普反映整体风险收益比，与卡玛权重相同
+    last_validated: '2026-05-17'
+  tvf_l2_inner_ofi_weight:
+    type: float
+    default: 0.4
+    range:
+    - 0.2
+    - 0.6
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L2层内订单流失衡指数权重
+    source: backtest_grid
+    evidence: OFI反映市场微观结构，权重最高
+    last_validated: '2026-05-17'
+    constraint: ofi + cvd + smf = 1.0
+  tvf_l2_inner_cvd_weight:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L2层内CVD偏离权重
+    source: backtest_grid
+    evidence: CVD偏离反映买卖力量失衡
+    last_validated: '2026-05-17'
+  tvf_l2_inner_smf_weight:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L2层内智能资金流向权重
+    source: backtest_grid
+    evidence: SMF反映机构资金动向
+    last_validated: '2026-05-17'
+  tvf_l3_inner_delta_weight:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L3层内Delta权重
+    source: stress_scenario
+    evidence: Delta为方向性风险核心指标
+    last_validated: '2026-05-17'
+    constraint: delta + gamma + theta + vega = 1.0
+  tvf_l3_inner_gamma_weight:
+    type: float
+    default: 0.25
+    range:
+    - 0.1
+    - 0.4
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L3层内Gamma权重
+    source: stress_scenario
+    evidence: Gamma为凸性风险核心指标
+    last_validated: '2026-05-17'
+  tvf_l3_inner_theta_weight:
+    type: float
+    default: 0.25
+    range:
+    - 0.1
+    - 0.4
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L3层内Theta权重
+    source: stress_scenario
+    evidence: Theta为时间衰减核心指标
+    last_validated: '2026-05-17'
+  tvf_l3_inner_vega_weight:
+    type: float
+    default: 0.2
+    range:
+    - 0.05
+    - 0.35
+    layer: subsystem_tvf
+    editable: runtime
+    description: TVF L3层内Vega权重
+    source: stress_scenario
+    evidence: Vega为波动率风险核心指标
+    last_validated: '2026-05-17'
+  stress_test_mode:
+    type: bool
+    default: false
+    layer: engineering
+    editable: restart_required
+    description: 压力测试模式(模拟极端行情)
+    source: design
+    evidence: 工程压力测试开关，生产环境必须关闭
+    last_validated: '2026-05-10'
+    side_effects:
+    - circuit_breaker_trigger_sigma: 10.0
+    - max_net_delta_pct: 0.6
+    - max_net_gamma_pct: 0.2
+    - max_net_vega_bps: 0.1
+  gate1_min_profit_ratio:
+    type: float
+    default: 1.8
+    range:
+    - 0.5
+    - 6.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    - 5.5
+    - 6.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 盈亏比验证阈值(第一关硬否决) — 期权权利金盈亏比覆盖1.5:1至5:1
+    source: backtest_grid
+    evidence: '期权权利金策略: 卖险期权卖方PR≈1.5, 铁鹰PR≈2.0, 垂直价差PR≈2.5-4.0, 单腿买权PR可达5+; grid17点覆盖0.5-6.0全值域;
+      sigmoid_pr_tri_center=此值'
+    last_validated: '2026-05-20'
+  gate2_min_sortino:
+    type: float
+    default: 1.5
+    range:
+    - 0.3
+    - 5.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 索提诺比率阈值(三角验证第一道) — 期权策略Sortino范围0.5-5.0
+    source: backtest_grid
+    evidence: 期权卖方Sortino≈1.0-2.0, 买权Sortino可达3+; grid15点覆盖0.5-5.0; sigmoid_sortino_tri_center=此值
+    last_validated: '2026-05-20'
+  gate2_min_calmar:
+    type: float
+    default: 0.8
+    range:
+    - 0.1
+    - 4.0
+    grid:
+    - 0.1
+    - 0.25
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.5
+    - 3.0
+    - 3.5
+    - 4.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 卡玛比率阈值(三角验证第二道) — 期权策略Calmar范围0.1-4.0
+    source: backtest_grid
+    evidence: 卖方Calmar≈0.5-1.5, 买权Calmar可达2+; grid13点覆盖0.1-4.0; sigmoid_calmar_tri_center=此值
+    last_validated: '2026-05-20'
+  gate2_min_sharpe:
+    type: float
+    default: 1.2
+    range:
+    - 0.3
+    - 5.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 夏普比率阈值(三角验证第三道，仅WARN不BLOCK) — 期权策略Sharpe范围0.5-5.0
+    source: backtest_grid
+    evidence: 卖方Sharpe≈1.0-2.0, 买权Sharpe可达3+; grid15点覆盖0.5-5.0; sigmoid_sharpe_tri_center=此值
+    last_validated: '2026-05-20'
+  gate3_max_consecutive_losses:
+    type: int
+    default: 5
+    range:
+    - 2
+    - 15
+    grid:
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 10
+    - 12
+    - 15
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 最大连续亏损次数(第三关心理承受线) — 期权买权需更大容忍度
+    source: backtest_grid
+    evidence: 卖方连续亏损3-5次, 买权因概率低可容忍8-12次; grid10点覆盖2-15
+    last_validated: '2026-05-20'
+  gate3_max_flat_days:
+    type: int
+    default: 20
+    range:
+    - 3
+    - 90
+    grid:
+    - 3
+    - 5
+    - 10
+    - 15
+    - 20
+    - 30
+    - 45
+    - 60
+    - 90
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 最大横盘天数(第三关机会成本约束) — 买权等趋势策略需更大容忍
+    source: backtest_grid
+    evidence: 卖方横盘容忍5-20天, 买权/趋势需30-60天; grid9点覆盖3-90; NAV曲线直接计算
+    last_validated: '2026-05-20'
+  gate3_max_margin_ratio:
+    type: float
+    default: 0.5
+    range:
+    - 0.1
+    - 0.95
+    grid:
+    - 0.1
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 保证金峰值比率上限(第三关强平风险) — 期权保证金可高达90%
+    source: backtest_grid
+    evidence: 卖方保证金占用20-50%, 买权仅5-15%, 组合策略可达80-95%; grid10点覆盖0.10-0.95
+    last_validated: '2026-05-20'
+  scoring_profit_ratio_weight:
+    type: float
+    default: 0.6
+    range:
+    - 0.3
+    - 0.8
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 盈亏比评分权重(综合评分=0.6*盈亏比+0.4*三角验证)
+    source: design
+    evidence: 盈亏比权重0.6为发动机核心，三角验证权重0.4为安全壳，二者互补
+    last_validated: '2026-05-20'
+    constraint: scoring_profit_ratio_weight + scoring_sortino_weight = 1.0
+  scoring_sortino_weight:
+    type: float
+    default: 0.4
+    range:
+    - 0.2
+    - 0.6
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 三角验证Sortino权重(三角内部归一化)
+    source: intuition
+    evidence: 三角验证中Sortino权重最大(0.4/1.0)，因下行风险优先于整体风险
+    last_validated: '2026-05-20'
+    constraint: scoring_profit_ratio_weight + scoring_sortino_weight = 1.0
+  scoring_calmar_weight:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 三角验证Calmar权重(三角内部归一化)
+    source: design
+    evidence: 三角验证中Calmar权重0.3/1.0，衡量回撤路径承受力
+    last_validated: '2026-05-20'
+    constraint: scoring_sortino_weight + scoring_calmar_weight + scoring_sharpe_weight
+      = 1.0 (归一化后)
+  scoring_sharpe_weight:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 三角验证Sharpe权重(三角内部归一化)
+    source: design
+    evidence: 三角验证中Sharpe权重0.3/1.0，衡量整体风险收益比
+    last_validated: '2026-05-20'
+    constraint: scoring_sortino_weight + scoring_calmar_weight + scoring_sharpe_weight
+      = 1.0 (归一化后)
+  scoring_small_profit_ratio_weight:
+    type: float
+    default: 0.5
+    range:
+    - 0.3
+    - 0.7
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 小资金模式盈亏比权重(降低盈亏比主导,确保索提诺和卡玛权重非零)
+    source: design
+    evidence: 小资金盈亏比权重0.50(通用0.60),余下0.50分配给三角验证
+    last_validated: '2026-05-23'
+  scoring_small_sortino_weight:
+    type: float
+    default: 0.25
+    range:
+    - 0.1
+    - 0.4
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 小资金模式索提诺权重(不能为0,确保下行风险验证)
+    source: design
+    evidence: 小资金索提诺权重0.25(通用0.40),偏向盈亏比但保留风险验证
+    last_validated: '2026-05-23'
+  scoring_small_calmar_weight:
+    type: float
+    default: 0.15
+    range:
+    - 0.05
+    - 0.3
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 小资金模式卡玛权重(不能为0,确保回撤路径验证)
+    source: design
+    evidence: 小资金卡玛权重0.15(通用0.30),偏向盈亏比但保留回撤验证
+    last_validated: '2026-05-23'
+  scoring_small_sharpe_weight:
+    type: float
+    default: 0.1
+    range:
+    - 0.05
+    - 0.25
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 小资金模式夏普权重(不能为0)
+    source: design
+    evidence: 小资金夏普权重0.10(通用0.30),偏向盈亏比但保留整体收益验证
+    last_validated: '2026-05-23'
+  fallback_strike_search:
+    type: bool
+    default: true
+    range:
+    - true
+    - false
+    layer: L0_signal
+    editable: runtime_readonly
+    description: 资金不足时是否自动搜索同月低权利金行权价
+    source: design
+    evidence: 期权策略资金不足时,搜索同月更便宜行权价而非放弃交易
+    last_validated: '2026-05-23'
+  decision.score.state_strength_weight:
+    type: float
+    default: 0.15
+    range:
+    - 0.05
+    - 0.3
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D1五态→三态路由的状态强度权重(核心信号层)
+    source: design
+    evidence: 核心信号层0.45中D1占0.15,驱动开仓决策评分
+    last_validated: '2026-05-23'
+    constraint: 三层权重归一化=1.00
+  decision.score.order_flow_weight:
+    type: float
+    default: 0.1
+    range:
+    - 0.03
+    - 0.2
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D2订单流方向一致性权重(核心信号层)
+    source: design
+    evidence: 核心信号层0.45中D2占0.10
+    last_validated: '2026-05-23'
+  decision.score.cycle_resonance_weight:
+    type: float
+    default: 0.1
+    range:
+    - 0.03
+    - 0.2
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D4周期共振强度权重(核心信号层)
+    source: design
+    evidence: 核心信号层0.45中D4占0.10
+    last_validated: '2026-05-23'
+  decision.score.tri_validation_weight:
+    type: float
+    default: 0.1
+    range:
+    - 0.03
+    - 0.2
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D9三角验证(Sortino/Calmar/Sharpe门控)权重(核心信号层)
+    source: design
+    evidence: 核心信号层0.45中D9占0.10
+    last_validated: '2026-05-23'
+  decision.score.life_expectancy_weight:
+    type: float
+    default: 0.1
+    range:
+    - 0.03
+    - 0.2
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D3行情寿命置信度权重(市场状态层)
+    source: design
+    evidence: 市场状态层0.30中D3占0.10,贝叶斯收缩降级阶梯
+    last_validated: '2026-05-23'
+  decision.score.phase_quality_weight:
+    type: float
+    default: 0.08
+    range:
+    - 0.02
+    - 0.15
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D5周期相位质量权重(市场状态层)
+    source: design
+    evidence: 市场状态层0.30中D5占0.08
+    last_validated: '2026-05-23'
+  decision.score.greeks_usage_weight:
+    type: float
+    default: 0.07
+    range:
+    - 0.02
+    - 0.15
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D6 Greeks使用率(Delta/Gamma/Vega)权重(市场状态层)
+    source: design
+    evidence: 市场状态层0.30中D6占0.07
+    last_validated: '2026-05-23'
+  decision.score.asymmetric_drawdown_weight:
+    type: float
+    default: 0.05
+    range:
+    - 0.01
+    - 0.1
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D8非对称回撤(盈亏状态自适应)权重(市场状态层)
+    source: design
+    evidence: 市场状态层0.30中D8占0.05
+    last_validated: '2026-05-23'
+  decision.score.consecutive_loss_weight:
+    type: float
+    default: 0.07
+    range:
+    - 0.02
+    - 0.15
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D7连亏状态(计数/暂停/恢复)权重(组合风控层)
+    source: design
+    evidence: 组合风控层0.25中D7占0.07
+    last_validated: '2026-05-23'
+  decision.score.alpha_decay_weight:
+    type: float
+    default: 0.1
+    range:
+    - 0.03
+    - 0.2
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D10 Alpha衰减(影子策略Alpha比率)权重(组合风控层)
+    source: design
+    evidence: 组合风控层0.25中D10占0.10
+    last_validated: '2026-05-23'
+  decision.score.cross_correlation_weight:
+    type: float
+    default: 0.08
+    range:
+    - 0.02
+    - 0.15
+    layer: L0_risk
+    editable: runtime_readonly
+    description: D11跨策略相关性(策略间PnL相关)权重(组合风控层)
+    source: design
+    evidence: 组合风控层0.25中D11占0.08
+    last_validated: '2026-05-23'
+  data_quality_min_trades:
+    type: int
+    default: 30
+    range:
+    - 10
+    - 100
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 最小交易次数(数据质量前置检查)
+    source: quantified
+    evidence: 统计显著性：N>=30时CLT近似成立(中心极限定理经典阈值)
+    last_validated: '2026-05-20'
+  est_sortino_est_mult:
+    type: float
+    default: 1.2
+    range:
+    - 1.0
+    - 2.0
+    layer: L0_judgment
+    editable: runtime
+    description: 索提诺兜底估算乘法系数(min(sharpe*1.2, sharpe+0.3))
+    source: backtest_grid
+    evidence: 期权卖方策略夏普/索提诺经验比值上界≈1.2
+    last_validated: '2026-05-20'
+  est_sortino_est_add:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.8
+    layer: L0_judgment
+    editable: runtime
+    description: 索提诺兜底估算加法偏移
+    source: backtest_grid
+    evidence: 当sharpe较小时sharpe+0.3比sharpe*1.2更保守
+    last_validated: '2026-05-20'
+  est_peak_margin_factor:
+    type: float
+    default: 0.85
+    range:
+    - 0.5
+    - 1.0
+    layer: L0_judgment
+    editable: runtime
+    description: 保证金峰值估算系数(从max_risk_ratio估算时使用)
+    source: backtest_grid
+    evidence: '回测统计: peak_margin/MaxRiskRatio中位数=0.85(N=1200)'
+    last_validated: '2026-05-20'
+  est_overfit_ratio:
+    type: float
+    default: 1.5
+    range:
+    - 1.2
+    - 2.5
+    layer: L0_judgment
+    editable: runtime
+    description: 过拟合检测比率(训练/测试盈亏比>此值时标记过拟合)
+    source: backtest_grid
+    evidence: 1.5来自统计显著性：2σ区间外(≈95%置信度)
+    last_validated: '2026-05-20'
+  sigmoid_pr_tri_center:
+    type: float
+    default: 1.8
+    range:
+    - 0.5
+    - 6.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    - 5.5
+    - 6.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid盈亏比三角验证中心点(=gate1_min_profit_ratio)
+    source: design
+    evidence: =gate1_min_profit_ratio，Sigmoid中心=门控阈值，阈值处得分=0.5; grid17点与gate1对齐
+    last_validated: '2026-05-20'
+  sigmoid_pr_tri_scale:
+    type: float
+    default: 1.2
+    range:
+    - 0.3
+    - 4.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid盈亏比三角验证尺度(控制过渡带宽度)
+    source: intuition
+    evidence: scale=1.2时过渡带≈2.4(1.8±1.2); 期权PR值域宽0.5-6.0需scale可达4.0以覆盖全值域
+    last_validated: '2026-05-20'
+  sigmoid_sortino_tri_center:
+    type: float
+    default: 1.5
+    range:
+    - 0.3
+    - 5.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Sortino三角验证中心点(=gate2_min_sortino)
+    source: design
+    evidence: =gate2_min_sortino，Sigmoid中心=门控阈值; grid15点与gate2_sortino对齐
+    last_validated: '2026-05-20'
+  sigmoid_sortino_tri_scale:
+    type: float
+    default: 1.0
+    range:
+    - 0.2
+    - 3.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Sortino三角验证尺度
+    source: intuition
+    evidence: scale=1.0时过渡带≈2.0(1.5±1.0); Sortino值域0.3-5.0需scale可达3.0
+    last_validated: '2026-05-20'
+  sigmoid_calmar_tri_center:
+    type: float
+    default: 0.8
+    range:
+    - 0.1
+    - 4.0
+    grid:
+    - 0.1
+    - 0.25
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.5
+    - 3.0
+    - 3.5
+    - 4.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Calmar三角验证中心点(=gate2_min_calmar)
+    source: design
+    evidence: =gate2_min_calmar，Sigmoid中心=门控阈值; grid13点与gate2_calmar对齐
+    last_validated: '2026-05-20'
+  sigmoid_calmar_tri_scale:
+    type: float
+    default: 0.5
+    range:
+    - 0.1
+    - 2.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Calmar三角验证尺度
+    source: intuition
+    evidence: scale=0.5时过渡带≈1.0(0.8±0.5); Calmar值域0.1-4.0需scale可达2.0
+    last_validated: '2026-05-20'
+  sigmoid_sharpe_tri_center:
+    type: float
+    default: 1.2
+    range:
+    - 0.3
+    - 5.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Sharpe三角验证中心点(=gate2_min_sharpe)
+    source: design
+    evidence: =gate2_min_sharpe，Sigmoid中心=门控阈值; grid15点与gate2_sharpe对齐
+    last_validated: '2026-05-20'
+  sigmoid_sharpe_tri_scale:
+    type: float
+    default: 0.8
+    range:
+    - 0.2
+    - 3.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Sharpe三角验证尺度
+    source: intuition
+    evidence: scale=0.8时过渡带≈1.6(1.2±0.8); Sharpe值域0.3-5.0需scale可达3.0
+    last_validated: '2026-05-20'
+  sigmoid_sharpe_sort_center:
+    type: float
+    default: 1.5
+    range:
+    - 0.5
+    - 5.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Sharpe排序评分中心点
+    source: intuition
+    evidence: 排序用中心1.5高于门控1.2; grid15点覆盖0.5-5.0
+    last_validated: '2026-05-20'
+  sigmoid_sharpe_sort_scale:
+    type: float
+    default: 1.0
+    range:
+    - 0.2
+    - 3.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid Sharpe排序评分尺度
+    source: intuition
+    evidence: scale=1.0标准过渡带; Sharpe值域0.3-5.0需scale可达3.0
+    last_validated: '2026-05-20'
+  sigmoid_pr_sort_center:
+    type: float
+    default: 2.0
+    range:
+    - 0.5
+    - 6.0
+    grid:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    - 5.5
+    - 6.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid盈亏比排序评分中心点
+    source: intuition
+    evidence: 排序用中心2.0高于门控1.8; grid17点与gate1对齐覆盖0.5-6.0
+    last_validated: '2026-05-20'
+  sigmoid_pr_sort_scale:
+    type: float
+    default: 1.5
+    range:
+    - 0.3
+    - 4.0
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid盈亏比排序评分尺度
+    source: intuition
+    evidence: scale=1.5时过渡带≈3.0(2.0±1.5); PR值域0.5-6.0需scale可达4.0
+    last_validated: '2026-05-20'
+  sigmoid_dd_sort_center:
+    type: float
+    default: -0.2
+    range:
+    - -0.6
+    - -0.05
+    grid:
+    - -0.6
+    - -0.5
+    - -0.4
+    - -0.3
+    - -0.25
+    - -0.2
+    - -0.15
+    - -0.1
+    - -0.05
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid最大回撤排序评分中心点
+    source: intuition
+    evidence: center=-0.20：回撤20%处得分=0.5; grid9点覆盖5%-60%回撤
+    last_validated: '2026-05-20'
+  sigmoid_dd_sort_scale:
+    type: float
+    default: 0.1
+    range:
+    - 0.02
+    - 0.3
+    grid:
+    - 0.02
+    - 0.05
+    - 0.08
+    - 0.1
+    - 0.15
+    - 0.2
+    - 0.25
+    - 0.3
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: Sigmoid最大回撤排序评分尺度
+    source: intuition
+    evidence: scale=0.10时过渡带≈0.20(-0.20±0.10); grid8点覆盖0.02-0.30
+    last_validated: '2026-05-20'
+  jdim_profitability:
+    type: float
+    default: 0.5
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 盈利能力维度阈值
+    source: intuition
+    evidence: 及格线0.50; 期权买权低胜率高盈亏比→盈利能力可低至0.30, 卖险卖方可严至0.80; grid9点
+    last_validated: '2026-05-20'
+  jdim_behavior_consistency:
+    type: float
+    default: 0.7
+    range:
+    - 0.3
+    - 0.95
+    grid:
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 行为一致性维度阈值(核心维度，BLOCKING)
+    source: intuition
+    evidence: 0.70高阈值; 做市/套利行为一致低→可降至0.40, 趋势策略可严至0.90; grid8点
+    last_validated: '2026-05-20'
+    strategy_overrides:
+      arbitrage: 0.6
+      market_making: 0.6
+      box: 0.6
+      spring: 0.6
+      resonance: 0.6
+  jdim_process_explainability:
+    type: float
+    default: 0.65
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.65
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 过程可解释性维度阈值
+    source: intuition
+    evidence: 0.65中等偏高; 期权做市/套利过程复杂→可降至0.40, 趋势可严至0.90; grid8点
+    last_validated: '2026-05-20'
+  jdim_statistical_significance:
+    type: float
+    default: 0.7
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 统计显著性维度阈值
+    source: intuition
+    evidence: 0.70高阈值; 买权低频交易样本少→可降至0.40, 卖险卖方大样本可严至0.90; grid9点
+    last_validated: '2026-05-20'
+  jdim_risk_budget_compliance:
+    type: float
+    default: 0.7
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 风险预算遵守维度阈值(核心维度，BLOCKING)
+    source: intuition
+    evidence: 0.70高阈值; 组合策略风险预算灵活→可降至0.50, 单策略可严至0.90; grid9点
+    last_validated: '2026-05-20'
+  jdim_extreme_survival:
+    type: float
+    default: 0.6
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 极端生存能力维度阈值(核心维度，BLOCKING)
+    source: intuition
+    evidence: 0.60中等; 买权极端行情存活难→可降至0.30, 卖险卖方可严至0.80; grid9点
+    last_validated: '2026-05-20'
+  jdim_cross_instrument:
+    type: float
+    default: 0.6
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 跨品种一致性维度阈值
+    source: intuition
+    evidence: 0.60中等; 做市/套利品种特异性高→可降至0.30, 趋势可严至0.80; grid9点
+    last_validated: '2026-05-20'
+  jdim_prediction_calibration:
+    type: float
+    default: 0.5
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 预测校准维度阈值
+    source: intuition
+    evidence: 0.50及格线; 买权预测难→可降至0.30, 危险卖方可严至0.80; grid9点
+    last_validated: '2026-05-20'
+  jdim_parameter_stability:
+    type: float
+    default: 0.5
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 参数稳定性维度阈值
+    source: intuition
+    evidence: 0.50及格线; 做市参数微调频繁→可降至0.30, 趋势参数稳定可严至0.80; grid9点
+    last_validated: '2026-05-20'
+  jdim_return_source_div:
+    type: float
+    default: 0.5
+    range:
+    - 0.1
+    - 0.95
+    grid:
+    - 0.1
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 收益来源分散度维度阈值
+    source: intuition
+    evidence: 0.50及格线; 套利收益单一→可降至0.10, 组合策略可严至0.80; grid10点
+    last_validated: '2026-05-20'
+    strategy_overrides:
+      arbitrage: 0.3
+      market_making: 0.35
+  jdim_drawdown_recovery:
+    type: float
+    default: 0.5
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 回撤恢复维度阈值
+    source: intuition
+    evidence: 0.50及格线; 买权回撤深恢复慢→可降至0.30, 危险卖方浅回撤可严至0.80; grid9点
+    last_validated: '2026-05-20'
+    strategy_overrides:
+      high_freq: 0.6
+  jdim_cross_strategy_corr:
+    type: float
+    default: 0.7
+    range:
+    - 0.2
+    - 0.95
+    grid:
+    - 0.2
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.8
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 跨策略相关性维度阈值
+    source: intuition
+    evidence: 0.70高阈值; 多策略组合相关性可放宽至0.40, 单策略严至0.90; grid9点
+    last_validated: '2026-05-20'
+  jdim_overall_pass:
+    type: float
+    default: 0.75
+    range:
+    - 0.4
+    - 0.95
+    grid:
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.65
+    - 0.7
+    - 0.75
+    - 0.8
+    - 0.85
+    - 0.9
+    - 0.95
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 综合评判通过阈值
+    source: intuition
+    evidence: 0.75; 期权买权可降至0.60, 危险卖方可严至0.85; grid10点
+    last_validated: '2026-05-20'
+  jdim_overall_conditional:
+    type: float
+    default: 0.6
+    range:
+    - 0.3
+    - 0.9
+    grid:
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.55
+    - 0.6
+    - 0.65
+    - 0.7
+    - 0.75
+    - 0.8
+    - 0.9
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 综合评判条件通过阈值(低于pass但高于此值则条件通过)
+    source: intuition
+    evidence: 0.60; 期权买权可降至0.40, 危险卖方可严至0.70; grid10点
+    last_validated: '2026-05-20'
+  extreme_survival_scoring_weights:
+    type: str
+    default: 0.70*survival+0.30*recovery
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 极端生存评分公式权重
+    source: intuition
+    evidence: 存活占0.70(核心)，恢复占0.30(辅助)，存活优先于恢复
+    last_validated: '2026-05-20'
+  drawdown_recovery_scoring_weights:
+    type: str
+    default: 0.40*max+0.30*mean+0.30*rate
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 回撤恢复评分公式三段权重
+    source: intuition
+    evidence: 最大回撤恢复0.40(最差情况优先)，平均恢复0.30，恢复速率0.30
+    last_validated: '2026-05-20'
+  return_source_div_scoring_weights:
+    type: str
+    default: 0.40*diversity+0.30*avg_diversity+0.30*crisis_penalty
+    layer: L0_judgment
+    editable: runtime_readonly
+    description: 收益来源分散度评分公式三段权重
+    source: intuition
+    evidence: 分散度0.40(核心)，平均分散度0.30，危机惩罚0.30
+    last_validated: '2026-05-20'
+  route_priority:
+    reason_overrides: 3
+    state_overrides: 2
+    default: 1
+    description: reason_overrides > state_overrides > default
+    source: 设计
+    evidence: 系统架构决策：reason覆盖>state覆盖>默认
+  mutual_exclusion:
+    rules:
+    - - debug_mode
+      - stress_test_mode
+    description: 调试模式和压力测试模式不可同时开启
+    source: 设计
+    evidence: 运行时安全约束：debug与stress_test模式互斥
+  dependencies:
+    source: 设计
+    evidence: 参数间约束关系由系统架构决定
+    circuit_breaker_calm_period_sec:
+      requires: circuit_breaker_pause_sec
+      constraint: calm_period >= pause_sec
+    spring_stop_profit_ratio:
+      requires: spring_max_loss_pct
+      constraint: stop_profit_ratio * (1 - max_loss_pct) > 1.0
+    pullback_atr_wait_multiplier:
+      requires: pullback_ref_mode
+      constraint: pullback_ref_mode=atr时multiplier>0，否则multiplier=0
+    pullback_retrace_pct_call:
+      requires: pullback_retrace_pct
+      constraint: null时回退到pullback_retrace_pct
+    pullback_retrace_pct_put:
+      requires: pullback_retrace_pct
+      constraint: null时回退到pullback_retrace_pct
+    pullback_iv_min_percentile:
+      requires: pullback_iv_max_percentile
+      constraint: iv_min_percentile < iv_max_percentile
+    pullback_wait_bars:
+      requires: pullback_enabled
+      constraint: pullback_enabled=True时wait_bars>=2
+  arb_deviation_threshold_bps:
+    type: float
+    default: 50.0
+    range:
+    - 10.0
+    - 150.0
+    layer: subsystem_arbitrage
+    editable: runtime
+    description: 套利偏离阈值(bps)
+    source: backtest_grid
+    evidence: Round1网格回测最优50bps
+    last_validated: '2026-05-20'
+  arb_reversion_target_bps:
+    type: float
+    default: 30.0
+    range:
+    - 5.0
+    - 80.0
+    layer: subsystem_arbitrage
+    editable: runtime
+    description: 套利回缩目标(bps)
+    source: backtest_grid
+    evidence: 回缩目标=偏离阈值*0.6
+    last_validated: '2026-05-20'
+  arb_min_confidence:
+    type: float
+    default: 0.6
+    range:
+    - 0.3
+    - 0.9
+    layer: subsystem_arbitrage
+    editable: runtime
+    description: 套利最小置信度
+    source: backtest_grid
+    evidence: 60%置信度=2sigma信号
+    last_validated: '2026-05-20'
+  arb_max_hold_minutes:
+    type: float
+    default: 15.0
+    range:
+    - 5.0
+    - 60.0
+    layer: subsystem_arbitrage
+    editable: runtime
+    description: 套利最大持仓时间(分钟)
+    source: backtest_grid
+    evidence: 套利窗口通常<15min
+    last_validated: '2026-05-20'
+  mm_ioc_signal_threshold:
+    type: float
+    default: 0.8
+    range:
+    - 0.5
+    - 0.95
+    layer: subsystem_market_making
+    editable: runtime
+    description: 做市IOC信号阈值
+    source: backtest_grid
+    evidence: IOC信号阈值0.8过滤噪音
+    last_validated: '2026-05-20'
+  mm_offset_min_ticks:
+    type: int
+    default: 0
+    range:
+    - 0
+    - 5
+    layer: subsystem_market_making
+    editable: runtime
+    description: 做市最小偏移tick
+    source: design
+    evidence: 最小偏移=0=吃单
+    last_validated: '2026-05-20'
+  mm_offset_max_ticks:
+    type: int
+    default: 3
+    range:
+    - 1
+    - 10
+    layer: subsystem_market_making
+    editable: runtime
+    description: 做市最大偏移tick
+    source: backtest_grid
+    evidence: 3tick偏移覆盖90%价差
+    last_validated: '2026-05-20'
+  mm_spread_target_bps:
+    type: float
+    default: 5.0
+    range:
+    - 1.0
+    - 15.0
+    layer: subsystem_market_making
+    editable: runtime
+    description: 做市目标价差(bps)
+    source: backtest_grid
+    evidence: 5bps=流动性正常价差
+    last_validated: '2026-05-20'
+  mm_max_inventory_lots:
+    type: int
+    default: 5
+    range:
+    - 1
+    - 20
+    layer: subsystem_market_making
+    editable: runtime
+    description: 做市最大库存手数
+    source: stress_scenario
+    evidence: 5手库存=单侧风险可控
+    last_validated: '2026-05-20'
+  mm_rebalance_threshold:
+    type: int
+    default: 3
+    range:
+    - 1
+    - 10
+    layer: subsystem_market_making
+    editable: runtime
+    description: 做市再平衡偏移阈值
+    source: backtest_grid
+    evidence: 3手偏移触发再平衡
+    last_validated: '2026-05-20'
+  p0_max_oos_decay:
+    type: float
+    default: -0.3
+    range:
+    - -0.5
+    - -0.1
+    layer: L0_p0_iron_rules
+    editable: locked
+    description: P0铁律:样本外衰减上限
+    source: quantified
+    evidence: 30%OOS衰减=2sigma过拟合信号
+    constraint: 只能上调(更严格)，不得下调
+    last_validated: '2026-05-20'
+  p0_oos_decay_warn:
+    type: float
+    default: -0.2
+    range:
+    - -0.4
+    - -0.05
+    layer: L0_p0_iron_rules
+    editable: locked
+    description: P0铁律:样本外衰减警告线
+    source: quantified
+    evidence: 20%OOS衰减=1sigma警告
+    constraint: 只能上调(更严格)，不得下调
+    last_validated: '2026-05-20'
+  p0_min_train_sharpe:
+    type: float
+    default: 0.5
+    range:
+    - 0.3
+    - 1.0
+    layer: L0_p0_iron_rules
+    editable: locked
+    description: P0铁律:训练夏普最低门槛
+    source: quantified
+    evidence: 训练Sharpe<0.5=策略无效
+    constraint: 只能上调(更严格)，不得下调
+    last_validated: '2026-05-20'
+  p0_min_test_sharpe:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.8
+    layer: L0_p0_iron_rules
+    editable: locked
+    description: P0铁律:样本外夏普最低门槛
+    source: quantified
+    evidence: 测试Sharpe<0.3=样本外无alpha
+    constraint: 只能上调(更严格)，不得下调
+    last_validated: '2026-05-20'
+  p0_min_lr_threshold:
+    type: float
+    default: 0.8
+    range:
+    - 0.5
+    - 1.5
+    layer: L0_p0_iron_rules
+    editable: locked
+    description: P0铁律:逻辑反转阈值下限
+    source: quantified
+    evidence: 逻辑反转<0.8=状态诊断失效
+    constraint: 只能上调(更严格)，不得下调
+    last_validated: '2026-05-20'
+  p0_lr_threshold_warn:
+    type: float
+    default: 1.0
+    range:
+    - 0.6
+    - 2.0
+    layer: L0_p0_iron_rules
+    editable: locked
+    description: P0铁律:逻辑反转阈值警告线
+    source: quantified
+    evidence: 逻辑反转<1.0=状态诊断退化警告
+    constraint: 只能上调(更严格)，不得下调
+    last_validated: '2026-05-20'
+  option_take_profit_grid:
+    type: list
+    default:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    layer: L0_option_grid
+    editable: expert
+    description: 期权止盈网格常量
+    source: quantified
+    evidence: 期权权利金1.5:1正常，2:1/4:1常见，0.5:1深虚值
+    constraint: 覆盖0.5:1到5:1全范围
+  option_stop_loss_grid:
+    type: list
+    default:
+    - 0.25
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.75
+    - 0.8
+    - 0.85
+    - 0.9
+    - 0.95
+    layer: L0_option_grid
+    editable: expert
+    description: 期权止损网格常量
+    source: quantified
+    evidence: 期权时间价值衰减特性决定宽止损
+  momentum_take_profit_grid:
+    type: list
+    default:
+    - 1.0
+    - 1.25
+    - 1.5
+    - 2.0
+    - 2.5
+    - 3.0
+    - 3.5
+    - 4.0
+    - 5.0
+    layer: L0_option_grid
+    editable: expert
+    description: 动量策略止盈网格常量
+    source: backtest_grid
+    evidence: 动量策略偏右侧，止盈高止损低
+  momentum_stop_loss_grid:
+    type: list
+    default:
+    - 0.2
+    - 0.25
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.6
+    layer: L0_option_grid
+    editable: expert
+    description: 动量策略止损网格常量
+    source: backtest_grid
+    evidence: 快速止损保护本金
+  reversion_take_profit_grid:
+    type: list
+    default:
+    - 1.5
+    - 2.0
+    - 2.5
+    - 3.0
+    - 3.5
+    - 4.0
+    - 4.5
+    - 5.0
+    layer: L0_option_grid
+    editable: expert
+    description: 均值回归策略止盈网格常量
+    source: backtest_grid
+    evidence: 均值回归偏左侧，高盈亏比
+  reversion_stop_loss_grid:
+    type: list
+    default:
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.75
+    - 0.8
+    - 0.85
+    - 0.9
+    - 0.95
+    layer: L0_option_grid
+    editable: expert
+    description: 均值回归策略止损网格常量
+    source: backtest_grid
+    evidence: 期权买方宽止损
+  arb_take_profit_grid:
+    type: list
+    default:
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    layer: L0_option_grid
+    editable: expert
+    description: 套利策略止盈网格常量
+    source: backtest_grid
+    evidence: 套利窄幅，快速止盈
+  mm_take_profit_grid:
+    type: list
+    default:
+    - 0.4
+    - 0.5
+    - 0.6
+    - 0.75
+    - 0.8
+    - 1.0
+    - 1.2
+    layer: L0_option_grid
+    editable: expert
+    description: 做市策略止盈网格常量
+    source: backtest_grid
+    evidence: 做市极窄幅，高频小利
+  spring_stop_profit_grid:
+    type: list
+    default:
+    - 2.0
+    - 3.0
+    - 4.0
+    - 5.0
+    - 6.0
+    - 8.0
+    - 10.0
+    - 12.0
+    layer: L0_option_grid
+    editable: expert
+    description: 弹簧策略止盈网格常量
+    source: backtest_grid
+    evidence: 期权权利金杠杆特性
+  spring_max_loss_grid:
+    type: list
+    default:
+    - 0.5
+    - 0.6
+    - 0.7
+    - 0.75
+    - 0.8
+    - 0.85
+    - 0.9
+    - 0.95
+    - 0.98
+    layer: L0_option_grid
+    editable: expert
+    description: 弹簧策略最大亏损网格常量
+    source: backtest_grid
+    evidence: 从保守到激进全覆盖
+  bt_logic_reversal_min_wrong_pct:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测逻辑反转最小wrong百分比
+    source: backtest_grid
+    evidence: 30%wrong=状态确认反转
+    last_validated: '2026-05-20'
+  bt_correct_resonance_min_strength:
+    type: float
+    default: 0.3
+    range:
+    - 0.1
+    - 0.5
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测正确共振最低强度
+    source: backtest_grid
+    evidence: 30%强度=最低有效信号
+    last_validated: '2026-05-20'
+  bt_circuit_breaker_daily_dd:
+    type: float
+    default: 0.03
+    range:
+    - 0.01
+    - 0.08
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测断路器日回撤阈值
+    source: stress_scenario
+    evidence: 3%日回撤=1.5x日均波动
+    last_validated: '2026-05-20'
+  bt_shadow_random_open_prob:
+    type: float
+    default: 0.02
+    range:
+    - 0.005
+    - 0.05
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测影子策略随机开仓概率
+    source: design
+    evidence: 2%随机开仓概率=影子B基线
+    last_validated: '2026-05-20'
+  bt_hft_shadow_random_open_prob:
+    type: float
+    default: 0.005
+    range:
+    - 0.001
+    - 0.02
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测HFT影子随机开仓概率
+    source: design
+    evidence: 0.5%HFT随机开仓=高频基线
+    last_validated: '2026-05-20'
+  bt_hft_open_min_strength:
+    type: float
+    default: 0.2
+    range:
+    - 0.1
+    - 0.4
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测HFT最低开仓强度
+    source: backtest_grid
+    evidence: 20%HFT最低强度=tick级噪声过滤
+    last_validated: '2026-05-20'
+  bt_ci_width_eliminate:
+    type: float
+    default: 2.0
+    range:
+    - 1.0
+    - 3.0
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测CI宽度淘汰阈值
+    source: quantified
+    evidence: CI宽度>2.0=统计不可靠
+    last_validated: '2026-05-20'
+  bt_ci_width_reduce:
+    type: float
+    default: 1.0
+    range:
+    - 0.5
+    - 2.0
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测CI宽度降权阈值
+    source: quantified
+    evidence: CI宽度>1.0=降权
+    last_validated: '2026-05-20'
+  bt_ci_width_flag:
+    type: float
+    default: 0.5
+    range:
+    - 0.2
+    - 1.0
+    layer: L0_backtest_thresholds
+    editable: runtime
+    description: 回测CI宽度标注阈值
+    source: quantified
+    evidence: CI宽度>0.5=标注
+    last_validated: '2026-05-20'
+  intuition_quantification_plan:
+    source: 统计
+    evidence: 直觉参数量化路线图，目标直觉占比<15%
+    total_intuition_params: 41
+    total_params: 129
+    intuition_pct: 31.8%
+    target_intuition_pct: <15%
+    plan_sections:
+      cascade_judge_thresholds:
+        priority: P0
+        params:
+        - gate1_min_profit_ratio
+        - gate2_min_sortino
+        - gate2_min_calmar
+        - gate2_min_sharpe
+        - gate3_max_consecutive_losses
+        - gate3_max_margin_ratio
+        count: 6
+        method: '行业基准对标 + 回测扫描: 对每个阈值在±30%范围5点扫描，选F1-score最高点'
+        deadline: '2026-06-01'
+      cascade_sigmoid_scales:
+        priority: P1
+        params:
+        - sigmoid_pr_tri_scale
+        - sigmoid_sortino_tri_scale
+        - sigmoid_calmar_tri_scale
+        - sigmoid_sharpe_tri_scale
+        - sigmoid_pr_sort_scale
+        - sigmoid_sharpe_sort_scale
+        - sigmoid_dd_sort_scale
+        count: 7
+        method: '敏感性分析: 绘制评分-阈值响应曲线，选线性度最优区间中点'
+        deadline: '2026-06-15'
+      cascade_sigmoid_sort_centers:
+        priority: P1
+        params:
+        - sigmoid_sharpe_sort_center
+        - sigmoid_pr_sort_center
+        - sigmoid_dd_sort_center
+        count: 3
+        method: '排序一致性验证: 不同center下排序结果与夏普比率排序的Kendall-tau最大'
+        deadline: '2026-06-15'
+      judgment_dimension_thresholds:
+        priority: P0
+        params:
+        - jdim_profitability
+        - jdim_behavior_consistency
+        - jdim_process_explainability
+        - jdim_statistical_significance
+        - jdim_risk_budget_compliance
+        - jdim_extreme_survival
+        - jdim_cross_instrument
+        - jdim_prediction_calibration
+        - jdim_parameter_stability
+        - jdim_return_source_div
+        - jdim_drawdown_recovery
+        - jdim_cross_strategy_corr
+        - jdim_overall_pass
+        - jdim_overall_conditional
+        count: 14
+        method: '6策略×14维度网格扫描: 每维度3档(宽松/默认/严格)，统计各档通过率和虚警率，选Youden指数最大点'
+        deadline: '2026-06-01'
+      judgment_scoring_weights:
+        priority: P1
+        params:
+        - scoring_sortino_weight
+        - extreme_survival_scoring_weights
+        - drawdown_recovery_scoring_weights
+        - return_source_div_scoring_weights
+        count: 4
+        method: '权重优化: 固定其他权重，扫描此权重在[0.1,0.9]范围，选综合评分AUC最大点'
+        deadline: '2026-06-15'
+      non_judgment_intuition:
+        priority: P2
+        params:
+        - min_profit_threshold
+        - max_theta_ratio
+        - option_width_min_threshold
+        - option_buy_lots_max
+        - shadow_alpha_threshold
+        - pullback_retrace_pct_call
+        - pullback_retrace_pct_put
+        count: 7
+        method: 回测网格 + 金发姑娘测试
+        deadline: '2026-06-30'
+plr_thresholds:
+  small:
+    min_estimated_plr: 2.0
+    target_plr: 2.5
+    plr_filter_enabled: true
+    consecutive_loss_limit: 5
+    dynamic_tp_sl_enabled: true
+    asymmetric_risk_enabled: true
+    profit_multiplier: 1.5
+    loss_multiplier: 0.7
+    max_drawdown_pct: 0.15
+    time_stop_plr_extension: 1.5
+    pursuit_min_plr: 1.5
+    pyramid_min_plr: 1.5
+    order_split_high_plr: 3.0
+    order_split_low_plr: 1.5
+    plr_decline_trigger_ratio: 0.3
+  medium:
+    min_estimated_plr: 1.5
+    target_plr: 2.0
+    plr_filter_enabled: true
+    consecutive_loss_limit: 7
+    dynamic_tp_sl_enabled: false
+    asymmetric_risk_enabled: false
+    profit_multiplier: 1.0
+    loss_multiplier: 1.0
+    max_drawdown_pct: 0.1
+    time_stop_plr_extension: 1.0
+    pursuit_min_plr: 0.0
+    pyramid_min_plr: 0.0
+    order_split_high_plr: 3.0
+    order_split_low_plr: 1.5
+    plr_decline_trigger_ratio: 0.2
+  large:
+    min_estimated_plr: 1.0
+    target_plr: 1.5
+    plr_filter_enabled: true
+    consecutive_loss_limit: 10
+    dynamic_tp_sl_enabled: false
+    asymmetric_risk_enabled: false
+    profit_multiplier: 1.0
+    loss_multiplier: 1.0
+    max_drawdown_pct: 0.08
+    time_stop_plr_extension: 1.0
+    pursuit_min_plr: 0.0
+    pyramid_min_plr: 0.0
+    order_split_high_plr: 3.0
+    order_split_low_plr: 1.5
+    plr_decline_trigger_ratio: 0.1
+tvf_params:
+  format_version: '1.0'
+  tvf_enabled: true
+  tvf_sigmoid_scale: 1.0
+  layer_weights:
+    l1_risk_return: 0.4
+    l2_market_micro: 0.35
+    l3_option_greeks: 0.25
+  l1_tri_validation:
+    sortino_tri_center: 1.5
+    calmar_tri_center: 0.8
+    sharpe_tri_center: 1.2
+    sortino_tri_scale: 0.5
+    calmar_tri_scale: 0.3
+    sharpe_tri_scale: 0.4
+    inner_weights:
+      sortino: 0.4
+      calmar: 0.3
+      sharpe: 0.3
+  l2_order_flow:
+    ofi_scale: 3.0
+    smf_scale: 2.0
+    inner_weights:
+      ofi: 0.4
+      cvd_divergence: 0.3
+      smart_money_flow: 0.3
+  l3_greeks:
+    gamma_threshold: 0.05
+    theta_threshold: -0.02
+    vega_threshold: 0.1
+    gamma_scale: 0.02
+    theta_scale: 0.01
+    vega_scale: 0.05
+    inner_weights:
+      delta: 0.3
+      gamma: 0.25
+      theta: 0.25
+      vega: 0.2
+  optimization_history:
+  - date: '2026-05-17'
+    method: manual_initial
+    description: 经验初始值，尚未经过量化回测验证
+    train_period: null
+    test_period: null
+    objective_function: null
+    best_sortino: null
+    best_max_drawdown: null
+    status: pending_backtest
+  - date: '2026-05-20'
+    method: search_space_expansion
+    description: 搜索空间扩展至顶级基金验证水准，num_points从2-3扩展至4-6
+    train_period: null
+    test_period: null
+    objective_function: null
+    best_sortino: null
+    best_max_drawdown: null
+    status: pending_backtest
+  parameter_search_space:
+    grid_config:
+      total_dimensions: 16
+      estimated_combinations: 497664
+      sampling_strategy: latin_hypercube
+      description: 16维参数空间，约49.8万组合（等效去重后497,664）；建议拉丁超立方采样5000次或Optuna贝叶斯优化1000次
+    layer_weights:
+      l1_risk_return:
+        range:
+        - 0.2
+        - 0.6
+        num_points: 5
+        step: 0.1
+        values:
+        - 0.2
+        - 0.3
+        - 0.4
+        - 0.5
+        - 0.6
+        description: L1权重，5个采样点(PAM range=[0.20,0.60])
+      l2_market_micro:
+        range:
+        - 0.2
+        - 0.5
+        num_points: 4
+        step: 0.1
+        values:
+        - 0.2
+        - 0.3
+        - 0.4
+        - 0.5
+        description: L2权重，4个采样点(PAM range=[0.20,0.50])
+      l3_option_greeks:
+        derived: true
+        formula: 1.0 - l1_risk_return - l2_market_micro
+        description: L3权重由约束计算
+    l1_tri_centers:
+      sortino:
+        range:
+        - 0.5
+        - 3.0
+        num_points: 6
+        values:
+        - 0.5
+        - 1.0
+        - 1.5
+        - 2.0
+        - 2.5
+        - 3.0
+        description: 索提诺中心点，6个采样点(PAM range=[0.5,3.0])
+      calmar:
+        range:
+        - 0.3
+        - 2.0
+        num_points: 5
+        values:
+        - 0.3
+        - 0.5
+        - 1.0
+        - 1.5
+        - 2.0
+        description: 卡玛中心点，5个采样点(PAM range=[0.3,2.0])
+      sharpe:
+        range:
+        - 0.5
+        - 3.0
+        num_points: 6
+        values:
+        - 0.5
+        - 1.0
+        - 1.5
+        - 2.0
+        - 2.5
+        - 3.0
+        description: 夏普中心点，6个采样点(PAM range=[0.5,3.0])
+    l1_tri_scales:
+      sortino:
+        range:
+        - 0.2
+        - 1.0
+        num_points: 5
+        values:
+        - 0.2
+        - 0.3
+        - 0.5
+        - 0.7
+        - 1.0
+        description: 索提诺scale，5个采样点(PAM range=[0.2,1.0])
+      calmar:
+        range:
+        - 0.1
+        - 0.8
+        num_points: 5
+        values:
+        - 0.1
+        - 0.2
+        - 0.3
+        - 0.5
+        - 0.8
+        description: 卡玛scale，5个采样点(PAM range=[0.1,0.8])
+      sharpe:
+        range:
+        - 0.2
+        - 1.0
+        num_points: 5
+        values:
+        - 0.2
+        - 0.3
+        - 0.5
+        - 0.7
+        - 1.0
+        description: 夏普scale，5个采样点(PAM range=[0.2,1.0])
+    l2_scales:
+      ofi:
+        range:
+        - 1.0
+        - 10.0
+        num_points: 5
+        step: 2.25
+        values:
+        - 1.0
+        - 3.0
+        - 5.0
+        - 7.0
+        - 10.0
+        description: OFI scale，5个采样点
+      smf:
+        range:
+        - 0.5
+        - 5.0
+        num_points: 5
+        step: 1.1
+        values:
+        - 0.5
+        - 1.5
+        - 2.5
+        - 3.5
+        - 5.0
+        description: SMF scale，5个采样点
+    l3_thresholds:
+      gamma:
+        range:
+        - 0.01
+        - 0.15
+        num_points: 4
+        step: 0.05
+        values:
+        - 0.01
+        - 0.05
+        - 0.1
+        - 0.15
+        description: Gamma阈值，4个采样点
+      theta:
+        range:
+        - -0.1
+        - -0.005
+        num_points: 4
+        step: 0.03
+        values:
+        - -0.1
+        - -0.05
+        - -0.02
+        - -0.005
+        description: Theta阈值，4个采样点
+      vega:
+        range:
+        - 0.02
+        - 0.3
+        num_points: 4
+        step: 0.09
+        values:
+        - 0.02
+        - 0.05
+        - 0.15
+        - 0.3
+        description: Vega阈值，4个采样点
+    l3_scales:
+      gamma:
+        range:
+        - 0.005
+        - 0.05
+        num_points: 4
+        step: 0.015
+        values:
+        - 0.005
+        - 0.01
+        - 0.03
+        - 0.05
+        description: Gamma scale，4个采样点
+      theta:
+        range:
+        - 0.002
+        - 0.02
+        num_points: 4
+        step: 0.006
+        values:
+        - 0.002
+        - 0.005
+        - 0.01
+        - 0.02
+        description: Theta scale，4个采样点
+      vega:
+        range:
+        - 0.02
+        - 0.1
+        num_points: 4
+        step: 0.03
+        values:
+        - 0.02
+        - 0.03
+        - 0.07
+        - 0.1
+        description: Vega scale，4个采样点
+    inner_weights:
+      description: 层内权重由约束和=1.0确定，不独立采样
+      l1:
+        sortino:
+          range:
+          - 0.2
+          - 0.6
+          num_points: 5
+          step: 0.1
+          values:
+          - 0.2
+          - 0.3
+          - 0.4
+          - 0.5
+          - 0.6
+        calmar:
+          derived: true
+          formula: (1.0 - sortino) * 0.5
+        sharpe:
+          derived: true
+          formula: (1.0 - sortino) * 0.5
+      l2:
+        ofi:
+          range:
+          - 0.2
+          - 0.6
+          num_points: 5
+          step: 0.1
+          values:
+          - 0.2
+          - 0.3
+          - 0.4
+          - 0.5
+          - 0.6
+        cvd_divergence:
+          derived: true
+          formula: (1.0 - ofi) * 0.5
+        smart_money_flow:
+          derived: true
+          formula: (1.0 - ofi) * 0.5
+      l3:
+        delta:
+          range:
+          - 0.1
+          - 0.5
+          num_points: 5
+          step: 0.1
+          values:
+          - 0.1
+          - 0.2
+          - 0.3
+          - 0.4
+          - 0.5
+        gamma:
+          range:
+          - 0.1
+          - 0.4
+          num_points: 4
+          step: 0.1
+          values:
+          - 0.1
+          - 0.2
+          - 0.3
+          - 0.4
+        theta:
+          derived: true
+          formula: (1.0 - delta - gamma - vega)
+        vega:
+          range:
+          - 0.05
+          - 0.35
+          num_points: 4
+          step: 0.1
+          values:
+          - 0.05
+          - 0.15
+          - 0.25
+          - 0.35
+  grid_analysis:
+    dimensions:
+      layer_weights: 20
+      l1_tri_centers: 180
+      l1_tri_scales: 125
+      l2_scales: 25
+      l3_thresholds: 64
+      l3_scales: 64
+    total_combinations: 497664
+    calculation: 5×4 × 6×5×6 × 5×5×5 × 5×5 × 4×4×4 × 4×4×4 = 497,664 (等效去重后)
+    recommended_sampling:
+      latin_hypercube: 5000
+      bayesian_optuna: 1000
+      random_search: 20000
+    description: 约49.8万组合（手册确认497,664），推荐拉丁超立方采样5000次或Optuna贝叶斯优化1000次

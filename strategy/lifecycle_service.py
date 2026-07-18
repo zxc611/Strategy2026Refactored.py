@@ -12,21 +12,21 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ali2026v3_trading.lifecycle.lifecycle_state_machine import LifecycleStateMachine
-from ali2026v3_trading.lifecycle.lifecycle_platform import LifecyclePlatform
-from ali2026v3_trading.lifecycle.lifecycle_resource import LifecycleResource
-from ali2026v3_trading.lifecycle.lifecycle_parallel import LifecycleParallel
-from ali2026v3_trading.lifecycle.lifecycle_transition import LifecycleTransition
-from ali2026v3_trading.lifecycle.lifecycle_init import LifecycleInit
-from ali2026v3_trading.infra.commission_utils import OPTION_TO_FUTURE_MAP  # 五唯一性修复
-from ali2026v3_trading.lifecycle.lifecycle_bind import LifecycleBind
-from ali2026v3_trading.lifecycle.lifecycle_callbacks import LifecycleCallbacks
-from ali2026v3_trading.lifecycle.lifecycle_monitor import LifecycleMonitor
-from ali2026v3_trading.lifecycle.lifecycle_parallel import LifecycleParallelOps
-from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
+from lifecycle.lifecycle_state_machine import LifecycleStateMachine
+from lifecycle.lifecycle_platform import LifecyclePlatform
+from lifecycle.lifecycle_resource import LifecycleResource
+from lifecycle.lifecycle_parallel import LifecycleParallel
+from lifecycle.lifecycle_transition import LifecycleTransition
+from lifecycle.lifecycle_init import LifecycleInit
+from infra.commission_utils import OPTION_TO_FUTURE_MAP  # 五唯一性修复
+from lifecycle.lifecycle_bind import LifecycleBind
+from lifecycle.lifecycle_callbacks import LifecycleCallbacks
+from lifecycle.lifecycle_monitor import LifecycleMonitor
+from lifecycle.lifecycle_parallel import LifecycleParallelOps
+from lifecycle.lifecycle_state_machine import StrategyState, _state_key, _state_is, VALID_STATE_TRANSITIONS
 
 try:
-    from ali2026v3_trading.data.data_service import get_data_service as _get_data_service
+    from data.data_service import get_data_service as _get_data_service
 except ImportError:
     _get_data_service = None
 
@@ -168,7 +168,7 @@ class LifecycleService:
 
     def _extract_contract_year_month(self, instrument_id):
         try:
-            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
+            from infra.subscription_service import SubscriptionManager
             parsed = SubscriptionManager.parse_future(instrument_id)
             return parsed.get('year_month', '')
         except Exception:
@@ -217,10 +217,17 @@ class LifecycleService:
             result = self._lc_transition.transition_to(new_state)
         success = result[0] if isinstance(result, tuple) else bool(result)
         if success:
-            p._state = new_state
             _lm = getattr(p, '_lifecycle_mgr', None)
             if _lm is not None:
                 _lm.state = new_state
+            # FIX-20260715-STATE-SHADOW: 避免p.__dict__._state遮蔽__getattr__委托
+            # 根因: p._state = new_state 在 StrategyCoreService.__dict__ 上创建 _state 属性
+            #   之后 getattr(p, '_state') 不再走 __getattr__ 委托到 _lifecycle_mgr.state
+            #   如果 _lifecycle_mgr.state 被其他代码修改，p.__dict__._state 不会自动更新
+            #   导致状态不一致: p.__dict__._state != _lifecycle_mgr.state
+            # 修复: 删除 p.__dict__ 中的 _state 遮蔽，让 getattr(p, '_state') 始终走 __getattr__ 委托
+            if '_state' in p.__dict__:
+                del p.__dict__['_state']
             # FIX-20260709-PAUSE-ROOT-V2: 四元状态原子同步
             # 根因: transition_to()只更新_state和_is_running，不更新_is_paused/_is_trading
             # 导致任何通过transition_to()转换状态的代码路径(如DEGRADED→RUNNING恢复)都可能出现四元状态不一致
@@ -244,12 +251,13 @@ class LifecycleService:
             else:
                 _new_running, _new_paused, _new_trading = None, None, None
             if _new_running is not None:
-                p._is_running = _new_running
-                p._is_paused = _new_paused
-                p._is_trading = _new_trading
                 if _lm is not None:
                     _lm.is_running = _new_running
                     _lm.is_paused = _new_paused
+                # FIX-20260715-STATE-SHADOW: 同上，删除 p.__dict__ 中的遮蔽属性
+                for _attr in ('_is_running', '_is_paused', '_is_trading'):
+                    if _attr in p.__dict__:
+                        del p.__dict__[_attr]
             # FIX: 同步 _state 到 _state_store，否则状态报告(tick_processing_service.output_periodic_summary)
             # 从 _state_store 读取 _state 时恒显示 initializing，导致"长期处于初始化状态"假象
             _ss = getattr(p, '_state_store', None)
@@ -426,7 +434,13 @@ class LifecycleService:
                 p._platform_subscribe_thread = None
             except (AttributeError,):
                 pass
-        # FIX-20260714-R6: _cancel_all_timers扩展停止W7/W8/W9/W11启动阶段daemon线程
+        # FIX-20260716-THREAD-V2: 恢复W7/W8/W9/W11停止循环
+        # 根因: FIX-20260716-THREAD-V1错误删除此循环，基于"W1-W5已注册到LifecycleResource"的假设，
+        #       但实测register_thread从未被调用，stop_managed_threads从未被调用，
+        #       导致_bulk_subscribe_thread等4个线程在on_stop后仍然存活（线程泄漏）。
+        # 修复: 恢复停止循环，由_cancel_all_timers统一停止所有托管线程（方法唯一原则）。
+        #       lifecycle_callbacks.on_stop中的降级循环和_platform_subscribe_thread清理
+        #       已删除（与本处重复，违反方法唯一原则）。
         for _thread_attr, _stop_attr, _thread_desc in [
             ('_bulk_subscribe_thread', '_bulk_subscribe_stop', 'db-subscribe'),
             ('_subscribe_retry_thread', '_subscribe_retry_stop', 'subscribe-retry'),
@@ -444,7 +458,7 @@ class LifecycleService:
                         setattr(p, _thread_attr, None)
                     except (AttributeError,):
                         pass
-            except (ValueError, KeyError, TypeError, AttributeError):
+            except Exception:  # FIX-X R11-REG-03: 扩大异常捕获，防止OSError跳过后续线程停止
                 pass
 
     def _log_resource_ownership_table(self, phase='unknown'):

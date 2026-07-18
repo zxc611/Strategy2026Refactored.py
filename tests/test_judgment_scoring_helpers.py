@@ -109,7 +109,7 @@ class TestRunEcosystemIntegrations:
         try:
             result = jsh.run_ecosystem_integrations(
                 engine,
-                strategy_id="s1", strategy_type="high_freq", symbol="TEST", backtest_period="2024",
+                strategy_id="s1", strategy_type="s1_hft", symbol="TEST", backtest_period="2024",
                 diagnosis_report=None, resonance_accuracy=0.8, snapshot_statistics={},
                 extreme_survival_result=None, cross_instrument_results=None,
                 profitability_metrics=None, parameter_stability_result=None,

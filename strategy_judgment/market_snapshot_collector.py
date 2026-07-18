@@ -40,7 +40,7 @@ import numpy as np
 logger = get_logger(__name__)  # R9-5
 
 # ── 21策略标识体系：7主策略 × 3变体(master/shadow_a/shadow_b) ──
-SEVEN_STRATEGY_KEYS = ["high_freq", "resonance", "box", "spring", "arbitrage", "market_making", "divergence"]
+SEVEN_STRATEGY_KEYS = ["s1_hft", "s2_resonance", "s3_box", "s4_spring", "s5_arbitrage", "s6_market_making", "s7_divergence"]
 SIX_STRATEGY_KEYS = SEVEN_STRATEGY_KEYS  # 向后兼容别名
 THREE_VARIANTS = ["master", "shadow_a", "shadow_b"]
 
@@ -51,13 +51,13 @@ ALL_18_STRATEGY_IDS = ALL_21_STRATEGY_IDS  # 向后兼容别名
 
 STRATEGY_ID_TO_TYPE = {sid: sid.rsplit("_", 1)[0] if "_" in sid else sid for sid in ALL_21_STRATEGY_IDS}
 _STRATEGY_KEY_MAP = {
-    "high_freq": "high_freq",
-    "resonance": "resonance",
-    "box": "box",
-    "spring": "spring",
-    "arbitrage": "arbitrage",
-    "market_making": "market_making",
-    "divergence": "divergence",
+    "s1_hft": "s1_hft",
+    "s2_resonance": "s2_resonance",
+    "s3_box": "s3_box",
+    "s4_spring": "s4_spring",
+    "s5_arbitrage": "s5_arbitrage",
+    "s6_market_making": "s6_market_making",
+    "s7_divergence": "s7_divergence",
 }
 
 def _parse_strategy_id(strategy_id: str) -> Tuple[str, str]:

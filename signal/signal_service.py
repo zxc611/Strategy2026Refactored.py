@@ -122,6 +122,8 @@ class SignalGenerator:
     #       _filter_by_s5_s6_monitor抛ImportError/AttributeError，进而触发fail-safe
     #       永久阻断所有信号，造成S1/S3的0订单。
     # 修复: 异常分支内部分层处理(见_filter_by_s5_s6_monitor)，避免使用_CRITICAL_FILTERS全局阻断
+    # FIX-JJ (R10-2-2): _CRITICAL_FILTERS保持空集合，逻辑已内联到generate_signal的except分支
+    # 此属性保留用于向后兼容(外部代码可能检查此属性)，但不再参与filter chain决策
     _CRITICAL_FILTERS: set = set()
 
     def __init__(self, signal_service: Any):
@@ -207,11 +209,15 @@ class SignalGenerator:
                 ctx.rejected = True
                 ctx.reject_reason = _reason
                 ctx.filter_name = 'mode_engine'
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.warning("[R22-EP-P1] ModeEngine过滤异常, fail-safe阻断: %s", e)
-            ctx.rejected = True
-            ctx.reject_reason = 'mode_engine_exception'
-            ctx.filter_name = 'mode_engine'
+        except Exception as e:
+            # FIX-CC R10-2-3: dry_run模式fail-open放行，非dry_run fail-safe阻断
+            if self._is_dry_run():
+                logging.warning("[R22-EP-P1] ModeEngine过滤异常, dry_run模式放行: %s", e)
+            else:
+                logging.warning("[R22-EP-P1] ModeEngine过滤异常, fail-safe阻断: %s", e)
+                ctx.rejected = True
+                ctx.reject_reason = 'mode_engine_exception'
+                ctx.filter_name = 'mode_engine'
         return ctx
 
     def _filter_by_cooldown(self, ctx: SignalContext) -> SignalContext:
@@ -351,14 +357,16 @@ class SignalGenerator:
                     ctx.rejected = True
                     ctx.reject_reason = ctx.decision_result.get('filter_reason', '')
                     ctx.filter_name = 'decision_score'
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, NameError) as e:
-                if not getattr(self._svc, '_dsf_warn_suppressed', False):
-                    logging.warning("[R22-EP-P1] decision_score_filter异常, fail-safe阻断: %s (后续同类异常静默)", e)
-                    self._svc._dsf_warn_suppressed = True
-                ctx.rejected = True
-                # FIX-P0-20: ctx.reject_name 拼写错误，应为 ctx.reject_reason
-                ctx.reject_reason = 'decision_score_exception'
-                ctx.filter_name = 'decision_score'
+            except Exception as e:  # FIX-CC R10-2-3: 扩大异常+dry_run fail-open
+                if self._is_dry_run():
+                    logging.warning("[R22-EP-P1] decision_score_filter异常, dry_run模式放行: %s", e)
+                else:
+                    if not getattr(self._svc, '_dsf_warn_suppressed', False):
+                        logging.warning("[R22-EP-P1] decision_score_filter异常, fail-safe阻断: %s (后续同类异常静默)", e)
+                        self._svc._dsf_warn_suppressed = True
+                    ctx.rejected = True
+                    ctx.reject_reason = 'decision_score_exception'
+                    ctx.filter_name = 'decision_score'
         else:
             try:
                 from risk.risk_service import get_risk_service
@@ -382,11 +390,14 @@ class SignalGenerator:
                     ctx.rejected = True
                     ctx.reject_reason = hft_result.get('reason', '')
                     ctx.filter_name = 'hft'
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                logging.warning("[R22-EP-P1] HFT过滤异常, fail-safe阻断: %s", e)
-                ctx.rejected = True
-                ctx.reject_reason = 'hft_exception'
-                ctx.filter_name = 'hft'
+            except Exception as e:  # FIX-CC R10-2-03
+                if self._is_dry_run():
+                    logging.warning("[R22-EP-P1] HFT过滤异常, dry_run模式放行: %s", e)
+                else:
+                    logging.warning("[R22-EP-P1] HFT过滤异常, fail-safe阻断: %s", e)
+                    ctx.rejected = True
+                    ctx.reject_reason = 'hft_exception'
+                    ctx.filter_name = 'hft'
         return ctx
 
     def _filter_by_adaptive(self, ctx: SignalContext) -> SignalContext:
@@ -403,11 +414,14 @@ class SignalGenerator:
                     ctx.filter_name = 'adaptive'
                 else:
                     self._svc._adaptive_threshold.record_signal(passed=True, pnl=0.0)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                logging.warning("[R22-EP-P1] AdaptiveThreshold异常, fail-safe阻断: %s", e)
-                ctx.rejected = True
-                ctx.reject_reason = 'adaptive_exception'
-                ctx.filter_name = 'adaptive'
+            except Exception as e:  # FIX-CC R10-2-03
+                if self._is_dry_run():
+                    logging.warning("[R22-EP-P1] AdaptiveThreshold异常, dry_run模式放行: %s", e)
+                else:
+                    logging.warning("[R22-EP-P1] AdaptiveThreshold异常, fail-safe阻断: %s", e)
+                    ctx.rejected = True
+                    ctx.reject_reason = 'adaptive_exception'
+                    ctx.filter_name = 'adaptive'
         return ctx
 
     def _create_signal_record(self, ctx: SignalContext) -> SignalContext:

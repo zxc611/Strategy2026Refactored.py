@@ -44,9 +44,15 @@ class OrderService(BaseService):
 
     def __init__(self, event_bus=None, params=None):
 
-        super().__init__(event_bus); init_order_service_attrs(self, params)
+        super().__init__(); init_order_service_attrs(self, params)
 
         self._query_service = OrderQueryService(self)
+
+        # [P5-V2.0重构] OrderExecutor 单例 — 决策点 4 (用户已确认)
+        # 消除每次 send_order 都新建 OrderExecutor 的开销
+        # backend 路由: _backtest_mode > _dry_run_mode > live
+        from order.order_executor import OrderExecutor
+        self._executor = OrderExecutor(self)
 
     _PLATFORM_IDEMPOTENCY_FIELDS = ('client_order_id', 'request_id', 'order_id')
 
@@ -122,9 +128,10 @@ class OrderService(BaseService):
 
                    ref_price: float = 0.0) -> OrderResult:
 
-        from order.order_executor import OrderExecutor, OrderContext
+        # [P5-V2.0重构] 复用 _executor 单例 — 签名不变 (零API破坏)
+        from order.order_executor import OrderContext
 
-        return OrderExecutor(self).execute(OrderContext(
+        return self._executor.execute(OrderContext(
 
             instrument_id=instrument_id, volume=volume, price=price, direction=direction, action=action,
 
@@ -140,9 +147,8 @@ class OrderService(BaseService):
 
                          signal_strength=1.0, bids=None, asks=None, open_reason='', signal_id=''):
 
-        from order.order_executor import OrderExecutor
-
-        return OrderExecutor(self).send_order_split(instrument_id=instrument_id, volume=volume, price=price,
+        # [P5-V2.0重构] 复用 _executor 单例
+        return self._executor.send_order_split(instrument_id=instrument_id, volume=volume, price=price,
 
             direction=direction, action=action, exchange=exchange, signal_strength=signal_strength, bids=bids, asks=asks, open_reason=open_reason, signal_id=signal_id)
 
@@ -200,39 +206,107 @@ class OrderService(BaseService):
 
     def _plan_volume_split(self, volume, price, direction, bids, asks, signal_strength=1.0):
 
-        from order.order_executor import OrderExecutor
-
-        return OrderExecutor(self)._plan_volume_split(volume=volume, price=price, direction=direction, bids=bids, asks=asks, signal_strength=signal_strength)
+        # [P5-V2.0重构] 复用 _executor 单例
+        return self._executor._plan_volume_split(volume=volume, price=price, direction=direction, bids=bids, asks=asks, signal_strength=signal_strength)
 
     def execute_by_ranking(self, targets, direction='BUY', action='OPEN'):
 
-        from order.order_executor import OrderExecutor
-
-        return OrderExecutor(self).execute_by_ranking(targets, direction=direction, action=action)
+        # [P5-V2.0重构] 复用 _executor 单例
+        return self._executor.execute_by_ranking(targets, direction=direction, action=action)
 
     def bind_platform_apis(self, insert_order_func, cancel_order_func):
 
-        from order.order_executor import OrderExecutor
-
-        return OrderExecutor(self).bind_platform_apis(insert_order_func, cancel_order_func)
+        # [P5-V2.0重构] 直接委托 backend (决策点: 5个迂回委托改为直接backend调用)
+        # 仅 LiveExecutionBackend 支持 bind_platform_apis
+        _backend = self._executor._backend
+        if hasattr(_backend, 'bind_platform_apis'):
+            return _backend.bind_platform_apis(insert_order_func, cancel_order_func)
+        # 非 LiveBackend 时无操作 (回测/dry_run 不需要平台 API)
+        logging.info("[OrderService] 当前 backend=%s 无需 bind_platform_apis",
+                     type(_backend).__name__)
 
     def _build_platform_insert_params(self, *, order_id, instrument_id, exchange, volume, price, direction, action):
 
-        from order.order_executor import OrderExecutor
-
-        return OrderExecutor(self)._build_platform_insert_params(order_id=order_id, instrument_id=instrument_id, exchange=exchange, volume=volume, price=price, direction=direction, action=action)
+        # [P5-V2.0重构] 直接委托 backend
+        _backend = self._executor._backend
+        if hasattr(_backend, 'build_params'):
+            return _backend.build_params(order_id=order_id, instrument_id=instrument_id, exchange=exchange, volume=volume, price=price, direction=direction, action=action)
+        raise NotImplementedError(f"backend {type(_backend).__name__} 不支持 build_params")
 
     def _invoke_platform_insert_with_timeout(self, filtered_params):
 
-        from order.order_executor import OrderExecutor
-
-        return OrderExecutor(self)._invoke_platform_insert_with_timeout(filtered_params)
+        # [P5-V2.0重构] 直接委托 backend
+        _backend = self._executor._backend
+        if hasattr(_backend, 'invoke_insert'):
+            return _backend.invoke_insert(filtered_params)
+        raise NotImplementedError(f"backend {type(_backend).__name__} 不支持 invoke_insert")
 
     def _invoke_platform_cancel_with_timeout(self, platform_id):
 
-        from order.order_executor import OrderExecutor
+        # [P5-V2.0重构] 直接委托 backend
+        _backend = self._executor._backend
+        if hasattr(_backend, 'invoke_cancel'):
+            return _backend.invoke_cancel(platform_id)
+        raise NotImplementedError(f"backend {type(_backend).__name__} 不支持 invoke_cancel")
 
-        return OrderExecutor(self)._invoke_platform_cancel_with_timeout(platform_id)
+    # ==================================================================
+    # [P5-V2.0重构] 回测模式生命周期管理 — 决策点 5 (用户已确认)
+    # enter_backtest_mode / exit_backtest_mode 上下文管理
+    # ==================================================================
+
+    def enter_backtest_mode(self, backtest_context, backtest_fidelity=None):
+        """进入回测模式 — 与 _dry_run_mode 互斥
+
+        Args:
+            backtest_context: BacktestContext 协议实现 (BacktestStateAdapter)
+            backtest_fidelity: BacktestFidelity 协议实现 (BacktestFidelityAdapter)
+                [FIX-EXEC-V2-P2-1] 完整依赖倒置: BacktestExecutionBackend
+                不再直接 import param_pool.* 的保真度函数,通过协议调用
+                若为 None,则内部尝试构造默认 BacktestFidelityAdapter
+                (失败时降级为 None,Backend 在 _fid is None 时返回 fail)
+        """
+        if getattr(self, '_dry_run_mode', False):
+            logging.warning("[OrderService] 进入回测模式，清除 _dry_run_mode")
+            self._dry_run_mode = False
+        self._backtest_mode = True
+        self._backtest_context = backtest_context
+        # [FIX-EXEC-V2-P2-1] 注入 BacktestFidelity (完整依赖倒置)
+        _fidelity = backtest_fidelity
+        if _fidelity is None:
+            try:
+                from param_pool.backtest.backtest_fidelity_adapter import BacktestFidelityAdapter
+                _fidelity = BacktestFidelityAdapter()
+            except Exception as e:
+                # 实时回调路径硬约束: except Exception (HC-4 / EXEC-V2-REFACTOR)
+                logging.warning(
+                    "[OrderService] BacktestFidelityAdapter 构造失败,降级 None "
+                    "(回测下单将返回 no_fidelity 失败): %s", e
+                )
+                _fidelity = None
+        self._backtest_fidelity = _fidelity
+        # 重建 executor 使用 BacktestExecutionBackend
+        from order.order_executor import OrderExecutor
+        from order.backends.backtest_backend import BacktestExecutionBackend
+        self._executor = OrderExecutor(
+            self, backend=BacktestExecutionBackend(
+                context=backtest_context, fidelity=_fidelity
+            )
+        )
+        logging.info(
+            "[OrderService] 已进入回测模式 (BacktestExecutionBackend, fidelity=%s)",
+            type(_fidelity).__name__ if _fidelity is not None else 'None'
+        )
+
+    def exit_backtest_mode(self):
+        """退出回测模式 — 恢复默认 backend"""
+        self._backtest_mode = False
+        self._backtest_context = None
+        self._backtest_fidelity = None  # [FIX-EXEC-V2-P2-1] 清理 fidelity 引用
+        # 重新解析默认 backend (会根据 _dry_run_mode 自动选择)
+        from order.order_executor import OrderExecutor
+        self._executor = OrderExecutor(self)
+        logging.info("[OrderService] 已退出回测模式，恢复默认 backend=%s",
+                     type(self._executor._backend).__name__)
 
     # ── 委托给OrderStateManager ──
 

@@ -1,0 +1,881 @@
+"""
+strategy_scheduler.py - 策略定时任务管理
+
+职责：
+1. APScheduler初始化和管理
+2. 定时任务注册（期权诊断、缓存刷写）
+3. 调度器生命周期管理
+
+P1-05: 事件/回调统一到EventBus
+==============================
+APScheduler回调与EventBus事件是两套并行机制。
+在关键job回调中添加EventBus事件发布（不替换原有回调，仅补充）。
+后续应逐步将回调消费者迁移到EventBus订阅模式。
+
+已添加EventBus发布的job:
+- option_trading_cycle -> scheduler.trading_cycle
+- position_risk_check -> scheduler.risk_check
+- check_pending_orders -> scheduler.pending_order_check
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from datetime import datetime
+from typing import Any, Callable, Optional
+
+from infra.shared_utils import CHINA_TZ as _CHINA_TZ  # P2-13: 统一CHINA_TZ
+
+
+class StrategyScheduler:
+    """策略调度器管理器
+    
+    封装APScheduler的初始化和定时任务注册逻辑，
+    从StrategyCoreService中解耦出来。
+
+    职责边界：APScheduler策略定时任务调度，与infra/SchedulerService(通用定时任务)分工。
+    本类负责策略业务调度(交易循环/持仓风控/期权诊断/缓存刷写)，SchedulerService负责通用任务调度(超时/重试/优先级)。
+    """
+    
+    DEFAULT_TRADING_INTERVAL_SEC = 30
+    DEFAULT_POSITION_CHECK_INTERVAL_SEC = 5
+    DEFAULT_PENDING_ORDER_INTERVAL_SEC = 3
+    DEFAULT_DIAGNOSTIC_INTERVAL_MIN = 3
+    DEFAULT_DIAGNOSTIC_INTERVAL_SEC = 30
+    
+    def __init__(self):
+        self._scheduler = None
+        self._state_checker: Optional[Callable[[], bool]] = None
+        self._job_owners: dict[str, dict[str, Any]] = {}  # ✅ P0-3: job -> owner 映射  # R17-P2-DOC-03
+        self._job_owners_lock = threading.Lock()  # P0-3: _job_owners 线程安全保护
+        self._delegated_jobs: dict[str, str] = {}  # P1-08修复: 委托到SchedulerService的job映射
+    
+    @property
+    def scheduler(self):
+        """获取调度器实例"""
+        return self._scheduler
+
+    def bind_state_checker(self, state_checker: Optional[Callable[[], bool]]) -> None:
+        """绑定策略状态检查器，用于暂停/停止时短路后台定时任务。"""
+        self._state_checker = state_checker
+
+    def _can_run_jobs(self) -> bool:
+        """统一判定当前是否允许执行策略相关定时任务。"""
+        if not callable(self._state_checker):
+            return True
+
+        try:
+            result = bool(self._state_checker())
+            if not result:
+                logging.debug("[StrategyScheduler][owner_scope=strategy] Jobs blocked by state_checker")
+            return result
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+            logging.debug("[StrategyScheduler][owner_scope=strategy] State checker failed: %s", exc)
+            return False
+    
+    # P1-05: EventBus事件发布辅助方法（延迟导入避免循环依赖）
+    def _publish_scheduler_event(self, event_name: str, data: dict = None) -> None:
+        """在关键job回调中发布EventBus事件，补充APScheduler回调机制。
+        TODO(P1-05): 后续应逐步将回调消费者迁移到EventBus订阅模式。
+        """
+        try:
+            from infra.event_bus import EventBus
+            event_bus = EventBus.get_instance()
+            event_bus.publish(f"scheduler.{event_name}", data or {})
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.debug("[StrategyScheduler] EventBus publish failed for %s: %s", event_name, e)
+    
+    def initialize(self) -> None:
+        """初始化调度器（APScheduler为必需依赖，带有限重试）"""
+        max_retries = 3
+        retry_delay = 5.0  # 秒
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                from apscheduler.schedulers.background import BackgroundScheduler
+                self._scheduler = BackgroundScheduler()
+                self._scheduler.start()
+                logging.info(f"[StrategyScheduler] APScheduler initialized (attempt {attempt})")
+                return  # 成功则返回
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+                # ✅ 统一异常处理：ImportError和运行时异常采用相同重试策略
+                if attempt < max_retries:
+                    logging.warning(
+                        f"[StrategyScheduler] APScheduler init failed (attempt {attempt}/{max_retries}): {type(e).__name__}: {e}"
+                    )
+                    logging.info(f"[StrategyScheduler] Retrying in {retry_delay}s...")
+                    import time
+                    time.sleep(retry_delay)  # R23-P2-14标记: P2级调度等待
+                else:
+                    # 重试耗尽，抛出异常由上层处理
+                    if isinstance(e, ImportError):
+                        error_msg = (
+                            "APScheduler is required but not installed.\n"
+                            "Please install: pip install apscheduler>=3.10.0\n"
+                            "Or use: pip install -r requirements.txt"
+                        )
+                    else:
+                        error_msg = (
+                            f"APScheduler initialization failed after {max_retries} attempts.\n"
+                            f"Last error: {type(e).__name__}: {e}\n"
+                            "This may indicate a system resource issue or APScheduler configuration problem.\n"
+                            "Please check system logs and consider restarting the platform."
+                        )
+                    logging.critical(f"[StrategyScheduler] {error_msg}")
+                    raise RuntimeError(error_msg) from e
+    
+    def shutdown(self, wait: bool = True, wait_for_zero: bool = False, zero_timeout: float = 10.0) -> None:
+        """停止调度器
+        
+        ✅ P0-2: 两阶段停止 - 先冻结新任务，再等待归零，最后shutdown  # R17-P2-DOC-03
+        
+        Args:
+            wait: True=等待运行中任务完成(可能阻塞); False=立即断开调度器,再限时join
+            wait_for_zero: True=等待job归零后再shutdown
+            zero_timeout: 等待job归零的超时时间（秒）
+        """
+        if not self._scheduler:
+            return
+        
+        try:
+            # ✅ P0-2: Phase 1 - 冻结新任务  # R17-P2-DOC-03
+            if wait_for_zero and hasattr(self._scheduler, 'pause'):
+                self._scheduler.pause()
+                logging.info("[StrategyScheduler] Phase 1: Scheduler paused (no new jobs)")
+            
+            # ✅ P0-2: Phase 2 - 等待job归零
+            if wait_for_zero:
+                zero_result = self.wait_for_jobs_zero(timeout=zero_timeout)
+                if not zero_result:
+                    logging.warning(
+                        "[StrategyScheduler] ⚠️ Jobs not zero after %.1fs, proceeding with shutdown anyway",
+                        zero_timeout
+                    )
+            
+            # Phase 3 - shutdown
+            self._scheduler.shutdown(wait=wait)
+            if not wait:
+                import threading
+                for t in threading.enumerate():
+                    if t.name and 'APScheduler' in t.name and t.is_alive():
+                        t.join(timeout=3.0)
+            
+            logging.info("[StrategyScheduler] Shutdown complete")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.error(f"[StrategyScheduler] Shutdown error: {e}")
+    
+    def pause_scheduler(self) -> bool:
+        """冻结调度器（不停止运行中任务，但拒绝新任务）
+        
+        ✅ P0-2: Phase 1 of two-phase stop
+        
+        Returns:
+            bool: 是否成功冻结
+        """
+        if not self._scheduler:
+            return True
+        
+        try:
+            if hasattr(self._scheduler, 'pause'):
+                self._scheduler.pause()
+                logging.info("[StrategyScheduler] Scheduler paused (no new jobs will run)")
+                return True
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler] pause_scheduler error: {e}")
+            return False
+        return True
+
+    def resume_scheduler(self) -> bool:
+        """恢复调度器（从暂停状态恢复，允许任务继续执行）
+        
+        FIX-20260711-PAUSE-ACTION: 对称于pause_scheduler()，恢复时解冻调度器
+        
+        Returns:
+            bool: 是否成功恢复
+        """
+        if not self._scheduler:
+            return True
+        
+        try:
+            if hasattr(self._scheduler, 'resume'):
+                self._scheduler.resume()
+                logging.info("[StrategyScheduler] Scheduler resumed (jobs will run again)")
+                return True
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler] resume_scheduler error: {e}")
+            return False
+        return True
+
+    def ensure_trading_jobs(self) -> None:
+        """确保交易定时任务已注册（恢复时调用）
+        
+        FIX-20260711-PAUSE-ACTION: 暂停时scheduler被冻结可能导致job丢失，
+        恢复时检查并重新注册关键交易定时任务。
+        注意: 本类无provider引用，仅检查job数量；实际重新注册由LifecycleCallbacks.resume()完成。
+        """
+        try:
+            job_count = len(self._scheduler.get_jobs()) if self._scheduler else 0
+            logging.info("[StrategyScheduler] ensure_trading_jobs: 当前%d个定时任务", job_count)
+            return job_count
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.warning("[StrategyScheduler] ensure_trading_jobs error: %s", e)
+            return 0
+    
+    def get_running_job_count(self) -> int:
+        if not self._scheduler:
+            return 0
+        
+        try:
+            running_count = 0
+            if hasattr(self._scheduler, '_executors'):
+                for executor in self._scheduler._executors.values():
+                    if hasattr(executor, '_instances'):
+                        running_count += len(executor._instances)
+            return running_count
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.debug(f"[StrategyScheduler] get_running_job_count error: {e}")
+            return 0
+    
+    def get_registered_job_count(self) -> int:
+        if not self._scheduler:
+            return 0
+        try:
+            return len(self._scheduler.get_jobs())
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.debug(f"[StrategyScheduler] get_registered_job_count error: {e}")
+            return 0
+    
+    def wait_for_jobs_zero(self, timeout: float = 10.0) -> bool:
+        if not self._scheduler:
+            return True
+        
+        import time
+        
+        start_time = time.monotonic()
+        check_interval = 0.5
+        
+        while time.monotonic() - start_time < timeout:
+            running_count = self.get_running_job_count()
+            registered_count = self.get_registered_job_count()
+            
+            if running_count == 0 and registered_count == 0:
+                logging.info(
+                    "[StrategyScheduler] All jobs zero confirmed (running=%d, registered=%d) after %.1fs",
+                    running_count, registered_count, time.monotonic() - start_time
+                )
+                return True
+            
+            # running_count==0 即视为安全：已无job在执行，registered残留是APScheduler内部引用
+            # remove_jobs_by_owner已从_job_owners移除，scheduler.get_jobs()可能返回陈旧引用
+            if running_count == 0 and registered_count > 0:
+                # 等待额外1秒确认running确实为0（避免竞态）
+                time.sleep(1.0)  # R23-P2-14标记: P2级调度等待
+                recheck_running = self.get_running_job_count()
+                if recheck_running == 0:
+                    logging.info(
+                        "[StrategyScheduler] Jobs safe to stop: running=0, registered=%d (stale refs) after %.1fs",
+                        registered_count, time.monotonic() - start_time
+                    )
+                    return True
+            
+            logging.debug(
+                "[StrategyScheduler] Waiting for jobs to zero: %d running, %d registered, %.1fs elapsed",
+                running_count, registered_count, time.monotonic() - start_time
+            )
+            time.sleep(check_interval)  # R23-P2-14标记: P2级调度等待
+        
+        final_running = self.get_running_job_count()
+        final_registered = self.get_registered_job_count()
+        logging.warning(
+            "[StrategyScheduler] Jobs not zero after %.1fs: %d running, %d registered",
+            timeout, final_running, final_registered
+        )
+        return False
+    
+    # ========================================================================
+    # ✅ P0-3: 统一 job 注册包装器（带 owner metadata）  # R17-P2-DOC-03
+    # ========================================================================
+    
+    def add_job_with_owner(
+        self,
+        func: Callable,
+        trigger: str,
+        job_id: str,
+        strategy_id: str,
+        run_id: Optional[str] = None,
+        owner_scope: str = "strategy",
+        **trigger_args
+    ) -> None:
+        """
+        统一的 job 注册方法，自动绑定 owner metadata
+        
+        Args:
+            func: 要执行的函数
+            trigger: 触发器类型 ('interval', 'cron', 'date')
+            job_id: job ID
+            strategy_id: 策略ID（owner标识）
+            run_id: 运行ID（用于追踪）
+            owner_scope: owner范围 ('strategy', 'global', 'shared')
+            **trigger_args: 触发器参数 (seconds, minutes, hour等)
+        """
+        # P1-08修复: 优先委托到SchedulerService统一调度引擎
+        if self._try_delegate_to_scheduler_service(func, trigger, job_id, **trigger_args):
+            with self._job_owners_lock:
+                self._job_owners[job_id] = {
+                    'strategy_id': strategy_id,
+                    'run_id': run_id,
+                    'owner_scope': owner_scope,
+                    'func_name': getattr(func, '__name__', str(func)),
+                    'delegated_to': 'SchedulerService',
+                }
+                self._delegated_jobs[job_id] = 'SchedulerService'
+            logging.debug(
+                f"[StrategyScheduler] Job delegated to SchedulerService: {job_id} "
+                f"(owner={strategy_id}, scope={owner_scope})"
+            )
+            return
+
+        if not self._scheduler:
+            logging.warning("[StrategyScheduler.add_job_with_owner] Scheduler not initialized")
+            return
+        
+        try:
+            # 注册 job
+            # FIX-20260712-P0: 添加max_instances=3，防止APScheduler默认max_instances=1
+            # 导致任务执行超时被跳过("maximum number of running instances reached (1)")
+            # 影响: position_risk_check(5s间隔)和trading_cycle(30s间隔)在执行>5s时被跳过
+            self._scheduler.add_job(
+                func,
+                trigger,
+                id=job_id,
+                replace_existing=True,
+                max_instances=3,
+                **trigger_args
+            )
+            
+            # 记录 owner metadata（线程安全）
+            with self._job_owners_lock:
+                self._job_owners[job_id] = {
+                    'strategy_id': strategy_id,
+                    'run_id': run_id,
+                    'owner_scope': owner_scope,
+                    'func_name': getattr(func, '__name__', str(func))
+                }
+            
+            logging.debug(
+                f"[StrategyScheduler] Job registered: {job_id} "
+                f"(owner={strategy_id}, scope={owner_scope})"
+            )
+            
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler.add_job_with_owner] Failed to register job {job_id}: {e}")
+
+    def _try_delegate_to_scheduler_service(self, func: Callable, trigger: str,
+                                            job_id: str, **trigger_args) -> bool:
+        """P1-08/P1-43修复: 尝试委托到SchedulerService统一调度引擎。返回True表示委托成功。"""
+        try:
+            from infra.service_container import ServiceContainer
+            _sc = ServiceContainer()
+            if _sc is not None:
+                _svc = _sc.get('SchedulerService') if hasattr(_sc, 'get') else None
+                if _svc is not None and hasattr(_svc, 'add_job'):
+                    if trigger == 'interval':
+                        # P1-43修复: 支持seconds/minutes/hours参数自动转换为秒
+                        interval_sec = trigger_args.get('seconds', 0)
+                        if 'minutes' in trigger_args:
+                            interval_sec = trigger_args['minutes'] * 60
+                        elif 'hours' in trigger_args:
+                            interval_sec = trigger_args['hours'] * 3600
+                        if interval_sec > 0:
+                            _svc.add_job(func, interval=interval_sec, job_id=job_id)
+                            return True
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.debug("[P1-08] StrategyScheduler委托SchedulerService失败(回退到APScheduler): %s", e)
+        return False
+    
+    def remove_jobs_by_owner(self, strategy_id: str) -> int:
+        """
+        根据 owner 移除所有相关 job
+
+        Args:
+            strategy_id: 策略ID
+
+        Returns:
+            移除的 job 数量
+        """
+        if not self._scheduler:
+            return 0
+
+        removed_count = 0
+        with self._job_owners_lock:
+            jobs_to_remove = [
+                job_id for job_id, meta in self._job_owners.items()
+                if meta.get('strategy_id') == strategy_id
+            ]
+            for job_id in jobs_to_remove:
+                try:
+                    self._scheduler.remove_job(job_id)
+                    self._job_owners.pop(job_id, None)
+                    removed_count += 1
+                    logging.debug(f"[StrategyScheduler] Removed job: {job_id} (owner={strategy_id})")
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    logging.warning(f"[StrategyScheduler] Failed to remove job {job_id}: {e}")
+
+            # P1-43修复: 清理已委托到SchedulerService的job
+            delegated_to_remove = [
+                jid for jid, meta in self._delegated_jobs.items()
+                if meta.get('strategy_id') == strategy_id
+            ]
+            for jid in delegated_to_remove:
+                try:
+                    from infra.service_container import ServiceContainer
+                    _sc = ServiceContainer()
+                    _svc = _sc.get('SchedulerService') if hasattr(_sc, 'get') else None
+                    if _svc is not None and hasattr(_svc, 'cancel_job'):
+                        _svc.cancel_job(jid)
+                    self._delegated_jobs.pop(jid, None)
+                    removed_count += 1
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+                    logging.debug("[P1-43] 清理委托job失败(非致命): %s", e)
+
+        logging.info(
+            f"[StrategyScheduler] Removed {removed_count} jobs for strategy {strategy_id}"
+        )
+        return removed_count
+    
+    def get_jobs_by_owner(self, strategy_id: str) -> list[dict[str, Any]]:
+        """
+        查询指定 owner 的所有 job
+        
+        Args:
+            strategy_id: 策略ID
+            
+        Returns:
+            job 信息列表
+        """
+        with self._job_owners_lock:
+            return [
+                {'job_id': job_id, **meta}
+                for job_id, meta in self._job_owners.items()
+                if meta.get('strategy_id') == strategy_id
+            ]
+    
+    def verify_jobs_removed(self, strategy_id: str) -> bool:
+        """
+        验证指定 owner 的所有 job 是否已移除
+        
+        Args:
+            strategy_id: 策略ID
+            
+        Returns:
+            True=已全部移除, False=仍有残留
+        """
+        remaining = self.get_jobs_by_owner(strategy_id)
+        if remaining:
+            logging.warning(
+                f"[StrategyScheduler] ⚠️ {len(remaining)} jobs still exist for strategy {strategy_id}: "
+                f"{[j['job_id'] for j in remaining]}"
+            )
+            return False
+        return True
+    
+    def register_trading_jobs(
+        self,
+        strategy_id: str,
+        run_id: Optional[str],
+        execute_option_trading_cycle: Callable,
+        check_position_risk: Callable,
+        order_service: Any,
+        trading_interval_sec: Optional[int] = None,
+    ) -> None:
+        """
+        注册交易定时任务（封装 P0-3 owner metadata）
+
+        Args:
+            strategy_id: 策略ID
+            run_id: 运行ID
+            execute_option_trading_cycle: 期权交易周期函数
+            check_position_risk: 持仓风控函数
+            order_service: 订单服务对象
+            trading_interval_sec: 交易周期间隔（秒），None=从SORTER_CONFIG按K线倍数换算
+        """
+        # v2.8: 从SORTER_CONFIG读取K线倍数参数，换算为秒数
+        _interval = trading_interval_sec
+        if _interval is None:
+            try:
+                from config.tvf_param_loader import SORTER_CONFIG, kline_bars_to_seconds
+                _bars = SORTER_CONFIG.get('sort_trigger_bars', 1)
+                _kline_style = SORTER_CONFIG.get('kline_style', 'M1')
+                _interval = kline_bars_to_seconds(_bars, _kline_style)
+            except ImportError:
+                _interval = self.DEFAULT_TRADING_INTERVAL_SEC
+        _interval = max(5, min(86400, int(_interval)))  # 安全边界: 5s~86400s(1天)
+        try:
+            # P0-3修复：job_id 加入 strategy_id 前缀，避免多实例场景下互相覆盖
+            # 注册 3 个核心交易 job
+            
+            # P1-05: 包装交易循环job，补充EventBus事件发布
+            _orig_trading_cycle = execute_option_trading_cycle
+            def _trading_loop_job_with_event():
+                # FIX-P0-23: 原代码绕过_can_run_jobs()状态检查，与其他job不一致
+                # 对比_virtual_pos_eod_job(line 528)等job均有此检查
+                # 影响: 策略暂停/停止时交易周期仍继续执行
+                try:
+                    if not self._can_run_jobs():
+                        return
+                    # FIX-MARKET-CLOSE: 收盘后交易周期必须停止
+                    # 根因: option_trading_cycle(60s)定时器在15:00后继续执行，
+                    # 使用缓存中的旧tick数据生成DIVERGENCE_REVERSAL等信号并下单。
+                    # MarketTimeService已正确配置6交易所收盘时间(全部15:00)，
+                    # 但trading_cycle未调用is_market_open()进行门控。
+                    # 修复: 添加is_market_open()检查，收盘后跳过信号生成和下单。
+                    try:
+                        from infra.scheduler_service import is_market_open
+                        if not is_market_open():
+                            _closed_skip_count = getattr(self, '_market_closed_skip_count', 0) + 1
+                            self._market_closed_skip_count = _closed_skip_count
+                            if _closed_skip_count <= 3 or _closed_skip_count % 60 == 1:
+                                logging.info("[FIX-MARKET-CLOSE] 交易周期跳过: 市场已收盘(累计跳过%d次)", _closed_skip_count)
+                            return
+                    except (ImportError, AttributeError, TypeError):
+                        pass  # MarketTimeService不可用时降级继续执行
+                    _orig_trading_cycle()
+                finally:
+                    self._publish_scheduler_event('trading_cycle', {
+                        'strategy_id': strategy_id, 'run_id': run_id,
+                    })
+            
+            self.add_job_with_owner(
+                func=_trading_loop_job_with_event,
+                trigger='interval',
+                job_id=f'{strategy_id}_option_trading_cycle',
+                strategy_id=strategy_id,
+                run_id=run_id,
+                owner_scope='strategy',
+                seconds=_interval
+            )
+            
+            # P1-05: 包装风控检查job，补充EventBus事件发布
+            _orig_risk_check = check_position_risk
+            def _risk_check_job_with_event():
+                # FIX-20260712-P0: 移除_can_run_jobs()检查 — 持仓风控必须在暂停/停止时继续执行
+                # 根因: _can_run_jobs()在_is_paused=True或_is_running=False时返回False，
+                # 导致check_position_risk被跳过，持仓无人看管(止盈止损/时间止损全部失效)。
+                # 7/10夜盘high_freq持仓370min未触发1min硬止损的根因。
+                # strategy_monitoring_layer.py已移除_is_running检查，此处调度层也必须保持一致。
+                # 仅检查_destroyed防止策略销毁后仍执行。
+                try:
+                    if getattr(self, '_destroyed', False):
+                        return
+                    # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，风控/止损/平仓均无法执行
+                    # 根因: 交易所收盘后通道关闭，任何订单都无法提交，风控发现风险也无法平仓，
+                    # 止损平仓也无法执行。运行风控检查毫无意义，反而浪费资源。
+                    # 夜盘(21:00-02:30)is_market_open()=True，风控正常执行。
+                    try:
+                        from infra.scheduler_service import is_market_open
+                        if not is_market_open():
+                            return
+                    except (ImportError, AttributeError, TypeError):
+                        pass
+                    _orig_risk_check()
+                finally:
+                    self._publish_scheduler_event('risk_check', {
+                        'strategy_id': strategy_id, 'run_id': run_id,
+                    })
+            
+            self.add_job_with_owner(
+                func=_risk_check_job_with_event,
+                trigger='interval',
+                job_id=f'{strategy_id}_position_risk_check',
+                strategy_id=strategy_id,
+                run_id=run_id,
+                owner_scope='strategy',
+                seconds=self.DEFAULT_POSITION_CHECK_INTERVAL_SEC
+            )
+            
+            # P1-05: 包装挂单检查job，补充EventBus事件发布
+            if order_service and hasattr(order_service, 'check_pending_orders'):
+                _orig_pending_check = order_service.check_pending_orders
+                def _pending_order_job_with_event():
+                    # FIX-P0-23: 与trading_cycle job保持一致，添加_can_run_jobs()检查
+                    try:
+                        if not self._can_run_jobs():
+                            return
+                        # FIX-MARKET-CLOSE: 收盘后挂单检查也应停止
+                        # 根因: 与option_trading_cycle同理，15:00后不应再检查/重挂订单
+                        try:
+                            from infra.scheduler_service import is_market_open
+                            if not is_market_open():
+                                return
+                        except (ImportError, AttributeError, TypeError):
+                            pass
+                        _orig_pending_check()
+                    finally:
+                        self._publish_scheduler_event('pending_order_check', {
+                            'strategy_id': strategy_id, 'run_id': run_id,
+                        })
+                self.add_job_with_owner(
+                    func=_pending_order_job_with_event,
+                    trigger='interval',
+                    job_id=f'{strategy_id}_check_pending_orders',
+                    strategy_id=strategy_id,
+                    run_id=run_id,
+                    owner_scope='strategy',
+                    seconds=self.DEFAULT_PENDING_ORDER_INTERVAL_SEC
+                )
+
+            if order_service and hasattr(order_service, 'mark_virtual_positions_eod'):
+                def _virtual_pos_eod_job():
+                    try:
+                        if not self._can_run_jobs():
+                            return
+                        # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，EOD标记也应在收盘后停止
+                        # 注: EOD标记原本设计在15:01-15:10执行(收盘后)，是收盘后数据归档功能，
+                        # 但交易所通道关闭后除tick_data_sync外所有任务应停止
+                        try:
+                            from infra.scheduler_service import is_market_open
+                            if not is_market_open():
+                                return
+                        except (ImportError, AttributeError, TypeError):
+                            pass
+                        from datetime import datetime as _dt
+                        now = _dt.now(_CHINA_TZ)
+                        if now.hour == 15 and 1 <= now.minute <= 10:
+                            order_service.mark_virtual_positions_eod()
+                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+                        logging.error(f"[StrategyScheduler] virtual position eod mark failed: {e}")
+                self.add_job_with_owner(
+                    func=_virtual_pos_eod_job,
+                    trigger='interval',
+                    job_id=f'{strategy_id}_virtual_pos_eod_mark',
+                    strategy_id=strategy_id,
+                    run_id=run_id,
+                    owner_scope='strategy',
+                    minutes=1
+                )
+            
+            logging.info(
+                f"[StrategyScheduler] ✅ Registered 3 trading jobs (strategy={strategy_id}, run_id={run_id}): "
+                f"option_trading_cycle({_interval}s)/position_risk(5s)/pending_orders(3s)"
+            )
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler] Failed to register trading jobs: {e}")
+    
+    def stop_strategy_jobs(self, strategy_id: str) -> int:
+        """
+        停止策略的所有 job（封装 P0-3 owner 移除 + 验证）
+        
+        Args:
+            strategy_id: 策略ID
+            
+        Returns:
+            移除的 job 数量
+        """
+        try:
+            removed_count = self.remove_jobs_by_owner(strategy_id)
+            logging.info(f"[StrategyScheduler] Removed {removed_count} jobs for strategy {strategy_id}")
+            
+            if not self.verify_jobs_removed(strategy_id):
+                logging.warning(f"[StrategyScheduler] ⚠️ Some jobs may still exist for strategy {strategy_id}")
+            
+            return removed_count
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler] Failed to stop strategy jobs: {e}")
+            return 0
+    
+    def register_option_diagnosis_task(self, t_type_service: Any) -> None:
+        """注册期权5种状态诊断定时任务
+        
+        每3分钟输出一次期权5种状态的统计信息，帮助监控期权同步情况。
+        
+        Args:
+            t_type_service: TTypeService实例
+        """
+        try:
+            # 检查 t_type_service 是否可用
+            if not t_type_service:
+                logging.debug("[StrategyScheduler] t_type_service not available, skip option status diagnosis job")
+                return
+            
+            def _diagnose_job():
+                try:
+                    if not self._can_run_jobs():
+                        return
+                    # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，诊断任务也应停止
+                    try:
+                        from infra.scheduler_service import is_market_open
+                        if not is_market_open():
+                            return
+                    except (ImportError, AttributeError, TypeError):
+                        pass
+                    # 输出所有产品的期权状态诊断
+                    t_type_service.print_option_status_diagnosis(future_internal_id=None, top_n=10)
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    logging.error(f"[StrategyScheduler] Option status diagnosis failed: {e}", exc_info=True)
+            
+            # 添加定时任务：每3分钟执行一次
+            if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):
+                # ✅ P0-3: 使用统一注册方法，标记为全局任务  # R17-P2-DOC-03
+                self.add_job_with_owner(
+                    func=_diagnose_job,
+                    trigger='interval',
+                    job_id='option_status_diagnosis',
+                    strategy_id='GLOBAL',
+                    run_id=None,
+                    owner_scope='global',
+                    minutes=self.DEFAULT_DIAGNOSTIC_INTERVAL_MIN
+                )
+                logging.info(f"[StrategyScheduler] ✅ 期权5种状态诊断任务已添加 (每{self.DEFAULT_DIAGNOSTIC_INTERVAL_MIN}分钟)")
+            else:
+                logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler] Failed to add option status diagnosis job: {e}", exc_info=True)
+    
+    def register_cache_flush_task(self, data_service: Any) -> None:
+        """注册缓存刷写定时任务
+        
+        收市时段将 RealTimeCache 内存数据批量刷写到 DuckDB ticks_raw，
+        同时截断WAL文件。刷写后 DuckDB 数据可供历史查询使用。
+        
+        刷写窗口：
+        - 中午休市时段：12:00 - 12:50
+        - 下午收盘后：15:30 - 20:00
+        
+        Args:
+            data_service: DataService实例
+        """
+        try:
+            def _is_in_flush_window() -> bool:
+                """检查当前时间是否在刷写窗口内"""
+                now = datetime.now(_CHINA_TZ)
+                hour = now.hour
+                minute = now.minute
+                
+                # 窗口1：12:00 - 12:50（中午休市）
+                if hour == 12 and minute <= 50:
+                    return True
+                
+                # 窗口2：15:30 - 20:00（下午收盘后）
+                if hour == 15 and minute >= 30:
+                    return True
+                if 16 <= hour <= 19:
+                    return True
+                
+                return False
+            
+            def _flush_job():
+                cache_ticks = None
+                cache = None
+                try:
+                    if not self._can_run_jobs():
+                        return
+                    if not _is_in_flush_window():
+                        logging.debug("[StrategyScheduler] Cache flush skipped: outside flush window")
+                        return
+                    
+                    cache = getattr(data_service, 'realtime_cache', None)
+                    if not cache:
+                        logging.debug("[StrategyScheduler] Cache flush skipped: no realtime_cache")
+                        return
+                    
+                    cache_ticks = cache.drain_all_ticks(clear_cache=False)
+                    if not cache_ticks:
+                        logging.debug("[StrategyScheduler] Cache flush skipped: no data to flush")
+                        return
+                    
+                    logging.info(f"[StrategyScheduler] Cache flush starting: {len(cache_ticks)} ticks...")
+                    inserted = data_service.batch_insert_from_cache(cache_ticks)
+                    
+                    if inserted > 0:
+                        cache.clear_latest_ticks()
+                        data_service.truncate_wal()
+                        logging.info(f"[StrategyScheduler] Cache flush success: {inserted:,} records written, WAL truncated")
+                    else:
+                        logging.warning(f"[StrategyScheduler] Cache flush: 0 records written, cache retained")
+                        
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    if cache_ticks and cache:
+                        try:
+                            cache.restore_ticks(cache_ticks)
+                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as restore_err:
+                            logging.error(f"[StrategyScheduler] Cache restore also failed: {restore_err}, {len(cache_ticks)} ticks lost")
+                    retry_info = f", {len(cache_ticks)} ticks pending retry" if cache_ticks else ""
+                    logging.error(f"[StrategyScheduler] Cache flush failed: {e}{retry_info}, WAL not truncated", exc_info=True)
+                finally:
+                    try:
+                        if hasattr(data_service, 'release_connection'):
+                            data_service.release_connection()
+                    except Exception:
+                        pass
+            
+            # 添加定时任务：每5分钟检查一次
+            if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):
+                # ✅ P0-3: 使用统一注册方法，标记为全局任务  # R17-P2-DOC-03
+                self.add_job_with_owner(
+                    func=_flush_job,
+                    trigger='interval',
+                    job_id='tick_data_sync',
+                    strategy_id='GLOBAL',
+                    run_id=None,
+                    owner_scope='global',
+                    minutes=5
+                )
+                logging.info("[StrategyScheduler] 缓存刷写任务已添加 (每5分钟，窗口: 12:00-12:50, 15:30-20:00)")
+            else:
+                logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            logging.error(f"[StrategyScheduler] Failed to add cache flush job: {e}", exc_info=True)
+    
+    def register_14_contracts_diagnosis_task(self, storage=None, query_service=None) -> None:
+        """注册重点合约12环节诊断定时任务
+        
+        每30秒输出一次重点监控合约的12环节诊断状态，
+        使用汇总输出模式避免日志被CRITICAL告警淹没。
+        
+        Args:
+            storage: Storage实例
+            query_service: QueryService实例
+        """
+        try:
+            from infra.health_monitor import MONITORED_CONTRACT_COUNT, run_14_contracts_periodic_diagnostic
+            
+            def _diagnose_job():
+                try:
+                    if not self._can_run_jobs():
+                        return
+                    # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，诊断任务也应停止
+                    try:
+                        from infra.scheduler_service import is_market_open
+                        if not is_market_open():
+                            return
+                    except (ImportError, AttributeError, TypeError):
+                        pass
+                    if not storage:
+                        logging.debug("[StrategyScheduler] Storage not available, skip monitored contracts diagnosis")
+                        return
+                    
+                    # 执行12环节诊断
+                    run_14_contracts_periodic_diagnostic(storage=storage, query_service=query_service)
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    logging.error(f"[StrategyScheduler] monitored contracts diagnosis failed: {e}", exc_info=True)
+            
+            # 添加定时任务：每30秒执行一次
+            if self._scheduler is not None and hasattr(self._scheduler, 'add_job'):
+                # ✅ P0-3: 使用统一注册方法，标记为全局任务  # R17-P2-DOC-03
+                self.add_job_with_owner(
+                    func=_diagnose_job,
+                    trigger='interval',
+                    job_id='14_contracts_diagnosis',
+                    strategy_id='GLOBAL',
+                    run_id=None,
+                    owner_scope='global',
+                    seconds=self.DEFAULT_DIAGNOSTIC_INTERVAL_SEC
+                )
+                logging.info("[StrategyScheduler] ✅ %d合约12环节诊断任务已添加 (每%d秒)", MONITORED_CONTRACT_COUNT, self.DEFAULT_DIAGNOSTIC_INTERVAL_SEC)
+            else:
+                logging.warning("[StrategyScheduler] Scheduler not available or does not support add_job")
+        except ImportError as e:
+            logging.warning(f"[StrategyScheduler] Cannot import diagnosis_service: {e}")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            logging.error(f"[StrategyScheduler] Failed to add monitored contracts diagnosis job: {e}", exc_info=True)

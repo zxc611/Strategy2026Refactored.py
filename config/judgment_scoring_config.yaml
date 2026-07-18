@@ -1,0 +1,68 @@
+# SCORING_COEFFICIENTS 参数化配置 — 三系统统一
+# UPG-07修复: 添加format_version字段
+format_version: "1.0"
+# 对应 strategy_judgment_engine.py SCORING_COEFFICIENTS 字典
+# 优先级: params覆盖 > YAML > 硬编码兜底
+
+judgment_scoring_coefficients:
+  # profitability
+  win_rate_full_score_at: 0.6
+  profit_sharpe_w: 0.3
+  profit_calmar_w: 0.3
+  profit_win_w: 0.2
+  profit_pl_w: 0.2
+  # process_explainability
+  explain_coverage_w: 0.50
+  explain_chain_w: 0.25
+  explain_rule_w: 0.25
+  chain_full_at: 3.0
+  rule_full_at: 10.0
+  # extreme_survival
+  extreme_dd_norm: 30.0
+  extreme_survival_w: 0.70
+  extreme_recovery_w: 0.30
+  extreme_dd_pass_limit: 20.0
+  # prediction_calibration
+  predict_hit_w: 0.5
+  predict_dir_w: 0.5
+  # parameter_stability
+  skewness_norm: 2.0
+  kurtosis_norm: 5.0
+  param_plat_w: 0.4
+  param_dist_w: 0.3
+  param_sens_w: 0.3
+  # return_source_diversification
+  diversify_signal_w: 0.35
+  diversify_market_w: 0.35
+  diversify_time_w: 0.30
+  # drawdown_recovery
+  mean_recovery_norm_ratio: 0.5
+  dd_max_rec_w: 0.40
+  dd_mean_rec_w: 0.30
+  dd_rec_rate_w: 0.30
+  # cross_strategy_correlation
+  cross_normal_corr_tolerance: 0.30
+  cross_max_div_w: 0.40
+  cross_avg_div_w: 0.30
+  cross_crisis_w: 0.30
+  # auditability
+  auditability_threshold_ratio: 0.5
+  reproducibility_min_score: 0.5
+  # verdict
+  near_threshold_margin: 0.1
+  conditional_pass_max_conditions: 2
+  # deep_validation
+  l2_non_other_ratio_threshold: 0.65
+  l2_state_confirm_bars: 5
+  l2_logic_reversal_threshold: 1.5
+  mcbv_simulations: 100000
+  mcbv_initial_equity: 100000
+  mcbv_bankruptcy_threshold: 0.5
+  mcbv_max_drawdown_multiple: 2.0
+  mcbv_max_risk_ratio: 0.3
+  mcbv_daily_loss_rate: 0.02
+  bh_significance_level: 0.05
+  l2_accuracy_threshold: 0.6
+  realtime_risk_dd_norm: 30.0
+  realtime_risk_score_w: 0.50
+  realtime_risk_dd_w: 0.50

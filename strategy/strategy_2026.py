@@ -3,15 +3,22 @@ from __future__ import annotations
 
 import logging
 import os
-import importlib
-_stdlib_signal = importlib.import_module('signal')
+# FIX-20260716-SIGNAL-IMPORT: 本地 signal/ 包与 Python 标准库 signal 同名，
+# importlib.import_module('signal') 仍会受 sys.path 影响加载到本地包，
+# 导致 _stdlib_signal.signal / SIGTERM 不存在。改用内置 C 模块 _signal 绕过本地包。
+import _signal as _stdlib_signal
 import sys
 import threading
 import time
 from typing import Any, Dict, Optional
 
-from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_is
-from ali2026v3_trading.infra.shared_utils import generate_prefixed_id
+try:
+    from tkinter import TclError as _TclError
+except ImportError:
+    _TclError = RuntimeError  # fallback, will not match real TclError but keeps syntax safe
+
+from lifecycle.lifecycle_state_machine import StrategyState, _state_is
+from infra.shared_utils import generate_prefixed_id
 
 try:
     from pythongo.ui import BaseStrategy
@@ -24,7 +31,7 @@ except ImportError:
             pass
 
 try:
-    from ali2026v3_trading.config.ui_service import UIMixin
+    from config.ui_service import UIMixin
 except ImportError:
     class UIMixin:
         def __init__(self, *args, **kwargs):
@@ -40,7 +47,7 @@ class Strategy2026(BaseStrategy, UIMixin):
     def __init__(self, *args, **kwargs):
         # 尽早初始化日志，确保后续所有日志能正常输出
         try:
-            from ali2026v3_trading.config.config_logging import setup_logging
+            from config.config_logging import setup_logging
             setup_logging()
         except Exception as _log_err:
             import logging as _logging_fallback
@@ -76,7 +83,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         if self._runtime_market_center_ref is not None:
             bootstrap_config['market_center'] = self._runtime_market_center_ref
         self.config = bootstrap_config
-        from ali2026v3_trading.strategy.strategy_core_service import StrategyParams, StrategyCoreService
+        from strategy.strategy_core_service import StrategyParams, StrategyCoreService
         self.params = StrategyParams(bootstrap_config)
         _sid = kwargs.get('strategy_id')
         logging.info("[Strategy2026.__init__] strategy_id from kwargs: %s (type=%s)", _sid, type(_sid).__name__)
@@ -95,7 +102,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         self._callbacks_enabled = True
         self._stop_requested = False
         self._storage_warm_timer = None
-        from ali2026v3_trading.infra.scheduler_service import get_market_time_service
+        from infra.scheduler_service import get_market_time_service
         self.market_time_service = get_market_time_service()
         _orig_excepthook = sys.excepthook
         def _crash_excepthook(exc_type, exc_value, exc_tb):
@@ -111,7 +118,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.critical("[Strategy2026] SIGNAL RECEIVED: sig=%s", sig)
         try:
             _stdlib_signal.signal(_stdlib_signal.SIGTERM, _signal_handler)
-        except (ValueError, OSError):
+        except Exception:
             pass
         try:
             import t_type_bootstrap as ttb
@@ -139,7 +146,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         if self._config_loaded:
             return
 
-        from ali2026v3_trading.config.config_service import get_cached_params
+        from config.config_service import get_cached_params
 
         started_at = time.perf_counter()
         loaded_config = get_cached_params()
@@ -161,12 +168,22 @@ class Strategy2026(BaseStrategy, UIMixin):
             merged['market_center'] = runtime_market_center
 
         self.config = merged
-        from ali2026v3_trading.strategy.strategy_core_service import StrategyParams
+        from strategy.strategy_core_service import StrategyParams
         self.params = StrategyParams(merged)
         self._config_loaded = True
 
         logging.info("[Strategy2026] params.strategy = %s", getattr(self.params, 'strategy', None))
         logging.info("[Strategy2026] 运行时配置就绪，耗时 %.3fs", time.perf_counter() - started_at)
+
+        # FIX-20260718-SIGNAL-DIAG: 安装信号链诊断器（工厂函数包装模式，非侵入式）
+        # 根因: signal_chain_diagnoser 创建后未集成到生产代码，是"创建不用"的死代码
+        # 修复: 在策略初始化时安装诊断器，包装S4/S5/S6工厂函数，自动记录信号生成条件链
+        # 约束: 不修改业务模块代码，诊断调用集中在专门模块；可通过环境变量SIGNAL_DIAGNOSIS_ENABLED=0禁用
+        try:
+            from strategy_judgment.signal_diagnosis_integrator import install_signal_diagnosis
+            install_signal_diagnosis()
+        except Exception as _diag_install_err:
+            logging.warning("[Strategy2026] 信号链诊断器安装失败(不影响交易): %s", _diag_install_err)
 
     def _schedule_storage_warmup(self, delay_seconds: float = 0.25) -> None:
         try:
@@ -177,7 +194,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             def _warmup() -> None:
                 try:
                     self.strategy_core._warm_storage_async()
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+                except Exception as exc:
                     logging.warning("[Strategy2026] storage 延迟预热启动失败: %s", exc)
 
             timer = threading.Timer(delay_seconds, _warmup)
@@ -185,7 +202,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             self._storage_warm_timer = timer
             timer.start()
             logging.info("[Strategy2026] 已计划在 %.2fs 后启动 storage 后台预热", delay_seconds)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+        except Exception as exc:
             logging.warning("[Strategy2026] 安排 storage 预热失败: %s", exc)
 
     # R21-CC-P1-04修复: Timer取消机制 — stop时取消所有已注册的Timer
@@ -193,12 +210,17 @@ class Strategy2026(BaseStrategy, UIMixin):
         """取消所有已注册的threading.Timer，防止stop后回调仍触发
 
         FIX-20260714-R6: 扩展为同时停止启动阶段daemon线程(W7/W8/W9/W11)，
-        与ali2026v3_trading.strategy.lifecycle_service.LifecycleService._cancel_all_timers保持一致。
+        与strategy.lifecycle_service.LifecycleService._cancel_all_timers保持一致。
         """
         _warm_timer = getattr(self, '_storage_warm_timer', None)
         if _warm_timer is not None:
             _warm_timer.cancel()
             self._storage_warm_timer = None
+        # FIX-55: 取消auto_start_timer，防止on_init后0.1s内on_stop/on_destroy时回调仍触发
+        _auto_timer = getattr(self, '_auto_start_timer', None)
+        if _auto_timer is not None:
+            _auto_timer.cancel()
+            self._auto_start_timer = None
         # R22-RES-03修复: 线程生命周期管理 — stop时join清理
         _warm_thread = getattr(self, '_storage_warm_thread', None)
         if _warm_thread is not None and _warm_thread.is_alive():
@@ -225,14 +247,14 @@ class Strategy2026(BaseStrategy, UIMixin):
                     _t.join(timeout=2.0)
                     try:
                         setattr(self, _thread_attr, None)
-                    except (AttributeError,):
-                        pass
-            except (ValueError, KeyError, TypeError, AttributeError):
-                pass
+                    except Exception as _attr_clr_err:  # FIX-57: 扩展窄except，防止跳过setattr清理
+                        logging.debug("[_cancel_all_timers] setattr(%s, None)失败(非阻断): %s", _thread_attr, _attr_clr_err)
+            except Exception as _loop_err:  # FIX-57: 扩展窄except为Exception，让for循环继续处理剩余线程
+                logging.debug("[_cancel_all_timers] %s停止失败(非阻断，继续下一个): %s", _thread_desc, _loop_err)
 
     def is_market_open(self, exchange: str = 'AUTO') -> bool:
-        from ali2026v3_trading.infra.scheduler_service import is_market_open as _is_market_open
-        from ali2026v3_trading.config.config_params import get_param
+        from infra.scheduler_service import is_market_open as _is_market_open
+        from config.config_params import get_param
 
         try:
             exchange = exchange or 'AUTO'
@@ -250,7 +272,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                 exchanges = [e.strip() for e in str(default_exchanges_raw).split(',') if e.strip()]
 
             return any(_is_market_open(exch) for exch in exchanges)
-        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+        except Exception as _r3_err:
             return any(_is_market_open(exch) for exch in ['CFFEX', 'SHFE', 'DCE', 'CZCE', 'INE', 'GFEX'])
 
     def _sync_trading_to_outer_ref(self, trading_value: bool) -> None:
@@ -265,7 +287,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             if _outer is not None:
                 _outer.trading = trading_value
                 logging.info("[Strategy2026] _sync_trading_to_outer_ref: trading=%s已同步到引导层", trading_value)
-        except (ValueError, KeyError, TypeError, AttributeError) as _sync_err:
+        except Exception as _sync_err:
             logging.warning("[Strategy2026] _sync_trading_to_outer_ref同步失败(非致命): %s", _sync_err)
 
     def on_start(self):
@@ -284,7 +306,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                 # 仍需同步trading到_outer_ref（防止首次auto_start时未同步）
                 self._sync_trading_to_outer_ref(True)
                 return True
-        except (ValueError, KeyError, TypeError, AttributeError) as _idem_err:
+        except Exception as _idem_err:
             logging.debug("[Strategy2026.onStart] 幂等检查异常(非致命): %s", _idem_err)
 
         with self._lifecycle_lock:
@@ -323,7 +345,15 @@ class Strategy2026(BaseStrategy, UIMixin):
         self._onStart_step_ui_start(_init_steps)
         _init_steps['core_start'], _step_timings['core_start'] = self._onStart_step_core_start()
         self._onStart_finalize(_init_steps, _CRITICAL_STEPS, _step_timings, _overall_start)
-        return None
+        # FIX-OO1 (RC-9 v3): on_start必须返回True，C++平台依赖返回值判断启动成功
+        # 根因: L338硬编码return None，平台判定启动失败→重建策略对象→死循环式回退
+        # 历史: FIX-C已修复2次但均被回退，本次添加注释防止再次回退
+        # FIX-C-VERIFY: 诊断日志，确认_onStart_finalize完成后是否执行到return True
+        # 根因: lifecycle_probe.jsonl显示on_start返回None，但代码L341有return True
+        # 验证: 如果此日志打印但返回None，说明C++平台拦截了返回值
+        #       如果此日志不打印，说明在L337和L341之间被中断
+        logging.critical("[FIX-C-VERIFY] _onStart_finalize已完成(run_id=%s)，即将执行return True", self._lifecycle_run_id)
+        return True
 
     def _onStart_step_config_load(self):
         _step_start = time.time()
@@ -336,10 +366,10 @@ class Strategy2026(BaseStrategy, UIMixin):
                     if not _ds_ready:
                         logging.warning("[R23-IN-06-FIX] 数据源未就绪: %s, 策略降级为DEGRADED", _ds_msg)
                         self.strategy_core.transition_to(StrategyState.DEGRADED)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _ds_err:
+            except Exception as _ds_err:
                 logging.warning("[R23-IN-06-FIX] 数据源就绪检查异常: %s", _ds_err)
             return True, time.time() - _step_start
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error("[Strategy2026.onStart] CRITICAL: 加载运行时配置错误：%s", e)
             logging.exception("[Strategy2026.onStart] 加载运行时配置堆栈:")
             logging.error("[R23-P2-06-FIX] init_failed_event step=config_load error=%s run_id=%s", e, self._lifecycle_run_id)
@@ -359,7 +389,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                     logging.error("[Strategy2026.onStart] _inject_runtime_context failed: %s", inject_err)
             self._ensure_storage_injected()
             return True, time.time() - _step_start
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error("[Strategy2026.onStart] CRITICAL: bind_platform_apis() 错误：%s", e)
             logging.exception("[Strategy2026.onStart] bind_platform_apis() 堆栈:")
             logging.error("[R23-P2-06-FIX] init_failed_event step=api_bind error=%s run_id=%s", e, self._lifecycle_run_id)
@@ -375,7 +405,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.info("[Strategy2026] storage已注入state_store，无需重复注入 (type=%s)", type(_existing).__name__)
             return
         try:
-            from ali2026v3_trading.data.data_service import get_data_service
+            from data.data_service import get_data_service
             _ds = get_data_service()
             if _ds is not None:
                 _state_store.set_ref('storage', _ds)
@@ -398,7 +428,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.info("[Strategy2026] _onStart_step_status_set: update_status_bar() completed")
             self.output("策略启动")
             _init_steps['status_set'] = True
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             _init_steps['status_set'] = False
             logging.error("[Strategy2026.onStart] 状态设置错误：%s", e)
 
@@ -418,7 +448,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             #    2. 如果transition_to失败(非法转换)，fallback到带锁的直接赋值+同步_is_paused=False
             #    3. 禁止在p._lock外修改_state/_is_paused/_is_running三个变量中的任意一个
             try:
-                from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState as _SS, _state_is as _si
+                from lifecycle.lifecycle_state_machine import StrategyState as _SS, _state_is as _si
                 _mgr = object.__getattribute__(self.strategy_core, '_lifecycle_mgr')
                 _current = getattr(self.strategy_core, '_state', None)
                 # 优先使用正规状态转换路径（会同步三元状态）
@@ -439,7 +469,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                         _mgr._is_running = True
                         _mgr.is_paused = False  # ⚠️ 关键：必须同步is_paused，否则pause()可能失效
                     logging.info("[Strategy2026] FIX-20260706-STATE-FORCE: 强制RUNNING + is_paused=False同步")
-            except (ValueError, KeyError, TypeError, AttributeError) as _force_err:
+            except Exception as _force_err:
                 logging.warning("[Strategy2026] FIX-20260706-STATE-FORCE: 强制设置失败(非致命): %s", _force_err)
             logging.info("[Strategy2026] 检查 strategy_core 状态：has on_init=%s", hasattr(self.strategy_core, 'on_init'))
             if hasattr(self.strategy_core, 'on_init'):
@@ -469,7 +499,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                     # 安全性: on_start被调用意味着on_init已完成（L8541日志证实），_initialized必为True
                     try:
                         _already_initialized = object.__getattribute__(self.strategy_core, '_lifecycle_mgr')._initialized
-                    except (AttributeError, Exception) as _init_err:
+                    except Exception as _init_err:  # FIX-D (2026-07-18): 窄异常元组扩展为 Exception
                         logging.warning("[Strategy2026] FIX-20260706-SKIP-INIT: 直接访问_lifecycle_mgr._initialized失败，默认True: %s", _init_err)
                         _already_initialized = True
                     logging.info("[Strategy2026] _already_initialized=%s, about to decide init path", _already_initialized)
@@ -490,7 +520,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                             if _new_state is not None and hasattr(self.strategy_core, '_state'):
                                 self.strategy_core._state = StrategyState.RUNNING
                             logging.info("[Strategy2026] FIX-20260704-STATE-RUNNING: _is_running已手动设置为True, _state=%s", getattr(self.strategy_core, '_state', None))
-                        except (ValueError, KeyError, TypeError, AttributeError) as _state_err:
+                        except Exception as _state_err:
                             logging.warning("[Strategy2026] FIX-20260704-STATE-RUNNING: 设置_is_running=True失败(非致命): %s", _state_err)
                 else:
                     logging.info("[Strategy2026] 无需调用 on_init，当前状态为：%s", current_state)
@@ -500,8 +530,8 @@ class Strategy2026(BaseStrategy, UIMixin):
             # 根因V2: V2只重置strategy-level实例，但交易逻辑使用global实例(首次初始化完成时加载hard_stop=True)
             # 修复V3: 同时重置strategy-level和global实例，确保所有SafetyMetaLayer实例hard_stop=False
             try:
-                from ali2026v3_trading.risk.risk_circuit_breaker import get_safety_meta_layer as _get_sml
-                from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+                from risk.risk_circuit_breaker import get_safety_meta_layer as _get_sml
+                from infra.shared_utils import CHINA_TZ
                 from datetime import datetime as _dt_hs
                 _now_hs = _dt_hs.now(CHINA_TZ)
                 _market_open_today = _now_hs.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -526,10 +556,10 @@ class Strategy2026(BaseStrategy, UIMixin):
                                 logging.warning("[FIX-0710-HARD-STOP-RESET-V3] %s实例_drawdown_monitor_svc为None", _sml_label)
                     if _reset_count == 0:
                         logging.info("[FIX-0710-HARD-STOP-RESET-V3] 无需重置(所有实例hard_stop已为False)")
-            except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _hs_err:
+            except Exception as _hs_err:
                 logging.warning("[FIX-0710-HARD-STOP-RESET-V3] hard_stop重置跳过(非致命): %s", _hs_err)
             return True, time.time() - _step_start
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error("[Strategy2026.onStart] CRITICAL: strategy_core 初始化阶段错误：%s", e)
             logging.exception("[Strategy2026.onStart] strategy_core 初始化阶段堆栈:")
             logging.error("[R23-P2-06-FIX] init_failed_event step=core_init error=%s run_id=%s", e, self._lifecycle_run_id)
@@ -544,13 +574,13 @@ class Strategy2026(BaseStrategy, UIMixin):
                     logging.critical("[Strategy2026.onStart] DR-P1-04: 自动化恢复失败，进入SAFE_MODE")
             else:
                 _init_steps['auto_recovery'] = 'skipped'
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             _init_steps['auto_recovery'] = False
             logging.error("[Strategy2026.onStart] DR-P1-04: 自动化恢复异常: %s", e)
 
     def _onStart_step_service_container(self, _init_steps):
         try:
-            from ali2026v3_trading.infra.service_container import ServiceContainer
+            from infra.service_container import ServiceContainer
             _service_container = ServiceContainer()
             _sc_ok = _service_container.create_and_register_all_services()
             if _sc_ok:
@@ -558,13 +588,13 @@ class Strategy2026(BaseStrategy, UIMixin):
             else:
                 logging.warning("[Strategy2026] ServiceContainer初始化返回False，部分服务可能未就绪")
             _init_steps['service_container_init'] = True
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:
             _init_steps['service_container_init'] = False
             logging.warning("[Strategy2026.onStart] ServiceContainer初始化跳过（非关键）: %s", e)
 
     def _onStart_step_performance_monitor(self, _init_steps):
         try:
-            from ali2026v3_trading.infra.metrics_registry import PathCounter
+            from infra.metrics_registry import PathCounter
             _perf_enabled = getattr(self, 'config', None)
             if _perf_enabled is not None:
                 _perf_enabled = getattr(_perf_enabled, 'performance', None)
@@ -577,7 +607,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                 PathCounter.disable()
                 logging.info("[Strategy2026] 性能监控已禁用")
             _init_steps['performance_monitor_init'] = True
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:
             _init_steps['performance_monitor_init'] = False
             logging.warning("[R22-EP-P1-17] 性能监控初始化跳过: %s", e)
 
@@ -586,7 +616,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             market_open = self.is_market_open()
             logging.info("[Strategy2026] 市场开盘状态：%s", market_open)
             _init_steps['market_check'] = True
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             _init_steps['market_check'] = False
             logging.error("[Strategy2026.onStart] 市场状态检查错误：%s", e)
 
@@ -596,7 +626,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             self._start_output_mode_ui()
             logging.info("[Strategy2026] UI 界面启动成功")
             _init_steps['ui_start'] = True
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:
             _init_steps['ui_start'] = False
             logging.error("[Strategy2026.onStart] 启动 UI 错误：%s", e)
 
@@ -609,7 +639,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             else:
                 logging.warning("[Strategy2026.onStart] strategy_core.start 不可用，跳过")
             return True, time.time() - _step_start
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:
             logging.error("[Strategy2026.onStart] CRITICAL: strategy_core.start() 错误：%s", e)
             logging.exception("[Strategy2026.onStart] strategy_core.start() 堆栈:")
             logging.error("[R23-P2-06-FIX] init_failed_event step=core_start error=%s run_id=%s", e, self._lifecycle_run_id)
@@ -623,7 +653,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             if hasattr(self.strategy_core, 'transition_to'):
                 try:
                     self.strategy_core.transition_to(StrategyState.DEGRADED)
-                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                except Exception as _r3_err:
                     logging.debug("[R3-L2] transition_to DEGRADED failed: %s", _r3_err)
                     pass
         elif _failed_all:
@@ -657,33 +687,12 @@ class Strategy2026(BaseStrategy, UIMixin):
 
             self.output("策略初始化完毕，等待平台启动")
 
-            # FIX-20260714-V5-AUTO-START-DELAYED: Timer延迟auto_start，解决C++状态机卡住问题
-            # 根因（V5报告确认）: auto_start在on_init()内部同步调用on_start()导致C++状态机卡住
-            #   - C++检测到on_start()在on_init()执行期间被调用
-            #   - C++认为策略已启动，自己不再调用on_start()
-            #   - 状态机卡住在"已初始化" → UI显示"初始化"但策略在运行 → 暂停/删除失效
-            # 修复: 通过Timer延迟调用on_start()，on_init()先返回
-            #   - on_init()返回 → C++状态变为"已初始化"（C++不卡住）
-            #   - Timer 0.1s后触发on_start() → 策略自动进入运行状态（auto_start功能保留）
-            #   - 用户点击执行按钮 → C++调用on_start() → IDEMPOTENT SKIP → C++状态推进到"执行中"
-            #   - 用户点击暂停/删除按钮 → C++调用on_stop()/on_destroy() → 正常工作
-            # 验证依据: 2026-07-13 16:20 auto_start延迟0.05s执行，C++正常调用on_start()/on_stop()
-            # 参见: ali2026v3_trading/docs/排查报告_auto_start延迟方案与暂停删除修复_V5_20260714.md
-            try:
-                # FIX-20260714-V6: Timer必须调用t_type_bootstrap.on_start()，而非Strategy2026.on_start()
-                # 根因: V5代码Timer调用self.on_start(Strategy2026.on_start)，绕过t_type_bootstrap.on_start()
-                #       导致C++不认为on_start被正式调用，状态机卡住，不调用on_start/on_stop/on_destroy
-                # 修复: 通过_outer_ref获取t_type_bootstrap实例，调用其on_start()
-                #       t_type_bootstrap.on_start()会: 1.调用real.on_start() 2.设置self.trading=True 3.日志
-                #       这与2026-07-13 16:20工作版本完全一致
-                _outer = getattr(self, '_outer_ref', None) or self
-                _auto_start_timer = threading.Timer(0.1, _outer.on_start)
-                _auto_start_timer.daemon = True
-                _auto_start_timer.start()
-                _target = "t_type_bootstrap" if _outer is not self else "Strategy2026(fallback)"
-                logging.info("[Strategy2026.on_init] auto_start已调度（0.1s后执行，目标=%s），策略将自动进入运行状态", _target)
-            except Exception as _auto_start_err:
-                logging.error("[Strategy2026.on_init] auto_start调度失败(非致命，用户可手动点击执行): %s", _auto_start_err)
+            # FIX-59: 彻底移除auto_start Timer（用户决策2026-07-17）
+            # 根因: auto_start Timer在on_stop后0.1s内可能触发on_start()重启已暂停的策略
+            #       且即使auto_start自动执行on_start()，用户仍需点击平台运行按钮才能让C++状态机推进
+            # 决策: 移除Timer，让用户手动点击"执行"按钮启动策略，更稳妥
+            # t_type_bootstrap.py注释已声明"auto_start已禁用"，此处统一为彻底禁用
+            logging.info("[Strategy2026.on_init] auto_start已禁用（FIX-59），等待用户手动点击执行按钮启动策略")
             return None
         except Exception as e:
             # FIX-20260713: 扩大异常捕获范围，防止ImportError/OSError等导致on_init静默失败
@@ -695,6 +704,10 @@ class Strategy2026(BaseStrategy, UIMixin):
 
 
     def on_stop(self):
+        try:
+            from infra.health_monitor import DiagnosisProbeManager as _DPM
+            _DPM.on_lifecycle_call('Strategy2026.on_stop', 'CALLED', strategy_id=getattr(self,'strategy_id',None))
+        except Exception: pass
         with self._lifecycle_lock:
             if self._stop_executed:
                 logging.warning(
@@ -712,21 +725,48 @@ class Strategy2026(BaseStrategy, UIMixin):
         self._stop_requested = True
         logging.info("[Strategy2026.onStop] enter")
 
+        # FIX-41: 将FIX-34/FIX-36/setattr(None)移入finally块
         try:
             logging.info("[Strategy2026] 平台停止回调")
             if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'stop'):
                 result = self.strategy_core.stop()
                 logging.info("[Strategy2026.onStop] strategy_core 停止结果：%s", result)
-                # R23-IN-07-FIX: onStop清理所有实例属性，防止热重启惰性引用滞留
-                for _attr in ('_shadow_engine', '_signal_service', '_strategy_ecosystem', '_hft_engine', '_snapshot_collector'):
-                    if hasattr(self.strategy_core, _attr):
-                        setattr(self.strategy_core, _attr, None)
-                logging.info("[R23-IN-07-FIX] onStop: 已清理5个实例属性(_shadow_engine/_signal_service/_strategy_ecosystem/_hft_engine/_snapshot_collector)")
             else:
                 logging.warning("[Strategy2026.onStop] strategy_core.stop 不可用，跳过")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型
             logging.error("[Strategy2026.onStop] strategy_core.stop failed: %s", e)
             logging.exception("[Strategy2026.onStop] strategy_core.on_stop stack:")
+        finally:
+            # FIX-41: 以下清理代码无论stop()是否抛异常都必须执行
+            # FIX-58: 调用_cancel_all_timers清理Strategy2026实例上的定时器/线程
+            # 根因: _auto_start_timer和_storage_warm_timer在Strategy2026实例上设置，
+            #       但LifecycleService._cancel_all_timers在StrategyCoreService(provider)上查找，
+            #       getattr(p,...,None)返回None→定时器未取消→on_stop后0.1s内auto_start可能重启策略
+            try:
+                self._cancel_all_timers()
+                logging.info("[FIX-58] on_stop: _cancel_all_timers()已清理Strategy2026定时器/线程")
+            except Exception as _cat_err:
+                logging.warning("[FIX-58] on_stop: _cancel_all_timers()异常(非阻断): %s", _cat_err)
+            if hasattr(self, 'strategy_core') and self.strategy_core is not None:
+                try:
+                    if hasattr(self.strategy_core, '_coordinated_shutdown'):
+                        self.strategy_core._coordinated_shutdown()
+                        logging.info("[FIX-34] coordinated_shutdown()已完成: ShadowEngine/RiskService/OrderService已关闭")
+                except Exception as _cs_err:
+                    logging.warning("[FIX-34] coordinated_shutdown()异常(非阻断): %s", _cs_err)
+                try:
+                    if hasattr(self.strategy_core, '_atexit_cleanup_executor'):
+                        self.strategy_core._atexit_cleanup_executor()
+                        logging.info("[FIX-36] _atexit_cleanup_executor()已完成: _strategy_executor等线程池已关闭")
+                except Exception as _ace_err:
+                    logging.warning("[FIX-36] _atexit_cleanup_executor()异常(非阻断): %s", _ace_err)
+                try:
+                    for _attr in ('_shadow_engine', '_signal_service', '_strategy_ecosystem', '_hft_engine', '_snapshot_collector'):
+                        if hasattr(self.strategy_core, _attr):
+                            setattr(self.strategy_core, _attr, None)
+                    logging.info("[R23-IN-07-FIX] onStop: 已清理5个实例属性")
+                except Exception as _attr_err:
+                    logging.warning("[R23-IN-07-FIX] onStop: 属性清理异常(非阻断): %s", _attr_err)
 
         try:
             from pythongo import utils as _utils
@@ -739,7 +779,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         if _utils is not None:
             try:
                 _utils.Scheduler("PythonGO").stop()
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:  # FIX-40: 扩展异常类型
                 logging.error("[Strategy2026.onStop] Scheduler stop failed: %s", e)
         self.save_instance_file()
         logging.info("[Strategy2026.onStop] BaseStrategy non-INFINIGO steps completed")
@@ -750,7 +790,14 @@ class Strategy2026(BaseStrategy, UIMixin):
         logging.info("[Strategy2026.onStop] 生命周期标志已重置，允许下次on_start正常执行")
 
         # 平台规范：所有回调必须 super()
-        super().on_stop()
+        # FIX-20260716-UI-STOP: super().on_stop() 会触发平台 UI 隐藏/销毁，
+        # PyQtGraph 的 sigXRangeChanged.disconnect 在信号未连接/已断开时可能抛出
+        # TypeError；Tkinter 的 destroy 在应用已销毁时可能抛出 TclError。
+        # 这些异常不应阻断策略生命周期标志重置。
+        try:
+            super().on_stop()
+        except Exception as e:  # FIX-40: 扩展异常类型，防止TclError/OSError等阻断生命周期标志重置
+            logging.warning("[Strategy2026.onStop] super().on_stop() UI清理异常(非阻断): %s", e)
         return None
 
 
@@ -768,7 +815,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         try:
             if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'pause'):
                 result = bool(self.strategy_core.pause())
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型，防止pause()静默失败
             logging.error("[Strategy2026.internal_pause_strategy] 错误：%s", e)
             logging.exception("[Strategy2026.internal_pause_strategy] 堆栈:")
             result = False
@@ -786,7 +833,11 @@ class Strategy2026(BaseStrategy, UIMixin):
     # 全链条: platform.pause() → strategy_2026.pause() → strategy_core.pause() → _lifecycle_svc.pause() → LifecycleCallbacks.pause()
     def pause(self) -> bool:
         import traceback as _tb_pause
-        _caller_stack_pause = ''.join(_tb_pause.format_stack()[-4:]).strip()[:300]
+        try:
+            _caller_stack_pause = ''.join(_tb_pause.format_stack()[-4:]).strip()
+        except Exception as _fs_err:
+            _caller_stack_pause = ""
+            logging.debug("[pause] format_stack失败(非阻断): %s", _fs_err)
         logging.critical(
             "[FIX-20260709-PAUSE-DIAG] pause ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
             "caller_stack:\n%s",
@@ -817,7 +868,11 @@ class Strategy2026(BaseStrategy, UIMixin):
     # 全链条: platform.resume() → strategy_2026.resume() → strategy_core.resume() → _lifecycle_svc.resume() → LifecycleCallbacks.resume()
     def resume(self) -> bool:
         import traceback as _tb_resume
-        _caller_stack_resume = ''.join(_tb_resume.format_stack()[-4:]).strip()[:300]
+        try:
+            _caller_stack_resume = ''.join(_tb_resume.format_stack()[-4:]).strip()
+        except Exception as _fs_err:
+            _caller_stack_resume = ""
+            logging.debug("[resume] format_stack失败(非阻断): %s", _fs_err)
         logging.critical(
             "[FIX-20260710-RESUME-DIAG] resume ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
             "caller_stack:\n%s",
@@ -871,7 +926,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                 result = bool(_state_is(getattr(self.strategy_core, '_state', None), StrategyState.RUNNING))
             else:
                 logging.warning("[Strategy2026.internal_resume_strategy] Cannot resume in state: %s", current_state)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型，防止resume静默失败
             logging.error("[Strategy2026.internal_resume_strategy] 错误：%s", e)
             logging.exception("[Strategy2026.internal_resume_strategy] 堆栈:")
             result = False
@@ -884,11 +939,26 @@ class Strategy2026(BaseStrategy, UIMixin):
         return result
 
     def onDestroy(self):
+        # FIX-20260718-SIGNAL-DIAG: 策略销毁时输出信号链诊断汇总报告
+        # 在所有清理之前输出，确保报告不会因清理失败而丢失
+        try:
+            from strategy_judgment.signal_diagnosis_integrator import log_signal_diagnosis_summary
+            log_signal_diagnosis_summary()
+        except Exception as _diag_log_err:
+            logging.warning("[Strategy2026.onDestroy] 信号链诊断汇总输出失败(非阻断): %s", _diag_log_err)
+        try:
+            from infra.health_monitor import DiagnosisProbeManager as _DPM
+            _DPM.on_lifecycle_call('Strategy2026.onDestroy', 'CALLED', strategy_id=getattr(self,'strategy_id',None))
+        except Exception: pass
         # FIX-20260709-PAUSE-ROOT-V3: 暂停/删除彻底修复
         # 根因: onDestroy不调用strategy_core.on_destroy()，导致LifecycleCallbacks.on_destroy()从未被调用
         #       四元状态从未同步到STOPPED/destroyed，平台UI显示"删除"但策略实际仍在运行
         import traceback as _tb_destroy
-        _caller_stack_destroy = ''.join(_tb_destroy.format_stack()[-4:]).strip()[:300]
+        try:
+            _caller_stack_destroy = ''.join(_tb_destroy.format_stack()[-4:]).strip()
+        except Exception as _fs_err:
+            _caller_stack_destroy = ""
+            logging.debug("[onDestroy] format_stack失败(非阻断): %s", _fs_err)
         logging.critical(
             "[FIX-20260709-PAUSE-DIAG] onDestroy ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s\n"
             "caller_stack:\n%s",
@@ -919,21 +989,46 @@ class Strategy2026(BaseStrategy, UIMixin):
                 logging.info("[Strategy2026.onDestroy] 调用 strategy_core.destroy() (fallback)")
                 self.strategy_core.destroy()
                 logging.info("[Strategy2026.onDestroy] strategy_core.destroy() 完成")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型，防止on_destroy异常跳过FIX-35清理
             logging.error("[Strategy2026.onDestroy] strategy_core.on_destroy failed: %s", e, exc_info=True)
+
+        # FIX-58: 调用_cancel_all_timers清理Strategy2026实例上的定时器/线程
+        # 根因: 同on_stop，_auto_start_timer等在Strategy2026实例上，需在此显式清理
+        try:
+            self._cancel_all_timers()
+            logging.info("[FIX-58] onDestroy: _cancel_all_timers()已清理Strategy2026定时器/线程")
+        except Exception as _cat_err:
+            logging.warning("[FIX-58] onDestroy: _cancel_all_timers()异常(非阻断): %s", _cat_err)
+
+        # FIX-35 RC-45: onDestroy中调用coordinated_shutdown()和线程池清理
+        # 根因: onDestroy不调用coordinated_shutdown()→ShadowEngine/OrderService在删除时仍未关闭
+        # 修复: 在on_destroy后调用coordinated_shutdown()和_atexit_cleanup_executor()确保所有资源释放
+        # FIX-45: 拆分为独立try块，防止_coordinated_shutdown异常跳过_atexit_cleanup_executor
+        try:
+            if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, '_coordinated_shutdown'):
+                self.strategy_core._coordinated_shutdown()
+                logging.info("[FIX-35] onDestroy: coordinated_shutdown()已完成")
+        except Exception as _cs_err:
+            logging.warning("[FIX-35] onDestroy: coordinated_shutdown异常(非阻断): %s", _cs_err)
+        try:
+            if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, '_atexit_cleanup_executor'):
+                self.strategy_core._atexit_cleanup_executor()
+                logging.info("[FIX-35] onDestroy: _atexit_cleanup_executor()已完成")
+        except Exception as _ace_err:
+            logging.warning("[FIX-35] onDestroy: _atexit_cleanup_executor异常(非阻断): %s", _ace_err)
 
         try:
             self._destroy_output_mode_ui()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型
             logging.warning("[Strategy2026.onDestroy] destroy UI failed: %s", e)
 
         try:
-            from ali2026v3_trading.param_pool.task_scheduler import cleanup_global_data
+            from param_pool.task_scheduler import cleanup_global_data
             cleanup_global_data()
             logging.info("[R22-P0-MEM-01] onDestroy: task_scheduler全局DataFrame已释放")
         except ImportError as _ie:
             logging.warning("[R22-P0-MEM-01] onDestroy: param_pool.task_scheduler导入失败, 全局DataFrame可能未释放: %s", _ie)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型
             logging.warning("[R22-P0-MEM-01] onDestroy: cleanup_global_data failed: %s", e)
 
     def onTick(self, tick):
@@ -943,7 +1038,7 @@ class Strategy2026(BaseStrategy, UIMixin):
 
         # [OPTCOV_PROBE] 期权coverage诊断 - onTick绝对入口（任何过滤前）
         try:
-            from ali2026v3_trading.infra.health_monitor import record_option_entry_probe
+            from infra.health_monitor import record_option_entry_probe
             record_option_entry_probe(getattr(tick, 'instrument_id', ''), getattr(tick, 'last_price', 0.0))
         except Exception:
             pass
@@ -972,7 +1067,14 @@ class Strategy2026(BaseStrategy, UIMixin):
                 if _paused_tick_count <= 3 or _paused_tick_count % 1000 == 1:
                     logging.info("[Strategy2026.onTick] PAUSED状态：策略决策已跳过，数据保存继续。累计跳过%d个tick的决策", _paused_tick_count)
                 return None
-        except (ValueError, KeyError, TypeError, AttributeError):
+        # NEW-1 (2026-07-18): 实时回调路径窄异常扩展为Exception
+        # 根因: onTick是C++平台每行情回调入口，窄异常列表(ValueError/KeyError/...)
+        #       无法覆盖所有运行时异常(如ZeroDivisionError/OverflowError/OSError/
+        #       RecursionError/MemoryError/BufferError等)，未列举异常会穿透到C++平台
+        #       被视为fatal error导致策略实例崩溃。
+        # 修复: 扩展为except Exception，符合project_memory约束:
+        #       "实时回调路径(onTick/onOrder/onTrade)必须用except Exception"
+        except Exception:
             pass
 
         _first_tick = not getattr(self, '_tick_received', False)
@@ -997,7 +1099,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                 self._degraded_tick_count = _degraded_tick_count
                 if _degraded_tick_count % 1000 == 1:
                     logging.warning("[Strategy2026.onTick] DEGRADED状态：策略决策已跳过，数据保存继续。累计跳过%d个tick的决策", _degraded_tick_count)
-        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+        except Exception as _r3_err:  # NEW-1: 实时回调路径必须用except Exception
             logging.warning("[R22-EP-P1] StrategyCoreService exception swallowed")
             pass
 
@@ -1018,7 +1120,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                 _pqs_throttle_sec = 5.0
                 _pqs_throttle_ticks = 10
                 if (_now_pqs - _pqs_last_time) >= _pqs_throttle_sec or _pqs_tick_count >= _pqs_throttle_ticks:
-                    from ali2026v3_trading.ProductionQuantSystem import get_production_quant_system
+                    from ProductionQuantSystem import get_production_quant_system
                     _pqs = get_production_quant_system()
                     # FIX-20260709-PQS-INIT: 首次使用时自动初始化PQS，否则_initialized永远为False
                     # 导致crm.update()从未被调用→incorrect_reversal=0→spring/box/resonance未运行
@@ -1054,7 +1156,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                                 )
                         self._pqs_last_update_time = _now_pqs
                         self._pqs_tick_count = 0
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _pqs_err:
+            except Exception as _pqs_err:  # NEW-1: 实时回调路径必须用except Exception
                 # FIX-20260709-PQS-VERIFY: 全链条验证修复
                 # 原因: logging.debug在INFO级别被过滤，PQS异常被静默吞没
                 # 导致 FIX-20260709-PQS-INIT 修复看似已落地，实则从未在运行时被验证
@@ -1072,7 +1174,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                     if _ss is not None:
                         _ss.set('_pqs_last_error', str(_pqs_err))
                         _ss.set('_pqs_error_count', _pqs_err_count)
-                except (ValueError, KeyError, TypeError, AttributeError):
+                except Exception:  # NEW-1: 实时回调路径必须用except Exception
                     pass
 
                 # FIX-20260712-P0: PQS失败时的CRM降级更新 — 确保_last_output不为None
@@ -1081,7 +1183,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                 # 修复: PQS失败时用默认参数直接调用crm.update()，确保至少有基础风险曲面。
                 try:
                     import importlib as _imp_fb
-                    _crm_mod = _imp_fb.import_module('ali2026v3_trading.param_pool.optimization.cycle_sharpe')
+                    _crm_mod = _imp_fb.import_module('param_pool.optimization.cycle_sharpe')
                     _crm_inst = _crm_mod.get_cycle_resonance_module()
                     if getattr(_crm_inst, '_last_output', None) is None:
                         _crm_inst.update(
@@ -1099,7 +1201,7 @@ class Strategy2026(BaseStrategy, UIMixin):
                                 "[FIX-20260712-P0] CRM降级更新(PQS失败fallback): count=%d, "
                                 "crm._last_output已设置为NORMAL默认值", _fb_count,
                             )
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _crm_fb_err:
+                except Exception as _crm_fb_err:  # NEW-1: 实时回调路径必须用except Exception
                     _crm_fb_count = getattr(self, '_crm_fb_err_count', 0) + 1
                     self._crm_fb_err_count = _crm_fb_count
                     if _crm_fb_count <= 3 or _crm_fb_count % 100 == 0:
@@ -1121,16 +1223,33 @@ class Strategy2026(BaseStrategy, UIMixin):
         if not getattr(self, '_callbacks_enabled', True):
             return None
 
+        # 数据同步路径：无条件执行（与 onTick 数据保存对齐，确保持仓/订单状态正确更新）
         try:
             super().on_order(order)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # NEW-1: 实时回调路径必须用except Exception
             logging.error("[Strategy2026.onOrder] super().on_order() 错误：%s", e)
 
         try:
             if hasattr(self.strategy_core, 'on_order'):
                 self.strategy_core.on_order(order)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # NEW-1: 实时回调路径必须用except Exception
             logging.error("[Strategy2026.onOrder] strategy_core.on_order() 错误：%s", e)
+
+        # FIX-A (BP-02, 2026-07-18): 暂停期间跳过策略决策（数据同步已在上方完成）
+        # 根因: onOrder 未检查 _is_paused，暂停期间订单回调仍触发持仓更新和风控检查
+        # 修复: 数据同步无条件执行，策略决策（如下单/撤单动作）在暂停期间跳过
+        # 设计: 与 onTick L1059-1078 模式对齐（数据保存 + 策略决策分离）
+        _is_paused = False
+        try:
+            _is_paused = getattr(self.strategy_core, '_is_paused', False) if hasattr(self, 'strategy_core') else False
+            if _is_paused:
+                _paused_order_count = getattr(self, '_paused_order_count', 0) + 1
+                self._paused_order_count = _paused_order_count
+                if _paused_order_count <= 3 or _paused_order_count % 100 == 1:
+                    logging.info("[Strategy2026.onOrder] PAUSED状态：策略决策已跳过，数据同步继续。累计跳过%d个order的决策", _paused_order_count)
+                return None
+        except Exception:  # NEW-1: 实时回调路径必须用except Exception
+            pass
 
         return None
 
@@ -1139,23 +1258,48 @@ class Strategy2026(BaseStrategy, UIMixin):
         if not getattr(self, '_callbacks_enabled', True):
             return None
 
+        # 数据同步路径：无条件执行（与 onTick 数据保存对齐）
         try:
             super().on_trade(trade)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # NEW-1: 实时回调路径必须用except Exception
             logging.error("[Strategy2026.onTrade] super().on_trade() 错误：%s", e)
 
         try:
             if hasattr(self.strategy_core, 'on_trade'):
                 self.strategy_core.on_trade(trade)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # NEW-1: 实时回调路径必须用except Exception
             logging.error("[Strategy2026.onTrade] strategy_core.on_trade() 错误：%s", e)
+
+        # FIX-B (BP-03, 2026-07-18): 暂停期间跳过策略决策（数据同步已在上方完成）
+        # 根因: onTrade 未检查 _is_paused，暂停期间成交回调仍触发持仓更新和风控检查
+        # 修复: 数据同步无条件执行，策略决策（如风控动作/平仓决策）在暂停期间跳过
+        # 设计: 与 onTick L1059-1078 模式对齐 + 与 FIX-A onOrder 模式对称
+        _is_paused = False
+        try:
+            _is_paused = getattr(self.strategy_core, '_is_paused', False) if hasattr(self, 'strategy_core') else False
+            if _is_paused:
+                _paused_trade_count = getattr(self, '_paused_trade_count', 0) + 1
+                self._paused_trade_count = _paused_trade_count
+                if _paused_trade_count <= 3 or _paused_trade_count % 100 == 1:
+                    logging.info("[Strategy2026.onTrade] PAUSED状态：策略决策已跳过，数据同步继续。累计跳过%d个trade的决策", _paused_trade_count)
+                return None
+        except Exception:  # NEW-1: 实时回调路径必须用except Exception
+            pass
 
         return None
 
     onInit = on_init
     onStart = on_start
     onStop = on_stop
+    # FIX-20260716-THREAD-V2: 补全onPause/onResume驼峰别名
+    # 根因: 平台C++通过驼峰式onPause/onResume调用Python回调，
+    #       但strategy_2026只有蛇形on_pause/on_resume，缺少驼峰别名，
+    #       导致C++调用onPause()时进入BaseStrategy默认no-op实现（暂停功能失效）。
+    # 修复: 添加驼峰别名，与onInit/onStart/onStop保持一致。
+    onPause = on_pause
+    onResume = on_resume
     on_destroy = onDestroy
+    onDestroy = onDestroy
     on_tick = onTick
     on_order = onOrder
     on_trade = onTrade

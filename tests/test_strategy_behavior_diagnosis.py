@@ -37,7 +37,7 @@ def _make_snapshot(strategy_id, extreme_region, signal_strength=0.5, position_si
     _, _, _, MarketSnapshot, StrategyStateSnapshot = _ensure_imports()
     ss = StrategyStateSnapshot(
         strategy_id=strategy_id,
-        strategy_type="high_freq",
+        strategy_type="s1_hft",
         signal_strength=signal_strength,
         signal_direction=signal_direction,
         position_size=position_size,
@@ -59,9 +59,9 @@ class TestStrategyBehaviorDiagnosis:
     def test_init(self):
         StrategyBehaviorDiagnosis = _ensure_imports()[0]
         inst = StrategyBehaviorDiagnosis.__new__(StrategyBehaviorDiagnosis)
-        inst.__init__("s1", strategy_type="high_freq")
+        inst.__init__("s1", strategy_type="s1_hft")
         assert inst._strategy_id == "s1"
-        assert inst._strategy_type == "high_freq"
+        assert inst._strategy_type == "s1_hft"
         assert inst._expected_logic is not None
 
     def test_init_empty_id(self):
@@ -75,7 +75,7 @@ class TestStrategyBehaviorDiagnosis:
         StrategyBehaviorDiagnosis = _ensure_imports()[0]
         DiagnosisSeverity = _ensure_imports()[1]
         inst = StrategyBehaviorDiagnosis.__new__(StrategyBehaviorDiagnosis)
-        inst.__init__("s1", strategy_type="high_freq")
+        inst.__init__("s1", strategy_type="s1_hft")
         snaps = []
         report = inst.diagnose(snaps, snaps, symbol="TEST", backtest_period="2024")
         assert report.strategy_id == "s1"
@@ -84,7 +84,7 @@ class TestStrategyBehaviorDiagnosis:
     def test_diagnose_with_samples(self):
         StrategyBehaviorDiagnosis = _ensure_imports()[0]
         inst = StrategyBehaviorDiagnosis.__new__(StrategyBehaviorDiagnosis)
-        inst.__init__("s1", strategy_type="high_freq")
+        inst.__init__("s1", strategy_type="s1_hft")
         snaps = [
             _make_snapshot("s1", "NEAR_HIGH", signal_strength=0.8, position_size=1.0, pnl=100.0),
             _make_snapshot("s1", "NEAR_HIGH", signal_strength=0.6, position_size=0.8, pnl=110.0),

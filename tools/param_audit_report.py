@@ -96,7 +96,7 @@ def _extract_yaml_params_from_threshold_grid(data: Dict[str, Any]) -> Dict[str, 
             if isinstance(params, dict):
                 for k, v in params.items():
                     # 高频策略的预设值作为参考默认值
-                    if strategy == "high_freq" and isinstance(v, (int, float)):
+                    if strategy == "s1_hft" and isinstance(v, (int, float)):
                         result[k] = v
     return result
 

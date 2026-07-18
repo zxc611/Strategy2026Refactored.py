@@ -1,0 +1,268 @@
+{
+    "$schema": "参数默认值JSON覆盖层 v1.0 — R17-PAR-P1-05修复",
+    "description": "此文件为DEFAULT_PARAM_TABLE的JSON覆盖层。运维可编辑此文件覆盖代码默认值。dry_run调整: 2026-06-30",
+    "updated_at": "2026-06-30",
+    "version": "17.1",
+    "params": {
+        "max_risk_ratio": {
+            "default": 0.8,
+            "type": "float",
+            "min": 0.1,
+            "max": 1.0,
+            "description": "单边最大风险占比 (R16-P0-DF-01修复: 0.3→0.8)"
+        },
+        "lots_min": {
+            "default": 3,
+            "type": "int",
+            "min": 1,
+            "max": 100,
+            "description": "最小手数 (R24-P1-DF-08修复: 5→3)"
+        },
+        "signal_cooldown_sec": {
+            "default": 30.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 3600.0,
+            "description": "信号冷却秒数 (dry_run调整: 60→30加速信号生成验证)"
+        },
+        "close_take_profit_ratio": {
+            "default": 1.8,
+            "type": "float",
+            "min": 0.5,
+            "max": 5.0,
+            "description": "止盈倍率"
+        },
+        "option_buy_lots_min": {
+            "default": 1,
+            "type": "int",
+            "min": 1,
+            "max": 100,
+            "description": "期权最小买入手数"
+        },
+        "option_buy_lots_max": {
+            "default": 100,
+            "type": "int",
+            "min": 1,
+            "max": 1000,
+            "description": "期权最大买入手数"
+        },
+        "option_contract_multiplier": {
+            "default": 10000,
+            "type": "int",
+            "min": 1000,
+            "max": 100000,
+            "description": "期权合约乘数"
+        },
+        "position_limit_max_ratio": {
+            "default": 0.2,
+            "type": "float",
+            "min": 0.05,
+            "max": 0.5,
+            "description": "持仓上限占总资金比例"
+        },
+        "circuit_breaker_pause_sec": {
+            "default": 60.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 7200.0,
+            "description": "熔断暂停秒数 (dry_run调整: 180→60加速恢复验证)"
+        },
+        "circuit_breaker_trigger_sigma": {
+            "default": 5.0,
+            "type": "float",
+            "min": 1.0,
+            "max": 10.0,
+            "description": "熔断触发Sigma倍数 (dry_run调整: 3.0→5.0放宽避免误触发)"
+        },
+        "daily_loss_hard_stop_pct": {
+            "default": 0.10,
+            "type": "float",
+            "min": 0.01,
+            "max": 0.20,
+            "description": "日最大回撤硬停止比例 (dry_run调整: 0.05→0.10放宽避免误触发)"
+        },
+        "max_signals_per_window": {
+            "default": 20,
+            "type": "int",
+            "min": 1,
+            "max": 50,
+            "description": "窗口内最大信号数 (dry_run调整: 10→20放宽加速验证)"
+        },
+        "rate_limit_global_per_min": {
+            "default": 120,
+            "type": "int",
+            "min": 10,
+            "max": 300,
+            "description": "全局下单速率限制 (dry_run调整: 60→120 dry_run下无需严格限流)"
+        },
+        "daily_drawdown_multiplier": {
+            "default": 2.0,
+            "type": "float",
+            "min": 0.5,
+            "max": 10.0,
+            "description": "日回撤乘数"
+        },
+        "kline_max_age_sec": {
+            "default": 60,
+            "type": "int",
+            "min": 10,
+            "max": 600,
+            "description": "K线最大年龄秒"
+        },
+        "signal_max_age_sec": {
+            "default": 180,
+            "type": "int",
+            "min": 10,
+            "max": 3600,
+            "description": "信号最大年龄秒"
+        },
+        "tvf_enabled": {
+            "default": true,
+            "type": "bool",
+            "description": "TVF三层加权模型开关 (R17-PAR-02修复: 三源统一为True)"
+        },
+        "tvf_l1_weight": {
+            "default": 0.40,
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "description": "TVF L1权重"
+        },
+        "tvf_l2_weight": {
+            "default": 0.35,
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "description": "TVF L2权重"
+        },
+        "tvf_l3_weight": {
+            "default": 0.25,
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "description": "TVF L3权重"
+        },
+        "subscription_batch_size": {
+            "default": 10,
+            "type": "int",
+            "min": 1,
+            "max": 100,
+            "description": "订阅批次大小"
+        },
+        "rate_limit_min_interval_sec": {
+            "default": 0.5,
+            "type": "float",
+            "min": 0.0,
+            "max": 60.0,
+            "description": "下单最小间隔秒 (dry_run调整: 1.0→0.5 dry_run下可缩短间隔)"
+        },
+        "enforce_trading_session_boundary": {
+            "default": true,
+            "type": "bool",
+            "description": "强制交易时间边界检查"
+        },
+        "last_trading_day_close_ahead_days": {
+            "default": 3,
+            "type": "int",
+            "min": 0,
+            "max": 10,
+            "description": "到期日平仓提前天数"
+        },
+        "delivery_slippage_multiplier_max": {
+            "default": 3.0,
+            "type": "float",
+            "min": 1.0,
+            "max": 10.0,
+            "description": "交割月滑点最大倍数"
+        },
+        "default_slippage_bps": {
+            "default": 0.0,
+            "type": "float",
+            "min": 0.0,
+            "max": 100.0,
+            "description": "默认滑点基点"
+        },
+        "intraday_max_total_ticks": {
+            "default": 5000000,
+            "type": "int",
+            "min": 100000,
+            "max": 50000000,
+            "description": "日内最大tick总数"
+        },
+        "tick_shard_count": {
+            "default": 16,
+            "type": "int",
+            "min": 1,
+            "max": 64,
+            "description": "Tick分片数"
+        },
+        "CACHE_TTL": {
+            "default": 60.0,
+            "type": "float",
+            "min": 1.0,
+            "max": 3600.0,
+            "description": "参数缓存TTL秒 (与state_param_manager对齐)"
+        },
+        "close_stop_loss_ratio": {
+            "default": 0.3,
+            "type": "float",
+            "min": 0.05,
+            "max": 1.0,
+            "description": "止损倍率 (R24-P0-DF-03修复: 0.5→0.3)"
+        },
+        "max_open_positions": {
+            "default": 3,
+            "type": "int",
+            "min": 1,
+            "max": 20,
+            "description": "最大同时持仓合约数"
+        },
+        "dry_run_mode": {
+            "default": true,
+            "type": "bool",
+            "description": "模拟运行模式(只记录信号不下单)，用于验证数据/交易链路。生产环境必须关闭"
+        },
+        "dry_run_callback_delay_sec": {
+            "default": 0.05,
+            "type": "float",
+            "min": 0.0,
+            "max": 5.0,
+            "description": "dry_run模式下虚拟回调注入延迟(秒)，模拟平台网络往返"
+        },
+        "sorter.scoring_scheme": {
+            "default": "scheme_1",
+            "type": "string",
+            "description": "v2.8 §21 排序方案: scheme_1=实盘默认(net_score+confidence), scheme_2=D/Q正交分解, scheme_3=entropy+concentration+direction_bias, all=全特征(回测用)"
+        },
+        "sorter.output_mode": {
+            "default": "research",
+            "type": "string",
+            "description": "v2.8 §21 输出模式: research=全字段(回测用), production=瘦身字段(实盘用, 按scoring_scheme自动选择)"
+        },
+        "sorter.direction_threshold": {
+            "default": 0.10,
+            "type": "float",
+            "min": 0.05,
+            "max": 0.20,
+            "description": "v2.8 §21 方向判定阈值: D > threshold → long, D < -threshold → short"
+        },
+        "sorter.quality_high_threshold": {
+            "default": 0.30,
+            "type": "float",
+            "min": 0.20,
+            "max": 0.40,
+            "description": "v2.8 §21 质量分级阈值: Q > threshold → high, Q > 0 → medium, else → low"
+        }
+    },
+    "constraints": {
+        "tvf_weights_sum": {
+            "rule": "tvf_l1_weight + tvf_l2_weight + tvf_l3_weight must equal 1.0",
+            "strict": false,
+            "description": "TVF权重之和建议为1.0"
+        },
+        "max_risk_positions": {
+            "rule": "max_risk_ratio * position_limit_max_ratio must not exceed allowed risk budget",
+            "strict": false
+        }
+    }
+}

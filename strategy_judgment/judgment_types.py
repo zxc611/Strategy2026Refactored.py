@@ -370,50 +370,50 @@ SCORING_COEFFICIENTS = {
 }
 
 STRATEGY_TYPE_WEIGHT_OVERRIDES = {
-    "resonance": {"prediction_calibration": 0.08, "behavior_consistency": 0.18, "cross_instrument_consistency": 0.04},
-    "high_freq": {"prediction_calibration": 0.04, "behavior_consistency": 0.22},
-    "box": {"behavior_consistency": 0.18, "risk_budget_compliance": 0.16},
-    "spring": {"behavior_consistency": 0.18, "risk_budget_compliance": 0.16},
-    "arbitrage": {"return_source_diversification": 0.03, "cross_strategy_correlation": 0.08},
-    "market_making": {"return_source_diversification": 0.05, "cross_strategy_correlation": 0.06},
-    "divergence": {"behavior_consistency": 0.16, "cross_instrument_consistency": 0.06, "prediction_calibration": 0.06},
+    "s2_resonance": {"prediction_calibration": 0.08, "behavior_consistency": 0.18, "cross_instrument_consistency": 0.04},
+    "s1_hft": {"prediction_calibration": 0.04, "behavior_consistency": 0.22},
+    "s3_box": {"behavior_consistency": 0.18, "risk_budget_compliance": 0.16},
+    "s4_spring": {"behavior_consistency": 0.18, "risk_budget_compliance": 0.16},
+    "s5_arbitrage": {"return_source_diversification": 0.03, "cross_strategy_correlation": 0.08},
+    "s6_market_making": {"return_source_diversification": 0.05, "cross_strategy_correlation": 0.06},
+    "s7_divergence": {"behavior_consistency": 0.16, "cross_instrument_consistency": 0.06, "prediction_calibration": 0.06},
     "other": {"behavior_consistency": 0.10, "risk_budget_compliance": 0.10},
 }
 
 STRATEGY_TYPE_THRESHOLD_OVERRIDES = {
-    "arbitrage": {
+    "s5_arbitrage": {
         "return_source_diversification": 0.30,
         "behavior_consistency": 0.60,
         "drawdown_recovery": 0.55,
         "parameter_stability": 0.55,
     },
-    "high_freq": {
+    "s1_hft": {
         "drawdown_recovery": 0.60,
         "behavior_consistency": 0.65,
         "prediction_calibration": 0.55,
     },
-    "market_making": {
+    "s6_market_making": {
         "return_source_diversification": 0.35,
         "behavior_consistency": 0.60,
         "risk_budget_compliance": 0.65,
         "parameter_stability": 0.55,
     },
-    "spring": {
+    "s4_spring": {
         "behavior_consistency": 0.60,
         "extreme_survival": 0.55,
         "risk_budget_compliance": 0.65,
     },
-    "resonance": {
+    "s2_resonance": {
         "behavior_consistency": 0.60,
         "prediction_calibration": 0.55,
         "cross_instrument_consistency": 0.55,
     },
-    "box": {
+    "s3_box": {
         "behavior_consistency": 0.60,
         "extreme_survival": 0.55,
         "risk_budget_compliance": 0.65,
     },
-    "divergence": {
+    "s7_divergence": {
         "behavior_consistency": 0.60,
         "cross_instrument_consistency": 0.55,
         "prediction_calibration": 0.55,
@@ -426,16 +426,16 @@ STRATEGY_TYPE_THRESHOLD_OVERRIDES = {
 }
 
 ECOSYSTEM_TO_JUDGMENT_TYPE_MAP = {
-    "correct_trending": "high_freq",
-    "correct_trending_defensive": "high_freq",  # R10-三对齐修复: defensive状态映射与correct_trending同类
-    "incorrect_reversal": "divergence",
-    "incorrect_reversal_defensive": "divergence",
-    "box_extreme": "box",
-    "box_spring": "spring",
-    "arbitrage": "arbitrage",
-    "market_making": "market_making",
-    "divergence_reversal": "divergence",
-    "divergence_reversal_defensive": "divergence",
+    "correct_trending": "s1_hft",
+    "correct_trending_defensive": "s1_hft",
+    "incorrect_reversal": "s7_divergence",
+    "incorrect_reversal_defensive": "s7_divergence",
+    "box_extreme": "s3_box",
+    "box_spring": "s4_spring",
+    "s5_arbitrage": "s5_arbitrage",
+    "s6_market_making": "s6_market_making",
+    "divergence_reversal": "s7_divergence",
+    "divergence_reversal_defensive": "s7_divergence",
     "other": "other",
 }
 

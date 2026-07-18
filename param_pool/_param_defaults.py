@@ -681,9 +681,9 @@ STRATEGY_SHADOW_DEFAULTS = {
     "main":            {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_SHADOW_A),              "shadow_b": copy.deepcopy(PARAM_DEFAULTS_SHADOW_B)},
     "box_extreme":     {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_BOX_EXTREME_SHADOW_A),  "shadow_b": copy.deepcopy(PARAM_DEFAULTS_BOX_EXTREME_SHADOW_B)},
     "box_spring":      {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_BOX_SPRING_SHADOW_A),   "shadow_b": copy.deepcopy(PARAM_DEFAULTS_BOX_SPRING_SHADOW_B)},
-    "arbitrage":       {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_ARBITRAGE_SHADOW_A),    "shadow_b": copy.deepcopy(PARAM_DEFAULTS_ARBITRAGE_SHADOW_B)},
-    "market_making":   {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_MARKET_MAKING_SHADOW_A),"shadow_b": copy.deepcopy(PARAM_DEFAULTS_MARKET_MAKING_SHADOW_B)},
-    "divergence":      {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_DIVERGENCE_SHADOW_A),   "shadow_b": copy.deepcopy(PARAM_DEFAULTS_DIVERGENCE_SHADOW_B)},
+    "s5_arbitrage":       {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_ARBITRAGE_SHADOW_A),    "shadow_b": copy.deepcopy(PARAM_DEFAULTS_ARBITRAGE_SHADOW_B)},
+    "s6_market_making":   {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_MARKET_MAKING_SHADOW_A),"shadow_b": copy.deepcopy(PARAM_DEFAULTS_MARKET_MAKING_SHADOW_B)},
+    "s7_divergence":      {"shadow_a": copy.deepcopy(PARAM_DEFAULTS_DIVERGENCE_SHADOW_A),   "shadow_b": copy.deepcopy(PARAM_DEFAULTS_DIVERGENCE_SHADOW_B)},
 }
 
 ROUND1_TOP_K = 10
@@ -821,12 +821,12 @@ CR_PARAM_GRID = {
 MULTISCALE_BAR_LENGTHS = [1, 2, 3, 5, 10, 15, 30, 60, 120, 240, 1440]
 
 BAR_INTERVAL_GRID = {
-    "high_freq": [1],
-    "resonance": [1, 2, 3, 5, 10, 15, 30],
-    "box": [2, 3, 5, 10, 15, 30, 60, 120, 240],
-    "spring": [2, 3, 5, 10, 15, 30, 60, 120, 240],
-    "arbitrage": [1, 2, 3, 5],
-    "market_making": [1, 2, 3, 5, 10, 15],
+    "s1_hft": [1],
+    "s2_resonance": [1, 2, 3, 5, 10, 15, 30],
+    "s3_box": [2, 3, 5, 10, 15, 30, 60, 120, 240],
+    "s4_spring": [2, 3, 5, 10, 15, 30, 60, 120, 240],
+    "s5_arbitrage": [1, 2, 3, 5],
+    "s6_market_making": [1, 2, 3, 5, 10, 15],
 }
 
 KLINE_LENGTH_PARAM_GRID = {
@@ -932,7 +932,7 @@ TEST_END = "2026-12-31"
 # Phase 1: 核心9参数（4 Tier阈值 + 5个月份权重）
 THREE_LAYER_CORE_DEFAULTS = {
     "tl_tier1_wilson_threshold": 0.50,        # 范围 (0.50, 0.70)
-    "tl_tier2_coverage_threshold": 0.40,      # 范围 (0.40, 0.70)
+    "tl_tier2_coverage_threshold": 0.20,      # FIX-FF R12-4-1: 与代码默认0.20对齐(原0.40)
     "tl_tier2_correct_up_threshold": 0.45,    # 范围 (0.45, 0.60)
     "tl_tier3_correct_up_threshold": 0.35,    # 范围 (0.35, 0.50)
     "tl_month_weight_1": 0.35,
@@ -944,7 +944,7 @@ THREE_LAYER_CORE_DEFAULTS = {
 
 THREE_LAYER_CORE_GRID = {
     "tl_tier1_wilson_threshold": [0.50, 0.55, 0.60, 0.65, 0.70],
-    "tl_tier2_coverage_threshold": [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
+    "tl_tier2_coverage_threshold": [0.15, 0.20, 0.25, 0.30, 0.40, 0.50],  # FIX-FF R12-4-1: 含0.20
     "tl_tier2_correct_up_threshold": [0.45, 0.50, 0.55, 0.60],
     "tl_tier3_correct_up_threshold": [0.35, 0.40, 0.45, 0.50],
     "tl_month_weight_1": [0.25, 0.30, 0.35, 0.40, 0.45],

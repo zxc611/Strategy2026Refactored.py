@@ -11,9 +11,9 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
-from ali2026v3_trading.config.params_service import get_param_value
-from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState, _state_is
+from infra.shared_utils import CHINA_TZ
+from config.params_service import get_param_value
+from lifecycle.lifecycle_state_machine import StrategyState, _state_is
 
 
 class LifecycleCallbacks:
@@ -32,7 +32,7 @@ class LifecycleCallbacks:
         )
         logging.info("[StrategyCoreService.on_start] ========== START ==========")
         try:
-            from ali2026v3_trading.config.state_param import get_state_param_manager
+            from config.state_param import get_state_param_manager
             spm = get_state_param_manager()
             if hasattr(p, 't_type_service') and p.t_type_service:
                 wc = getattr(p.t_type_service, '_width_cache', None)
@@ -42,24 +42,36 @@ class LifecycleCallbacks:
                 else:
                     logging.error("[on_start] bind_width_cache 失败! _width_cache=None, 五态分类将无法更新")
             p._state_param_manager = spm
+            # FIX-56 RC-13: SPM注册到_state_store，确保tick_hft.py可通过get_ref访问
+            # 根因: V3报告FIX-12声称已落地但实际未落地，set_ref从未被调用
+            #       → tick_hft.py:154 get_ref('_state_param_manager')返回None
+            #       → resonance_strength=0, SPM五态分类系统失效
+            # 修复: 补全set_ref注册，同时保留属性赋值作为兼容性fallback
+            try:
+                _ss_spm = getattr(p, '_state_store', None)
+                if _ss_spm is not None:
+                    _ss_spm.set_ref('_state_param_manager', spm)
+                    logging.info("[FIX-56] SPM已注册到_state_store (set_ref成功)")
+            except Exception as _spm_ref_err:
+                logging.warning("[on_start] SPM set_ref注册失败(非阻断): %s", _spm_ref_err)
             logging.info("[StrategyCoreService.on_start] StateParamManager initialized, state=%s", spm.get_current_state())
             try:
-                from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
+                from strategy.strategy_ecosystem import get_strategy_ecosystem
                 eco = get_strategy_ecosystem()
                 spm.register_on_state_switch(eco.on_state_switched)
                 logging.info("[StrategyCoreService.on_start] SPM-Ecosystem联动已绑定")
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as eco_e:
+            except Exception as eco_e:
                 logging.warning("[StrategyCoreService.on_start] Ecosystem联动绑定失败: %s", eco_e)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as spm_e:
+        except Exception as spm_e:
             logging.warning("[StrategyCoreService.on_start] StateParamManager init failed: %s", spm_e)
         try:
-            from ali2026v3_trading.risk.risk_service import get_safety_meta_layer
-            from ali2026v3_trading.config.params_service import get_params_service
+            from risk.risk_service import get_safety_meta_layer
+            from config.params_service import get_params_service
             ps = get_params_service()
             _sid = str(getattr(p, 'strategy_id', '') or 'global')
             p._safety_meta_layer = get_safety_meta_layer(params=ps, strategy_id=_sid)
             logging.info("[StrategyCoreService.on_start] SafetyMetaLayer initialized")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as safety_e:
+        except Exception as safety_e:
             logging.warning("[StrategyCoreService.on_start] SafetyMetaLayer init failed: %s", safety_e)
         try:
             _bl = getattr(p, '_business_layer', None)
@@ -72,8 +84,8 @@ class LifecycleCallbacks:
                     # 旧代码直接赋值导致_ps永远为None→SnapshotCollector注入被跳过
                     _bl.ensure_position_service()
                     _ps = getattr(_bl, '_position_service', None) or getattr(p, '_position_service', None)
-                except Exception:
-                    pass
+                except Exception as _pass_err_0:
+                    logging.debug("[on_start] 异常(非阻断): %s", _pass_err_0)
             if _bl is None:
                 logging.info("[StrategyCoreService.on_start] SnapshotCollector注入跳过: _business_layer=None")
             elif _ps is None:
@@ -85,7 +97,7 @@ class LifecycleCallbacks:
                 else:
                     _ps.set_snapshot_collector(_sc)
                     logging.info("[StrategyCoreService.on_start] SnapshotCollector注入PositionService完成")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _sc_e:
+        except Exception as _sc_e:
             logging.debug("[StrategyCoreService.on_start] SnapshotCollector注入跳过: %s", _sc_e)
         try:
             params = getattr(p, 'params', None) or {}
@@ -119,25 +131,43 @@ class LifecycleCallbacks:
                 # 标记到策略对象，便于运行时检查
                 try:
                     setattr(p, '_dry_run_active', True)
-                except (AttributeError, TypeError):
-                    pass
+                    # FIX-GG-REAL: 传播_dry_run_active到PositionService和SignalService
+                    # 根因: position_command_service.py L479从PositionService实例读取_dry_run_active
+                    #       但原代码只SET到StrategyCoreService实例(p)，PositionService是独立实例
+                    #       导致FIX-A(dry_run保证金旁路)的第二路径不触发
+                    # 修复(v2): _business_layer为None时也要尝试从p直接读取，避免传播块被整体跳过
+                    _bl = getattr(p, '_business_layer', None)
+                    _ps = getattr(_bl, '_position_service', None) if _bl is not None else None
+                    if _ps is None:
+                        _ps = getattr(p, '_position_service', None)
+                    if _ps is not None:
+                        setattr(_ps, '_dry_run_active', True)
+                        logging.info("[FIX-GG-REAL] 已传播_dry_run_active=True到PositionService")
+                    _ss = getattr(_bl, '_signal_service', None) if _bl is not None else None
+                    if _ss is None:
+                        _ss = getattr(p, '_signal_service', None)
+                    if _ss is not None:
+                        setattr(_ss, '_dry_run_active', True)
+                        logging.info("[FIX-GG-REAL] 已传播_dry_run_active=True到SignalService")
+                except Exception as _pass_err_1:
+                    logging.debug("[on_start] 异常(非阻断): %s", _pass_err_1)
                 # [FIX-20260708-DRY-RUN-V2] 同步到OrderService._dry_run_mode
                 try:
-                    from ali2026v3_trading.order.order_base import get_order_service
+                    from order.order_base import get_order_service
                     _osvc = get_order_service()
                     if _osvc is not None:
                         _osvc._dry_run_mode = True
                         logging.info("[DRY-RUN] 已同步_dry_run_mode=True到OrderService")
-                except (ValueError, KeyError, TypeError, AttributeError, ImportError, RuntimeError):
-                    pass
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as mode_e:
+                except Exception as _pass_err_2:
+                    logging.debug("[on_start] 异常(非阻断): %s", _pass_err_2)
+        except Exception as mode_e:
             logging.debug("[P2-R8-06] debug/stress mode处理异常: %s", mode_e)
         try:
-            from ali2026v3_trading.data.data_service import get_data_service
+            from data.data_service import get_data_service
             ds = get_data_service()
             # FIX-20260702-HARDEN: 记录嵌入式环境安全模式状态
             try:
-                from ali2026v3_trading.data.ds_db_connection import DBConnectionMixin, _TimedDuckDBConnection
+                from data.ds_db_connection import DBConnectionMixin, _TimedDuckDBConnection
                 if DBConnectionMixin._EMBEDDED_MODE:
                     logging.info(
                         "[FIX-20260702-HARDEN] DataService 预热完成(嵌入式安全模式: "
@@ -146,20 +176,28 @@ class LifecycleCallbacks:
                         DBConnectionMixin._EMBEDDED_THREADS,
                         _TimedDuckDBConnection._SYNC_EXEC,
                     )
-            except (ImportError, AttributeError):
-                pass
+            except Exception as _pass_err_3:
+                logging.debug("[on_start] 异常(非阻断): %s", _pass_err_3)
             logging.info(f"[StrategyCoreService.on_start] DataService预热完成: {ds is not None}")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as ds_e:
+        except Exception as ds_e:
             logging.warning(f"[StrategyCoreService.on_start] DataService预热失败: {ds_e}")
         # FIX-20260709-PAUSE-DIAG: 入口诊断日志，追踪平台回调
         import traceback as _tb_start
-        _caller_stack_start = ''.join(_tb_start.format_stack()[-3:]).strip()[:200]
-        logging.critical(
-            "[FIX-20260709-PAUSE-DIAG] on_start ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
-            "caller_stack:\n%s",
-            p.strategy_id, p._state, p._is_running, p._is_paused, getattr(p, '_is_trading', 'N/A'),
-            _caller_stack_start,
-        )
+        try:
+            _caller_stack_start = ''.join(_tb_start.format_stack()[-3:]).strip()
+        except Exception as _fs_err:
+            _caller_stack_start = ""
+            logging.debug("[on_start] format_stack失败(非阻断): %s", _fs_err)
+        try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个on_start
+            logging.critical(
+                "[FIX-20260709-PAUSE-DIAG] on_start ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
+                "caller_stack:\n%s",
+                getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
+                getattr(p, '_is_running', 'N/A'), getattr(p, '_is_paused', 'N/A'),
+                getattr(p, '_is_trading', 'N/A'), _caller_stack_start,
+            )
+        except Exception as _diag_err:
+            logging.debug("[on_start] 入口诊断日志失败(非阻断): %s", _diag_err)
         with p._lock:
             # FIX-20260713: 添加STOPPED到允许状态，支持从STOPPED状态重新启动
             # FIX-20260714-DEGRADED-STOP: 添加DEGRADED_STOP到允许状态，支持从降级停止恢复启动
@@ -189,8 +227,8 @@ class LifecycleCallbacks:
                     _ss.set('_is_running', True)
                     _ss.set('_is_paused', False)
                     _ss.set('_is_trading', True)
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    pass
+                except Exception as _pass_err_4:
+                    logging.debug("[on_start] 异常(非阻断): %s", _pass_err_4)
             p.transition_to(StrategyState.RUNNING)
             logging.info(f"[StrategyCoreService.on_start] Started: {p.strategy_id}")
             # FIX-20260714-STOP-EVENTS: 创建线程停止事件（原代码遗漏，导致on_stop无法通知线程退出）
@@ -243,8 +281,8 @@ class LifecycleCallbacks:
             if _ss is not None:
                 try:
                     _ss.set('_subscribed_instruments', p._subscribed_instruments)
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    pass
+                except Exception as _pass_err_5:
+                    logging.debug("[on_start] 异常(非阻断): %s", _pass_err_5)
             logging.info(
                 f"[Subscribe] 使用on_init结果: "
                 f"{len(selected_futures_list)} 期货, "
@@ -253,15 +291,15 @@ class LifecycleCallbacks:
             )
             if selected_futures_list or selected_options_dict:
                 try:
-                    from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                    from infra.health_monitor import DiagnosisProbeManager
                     DiagnosisProbeManager.start_contract_watch(p._subscribed_instruments)
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as contract_watch_e:
+                except Exception as contract_watch_e:
                     logging.warning("[ContractWatch] 启动失败: %s", contract_watch_e)
                 p._e2e_counters['configured_instruments'] = len(p._subscribed_instruments)
                 try:
                     _storage = getattr(p, 'storage', None)
                     logging.info(f"[Subscribe] storage 已就绪: {_storage is not None}")
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as storage_e:
+                except Exception as storage_e:
                     logging.error(f"[Subscribe] storage 初始化失败: {storage_e}")
                     _storage = None
                 _sm = None
@@ -271,11 +309,11 @@ class LifecycleCallbacks:
                         _sm = _sm()
                 if _sm is None:
                     try:
-                        from ali2026v3_trading.data.data_service import get_data_service
+                        from data.data_service import get_data_service
                         _ds = get_data_service()
                         if _ds is not None:
                             _sm = getattr(_ds, 'subscription_manager', None)
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as sm_fb_err:
+                    except Exception as sm_fb_err:
                         logging.warning("[Subscribe] DataService fallback for subscription_manager failed: %s", sm_fb_err)
                 if _sm is not None and hasattr(_sm, 'subscribe_all_instruments'):
                     # FIX-20260703-LOCK: subscribe_all_instruments移出同步阻塞路径
@@ -292,7 +330,7 @@ class LifecycleCallbacks:
                             _p_ref._e2e_counters['preregistered_instruments'] = _cnt
                             # FIX-20260707-SUB-RET: 检查C++订阅失败数并重试
                             try:
-                                from ali2026v3_trading.data.data_service import DataService
+                                from data.data_service import DataService
                                 _fail_cnt = DataService.get_subscribe_fail_count()
                                 _total = len(_args[0]) + sum(len(v) for v in _args[1].values()) if _args[1] else len(_args[0])
                                 logging.info(
@@ -341,7 +379,7 @@ class LifecycleCallbacks:
                                     break
                             # 诊断C++ sub_market_data返回值 (采样)
                             try:
-                                from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                                from infra.health_monitor import DiagnosisProbeManager
                                 DiagnosisProbeManager.diagnose_subscribe_api_return(_p_ref)
                             except Exception as _diag_err:
                                 logging.debug("[Subscribe] diagnose_subscribe_api_return跳过: %s", _diag_err)
@@ -413,7 +451,7 @@ class LifecycleCallbacks:
                                     try:
                                         _bind_fn(_host)
                                         logging.info("[Subscribe] 延迟重试bind_platform_apis成功（第%d次）", attempt)
-                                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as bind_e:
+                                    except Exception as bind_e:
                                         logging.warning("[Subscribe] 延迟重试bind_platform_apis失败: %s", bind_e)
                             _subscribe_fn = getattr(_self, 'subscribe', None)
                             if callable(_subscribe_fn):
@@ -488,7 +526,7 @@ class LifecycleCallbacks:
                             logging.info("[Subscribe] deferred-subscribe线程收到停止事件，终止")
                             return
                         try:
-                            from ali2026v3_trading.infra.subscription_service import SubscriptionManager
+                            from infra.subscription_service import SubscriptionManager
                             _deferred_futures = [x for x in _deferred if not SubscriptionManager.is_option(x)]
                             _deferred_option_ids = [x for x in _deferred if SubscriptionManager.is_option(x)]
                             # [FIX-20260703-DLL] 延迟合约(on_init分区时已超出DLL 16287上限)禁止重新订阅
@@ -543,7 +581,7 @@ class LifecycleCallbacks:
                                                     internal_id=int(_iid),
                                                 )
                                                 _tts_reg += 1
-                                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _oe:
+                                            except Exception as _oe:
                                                 logging.warning("[TTS-Deferred] 注册期权 %s 失败: %s", _oid, _oe)
                                             if _tts_proc % _TTS_BATCH == 0:
                                                 logging.info("[TTS-Deferred] 期权注册进度: %d/%d (成功=%d)", _tts_proc, _tts_opt_total, _tts_reg)
@@ -581,7 +619,7 @@ class LifecycleCallbacks:
                 if hasattr(p, '_add_option_status_diagnosis_job'):
                     p._add_option_status_diagnosis_job()
                     logging.info("[StrategyCoreService.on_start] 期权5态诊断任务已重新注册（重启场景）")
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _diag_err:
+            except Exception as _diag_err:
                 logging.warning("[StrategyCoreService.on_start] 期权5态诊断任务注册失败: %s", _diag_err)
             p._publish_event('StrategyStarted', {'strategy_id': p.strategy_id})
             p._log_resource_ownership_table(phase='start')
@@ -592,13 +630,21 @@ class LifecycleCallbacks:
         run_id = getattr(p, '_lifecycle_run_id', 'N/A')
         # FIX-20260709-PAUSE-DIAG: 入口诊断日志，追踪平台回调
         import traceback as _tb
-        _caller_stack = ''.join(_tb.format_stack()[-3:]).strip()[:200]
-        logging.critical(
-            "[FIX-20260709-PAUSE-DIAG] on_stop ENTER: strategy_id=%s run_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
-            "caller_stack:\n%s",
-            p.strategy_id, run_id, p._state, p._is_running, p._is_paused, getattr(p, '_is_trading', 'N/A'),
-            _caller_stack,
-        )
+        try:
+            _caller_stack = ''.join(_tb.format_stack()[-3:]).strip()
+        except Exception as _fs_err:
+            _caller_stack = ""
+            logging.debug("[on_stop] format_stack失败(非阻断): %s", _fs_err)
+        try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个on_stop
+            logging.critical(
+                "[FIX-20260709-PAUSE-DIAG] on_stop ENTER: strategy_id=%s run_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
+                "caller_stack:\n%s",
+                getattr(p, 'strategy_id', 'N/A'), run_id, getattr(p, '_state', 'N/A'),
+                getattr(p, '_is_running', 'N/A'), getattr(p, '_is_paused', 'N/A'),
+                getattr(p, '_is_trading', 'N/A'), _caller_stack,
+            )
+        except Exception as _diag_err:
+            logging.debug("[on_stop] 入口诊断日志失败(非阻断): %s", _diag_err)
         with p._lock:
             if p._state == StrategyState.STOPPED:
                 logging.debug(
@@ -615,28 +661,37 @@ class LifecycleCallbacks:
             # FIX-20260714-R16: _is_paused应为False（STOPPED状态不是暂停状态）
             # 根因R16: on_stop()设置_is_paused=True，但transition_to(STOPPED)会覆盖为False
             #         竞态窗口内其他线程读取_is_paused得到错误值
-            p._is_running = False
-            p._is_paused = False
-            p._is_trading = False
-            # FIX-20260711-PAUSE-ACTION: 通知TickBufferFlushFallback线程退出
+            # FIX-42: 保护with p._lock内的状态赋值和tick_svc调用
+            try:
+                p._is_running = False
+                p._is_paused = False
+                p._is_trading = False
+            except Exception as _pass_err_6:
+                logging.debug("[on_stop] 异常(非阻断): %s", _pass_err_6)
             _tick_svc = getattr(p, '_tick_svc', None)
             if _tick_svc is not None:
-                if hasattr(_tick_svc, 'on_stop'):
-                    _tick_svc.on_stop()
-                else:
-                    _tick_svc._flush_stop_requested = True
+                try:
+                    if hasattr(_tick_svc, 'on_stop'):
+                        _tick_svc.on_stop()
+                    else:
+                        _tick_svc._flush_stop_requested = True
+                except Exception as _tick_stop_err:
+                    logging.warning("[on_stop] _tick_svc.on_stop()失败(非阻断): %s", _tick_stop_err)
             _lm = getattr(p, '_lifecycle_mgr', None)
             if _lm is not None:
-                _lm.is_running = False
-                _lm.is_paused = False
+                try:
+                    _lm.is_running = False
+                    _lm.is_paused = False
+                except Exception as _pass_err_7:
+                    logging.debug("[on_stop] 异常(非阻断): %s", _pass_err_7)
             _ss = getattr(p, '_state_store', None)
             if _ss is not None:
                 try:
                     _ss.set('_is_running', False)
                     _ss.set('_is_paused', False)
                     _ss.set('_is_trading', False)
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    pass
+                except Exception as _pass_err_8:  # FIX-40: 扩展异常类型，防止OSError等跳过on_stop后续清理
+                    logging.debug("[on_stop] 异常(非阻断): %s", _pass_err_8)
         jobs_zero = True
         try:
             # FIX-20260714-SCHED-SAFE: pause_scheduler添加SchedulerNotRunningError保护
@@ -660,136 +715,154 @@ class LifecycleCallbacks:
                         f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] "
                         f"Jobs not zero after 10s, entering DEGRADED_STOP"
                     )
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error(
                 f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}]"
                 f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] Phase 2 error: {e}"
             )
             jobs_zero = False
         try:
-            from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager, reset_diagnosis_grace_period
+            from infra.health_monitor import DiagnosisProbeManager, reset_diagnosis_grace_period
             DiagnosisProbeManager.stop_contract_watch(reason='strategy_stop')
             reset_diagnosis_grace_period()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as contract_watch_e:
+        except Exception as contract_watch_e:
             logging.warning(
                 f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}]"
                 f"[run_id={run_id}] contract_watch stop error: {contract_watch_e}"
             )
-        try:
-            # FIX-20260714-STOP-EVENT: 无论线程是否存活都设置停止事件，确保无绕过
-            _stop_event = getattr(p, '_platform_subscribe_stop', None)
-            if _stop_event is not None:
-                _stop_event.set()
-                logging.debug("[R22-RES-03-修复] _platform_subscribe_stop已设置")
-            _sub_thread = getattr(p, '_platform_subscribe_thread', None)
-            if _sub_thread is not None and _sub_thread.is_alive():
-                _sub_thread.join(timeout=5.0)
-                logging.debug("[R22-RES-03-修复] _platform_subscribe_thread已清理")
-            p._platform_subscribe_thread = None
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _cancel_err:
-            logging.warning("[R22-RES-03] _platform_subscribe_thread清理失败: %s", _cancel_err)
+        # FIX-20260716-THREAD-V2: 统一由_cancel_all_timers停止所有托管线程
+        # 根因: 原on_stop中有3处重复停止逻辑（_platform_subscribe清理+降级循环+_cancel_all_timers调用），
+        #       违反方法唯一原则，且降级循环与_cancel_all_timers功能完全重复。
+        # 修复: 仅保留_cancel_all_timers调用（位于lifecycle_service.py），统一停止
+        #       _storage_warm/_platform_subscribe/W7/W8/W9/W11全部线程。
         try:
             if hasattr(p, '_cancel_all_timers'):
                 p._cancel_all_timers()
-                logging.debug("[R22-RES-03-修复] _cancel_all_timers()已调用")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _timer_err:
-            logging.warning("[R22-RES-03] _cancel_all_timers()调用失败: %s", _timer_err)
-        # FIX-20260714-R5/R9/R10/R17: 补全停止W7/W8/W9/W11线程（原on_stop漏停）
-        # 根因R5/R9/R17: on_stop()未停止_bulk_subscribe_thread/subscribe-retry/deferred-subscribe
-        # 根因R10: 历史K线加载线程无停止机制
-        # 修复: 先设置退出事件，再join（带超时），防止删除后继续运行访问已销毁资源
-        for _thread_attr, _stop_attr, _thread_desc in [
-            ('_bulk_subscribe_thread', '_bulk_subscribe_stop', 'db-subscribe'),
-            ('_subscribe_retry_thread', '_subscribe_retry_stop', 'subscribe-retry'),
-            ('_deferred_subscribe_thread', '_deferred_subscribe_stop', 'deferred-subscribe'),
-            ('_historical_kline_thread', '_historical_kline_stop', 'kline-load-async'),
-        ]:
-            try:
-                _stop_evt = getattr(p, _stop_attr, None)
-                if _stop_evt is not None:
-                    _stop_evt.set()
-                    logging.info("[on_stop] %s停止事件已设置", _thread_desc)
-                _t = getattr(p, _thread_attr, None)
-                if _t is not None and _t.is_alive():
-                    _t.join(timeout=3.0)
-                    if _t.is_alive():
-                        logging.warning("[on_stop] %s线程join超时(3s)，继续（daemon线程将自行退出）", _thread_desc)
-                    else:
-                        logging.info("[on_stop] %s线程已退出", _thread_desc)
-                    setattr(p, _thread_attr, None)
-            except (ValueError, KeyError, TypeError, AttributeError) as _join_err:
-                logging.warning("[on_stop] %s线程停止失败: %s", _thread_desc, _join_err)
+                logging.info("[on_stop] _cancel_all_timers()已统一停止所有托管线程")
+        except Exception as _timer_err:
+            logging.warning("[on_stop] _cancel_all_timers()调用失败: %s", _timer_err)
         try:
             p._stop_scheduler()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error(f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}][run_id={run_id}] _stop_scheduler error: {e}")
         try:
             p._unsubscribe_all_instruments()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error(f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}][run_id={run_id}] _unsubscribe error: {e}")
         try:
             p._shutdown_runtime_services()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error(f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}][run_id={run_id}] _shutdown_runtime error: {e}")
         if hasattr(p, '_flush_tick_buffer'):
             try:
                 p._flush_tick_buffer()
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.error(f"[on_stop][strategy_id={p.strategy_id}][run_id={run_id}] Failed to flush tick buffer: {e}")
         with p._lock:
             if jobs_zero:
-                p.transition_to(StrategyState.STOPPED)
+                try:  # FIX-40: 保护transition_to，防止异常跳过save_state/shutdown_thread_pools
+                    p.transition_to(StrategyState.STOPPED)
+                except Exception as _ts_err:
+                    logging.warning("[on_stop] transition_to(STOPPED)失败(非阻断): %s", _ts_err)
                 logging.info(
                     f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] Stopped"
                 )
             else:
-                p.transition_to(StrategyState.DEGRADED_STOP)
+                try:  # FIX-40: 保护transition_to
+                    p.transition_to(StrategyState.DEGRADED_STOP)
+                except Exception as _ts_err:
+                    logging.warning("[on_stop] transition_to(DEGRADED_STOP)失败(非阻断): %s", _ts_err)
                 logging.warning(
                     f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] DEGRADED_STOP (jobs not zero)"
                 )
         try:
             p._publish_event('StrategyStopped', {'strategy_id': p.strategy_id, 'state': p._state.value})
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error(f"[on_stop][strategy_id={p.strategy_id}][run_id={run_id}] Failed to publish event: {e}")
-        p._log_resource_ownership_table(phase='stop')
+        try:  # FIX-40: 保护_log_resource_ownership_table，防止异常跳过后续清理
+            p._log_resource_ownership_table(phase='stop')
+        except Exception as _rot_err:
+            logging.warning("[on_stop] _log_resource_ownership_table失败(非阻断): %s", _rot_err)
         try:
             p._lifecycle_platform.unsubscribe_all()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lp_err:
+        except Exception as _lp_err:
             logging.debug("[LifecyclePlatform] unsubscribe_all 委托失败: %s", _lp_err)
         try:
             p._lifecycle_resource.cleanup_all(level='normal')
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lr_err:
+        except Exception as _lr_err:
             logging.debug("[LifecycleResource] cleanup_all 委托失败: %s", _lr_err)
         try:
-            from ali2026v3_trading.risk.risk_service import generate_exchange_report
+            from risk.risk_service import generate_exchange_report
             generate_exchange_report([], output_path='logs/exchange_report.csv')
-        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+        except Exception as _r3_err:  # FIX-40: 扩展异常类型
             logging.debug("[R3-L2] suppressed exception", exc_info=True)
             pass
             pass
         try:
             p.save_state()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning(f"[on_stop] save_state failed: {e}")
+        # FIX-20260716-THREAD-V2: on_stop时关闭线程池（防止ThreadPoolExecutor泄漏）
+        # 根因: on_stop()只停止daemon线程，不关闭ThreadPoolExecutor，导致线程池工作线程泄漏
+        #       （07-15日志证据: UNCAUGHT THREAD TclError: application has been destroyed）。
+        # 修复: 调用shutdown_thread_pools(wait=True)阻塞关闭线程池。
+        try:
+            _lr = getattr(p, '_lifecycle_resource', None)
+            if _lr is not None and hasattr(_lr, 'shutdown_thread_pools'):
+                _lr.shutdown_thread_pools(wait=True, timeout=5.0)
+                logging.info("[on_stop] shutdown_thread_pools(wait=True)已调用")
+        except Exception as e:
+            logging.warning("[on_stop] shutdown_thread_pools失败: %s", e)
+        # FIX-38 RC-48: on_stop时停止SubscriptionWALService的4个共享服务线程
+        # 根因: SubscriptionWALService有stop_background_threads()方法但从未在on_stop中被调用
+        #       →SubAsyncWriter/SubRetry/SubCleanup/TickWatchdog 4个线程在策略停止后仍运行
+        #       (之前误判为"死代码"是因为Grep工具在subscription_service.py上失效)
+        # 修复: 通过subscription_manager.stop_background_threads()或_wal_service.close()停止
+        try:
+            _ds = getattr(p, '_data_service', None) or getattr(p, 'storage', None)
+            if _ds is not None:
+                _sm = getattr(_ds, 'subscription_manager', None)
+                if _sm is not None:
+                    if hasattr(_sm, 'stop_background_threads'):
+                        _sm.stop_background_threads(join_timeout=2.0)
+                        logging.info("[FIX-38] on_stop: SubscriptionWALService 4个共享线程已停止")
+                    elif hasattr(_sm, 'close'):
+                        _sm.close(silent=True)
+                        logging.info("[FIX-38] on_stop: SubscriptionWALService已关闭")
+        except Exception as _sub_err:
+            logging.warning("[FIX-38] on_stop: SubscriptionWALService停止失败(非阻断): %s", _sub_err)
         return True
 
     def on_destroy(self) -> None:
         p = self.p
         # FIX-20260709-PAUSE-DIAG: 入口诊断日志，追踪平台回调
         import traceback as _tb_destroy
-        _caller_stack_destroy = ''.join(_tb_destroy.format_stack()[-3:]).strip()[:200]
-        logging.critical(
-            "[FIX-20260709-PAUSE-DIAG] on_destroy ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s\n"
-            "caller_stack:\n%s",
-            p.strategy_id, p._state, p._is_running, p._is_paused,
-            _caller_stack_destroy,
-        )
+        try:
+            _caller_stack_destroy = ''.join(_tb_destroy.format_stack()[-3:]).strip()
+        except Exception as _fs_err:
+            _caller_stack_destroy = ""
+            logging.debug("[on_destroy] format_stack失败(非阻断): %s", _fs_err)
+        try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个on_destroy
+            logging.critical(
+                "[FIX-20260709-PAUSE-DIAG] on_destroy ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s\n"
+                "caller_stack:\n%s",
+                getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
+                getattr(p, '_is_running', 'N/A'), getattr(p, '_is_paused', 'N/A'),
+                _caller_stack_destroy,
+            )
+        except Exception as _diag_err:
+            logging.debug("[on_destroy] 入口诊断日志失败(非阻断): %s", _diag_err)
         try:
             p.destroy()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error(f"[StrategyCoreService.on_destroy] Error: {e}", exc_info=True)
+            # FIX-54: 即使destroy()失败也必须设置_destroyed=True
+            try:
+                p._destroyed = True
+            except Exception as _dest_err:
+                logging.warning("[on_destroy] _destroyed=True设置失败(非阻断): %s", _dest_err)
 
     def start(self) -> bool:
         return self.on_start()
@@ -801,13 +874,21 @@ class LifecycleCallbacks:
         p = self.p
         # FIX-20260709-PAUSE-DIAG: 入口诊断日志，追踪平台/UI回调
         import traceback as _tb_pause
-        _caller_stack_pause = ''.join(_tb_pause.format_stack()[-4:]).strip()[:200]
-        logging.critical(
-            "[FIX-20260709-PAUSE-DIAG] pause ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
-            "caller_stack:\n%s",
-            p.strategy_id, p._state, p._is_running, p._is_paused, getattr(p, '_is_trading', 'N/A'),
-            _caller_stack_pause,
-        )
+        try:
+            _caller_stack_pause = ''.join(_tb_pause.format_stack()[-4:]).strip()
+        except Exception as _fs_err:
+            _caller_stack_pause = ""
+            logging.debug("[pause] format_stack失败(非阻断): %s", _fs_err)
+        try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个pause
+            logging.critical(
+                "[FIX-20260709-PAUSE-DIAG] pause ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
+                "caller_stack:\n%s",
+                getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
+                getattr(p, '_is_running', 'N/A'), getattr(p, '_is_paused', 'N/A'),
+                getattr(p, '_is_trading', 'N/A'), _caller_stack_pause,
+            )
+        except Exception as _diag_err:
+            logging.debug("[pause] 入口诊断日志失败(非阻断): %s", _diag_err)
         with p._lock:
             # FIX-20260707-PAUSE: 扩展暂停可接受状态
             # 根因: 原只接受RUNNING状态，DEGRADED(订阅重试中)或PARALLEL_RUNNING时用户点暂停返回False
@@ -822,22 +903,36 @@ class LifecycleCallbacks:
             #    也必须获取p._lock，否则会导致四元状态不同步→暂停/恢复功能失效。
             # FIX-20260708-PAUSE-ROOT: 补全_is_running=False和_is_trading=False，
             #    原代码只设_is_paused=True，导致暂停后_is_running仍为True，状态不一致
-            p._is_paused = True
-            p._is_running = False
-            p._is_trading = False
+            # FIX-48: 保护四元状态赋值
+            try:
+                p._is_paused = True
+                p._is_running = False
+                p._is_trading = False
+            except Exception as _pass_err_9:
+                logging.debug("[pause] 异常(非阻断): %s", _pass_err_9)
             _lm = getattr(p, '_lifecycle_mgr', None)
             if _lm is not None:
-                _lm.is_paused = True
-                _lm.is_running = False
-            p.transition_to(StrategyState.PAUSED)
+                try:
+                    _lm.is_paused = True
+                    _lm.is_running = False
+                except Exception as _pass_err_10:
+                    logging.debug("[pause] 异常(非阻断): %s", _pass_err_10)
+            # FIX-46: 保护transition_to和_publish_event
+            try:
+                p.transition_to(StrategyState.PAUSED)
+            except Exception as _pause_ts_err:
+                logging.warning("[pause] transition_to(PAUSED)失败(非阻断): %s", _pause_ts_err)
             _ss = getattr(p, '_state_store', None)
             if _ss is not None:
                 try:
                     _ss.set('_is_paused', True)
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    pass
+                except Exception as _pass_err_11:  # FIX-40: 扩展异常类型
+                    logging.debug("[pause] 异常(非阻断): %s", _pass_err_11)
             logging.info(f"[StrategyCoreService] Paused: {p.strategy_id}")
-            p._publish_event('StrategyPaused', {'strategy_id': p.strategy_id})
+            try:
+                p._publish_event('StrategyPaused', {'strategy_id': p.strategy_id})
+            except Exception as _pe_err:
+                logging.warning("[pause] _publish_event失败(非阻断): %s", _pe_err)
         # FIX-20260711-PAUSE-ACTION: 暂停时必须逐个关闭正在运行的工作
         # 根因: pause()只设状态变量但不停止任何运行中的工作(APScheduler/onTick策略决策)
         # 导致暂停后定时任务继续触发、交易周期继续执行、tick策略决策继续运行
@@ -847,14 +942,14 @@ class LifecycleCallbacks:
             if hasattr(p, '_scheduler_manager') and hasattr(p._scheduler_manager, 'pause_scheduler'):
                 p._scheduler_manager.pause_scheduler()
                 logging.info("[StrategyCoreService] pause: APScheduler已冻结")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning("[StrategyCoreService] pause: pause_scheduler失败: %s", e)
         tick_handler = getattr(p, '_tick_handler', None)
         if tick_handler and hasattr(tick_handler, '_flush_tick_buffer'):
             try:
                 tick_handler._flush_tick_buffer()
                 logging.info("[StrategyCoreService] pause: shard buffer已flush")
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.warning("[StrategyCoreService] pause: shard buffer flush失败: %s", e)
         storage = getattr(p, 'storage', None)
         if storage and hasattr(storage, 'drain_all_queues'):
@@ -863,7 +958,7 @@ class LifecycleCallbacks:
                 total_drained = sum(drain_result.values()) if drain_result else 0
                 if total_drained > 0:
                     logging.info("[StrategyCoreService] pause: drain完成 %s", drain_result)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.warning("[StrategyCoreService] pause: drain失败: %s", e)
         # FIX-20260714-PAUSE-STOP: 补全暂停时漏停的工作
         # 根因R4: pause()漏停W6(DiagnosisProbeManager)/W10(_platform_subscribe_thread)/W14(TickBufferFlushFallback)
@@ -875,10 +970,10 @@ class LifecycleCallbacks:
                 _diag_mgr.stop_contract_watch()
                 logging.info("[StrategyCoreService] pause: DiagnosisProbeManager(_diagnosis_probe_manager)合约监控已停止")
             else:
-                from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+                from infra.health_monitor import DiagnosisProbeManager
                 DiagnosisProbeManager.stop_contract_watch()
                 logging.info("[StrategyCoreService] pause: DiagnosisProbeManager类方法合约监控已停止")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning("[StrategyCoreService] pause: stop_contract_watch失败: %s", e)
         # FIX-20260714-R4/R9: 暂停时若W7/W8/W9仍在运行，设置退出标志让其自行退出
         for _thread_attr, _stop_attr, _desc in [
@@ -896,7 +991,7 @@ class LifecycleCallbacks:
                     _t.join(timeout=1.0)
                     if _t.is_alive():
                         logging.warning("[StrategyCoreService] pause: %s线程仍存活（daemon，将在后台自行退出）", _desc)
-            except (ValueError, KeyError, TypeError, AttributeError) as _pause_thread_err:
+            except Exception as _pause_thread_err:  # FIX-40: 扩展异常类型
                 logging.warning("[StrategyCoreService] pause: %s线程停止失败: %s", _desc, _pause_thread_err)
         # W10: 停止平台订阅线程（设置stop标志，让其自行退出）
         try:
@@ -904,7 +999,7 @@ class LifecycleCallbacks:
             if _stop_event is not None:
                 _stop_event.set()
                 logging.info("[StrategyCoreService] pause: _platform_subscribe_stop已设置")
-        except (ValueError, KeyError, TypeError, AttributeError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型
             logging.warning("[StrategyCoreService] pause: _platform_subscribe_stop设置失败: %s", e)
         # W14: 停止TickBufferFlushFallback线程
         try:
@@ -912,8 +1007,12 @@ class LifecycleCallbacks:
             if _tick_svc is not None and hasattr(_tick_svc, 'on_stop'):
                 _tick_svc.on_stop()
                 logging.info("[StrategyCoreService] pause: TickBufferFlushFallback已停止")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning("[StrategyCoreService] pause: _tick_svc.on_stop失败: %s", e)
+        # FIX-37 RC-47: pause()不应关闭线程池
+        # 根因: pause()调用shutdown_thread_pools(wait=False)关闭4个已注册线程池(subscription/diagnosis/heartbeat/close_retry)，
+        #       但resume()不重建它们→恢复后策略无法提交任务到已关闭的ThreadPoolExecutor→RuntimeError
+        # 修复: 暂停时不关闭线程池，仅通过_is_paused状态标志阻止新任务提交。on_stop()会正确关闭线程池。
         return True
 
     def resume(self) -> bool:
@@ -921,10 +1020,14 @@ class LifecycleCallbacks:
         # FIX-20260713-RESUME-ROBUST: 入口日志+支持STOPPED状态恢复
         # 根因1: 原仅接受PAUSED状态，STOPPED状态调用resume静默返回False
         # 根因2: _resume_in_progress不在try/finally中，异常时标志残留导致PAUSE-GUARD永久放行
-        logging.critical(
-            "[FIX-20260713-RESUME] resume ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s",
-            p.strategy_id, p._state, p._is_running, p._is_paused,
-        )
+        try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个resume
+            logging.critical(
+                "[FIX-20260713-RESUME] resume ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s",
+                getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
+                getattr(p, '_is_running', 'N/A'), getattr(p, '_is_paused', 'N/A'),
+            )
+        except Exception as _diag_err:
+            logging.debug("[resume] 入口诊断日志失败(非阻断): %s", _diag_err)
         with p._lock:
             # FIX-20260713: 允许从PAUSED和STOPPED状态恢复
             if p._state == StrategyState.PAUSED:
@@ -932,10 +1035,14 @@ class LifecycleCallbacks:
             elif p._state == StrategyState.STOPPED:
                 # STOPPED → INITIALIZING → RUNNING 两步转换
                 logging.info("[FIX-20260713-RESUME] 从STOPPED状态恢复，先转换到INITIALIZING")
-                _lm = getattr(p, '_lifecycle_mgr', None)
-                if _lm is not None:
-                    _lm.state = StrategyState.INITIALIZING
-                p._state = StrategyState.INITIALIZING
+                # FIX-48: 保护_lm.state和p._state赋值
+                try:
+                    _lm = getattr(p, '_lifecycle_mgr', None)
+                    if _lm is not None:
+                        _lm.state = StrategyState.INITIALIZING
+                    p._state = StrategyState.INITIALIZING
+                except Exception as _stopped_ts_err:
+                    logging.warning("[resume] STOPPED→INITIALIZING状态转换失败(非阻断): %s", _stopped_ts_err)
             else:
                 logging.warning(f"[StrategyCoreService] Cannot resume in state: {p._state}")
                 return False
@@ -951,17 +1058,24 @@ class LifecycleCallbacks:
                 if _lm is not None:
                     _lm.is_paused = False
                     _lm.is_running = True
-                p.transition_to(StrategyState.RUNNING)
+                # FIX-47: 保护transition_to(RUNNING)和_publish_event
+                try:
+                    p.transition_to(StrategyState.RUNNING)
+                except Exception as _resume_ts_err:
+                    logging.warning("[resume] transition_to(RUNNING)失败(非阻断): %s", _resume_ts_err)
                 _ss = getattr(p, '_state_store', None)
                 if _ss is not None:
                     try:
                         _ss.set('_is_running', True)
                         _ss.set('_is_paused', False)
                         _ss.set('_is_trading', True)
-                    except (ValueError, KeyError, TypeError, AttributeError):
-                        pass
+                    except Exception as _pass_err_12:  # FIX-40: 扩展异常类型
+                        logging.debug("[resume] 异常(非阻断): %s", _pass_err_12)
                 logging.info(f"[StrategyCoreService] Resumed: {p.strategy_id} [R23-SM-01-FIX] _is_running同步为True")
-                p._publish_event('StrategyResumed', {'strategy_id': p.strategy_id})
+                try:
+                    p._publish_event('StrategyResumed', {'strategy_id': p.strategy_id})
+                except Exception as _re_err:
+                    logging.warning("[resume] _publish_event失败(非阻断): %s", _re_err)
             finally:
                 # FIX-20260713: 确保标志一定被清除，防止PAUSE-GUARD永久放行
                 p._resume_in_progress = False
@@ -971,7 +1085,7 @@ class LifecycleCallbacks:
             if hasattr(p, '_scheduler_manager') and hasattr(p._scheduler_manager, 'resume_scheduler'):
                 p._scheduler_manager.resume_scheduler()
                 logging.info("[StrategyCoreService] resume: APScheduler已恢复")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning("[StrategyCoreService] resume: resume_scheduler失败: %s", e)
         # FIX-20260711-PAUSE-ACTION: 恢复时检查并重新注册交易定时任务
         # APScheduler的pause()不会删除job，但为安全起见检查job数量
@@ -982,7 +1096,7 @@ class LifecycleCallbacks:
             if _job_count == 0 and hasattr(p, '_add_trading_jobs'):
                 p._add_trading_jobs()
                 logging.info("[StrategyCoreService] resume: 交易定时任务已重新注册")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning("[StrategyCoreService] resume: ensure_trading_jobs失败: %s", e)
         # FIX-20260714-RESUME-RESTART: 恢复pause()中停止的W6/W10/W14
         # 根因: pause()停止了W6(DiagnosisProbeManager)/W10(_platform_subscribe_thread)/W14(TickBufferFlushFallback)
@@ -997,7 +1111,7 @@ class LifecycleCallbacks:
             if hasattr(p, '_start_platform_subscribe_async') and _subscribed:
                 p._start_platform_subscribe_async(_subscribed)
                 logging.info("[StrategyCoreService] resume: 平台订阅线程已重启(instruments=%d)", len(_subscribed))
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning("[StrategyCoreService] resume: 平台订阅重启失败: %s", e)
         # W14: 重置_flush_stop_requested + 重启TickBufferFlushFallback线程
         try:
@@ -1017,7 +1131,7 @@ class LifecycleCallbacks:
                                 if getattr(_tick_svc, '_flush_stop_requested', False):
                                     break
                                 if hasattr(_tick_svc, '_shard_buffers') and _tick_svc._shard_buffers:
-                                    from ali2026v3_trading.strategy.tick_processing_service import flush_tick_buffer
+                                    from strategy.tick_processing_service import flush_tick_buffer
                                     flush_tick_buffer(_tick_svc)
                             except Exception as _flush_err:
                                 import logging as _logging_flush
@@ -1028,15 +1142,15 @@ class LifecycleCallbacks:
                     logging.info("[StrategyCoreService] resume: TickBufferFlushFallback线程已重启")
                 else:
                     logging.info("[StrategyCoreService] resume: TickBufferFlushFallback线程仍存活，仅重置标志")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型
             logging.warning("[StrategyCoreService] resume: TickBufferFlushFallback重启失败: %s", e)
         # W6: 重启合约监控
         try:
-            from ali2026v3_trading.infra.health_monitor import DiagnosisProbeManager
+            from infra.health_monitor import DiagnosisProbeManager
             _host = getattr(p, '_runtime_strategy_host', None)
             DiagnosisProbeManager.start_contract_watch(_host)
             logging.info("[StrategyCoreService] resume: DiagnosisProbeManager合约监控已重启")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:  # FIX-40: 扩展异常类型
             logging.warning("[StrategyCoreService] resume: 合约监控重启失败: %s", e)
         return True
 
@@ -1058,19 +1172,31 @@ class LifecycleCallbacks:
                 p.on_stop()
                 try:
                     p._shutdown_runtime_services()
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
                     logging.warning(f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}][run_id={run_id}] _shutdown_runtime_services error: {e}")
+                # FIX-C (2026-07-18): EventBus 显式 shutdown 防止线程池泄漏
+                # 根因: destroy() 仅解除引用 p._event_bus = None，未调用 shutdown()
+                #       导致 SP-01 EventBus 线程池工作线程泄漏
+                # 修复: 显式调用 shutdown() 后再解除引用，与 strategy_2026.onDestroy 的
+                #       _coordinated_shutdown 配合，确保所有线程池资源释放
+                try:
+                    _eb = getattr(p, '_event_bus', None)
+                    if _eb is not None and hasattr(_eb, 'shutdown'):
+                        _eb.shutdown(wait=False)
+                        logging.info(f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}][run_id={run_id}] EventBus.shutdown()已完成")
+                except Exception as _eb_err:
+                    logging.warning(f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}][run_id={run_id}] EventBus.shutdown失败(非阻断): {_eb_err}")
                 p._scheduler = None
                 p._event_bus = None
                 p._destroyed = True
                 try:
                     if hasattr(p, '_lsm_instance') and p._lsm_instance is not None:
                         p._lsm_instance.transition_to("DESTROYED")
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lsm_err:
+                except Exception as _lsm_err:
                     logging.debug("[LifecycleStateMachine] DESTROYED 委托失败: %s", _lsm_err)
                 try:
                     p._lifecycle_resource.cleanup_all(level='final')
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _lr_err:
+                except Exception as _lr_err:
                     logging.debug("[LifecycleResource] cleanup_all(destroy) 委托失败: %s", _lr_err)
                 p._stats = {
                     'start_time': None, 'total_ticks': 0, 'total_trades': 0, 'total_signals': 0,
@@ -1082,13 +1208,26 @@ class LifecycleCallbacks:
                     f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] Destroyed"
                 )
-                p._publish_event('StrategyDestroyed', {'strategy_id': p.strategy_id})
+                try:
+                    p._publish_event('StrategyDestroyed', {'strategy_id': p.strategy_id})
+                except Exception as _pe_err:  # FIX-50: 保护_publish_event
+                    logging.warning("[destroy] _publish_event失败(非阻断): %s", _pe_err)
                 return True
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.error(
                     f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] Failed: {e}"
                 )
+                # FIX-44: 即使destroy失败也必须设置_destroyed=True和执行final cleanup
+                try:
+                    p._destroyed = True
+                except Exception as _pass_err_13:
+                    logging.debug("[destroy] 异常(非阻断): %s", _pass_err_13)
+                try:
+                    if hasattr(p, '_lifecycle_resource') and p._lifecycle_resource is not None:
+                        p._lifecycle_resource.cleanup_all(level='final')
+                except Exception as _final_err:
+                    logging.warning("[destroy] cleanup_all(final)失败(非阻断): %s", _final_err)
                 p._stats['errors_count'] += 1
                 p._stats['last_error_time'] = datetime.now(CHINA_TZ)
                 p._stats['last_error_message'] = str(e)
@@ -1116,24 +1255,28 @@ class LifecycleCallbacks:
                 raise RuntimeError("Data verification failed: strategy_id mismatch")
             logging.info("[save_state] State saved and verified")
             return True
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.error(f"[save_state] Failed: {e}", exc_info=True)
             return False
 
     def _shutdown_runtime_services(self) -> None:
         p = self.p
-        p._shutdown_historical_services()
+        # FIX-43: 保护_shutdown_historical_services()
+        try:
+            p._shutdown_historical_services()
+        except Exception as _hs_err:
+            logging.warning(f"[StrategyCoreService] _shutdown_historical_services error: {_hs_err}")
         if p._storage is not None and hasattr(p._storage, '_stop_async_writer'):
             try:
                 p._storage._stop_async_writer()
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.warning(f"[StrategyCoreService] Storage async writer stop error: {e}")
         try:
-            from ali2026v3_trading.risk.risk_service import get_risk_service
+            from risk.risk_service import get_risk_service
             _rs = get_risk_service()
             if _rs is not None and hasattr(_rs, 'stop'):
                 _rs.stop()
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
             logging.warning("[StrategyCoreService] R24-P1-CF-05: RiskService stop error: %s", e)
 
     def _log_resource_ownership_table(self, phase: str = 'unknown') -> None:
@@ -1142,7 +1285,7 @@ class LifecycleCallbacks:
         _sid = getattr(p, 'strategy_id', None)
         if _sid is None:
             try:
-                from ali2026v3_trading.config.config_service import get_cached_params
+                from config.config_service import get_cached_params
                 _cp = get_cached_params() or {}
                 _rs = _cp.get('strategy')
                 _sid = getattr(_rs, 'strategy_id', None) if _rs is not None else None
@@ -1229,7 +1372,7 @@ class LifecycleCallbacks:
                             f"[ResourceOwnership][owner_scope=strategy-instance][strategy={strategy_id}]"
                             f"[run_id={run_id}][source_type=strategy-job] No strategy-instance scheduler jobs leaked"
                         )
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.debug(f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}] Scheduler diagnosis error: {e}")
         storage = getattr(p, '_storage', None)
         if storage and hasattr(storage, 'get_queue_stats'):
@@ -1247,7 +1390,7 @@ class LifecycleCallbacks:
                             f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
                             f"[run_id={run_id}][source_type=shared-queue-drain] Storage queue empty"
                         )
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.debug(f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}] Storage queue diagnosis error: {e}")
         event_bus = getattr(p, '_event_bus', None)
         if event_bus and hasattr(event_bus, '_pending_events'):
@@ -1264,7 +1407,7 @@ class LifecycleCallbacks:
                             f"[ResourceOwnership][owner_scope=shared-service][strategy={strategy_id}]"
                             f"[run_id={run_id}][source_type=event-tail] EventBus pending callbacks empty"
                         )
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.debug(f"[ResourceOwnership][strategy={strategy_id}][run_id={run_id}] EventBus diagnosis error: {e}")
 
     def _publish_event(self, event_type: str, data: Dict[str, Any]) -> None:
@@ -1280,7 +1423,7 @@ class LifecycleCallbacks:
                     **data
                 })()
                 p._event_bus.publish(event, async_mode=True)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
                 logging.debug(
                     f"[StrategyCoreService][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=event-tail] "

@@ -23,7 +23,15 @@ import argparse
 import sys
 from typing import Any, Dict, List, Optional
 
-from .infra.serialization_utils import json_dumps, json_loads, json_default_serializer
+# FIX-20260716-PQS-RELATIVE-IMPORT: ProductionQuantSystem.py 既可能作为模块
+# (python -m ProductionQuantSystem) 被相对导入，也可能被 strategy_2026.py 以
+# `from ProductionQuantSystem import get_production_quant_system` 直接导入。
+# 后一种情况下 __package__ 为 None，相对导入会触发 ImportError。
+# 因此所有相对导入都包裹 try/except，失败时回退到绝对导入。
+try:
+    from .infra.serialization_utils import json_dumps, json_loads, json_default_serializer
+except ImportError:
+    from infra.serialization_utils import json_dumps, json_loads, json_default_serializer
 
 try:
     from .data.quant_infra import NumpyRingBuffer, ExchangeTime, TickAggregator, AtomicSystemState, SystemHealthMonitor, MultiPeriodTrendScorer, IVSurfacePCA, VolatilityRegimeFilter
@@ -64,7 +72,7 @@ class ProductionQuantSystem:
             self.health_check_api = HealthCheckAPI(config=cfg)
             self.health_check_aggregator = HealthCheckAggregator
             logging.info("[ProductionQuantSystem] 健康检查API和Aggregator已集成")
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # FIX-Z R12-2: 扩大异常捕获，包含ImportError
             logging.warning("[ProductionQuantSystem] 健康检查集成失败: %s", e)
             self.health_check_api = None
             self.health_check_aggregator = None

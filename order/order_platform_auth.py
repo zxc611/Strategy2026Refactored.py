@@ -148,12 +148,13 @@ class PlatformAuthenticator:
 
         _hmac_key = os.environ.get('ORDER_SIGN_KEY', 'default_order_sign_key_change_in_prod')
         if _hmac_key == 'default_order_sign_key_change_in_prod':
-            if not hasattr(type(self), '_order_sign_key_warned'):
-                type(self)._order_sign_key_warned = True
-                logging.error(
-                    "[SECURITY] ORDER_SIGN_KEY使用默认密钥，订单签名可被预测。"
-                    "请在启动前设置环境变量: set ORDER_SIGN_KEY=<your_random_key> (Windows) "
-                    "或 export ORDER_SIGN_KEY=<your_random_key> (Linux/Mac)"
+            import secrets as _secrets
+            _hmac_key = _secrets.token_hex(16)
+            os.environ['ORDER_SIGN_KEY'] = _hmac_key
+            if not hasattr(type(self), '_order_sign_key_auto_gen_warned'):
+                type(self)._order_sign_key_auto_gen_warned = True
+                logging.info(
+                    "[SECURITY] ORDER_SIGN_KEY未配置，已自动生成随机密钥"
                 )
         _signature = hmac.new(_hmac_key.encode(), _sign_payload.encode(), hashlib.sha256).hexdigest()[:16]
 

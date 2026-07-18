@@ -11,7 +11,7 @@ StrategyJudgmentEngine.judge()所需的输入参数，
   from strategy_judgment.parameter_pool_adapter import judge_backtest_result
 
   result = run_backtest(params, bar_data)
-  report = judge_backtest_result("resonance", "rb888", "2025-01~06", result)
+  report = judge_backtest_result("s2_resonance", "rb888", "2025-01~06", result)
 """
 from __future__ import annotations
 

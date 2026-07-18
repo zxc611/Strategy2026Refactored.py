@@ -98,43 +98,60 @@ class t_type_bootstrap(BaseStrategy):
         self.paramMap = {}
         self.varMap = {}
 
+        # FIX-49: 显式初始化strategy_id，等待C++平台设置真实值
+        if not hasattr(self, 'strategy_id'):
+            self.strategy_id = 0
+
+    def _probe(self, method, phase, extra=None):
+        """FIX-58: 生命周期探针(独立文件写入,不依赖logging模块)"""
+        try:
+            from infra.health_monitor import DiagnosisProbeManager as _DPM
+            _DPM.on_lifecycle_call(method, phase, strategy_id=getattr(self, 'strategy_id', None),
+                trading=getattr(self, 'trading', None), inited=getattr(self, 'inited', None), extra=extra)
+        except Exception:
+            pass
+
     def on_init(self):
         import threading
         import traceback
-        _caller = ''.join(traceback.format_stack()[-4:-1])
+        try:
+            _caller = ''.join(traceback.format_stack()[-4:-1])
+        except Exception as _fs_err:
+            _caller = ""
+            logging.debug("[on_init] format_stack失败(非阻断): %s", _fs_err)
         logging.critical("[DIAG-LIFECYCLE] on_init() CALLED thread=%s trading_before=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, _caller)
+        self._probe('on_init', 'CALLED')
         self._on_init_called = True
         if self._real_strategy is None:
             from strategy.strategy_2026 import Strategy2026 as _Real
             self._real_strategy = _Real(*self._init_args, **self._init_kwargs)
 
-        # FIX-20260713-DELETE-ROOT: 强制同步strategy_id到_real_strategy
-        # 根因: 原同步条件 `getattr(_real, 'strategy_id', 0) == 0` 永远不满足
-        #   因为 Strategy2026.__init__() 默认设置 strategy_id=int(time.time()) (非零)
-        #   导致 strategy_id 永远不同步
-        #   影响: update_status_bar()和sub_market_data()使用错误的strategy_id
-        #         C++无法正确匹配策略实例 → 暂停/删除失败
-        # 修复: 移除 `== 0` 条件, 改为强制同步
+        # FIX-49: strategy_id双向同步
+        # 根因: t_type_bootstrap.strategy_id=0, Strategy2026.strategy_id=int(time.time())
+        #       不一致→C++平台无法匹配策略实例→暂停/删除按钮无效
         try:
             _my_sid = object.__getattribute__(self, 'strategy_id')
             _real = object.__getattribute__(self, '_real_strategy')
             if _real is not None:
-                _old_sid = getattr(_real, 'strategy_id', None)
-                _real.strategy_id = _my_sid
-                logging.info(
-                    "[t_type_bootstrap] strategy_id强制同步: %s -> _real_strategy (旧值=%s)",
-                    _my_sid, _old_sid,
-                )
+                _real_sid = getattr(_real, 'strategy_id', None)
+                if _my_sid == 0 and _real_sid is not None and _real_sid != 0:
+                    self.strategy_id = _real_sid
+                    logging.info("[FIX-49] strategy_id反向同步: _real→bootstrap (值=%s)", _real_sid)
+                elif _my_sid != 0:
+                    _real.strategy_id = _my_sid
+                    logging.info("[FIX-49] strategy_id正向同步: bootstrap→_real (值=%s)", _my_sid)
+                else:
+                    logging.warning("[FIX-49] strategy_id=0: 两端都为0，C++可能无法匹配策略实例")
         except Exception as _sync_err:
-            logging.error("[t_type_bootstrap] strategy_id同步失败: %s", _sync_err)
+            logging.error("[FIX-49] strategy_id同步失败: %s", _sync_err, exc_info=True)
 
         # FIX-20260713-DELETE-ROOT: 注入_outer_ref引用, 让Strategy2026能找到t_type_bootstrap实例
         # 用途: 保留外层引用，供策略实例访问引导层属性(strategy_id等)
         try:
             _real._outer_ref = self
-        except Exception:
-            pass
+        except Exception as _pass_err_0:
+            logging.debug("[on_init] 异常(非阻断): %s", _pass_err_0)
 
         result = self._real_strategy.on_init()
         self.inited = True
@@ -150,6 +167,7 @@ class t_type_bootstrap(BaseStrategy):
         import threading
         logging.critical("[DIAG-LIFECYCLE] on_init() RETURN thread=%s trading=%s inited=%s",
                          threading.current_thread().name, self.trading, self.inited)
+        self._probe('on_init', 'RETURNED')
         return result
 
     # FIX-20260713-AUDIT: on_start/on_stop/onTick/onOrder/onTrade添加None检查
@@ -159,9 +177,14 @@ class t_type_bootstrap(BaseStrategy):
     def on_start(self):
         import threading
         import traceback
-        _caller = ''.join(traceback.format_stack()[-4:-1])
+        try:
+            _caller = ''.join(traceback.format_stack()[-4:-1])
+        except Exception as _fs_err:
+            _caller = ""
+            logging.debug("[on_start] format_stack失败(非阻断): %s", _fs_err)
         logging.critical("[DIAG-LIFECYCLE] on_start() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
+        self._probe('on_start', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             return None
@@ -177,14 +200,20 @@ class t_type_bootstrap(BaseStrategy):
         _sid = getattr(self, 'strategy_id', None)
         logging.critical("[DIAG-LIFECYCLE] on_start() RETURN thread=%s trading=%s result=%s strategy_id=%s outer_id=%d real_id=%d",
                          threading.current_thread().name, self.trading, result, _sid, _outer_ref_id, _real_ref_id)
+        self._probe('on_start', 'RETURNED', extra={'result': result, 'outer_id': _outer_ref_id, 'real_id': _real_ref_id})
         return result
 
     def on_stop(self):
         import threading
         import traceback
-        _caller = ''.join(traceback.format_stack()[-4:-1])
+        try:
+            _caller = ''.join(traceback.format_stack()[-4:-1])
+        except Exception as _fs_err:
+            _caller = ""
+            logging.debug("[on_stop] format_stack失败(非阻断): %s", _fs_err)
         logging.critical("[DIAG-LIFECYCLE] on_stop() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
+        self._probe('on_stop', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             return None
@@ -196,6 +225,7 @@ class t_type_bootstrap(BaseStrategy):
         import threading
         logging.critical("[DIAG-LIFECYCLE] on_stop() RETURN thread=%s trading=%s result=%s",
                          threading.current_thread().name, self.trading, result)
+        self._probe('on_stop', 'RETURNED', extra={'result': result})
         return result
 
     def onTick(self, tick):
@@ -263,9 +293,14 @@ class t_type_bootstrap(BaseStrategy):
     def pause(self):
         import threading
         import traceback
-        _caller = ''.join(traceback.format_stack()[-4:-1])
+        try:
+            _caller = ''.join(traceback.format_stack()[-4:-1])
+        except Exception as _fs_err:
+            _caller = ""
+            logging.debug("[pause] format_stack失败(非阻断): %s", _fs_err)
         logging.critical("[DIAG-LIFECYCLE] pause() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
+        self._probe('pause', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] pause(): _real_strategy为None，操作被跳过")
@@ -276,22 +311,31 @@ class t_type_bootstrap(BaseStrategy):
         # 修复: 与on_start/on_stop/stop/destroy保持一致，委托方法中同步trading状态
         self.trading = False
         logging.info("[t_type_bootstrap] pause完成, trading=False")
+        self._probe('pause', 'RETURNED', extra={'result': result})
         return result
 
     def on_pause(self):
         logging.critical("[FIX-20260713-LIFECYCLE] on_pause() CALLED from platform")
+        self._probe('on_pause', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] on_pause(): _real_strategy为None，操作被跳过")
             return False
-        return real.on_pause()
+        result = real.on_pause()
+        self._probe('on_pause', 'RETURNED', extra={'result': result})
+        return result
 
     def on_destroy(self):
         import threading
         import traceback
-        _caller = ''.join(traceback.format_stack()[-4:-1])
+        try:
+            _caller = ''.join(traceback.format_stack()[-4:-1])
+        except Exception as _fs_err:
+            _caller = ""
+            logging.debug("[on_destroy] format_stack失败(非阻断): %s", _fs_err)
         logging.critical("[DIAG-LIFECYCLE] on_destroy() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
+        self._probe('on_destroy', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] on_destroy(): _real_strategy为None，操作被跳过")
@@ -301,6 +345,7 @@ class t_type_bootstrap(BaseStrategy):
         self.inited = False
         self.trading = False
         logging.info("[t_type_bootstrap] on_destroy完成, inited=False, trading=False")
+        self._probe('on_destroy', 'RETURNED', extra={'result': result})
         return result
 
     def internal_pause_strategy(self):
@@ -317,6 +362,7 @@ class t_type_bootstrap(BaseStrategy):
 
     def resume(self):
         logging.critical("[FIX-20260713-LIFECYCLE] resume() CALLED from platform")
+        self._probe('resume', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] resume(): _real_strategy为None，操作被跳过")
@@ -327,6 +373,7 @@ class t_type_bootstrap(BaseStrategy):
         # 修复: 与on_start/on_stop/pause保持一致，委托方法中同步trading状态
         self.trading = True
         logging.info("[t_type_bootstrap] resume完成, trading=True")
+        self._probe('resume', 'RETURNED', extra={'result': result})
         return result
 
     def on_resume(self):

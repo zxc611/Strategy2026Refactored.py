@@ -10,8 +10,8 @@ import os
 import threading
 from typing import Any, Dict, Optional
 
-from ali2026v3_trading.lifecycle.lifecycle_state_machine import StrategyState
-from ali2026v3_trading.infra.shared_utils import CHINA_TZ
+from lifecycle.lifecycle_state_machine import StrategyState
+from infra.shared_utils import CHINA_TZ
 from datetime import datetime
 
 
@@ -58,7 +58,7 @@ class StrategyConfigLayer:
         provider._trading_lock = threading.RLock()
 
         # 调度器管理器
-        from ali2026v3_trading.strategy.strategy_scheduler import StrategyScheduler
+        from strategy.strategy_scheduler import StrategyScheduler
         provider._scheduler_manager = StrategyScheduler()
 
         # 性能统计
@@ -79,8 +79,8 @@ class StrategyConfigLayer:
         }
 
         # 注册Manager实例
-        from ali2026v3_trading.strategy.instrument_service import InstrumentManager
-        from ali2026v3_trading.data.historical_data_manager import HistoricalDataManager
+        from strategy.instrument_service import InstrumentManager
+        from data.historical_data_manager import HistoricalDataManager
         provider._instrument_mgr = InstrumentManager()
         provider._historical_mgr = HistoricalDataManager(
             state_store=provider._state_store,
@@ -88,10 +88,10 @@ class StrategyConfigLayer:
         )
 
         # Phase 2 (CC-02+CC-04): 组合持有6个Manager，替代Mixin继承
-        from ali2026v3_trading.lifecycle.lifecycle_manager import LifecycleManager
-        from ali2026v3_trading.strategy_judgment.analytics_manager import AnalyticsManager
-        from ali2026v3_trading.infra.concurrent_utils import EventPublisher
-        from ali2026v3_trading.infra.scheduler_service import SchedulerManagerProxy
+        from lifecycle.lifecycle_manager import LifecycleManager
+        from strategy_judgment.analytics_manager import AnalyticsManager
+        from infra.concurrent_utils import EventPublisher
+        from infra.scheduler_service import SchedulerManagerProxy
         provider._lifecycle_mgr = LifecycleManager(provider=provider)
 
         provider._analytics_mgr = AnalyticsManager(provider=provider)
@@ -111,6 +111,14 @@ class StrategyConfigLayer:
         provider._lifecycle_mgr.is_paused = provider._is_paused
         provider._lifecycle_mgr.destroyed = provider._destroyed
         provider._lifecycle_mgr.initialized = provider._initialized
+        # FIX-20260715-STATE-SHADOW: 清理__dict__上的遮蔽属性
+        # 根因: init_state()中provider._state=...在__dict__上创建_state属性
+        #   遮蔽__getattr__委托到_lifecycle_mgr.state
+        #   导致状态不一致: __dict__._state != _lifecycle_mgr.state
+        # 修复: 同步到_lifecycle_mgr后，删除__dict__上的遮蔽属性
+        for _shadow_attr in ('_state', '_is_running', '_is_paused', '_is_trading'):
+            if _shadow_attr in provider.__dict__:
+                del provider.__dict__[_shadow_attr]
 
         # 初始化历史K线Mixin
         provider._init_historical_kline_mixin()
@@ -153,7 +161,7 @@ class StrategyConfigLayer:
             spm = getattr(self._provider, '_state_param_manager', None)
             if not spm:
                 try:
-                    from ali2026v3_trading.config.state_param import get_state_param_manager
+                    from config.state_param import get_state_param_manager
                     spm = get_state_param_manager()
                 except (ValueError, KeyError, TypeError, AttributeError, ImportError):
                     pass
@@ -181,7 +189,7 @@ class StrategyConfigLayer:
             try:
                 eco = None
                 try:
-                    from ali2026v3_trading.strategy.strategy_ecosystem import get_strategy_ecosystem
+                    from strategy.strategy_ecosystem import get_strategy_ecosystem
                     eco = get_strategy_ecosystem()
                 except (ValueError, KeyError, TypeError, AttributeError, ImportError):
                     pass
@@ -195,17 +203,25 @@ class StrategyConfigLayer:
                         try:
                             _bd_price = 0.0
                             try:
-                                from ali2026v3_trading.data.data_service import get_data_service
+                                from data.data_service import get_data_service
                                 _bd_ds = get_data_service()
                                 if _bd_ds and getattr(_bd_ds, 'realtime_cache', None):
-                                    _bd_price = _bd_ds.realtime_cache.get_latest_price(
-                                        getattr(self._provider, '_instrument_id', '')
-                                    ) or 0.0
+                                    # FIX-18 RC-20: _instrument_id为空时从realtime_cache获取首个可用合约
+                                    # 根因: _instrument_id为空→get_latest_price('')返回0→_bd_price==0→classify_extreme_state不调用→S3 0信号
+                                    _bd_inst = getattr(self._provider, '_instrument_id', '') or ''
+                                    if not _bd_inst:
+                                        try:
+                                            _rc_inner = getattr(_bd_ds.realtime_cache, '_cache', None)
+                                            if isinstance(_rc_inner, dict) and _rc_inner:
+                                                _bd_inst = next(iter(_rc_inner))
+                                        except Exception:
+                                            pass
+                                    _bd_price = _bd_ds.realtime_cache.get_latest_price(_bd_inst) or 0.0
                             except (ValueError, KeyError, TypeError, AttributeError, ImportError):
                                 pass
                             _bd_res_dir = ''
                             try:
-                                from ali2026v3_trading.param_pool.optimization.cycle_sharpe import get_cycle_resonance_module
+                                from param_pool.optimization.cycle_sharpe import get_cycle_resonance_module
                                 _bd_crm = get_cycle_resonance_module()
                                 _bd_output = getattr(_bd_crm, '_last_output', None)
                                 if _bd_output and hasattr(_bd_output, 'directional_bias'):
@@ -217,13 +233,15 @@ class StrategyConfigLayer:
                             except (ValueError, KeyError, TypeError, AttributeError, ImportError):
                                 pass
                             if _bd_price > 0:
-                                bd.classify_extreme_state(
+                                _bd_extreme = bd.classify_extreme_state(
                                     current_price=_bd_price,
                                     resonance_direction=_bd_res_dir,
+                                    instrument_id=_bd_inst,  # FIX-56: 传递instrument_id用于冷却控制
                                 )
                         except (ValueError, KeyError, TypeError, AttributeError):
                             pass
-                        extreme = getattr(bd, '_extreme_state', None)
+                        # FIX-56b: 使用classify_extreme_state返回值，不再读bd._extreme_state（可能陈旧）
+                        extreme = _bd_extreme if '_bd_extreme' in dir() else getattr(bd, '_extreme_state', None)
                         if extreme is not None and getattr(extreme, 'tradeable', False):
                             reason = 'BOX_EXTREME'
                             logging.info("[FIX-S3S5S6] BoxDetector极值信号触发: extreme_type=%s → BOX_EXTREME",
@@ -234,7 +252,7 @@ class StrategyConfigLayer:
                 #       为避免双重下单，仅当HFT通道未处理该信号时才走主交易周期
                 if reason == 'OTHER_SCALP':
                     try:
-                        from ali2026v3_trading.strategy.tick_hft import get_last_arbitrage_signal
+                        from strategy.tick_hft import get_last_arbitrage_signal
                         arb_sig = get_last_arbitrage_signal()
                         if arb_sig is not None:
                             arb_conf = arb_sig.get('confidence', 0.0)
@@ -262,7 +280,7 @@ class StrategyConfigLayer:
                                     if mm_cap > 0.05:
                                         spread_ok = False
                                         try:
-                                            from ali2026v3_trading.config.params_service import get_params_service
+                                            from config.params_service import get_params_service
                                             _ps_mm = get_params_service()
                                             _last_spread_bps = _ps_mm.get_float('last_bid_ask_spread_bps', 999.0)
                                             _max_spread = _ps_mm.get_float('market_maker_max_spread_bps', 50.0)
@@ -301,8 +319,20 @@ class StrategyConfigLayer:
         _atexit.register(provider._atexit_cleanup_executor)
 
         # 信号服务集成
-        from ali2026v3_trading.signal.signal_service import get_signal_service
+        from signal.signal_service import get_signal_service
         provider._signal_service = get_signal_service(event_bus=event_bus)
+        # FIX-57 D5: SignalService注册到_state_store
+        # 根因: tick_hft.py L297/459/515/547 通过 get_ref('_signal_service') 查找
+        #       但此处仅属性赋值未注册 → get_ref返回None → fallback new SignalService()
+        #       → 每次tick创建独立实例 → _cooldown_times={} 永远空 → cooldown抑制失效
+        #       → HFT四条信号路径(pursuit_exit/arbitrage/transition/smart_money)可能重复下单
+        # 修复: 补全set_ref注册，让tick_hft.py共用同一SignalService实例(共享cooldown)
+        try:
+            _ss_sig = getattr(provider, '_state_store', None)
+            if _ss_sig is not None and provider._signal_service is not None:
+                _ss_sig.set_ref('_signal_service', provider._signal_service)
+        except Exception as _sig_ref_err:
+            logging.warning("[StrategyConfigLayer] SignalService set_ref注册失败(非阻断): %s", _sig_ref_err)
 
         # 运行时平台 API 绑定
         provider.subscribe = None
@@ -518,11 +548,11 @@ class StrategyConfigLayer:
             services.append(('ShadowEngine', provider._shadow_engine))
         # P3-6-FIX: 使用get_risk_service()替代不存在的_risk_service属性
         try:
-            from ali2026v3_trading.risk.risk_service import get_risk_service
+            from risk.risk_service import get_risk_service
             _risk_svc = get_risk_service()
             if _risk_svc is not None:
                 services.append(('RiskService', _risk_svc))
-        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
+        except Exception as _r3_err:  # FIX-39: 扩展异常类型
             logging.debug("[R3-L2] silent except triggered: %s", _r3_err)
             pass
         if hasattr(provider, '_order_service') and provider._order_service:
@@ -531,12 +561,12 @@ class StrategyConfigLayer:
             try:
                 if hasattr(svc, 'shutdown'):
                     svc.shutdown()
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:  # FIX-39: 扩展异常类型，防止一个服务shutdown失败跳过后续服务
                 logging.error("[SHUTDOWN] %s shutdown failed: %s", name, e)
 
     def init_logging(self, params: Optional[Dict[str, Any]] = None) -> None:
         try:
-            from ali2026v3_trading.config.config_logging import setup_logging
+            from config.config_logging import setup_logging
             setup_logging()
             logging.info("[StrategyConfigLayer] 日志初始化完成（已调用setup_logging）")
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
@@ -562,19 +592,19 @@ import time
 from typing import Any, Dict, List, Optional
 
 # R1-2修复: CACHE_TTL权威源从config._constants导入，消除与config_params的循环依赖
-from ali2026v3_trading.config._params_canary_env import CACHE_TTL  # noqa: F401
+from config._params_canary_env import CACHE_TTL  # noqa: F401
 
 STRATEGY_MODE_CORRECT_TRENDING = "correct_trending"
 STRATEGY_MODE_INCORRECT_REVERSAL = "incorrect_reversal"
-STRATEGY_MODE_SPRING = "spring"
-STRATEGY_MODE_RESONANCE = "resonance"
-STRATEGY_MODE_BOX = "box"
+STRATEGY_MODE_SPRING = "s4_spring"
+STRATEGY_MODE_RESONANCE = "s2_resonance"
+STRATEGY_MODE_BOX = "s3_box"
 STRATEGY_MODE_HFT = "hft"
 STRATEGY_MODE_BOX_EXTREME = "box_extreme"
 STRATEGY_MODE_BOX_SPRING = "box_spring"
-STRATEGY_MODE_ARBITRAGE = "arbitrage"
-STRATEGY_MODE_MARKET_MAKING = "market_making"
-STRATEGY_MODE_HIGH_FREQ = "high_freq"
+STRATEGY_MODE_ARBITRAGE = "s5_arbitrage"
+STRATEGY_MODE_MARKET_MAKING = "s6_market_making"
+STRATEGY_MODE_HIGH_FREQ = "s1_hft"
 STRATEGY_MODE_DIVERGENCE_REVERSAL = "divergence_reversal"
 
 ALL_STRATEGY_MODES = (
@@ -605,6 +635,11 @@ ALL_MARKET_STATES = (
 # 原 strategy_config_layer 模块级5项 + 函数级9项(含策略模式) + backtest_config 9项(含原始五态)
 # 键 = 状态字符串（5策略状态 + 5原始五态 + 4策略模式，'other'重复已合并）
 # 值 = 开仓理由标签
+# FIX-22 RC-27: 'hft'/'s1_hft'映射保留但S1不通过_STATE_REASON_MAP触发HIGH_FREQ
+# 根因: SPM五态系统只产出correct_trending/incorrect_reversal/other三种状态，不产出high_freq
+# 确认: S1(HIGH_FREQ)通过独立HFT dispatch路径(tick_hft.py→on_tick_enhanced)生成信号，
+#       不经过resolve_open_reason→_STATE_REASON_MAP路径，此映射为兼容backtest保留
+# 修复: 确认S1通过HFT dispatch路径(FIX-2放宽pursuit条件+FIX-12 SPM注册已解决0信号)
 _STATE_REASON_MAP = {
     # 5种策略状态 → 7种开仓理由
     STRATEGY_MODE_CORRECT_TRENDING: STRATEGY_MODE_CORRECT_RESONANCE,
@@ -618,13 +653,13 @@ _STATE_REASON_MAP = {
     'wrong_rise': 'DIVERGENCE_REVERSAL',
     'wrong_fall': 'DIVERGENCE_REVERSAL',
     # 4种策略模式 → 策略理由
-    'spring': 'BOX_SPRING',
-    'box': 'BOX_SPRING',
+    's4_spring': 'BOX_SPRING',
+    's3_box': 'BOX_SPRING',
     'hft': 'HIGH_FREQ',
-    'high_freq': 'HIGH_FREQ',
+    's1_hft': 'HIGH_FREQ',
     'intraday': 'INTRADAY',  # [FIX-20260712-S2] S2日内交易策略
-    'arbitrage': 'ARBITRAGE',
-    'market_making': 'MARKET_MAKING',
+    's5_arbitrage': 'ARBITRAGE',
+    's6_market_making': 'MARKET_MAKING',
     'divergence_reversal': 'DIVERGENCE_REVERSAL',
     'box_extreme': 'BOX_EXTREME',
 }
@@ -777,7 +812,7 @@ _risk_data_freshness: Dict[str, float] = {}
 def subscribe_param_changes(callback) -> None:
     """[FR-P1-10-FIX] 参数变更事件订阅 — P1-05修复: 统一走EventBus单通道"""
     try:
-        from ali2026v3_trading.infra.event_bus import EventBus
+        from infra.event_bus import EventBus
         event_bus = EventBus.get_instance()
         event_bus.subscribe("param_changed", callback)
     except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
@@ -788,7 +823,7 @@ def subscribe_param_changes(callback) -> None:
 def _notify_param_change(param_key: str, old_val: Any, new_val: Any) -> None:
     """[FR-P1-10-FIX] 参数变更事件发布通知 — P1-05修复: 统一走EventBus单通道"""
     try:
-        from ali2026v3_trading.infra.event_bus import EventBus
+        from infra.event_bus import EventBus
         event_bus = EventBus.get_instance()
         event_bus.publish("param_changed", {
             "param_key": param_key,
