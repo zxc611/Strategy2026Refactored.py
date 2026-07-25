@@ -194,58 +194,74 @@ class StrategyConfigLayer:
                 except (ValueError, KeyError, TypeError, AttributeError, ImportError):
                     pass
 
+                # FIX-S3-DATAPIPE-20260724: 获取BoxDetector实例
+                # 根因: eco=None(get_strategy_ecosystem()返回None) → bd=None → S3完全跳过
+                # 修复: 当eco为None时，回退使用box_spring_strategy的_box_detector实例
+                #   (S4的box_spring_detector通过update_box→update_bar已有K线数据)
+                bd = None
+                if eco is not None:
+                    bd = getattr(eco, '_box_detector', None)
+                if bd is None:
+                    try:
+                        from strategy.box_spring_detector import get_box_spring_strategy
+                        _bss_fallback = get_box_spring_strategy()
+                        if _bss_fallback is not None:
+                            bd = getattr(_bss_fallback, '_box_detector', None)
+                            if bd is not None:
+                                logging.debug("[FIX-S3-DATAPIPE] S3使用box_spring_detector的BoxDetector实例(eco=None回退)")
+                    except Exception:
+                        pass
+
                 # S3-BOX_EXTREME: 检查BoxDetector极值信号
                 # P0-2修复: classify_extreme_state()要求current_price为必需参数，
                 #           且resonance_direction需为fall/rise等值才能产出tradeable信号
-                if eco is not None:
-                    bd = getattr(eco, '_box_detector', None)
-                    if bd is not None:
+                if bd is not None:
+                    try:
+                        _bd_price = 0.0
                         try:
-                            _bd_price = 0.0
-                            try:
-                                from data.data_service import get_data_service
-                                _bd_ds = get_data_service()
-                                if _bd_ds and getattr(_bd_ds, 'realtime_cache', None):
-                                    # FIX-18 RC-20: _instrument_id为空时从realtime_cache获取首个可用合约
-                                    # 根因: _instrument_id为空→get_latest_price('')返回0→_bd_price==0→classify_extreme_state不调用→S3 0信号
-                                    _bd_inst = getattr(self._provider, '_instrument_id', '') or ''
-                                    if not _bd_inst:
-                                        try:
-                                            _rc_inner = getattr(_bd_ds.realtime_cache, '_cache', None)
-                                            if isinstance(_rc_inner, dict) and _rc_inner:
-                                                _bd_inst = next(iter(_rc_inner))
-                                        except Exception:
-                                            pass
-                                    _bd_price = _bd_ds.realtime_cache.get_latest_price(_bd_inst) or 0.0
-                            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-                                pass
-                            _bd_res_dir = ''
-                            try:
-                                from param_pool.optimization.cycle_sharpe import get_cycle_resonance_module
-                                _bd_crm = get_cycle_resonance_module()
-                                _bd_output = getattr(_bd_crm, '_last_output', None)
-                                if _bd_output and hasattr(_bd_output, 'directional_bias'):
-                                    _bd_bias = _bd_output.directional_bias
-                                    if _bd_bias > 0.3:
-                                        _bd_res_dir = 'rise'
-                                    elif _bd_bias < -0.3:
-                                        _bd_res_dir = 'fall'
-                            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-                                pass
-                            if _bd_price > 0:
-                                _bd_extreme = bd.classify_extreme_state(
-                                    current_price=_bd_price,
-                                    resonance_direction=_bd_res_dir,
-                                    instrument_id=_bd_inst,  # FIX-56: 传递instrument_id用于冷却控制
-                                )
-                        except (ValueError, KeyError, TypeError, AttributeError):
+                            from data.data_service import get_data_service
+                            _bd_ds = get_data_service()
+                            if _bd_ds and getattr(_bd_ds, 'realtime_cache', None):
+                                # FIX-18 RC-20: _instrument_id为空时从realtime_cache获取首个可用合约
+                                # 根因: _instrument_id为空→get_latest_price('')返回0→_bd_price==0→classify_extreme_state不调用→S3 0信号
+                                _bd_inst = getattr(self._provider, '_instrument_id', '') or ''
+                                if not _bd_inst:
+                                    try:
+                                        _rc_inner = getattr(_bd_ds.realtime_cache, '_cache', None)
+                                        if isinstance(_rc_inner, dict) and _rc_inner:
+                                            _bd_inst = next(iter(_rc_inner))
+                                    except Exception:
+                                        pass
+                                _bd_price = _bd_ds.realtime_cache.get_latest_price(_bd_inst) or 0.0
+                        except (ValueError, KeyError, TypeError, AttributeError, ImportError):
                             pass
-                        # FIX-56b: 使用classify_extreme_state返回值，不再读bd._extreme_state（可能陈旧）
-                        extreme = _bd_extreme if '_bd_extreme' in dir() else getattr(bd, '_extreme_state', None)
-                        if extreme is not None and getattr(extreme, 'tradeable', False):
-                            reason = 'BOX_EXTREME'
-                            logging.info("[FIX-S3S5S6] BoxDetector极值信号触发: extreme_type=%s → BOX_EXTREME",
-                                        getattr(extreme, 'extreme_type', 'unknown'))
+                        _bd_res_dir = ''
+                        try:
+                            from param_pool.optimization.cycle_sharpe import get_cycle_resonance_module
+                            _bd_crm = get_cycle_resonance_module()
+                            _bd_output = getattr(_bd_crm, '_last_output', None)
+                            if _bd_output and hasattr(_bd_output, 'directional_bias'):
+                                _bd_bias = _bd_output.directional_bias
+                                if _bd_bias > 0.3:
+                                    _bd_res_dir = 'rise'
+                                elif _bd_bias < -0.3:
+                                    _bd_res_dir = 'fall'
+                        except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+                            pass
+                        if _bd_price > 0:
+                            _bd_extreme = bd.classify_extreme_state(
+                                current_price=_bd_price,
+                                resonance_direction=_bd_res_dir,
+                                instrument_id=_bd_inst,  # FIX-56: 传递instrument_id用于冷却控制
+                            )
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        pass
+                    # FIX-56b: 使用classify_extreme_state返回值，不再读bd._extreme_state（可能陈旧）
+                    extreme = _bd_extreme if '_bd_extreme' in dir() else getattr(bd, '_extreme_state', None)
+                    if extreme is not None and getattr(extreme, 'tradeable', False):
+                        reason = 'BOX_EXTREME'
+                        logging.info("[FIX-S3S5S6] BoxDetector极值信号触发: extreme_type=%s → BOX_EXTREME",
+                                    getattr(extreme, 'extreme_type', 'unknown'))
 
                 # S5-ARBITRAGE: 检查套利信号(高置信度)
                 # 注意: HFT通道已在handle_arbitrage_signal()中直接下单(reason='hft_arbitrage')
@@ -285,8 +301,9 @@ class StrategyConfigLayer:
                                             _last_spread_bps = _ps_mm.get_float('last_bid_ask_spread_bps', 999.0)
                                             _max_spread = _ps_mm.get_float('market_maker_max_spread_bps', 50.0)
                                             spread_ok = _last_spread_bps <= _max_spread
-                                        except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-                                            spread_ok = True
+                                        except Exception as _spread_err:  # V4-FIX-O24: fail-closed
+                                            logging.warning("[V4-FIX-O24] spread检查异常, spread_ok=False (fail-closed): %s", _spread_err)
+                                            spread_ok = False
                                         if spread_ok:
                                             reason = 'MARKET_MAKING'
                                             logging.info("[FIX-S3S5S6] 做市条件触发: open=%d cap=%.2f spread_ok=%s → MARKET_MAKING",
@@ -296,6 +313,12 @@ class StrategyConfigLayer:
 
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _s3s5s6_err:
                 logging.debug("[FIX-S3S5S6] S3/S5/S6信号检查异常: %s", _s3s5s6_err)
+
+        # V4-FIX-O21: 无检测器匹配的OTHER_SCALP→BLOCKED（数据不可用=不开仓）
+        # 原则: 未知状态=不开仓，而非未知状态=默认OTHER_SCALP开仓
+        if reason == 'OTHER_SCALP':
+            logging.info("[V4-FIX-O21] 无策略信号匹配→BLOCKED (数据不可用=不开仓) state=%s", state)
+            reason = 'BLOCKED'
 
         return reason
 
@@ -675,8 +698,9 @@ _strategy_cache_lock = threading.Lock()
 def resolve_open_reason_from_state(state: str) -> str:
     reason = _STATE_REASON_MAP.get(state, '')
     if not reason:
-        logging.warning("[strategy_config] 未知状态'%s'，默认OTHER_SCALP", state)
-        reason = 'OTHER_SCALP'
+        # V4-FIX-O21: 未知状态→BLOCKED（数据不可用=不开仓）
+        logging.info("[V4-FIX-O21] 未知状态'%s'→BLOCKED (数据不可用=不开仓)", state)
+        reason = 'BLOCKED'
     return reason
 
 
@@ -790,6 +814,7 @@ CENTRALIZED_DEFAULTS = {
         'other': 0.5,  # 其他状态止损比率
         'box_extreme': 0.3,  # 箱体极值止损比率
         'hft': 0.2,  # HFT止损比率
+        'intraday': 0.5,  # [FIX-20260712-S2] S2日内交易止损比率
     },
     'position_timeout_sec': 3600,  # R24-P1-DF-12修复: 持仓超时默认值(秒)
     'max_retry_count': 3,  # R24-P1-DF-14修复: 最大重试次数默认值

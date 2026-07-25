@@ -80,6 +80,24 @@ class UICreationService:
 
             '_schedule_output_mode_ui_refresh',
 
+            # FIX-20260719-UI-5[V2]/UI-7[V11]: 补充 current_strategy_id
+            # 根因: delegated 列表不包含 current_strategy_id，导致 _do_safe_pause 中
+            #       getattr(self, 'current_strategy_id', 'unknown') 永远返回 'unknown'。
+            # 修复: 1. delegated 列表补充 'current_strategy_id'
+            #       2. UILogicService 中添加 current_strategy_id property（委托到 _host_ref.strategy_id）
+            # 注意: internal_pause_strategy/internal_resume_strategy/pause_strategy/resume_strategy
+            #       不需要加入 delegated 列表，因为 _to_close_debug 已改用 _call_method_by_priority
+            #       三层路由（FIX-UI-4[V13]），不再使用 hasattr 检查。
+            'current_strategy_id',
+
+            # FIX-UI-11 (2026-07-20, RC-1): 补充 _on_param_modify_click / _on_backtest_click
+            # 根因: _param_modify/_backtest_modify 闭包通过 self._on_param_modify_click() 调用，
+            #       但这些方法定义在 UILogicService，未在 delegated 列表 → AttributeError
+            # 证据: 2026-07-20 10:19:23/24 日志 "参数编辑失败: 'UICreationService' object has no attribute '_on_param_modify_click'"
+            # 前次报告 FIX-UI-2 仅修复 _ui_root property，未识别方法名委托缺失 → 半拉子工程
+            # 修复: delegated 列表追加两个方法名，使 __getattr__ 委托到 self._logic._on_xxx_click
+            '_on_param_modify_click', '_on_backtest_click',
+
         ]
 
         if name in delegated and self._logic is not None:
@@ -117,7 +135,7 @@ class UICreationService:
 
                 root.after(200, lambda: root.attributes('-topmost', False))
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"设置窗口置顶失败: {e}")
 
@@ -127,7 +145,7 @@ class UICreationService:
 
                 h = safe_getattr_int(self.params, "ui_window_height", 310, 310)
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"读取UI窗口尺寸失败: {e}")
 
@@ -199,17 +217,54 @@ class UICreationService:
 
                     from infra.health_monitor import ControlActionLogger as _CAL
 
-                    strategy_id = getattr(self, 'current_strategy_id', 'unknown')
+                    # FIX-UI-7 (V11根因, 2026-07-19): 使用 _host_ref.strategy_id 替代 current_strategy_id
+                    # 根因: UICreationService/UILogicService 均未定义 current_strategy_id，
+                    #       delegated 列表也未包含，getattr 永远返回 'unknown'，日志无法追溯。
+                    # 修复: 通过 _host_ref (Strategy2026 实例) 获取真实 strategy_id。
+                    _host = getattr(self, '_host_ref', None)
+                    strategy_id = getattr(_host, 'strategy_id', 'unknown') if _host is not None else 'unknown'
 
                     run_id = getattr(self, 'current_run_id', 'N/A')
 
                     _CAL.log_control_action_enter('pause', strategy_id, run_id, source='ui-button')
 
-                    self._log_info(">>> [UI] 用户点击安全暂停...")
+                    self._log_info(f">>> [UI] 用户点击安全暂停... (strategy_id={strategy_id})")
 
                     self._call_method_by_priority(['internal_pause_strategy', 'pause_strategy'])
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    # FIX-UI-6 (V10根因, 2026-07-19): 补充 infini.pause_strategy 双通道
+                    # 根因: 原 _do_safe_pause 仅调用 _call_method_by_priority (Python侧)，
+                    #       未通知 C++ 平台更新 UI 状态，导致平台显示"运行中"但实际已暂停。
+                    # 修复: 补充 infini.pause_strategy 通道，与 StrategyUI._on_pause 对齐。
+                    try:
+                        if _host is not None and strategy_id != 'unknown':
+                            from pythongo import infini
+                            infini.pause_strategy(strategy_id)
+                            self._log_info(f"[FIX-UI-6] infini.pause_strategy({strategy_id}) 已调用 (C++平台UI同步)")
+                    except Exception as _infini_err:
+                        self._log_warning(f"[FIX-UI-6] infini.pause_strategy 失败(非致命): {_infini_err}")
+
+                    # FIX-20260720-6 (RC-20260720-1): 暂停后确认 _is_paused=True
+                    # 根因: internal_pause_strategy 可能成功返回但 _is_paused 仍为 False
+                    #       （如 strategy_core.pause() 内部异常被吞掉），用户以为已暂停但实际未暂停。
+                    # 修复: 暂停后 3 级检查 _is_paused，若仍为 False 则记录 CRITICAL 告警。
+                    try:
+                        if _host is not None:
+                            _sc = getattr(_host, 'strategy_core', None)
+                            if _sc is not None:
+                                _is_paused = getattr(_sc, '_is_paused', None)
+                                if _is_paused is not True:
+                                    import logging as _logging
+                                    _logging.critical(
+                                        "[FIX-20260720-6] 安全暂停后_is_paused仍为%s(期望True)! "
+                                        "strategy_id=%s state=%s",
+                                        _is_paused, strategy_id,
+                                        getattr(_sc, '_state', 'N/A')
+                                    )
+                    except Exception as _verify_err:
+                        pass  # 验证失败不阻断暂停流程
+
+                except Exception as e:  # FIX-UI-3 (V4): 窄异常元组扩展为 except Exception
 
                     self._log_error(f"安全暂停触发失败: {e}")
 
@@ -277,7 +332,7 @@ class UICreationService:
 
                                 messagebox.showwarning("操作禁止", error_msg)
 
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        except Exception as e:
 
                             self._log_error(f"显示错误对话框失败 {e}")
 
@@ -313,11 +368,11 @@ class UICreationService:
 
                             root.update_idletasks()
 
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    except Exception as e:
 
                         self._log_error(f"更新UI任务失败: {e}")
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"切换调试模式失败: {e}")
 
@@ -347,7 +402,7 @@ class UICreationService:
 
                                 messagebox.showwarning("操作禁止", error_msg)
 
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        except Exception as e:
 
                             self._log_error(f"显示错误对话框失败 {e}")
 
@@ -361,15 +416,11 @@ class UICreationService:
 
                     self.params.test_mode = self.params.test_mode if hasattr(self.params, 'test_mode') else True
 
-                    resumed = False
-
-                    if hasattr(self, "internal_resume_strategy"):
-
-                        resumed = self.internal_resume_strategy()
-
-                    elif hasattr(self, "resume_strategy"):
-
-                        resumed = bool(self.resume_strategy())
+                    # FIX-UI-4 (V13根因, 2026-07-19): _to_close_debug 改用 _call_method_by_priority
+                    # 根因: 原 hasattr(self, "internal_resume_strategy") 因 UICreationService.__getattr__
+                    #       delegated 列表不含该方法名，hasattr 返回 False，resume 永不调用。
+                    # 修复: 与 _to_debug L298 / _to_trade L451 对齐，统一使用 _call_method_by_priority 三层路由。
+                    resumed = self._call_method_by_priority(['internal_resume_strategy', 'resume_strategy'])
 
                     if resumed:
 
@@ -387,11 +438,11 @@ class UICreationService:
 
                             root.update_idletasks()
 
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    except Exception as e:
 
                         self._log_error(f"更新UI任务失败: {e}")
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"收市调试切换失败: {e}")
 
@@ -421,7 +472,7 @@ class UICreationService:
 
                                 messagebox.showwarning("操作禁止", error_msg)
 
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        except Exception as e:
 
                             self._log_error(f"显示错误对话框失败 {e}")
 
@@ -462,11 +513,11 @@ class UICreationService:
 
                             root.update_idletasks()
 
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    except Exception as e:
 
                         self._log_error(f"更新UI任务失败: {e}")
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"切换交易模式失败: {e}")
 
@@ -486,7 +537,7 @@ class UICreationService:
 
                     setattr(self.params, "diagnostic_output", False)
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"切换回测模式失败: {e}")
 
@@ -510,7 +561,21 @@ class UICreationService:
 
             def _daily_summary():
 
-                self._log_info("日结输出已触发")
+                # FIX-UI-8 (V12根因, 2026-07-19): _daily_summary 实现实际日结逻辑
+                # 根因: 原 _daily_summary 仅 1 行日志，无实际日结逻辑，按钮看似无效。
+                # 修复: 调用 _call_method_by_priority 路由到 Strategy2026 的日结方法（若存在），
+                #       并记录详细日志供运维追溯。若无日结方法，显式标记为"未实现"而非静默。
+                self._log_info(">>> [UI] 日结输出已触发，开始执行日结流程...")
+                try:
+                    _summary_done = self._call_method_by_priority([
+                        'internal_daily_summary', 'daily_summary', 'on_daily_summary'
+                    ])
+                    if _summary_done:
+                        self._log_info("[FIX-UI-8] 日结流程已执行完成 (strategy路由成功)")
+                    else:
+                        self._log_warning("[FIX-UI-8] 日结方法未在 Strategy2026 上找到，仅记录触发事件")
+                except Exception as _daily_err:
+                    self._log_error(f"[FIX-UI-8] 日结流程执行失败: {_daily_err}")
 
 
 
@@ -520,7 +585,7 @@ class UICreationService:
 
                     self._on_param_modify_click()
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"参数编辑失败: {e}")
 
@@ -532,7 +597,7 @@ class UICreationService:
 
                     self._on_backtest_click()
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"回测参数编辑失败: {e}")
 
@@ -561,6 +626,18 @@ class UICreationService:
             # 保存引用
 
             self._ui_root = root
+
+            # FIX-UI-2 (V6/V15/V16根因, 2026-07-19): 同步 _logic._ui_root
+            # 根因: UILogicService._ui_root 是类属性 None (ui_logic_service.py L124)，
+            #       UICreationService.__getattr__ 委托到 _logic._ui_root 返回 None，
+            #       导致 _on_param_modify_click/_on_backtest_click/_refresh_output_mode_ui_styles 短路。
+            # 修复: 在设置实例属性 self._ui_root 后，同步设置 _logic._ui_root，确保委托链路返回真实 root。
+            try:
+                if getattr(self, '_logic', None) is not None:
+                    self._logic._ui_root = root
+                    self._log_info("[FIX-UI-2] UILogicService._ui_root 已同步")
+            except Exception as _ui_root_sync_err:
+                self._log_error(f"[FIX-UI-2] _logic._ui_root 同步失败: {_ui_root_sync_err}")
 
             self._ui_lbl = lbl
 
@@ -594,23 +671,42 @@ class UICreationService:
 
             def _on_close():
 
+                # FIX-UI-10 (V17, 2026-07-19): 增强 UI 销毁清理日志
+                # 根因: 原 _on_close 无日志，无法追溯销毁过程是否完成，难以诊断UI重建失败问题。
+                # 修复: 在销毁各阶段记录日志，便于运维追溯。
+                self._log_info("[FIX-UI-10/V17] _on_close 触发，开始销毁UI窗口...")
+
                 try:
 
                     root.destroy()
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    self._log_info("[FIX-UI-10/V17] root.destroy() 完成")
 
-                    self._log_error(f"关闭窗口失败: {e}")
+                except Exception as e:
+
+                    self._log_error(f"[FIX-UI-10/V17] 关闭窗口失败: {e}")
 
                 self._ui_running = False
 
                 self._ui_root = None
+
+                self._log_info("[FIX-UI-10/V17] _ui_running=False, _ui_root=None 已设置")
+
+                # FIX-UI-2 (V6根因续, 2026-07-19): 销毁时同步清理 _logic._ui_root
+                try:
+                    if getattr(self, '_logic', None) is not None:
+                        self._logic._ui_root = None
+                        self._log_info("[FIX-UI-10/V17] _logic._ui_root=None 已同步清理")
+                except Exception as _sync_err:
+                    self._log_warning(f"[FIX-UI-10/V17] _logic._ui_root 清理失败(非致命): {_sync_err}")
 
                 with cls._get_ui_lock():
 
                     setattr(cls, "_ui_global_running", False)
 
                     setattr(cls, "_ui_global_root", None)
+
+                self._log_info("[FIX-UI-10/V17] _ui_global_running=False, _ui_global_root=None 已设置，UI销毁完成")
 
 
 
@@ -620,7 +716,7 @@ class UICreationService:
 
             self._log_info("UI界面已在主线程中创建")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"在主线程中创建UI失败: {e}")
 
@@ -640,7 +736,7 @@ class UICreationService:
 
             import tkinter as tk
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"tkinter不可逆 {e}")
 
@@ -665,7 +761,7 @@ class UICreationService:
 
                     return
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"前置窗口失败: {e}")
 
@@ -689,7 +785,7 @@ class UICreationService:
 
                     old_root.destroy()
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"清理遗留窗口失败: {e}")
 
@@ -702,17 +798,28 @@ class UICreationService:
 
 
         # P2 Bug #80修复：检查是否在主线程
+        # FIX-UI-9 (V8, 2026-07-19): 增强线程模型日志
+        # 根因: Tkinter 不是线程安全的，若 on_start 在 C++ 平台子线程被调用，
+        #       UI 会在子线程创建，按钮回调可能失效或行为不确定。
+        #       原代码仅记录"检测到非主线程"，未记录线程名/ident，难以诊断线程问题。
+        # 修复: 记录 main_thread/current_thread 的 name/ident/is_main，便于运维追溯。
         import threading as _threading
 
         main_thread = _threading.main_thread()
 
         current_thread = _threading.current_thread()
 
+        self._log_info(
+            f"[FIX-UI-9/V8] 线程检查: main_thread={main_thread.name}(ident={main_thread.ident}), "
+            f"current_thread={current_thread.name}(ident={current_thread.ident}), "
+            f"is_main={current_thread == main_thread}"
+        )
+
 
 
         if current_thread != main_thread:
 
-            self._log_info("检测到非主线程调用UI，将通过queue调度到主线程")
+            self._log_info(f"[FIX-UI-9/V8] 检测到非主线程调用UI({current_thread.name})，将通过queue调度到主线程({main_thread.name})")
 
             if not hasattr(self, "_ui_queue"):
 
@@ -774,7 +881,7 @@ class UICreationService:
 
                                                 self._log_info("UI线程中Tk root创建成功")
 
-                                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                                            except Exception as e:
 
                                                 self._log_error(f"UI线程中Tk root创建失败: {e}")
 
@@ -792,7 +899,7 @@ class UICreationService:
 
                                                 root.destroy()
 
-                                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                                            except Exception as e:
 
                                                 self._log_error(f"UI窗口销毁失败 {e}")
 
@@ -808,7 +915,7 @@ class UICreationService:
 
                                 pass
 
-                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                            except Exception as e:
 
                                 self._log_error(f"处理UI队列失败: {e}")
 
@@ -820,7 +927,7 @@ class UICreationService:
 
                                         root.after(100, _process_ui_queue)
 
-                                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                                    except Exception as e:
 
                                         self._log_error(f"UI队列调度失败: {e}")
 
@@ -858,7 +965,7 @@ class UICreationService:
 
                                 poll_count += 1
 
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    except Exception as e:
 
                         self._log_error(f"UI主循环线程异常 {e}")
 
@@ -874,7 +981,7 @@ class UICreationService:
 
                                 root.destroy()
 
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        except Exception as e:
 
                             self._log_error(f"UI窗口最终清理失败 {e}")
 
@@ -945,7 +1052,7 @@ class UICreationService:
 
                                     root.title("输出模式控制")
 
-                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                            except Exception as e:
 
                                 self._log_error(f"更新暂停状态失败 {e}")
 
@@ -955,7 +1062,7 @@ class UICreationService:
 
                                 self._refresh_output_mode_ui_styles()
 
-                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                            except Exception as e:
 
                                 self._log_error(f"刷新样式失败: {e}")
 
@@ -969,7 +1076,7 @@ class UICreationService:
 
                                 root.focus_force()
 
-                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                            except Exception as e:
 
                                 self._log_error(f"前置窗口失败: {e}")
 
@@ -985,7 +1092,7 @@ class UICreationService:
 
                                 setattr(cls, "_ui_global_running", False)
 
-                            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                            except Exception as e:
 
                                 self._log_error(f"销毁窗口失败 {e}")
 
@@ -993,7 +1100,7 @@ class UICreationService:
 
                     pass
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     self._log_error(f"处理队列失败: {e}")
 
@@ -1005,7 +1112,7 @@ class UICreationService:
 
                             root.after(100, _process_queue)
 
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        except Exception as e:
 
                             self._log_error(f"调度队列处理失败: {e}")
 
@@ -1019,7 +1126,7 @@ class UICreationService:
 
 
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"输出模式界面异常: {e}")
 
@@ -1036,7 +1143,7 @@ class UICreationService:
 
                 self._ui_queue.put({"action": "bring_front"})
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"调度窗口前置失败: {e}")
 

@@ -82,24 +82,29 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
         bid_price = svc._get_tick_field(tick, 'bid_price1', 0.0)
         ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
         direction_raw = ''
+        # FIX-HFT-DIR-20260724: direction获取根因修复(S1-HFT全天0下单根因)
+        # 根因: rc.get_tick()方法不存在(RealTimeCache无此方法,仅有get_authoritative_state/
+        #   get_latest_price/get_recent_ticks), 且tick_entry不存储direction字段(仅存
+        #   price/volume/bid_price/ask_price/option_type/strike_price)。
+        #   → rc.get_tick()抛AttributeError被except捕获 → direction_raw永远为空
+        #   → V4-FIX-O1每tick拒绝(25324次/小时) → S1-HFT全天0下单
+        #   原始tick对象也无direction字段(仅有bid/ask_price1-5、bid/ask_volume1-5、
+        #   last_price、volume、open_interest、turnover)。
+        # 修复原则(用户2026-07-25决策): 永远只做条件成就时的正确交易, 不做任何"增强"推断
+        #   - tick稀少/数据不全时 = 不开仓(fail-closed), 而非用替代数据源制造交易信号
+        #   - 已彻底删除的增强措施(原FIX-HFT-DIR v1的错误):
+        #     A. 用缓存tick的bid/ask补充当前tick缺失值 (制造非零bid/ask → 假信号)
+        #     B. bid_volume1/ask_volume1订单簿不平衡推断dead-zone方向 (制造方向 → 假信号)
+        #   - rc查找块已整体移除(不再需要缓存数据, 消除死代码)
+        #   - 保留V4-FIX-O1 fail-closed(direction仍为空则不开仓)
         try:
             from infra.subscription_service import SubscriptionManager
             if SubscriptionManager.is_option(instrument_id):
                 direction_raw = 'buy'
-            else:
-                rc = None
-                ds = svc._state_store.get_ref('_data_service') if svc._state_store else None
-                # FIX-63 D5: 补全 storage fallback（实际注册键为 'storage'）
-                if ds is None:
-                    ds = svc._state_store.get_ref('storage') if svc._state_store else None
-                if ds:
-                    rc = getattr(ds, 'realtime_cache', None)
-                if rc:
-                    tick_data = rc.get_tick(instrument_id)
-                    if tick_data:
-                        direction_raw = tick_data.get('direction', '')
         except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-            direction_raw = ''
+            pass  # direction_raw保持'', 后续条件推断或fail-closed
+        # direction推断: 仅当bid/ask都有效且last_price明确偏向一侧时才推断
+        # 删除增强B: dead-zone(last_price在spread中位)时不再用volume推断, 直接fail-closed
         if not direction_raw and bid_price > 0 and ask_price > 0:
             mid = (bid_price + ask_price) / 2.0
             if mid > 0:
@@ -108,12 +113,20 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     direction_raw = 'buy'
                 elif last_price <= bid_price + spread * 0.1:
                     direction_raw = 'sell'
-        # FIX-OO4 (S1-HFT-ROOT): direction为空时的最后回退
-        # 根因: 期货tick无direction字段且bid/ask=0时direction_raw=''→
-        #       hft_enhancements.py L252 direction_upper非BUY/SELL跳过evaluate_surge→S1零信号
-        # 修复: direction为空时默认'buy'(期权已默认buy，期货也需有方向才能评估)
+                # else: dead-zone, direction_raw保持'' → V4-FIX-O1 fail-closed (条件不成就=不开仓)
+        # V4-FIX-O1: direction为空=无方向=不开仓(fail-closed)
+        # 原则: 数据不可用=不开仓，而非数据不可用=默认buy方向
         if not direction_raw and last_price > 0:
-            direction_raw = 'buy'
+            # FIX-20260723-O1-THROTTLE: 日志限频(60s冷却)，原每tick每合约打WARNING→784次/下午
+            _o1_now = time.time()
+            _o1_last = svc.__class__.__dict__.get('_o1_warn_ts', {})
+            if not isinstance(_o1_last, dict):
+                _o1_last = {}
+                setattr(svc.__class__, '_o1_warn_ts', _o1_last)
+            if _o1_now - _o1_last.get(instrument_id, 0.0) >= 60:
+                logging.info("[V4-FIX-O1] direction为空, 返回None (数据不可用=不开仓) inst=%s", instrument_id)
+                _o1_last[instrument_id] = _o1_now
+            return None
 
         product = ''
         try:
@@ -203,12 +216,13 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     # MarketTimeService已正确配置6交易所收盘时间(全部15:00)。
                     if action in ('OPEN_POSITION', 'ADD_POSITION'):
                         try:
-                            from infra.scheduler_service import is_market_open
-                            if not is_market_open():
+                            from infra.market_time_service import get_market_open_cache as _gmo_cache_20260720
+                            if not _gmo_cache_20260720().is_open():
                                 logging.info("[FIX-MARKET-CLOSE] HFT %s跳过: 市场已收盘 inst=%s", action, instrument_id)
                                 pursuit_signal = None  # 清除信号，阻止执行
-                        except (ImportError, AttributeError, TypeError):
-                            pass
+                        except Exception as _mkt_err1:  # V4-FIX-O3: fail-closed
+                            pursuit_signal = None  # 门控不可用=不交易
+                            logging.warning("[V4-FIX-O3] MarketTimeService异常(OPEN/ADD), 阻断 (fail-closed): %s", _mkt_err1)
                     if pursuit_signal is not None:
                         if action == 'OPEN_POSITION':
                             execute_pursuit_entry(svc, hft, pursuit_signal, tick, instrument_id, last_price, volume, exchange)
@@ -222,12 +236,13 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     # pursuit_exit本质是提交平仓订单到交易所，收盘后无意义。
                     _exit_blocked = False
                     try:
-                        from infra.scheduler_service import is_market_open
-                        if not is_market_open():
+                        from infra.market_time_service import get_market_open_cache as _gmo_cache_20260720
+                        if not _gmo_cache_20260720().is_open():
                             _exit_blocked = True
                             logging.info("[FIX-MARKET-CLOSE] HFT pursuit_exit跳过: 市场已收盘 inst=%s", instrument_id)
-                    except (ImportError, AttributeError, TypeError):
-                        pass
+                    except Exception as _mkt_err2:  # V4-FIX-O3: fail-closed
+                        _exit_blocked = True  # 门控不可用=不交易
+                        logging.warning("[V4-FIX-O3] MarketTimeService异常(exit), 阻断 (fail-closed): %s", _mkt_err2)
                     if not _exit_blocked:
                         logging.info("[HFT] pursuit exit: %s %s reason=%s pnl=%.2f",
                                      pursuit_exit.get('instrument_id', ''),
@@ -244,11 +259,12 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，套利信号无法执行
                     _arb_blocked = False
                     try:
-                        from infra.scheduler_service import is_market_open
-                        if not is_market_open():
+                        from infra.market_time_service import get_market_open_cache as _gmo_cache_20260720
+                        if not _gmo_cache_20260720().is_open():
                             _arb_blocked = True
-                    except (ImportError, AttributeError, TypeError):
-                        pass
+                    except Exception as _mkt_err3:  # V4-FIX-O3: fail-closed
+                        _arb_blocked = True  # 门控不可用=不交易
+                        logging.warning("[V4-FIX-O3] MarketTimeService异常(arb), 阻断 (fail-closed): %s", _mkt_err3)
                     if not _arb_blocked:
                         handle_arbitrage_signal(svc, arbitrage_signal, instrument_id)
 
@@ -257,11 +273,12 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，转换信号无法执行
                     _trans_blocked = False
                     try:
-                        from infra.scheduler_service import is_market_open
-                        if not is_market_open():
+                        from infra.market_time_service import get_market_open_cache as _gmo_cache_20260720
+                        if not _gmo_cache_20260720().is_open():
                             _trans_blocked = True
-                    except (ImportError, AttributeError, TypeError):
-                        pass
+                    except Exception as _mkt_err4:  # V4-FIX-O3: fail-closed
+                        _trans_blocked = True  # 门控不可用=不交易
+                        logging.warning("[V4-FIX-O3] MarketTimeService异常(trans), 阻断 (fail-closed): %s", _mkt_err4)
                     if not _trans_blocked:
                         hft_mid_price = (bid_price + ask_price) / 2.0 if bid_price > 0 and ask_price > 0 else last_price
                         handle_transition_signal(svc, transition_signal, instrument_id, last_price, mid_price=hft_mid_price)
@@ -271,11 +288,12 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，聪明钱信号无法执行
                     _sm_blocked = False
                     try:
-                        from infra.scheduler_service import is_market_open
-                        if not is_market_open():
+                        from infra.market_time_service import get_market_open_cache as _gmo_cache_20260720
+                        if not _gmo_cache_20260720().is_open():
                             _sm_blocked = True
-                    except (ImportError, AttributeError, TypeError):
-                        pass
+                    except Exception as _mkt_err5:  # V4-FIX-O3: fail-closed
+                        _sm_blocked = True  # 门控不可用=不交易
+                        logging.warning("[V4-FIX-O3] MarketTimeService异常(sm), 阻断 (fail-closed): %s", _mkt_err5)
                     if not _sm_blocked:
                         handle_smart_money_signal(svc, smart_money_signal, instrument_id)
 
@@ -284,11 +302,12 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                     # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，过滤信号无法执行
                     _sf_blocked = False
                     try:
-                        from infra.scheduler_service import is_market_open
-                        if not is_market_open():
+                        from infra.market_time_service import get_market_open_cache as _gmo_cache_20260720
+                        if not _gmo_cache_20260720().is_open():
                             _sf_blocked = True
-                    except (ImportError, AttributeError, TypeError):
-                        pass
+                    except Exception as _mkt_err6:  # V4-FIX-O3: fail-closed
+                        _sf_blocked = True  # 门控不可用=不交易
+                        logging.warning("[V4-FIX-O3] MarketTimeService异常(sf), 阻断 (fail-closed): %s", _mkt_err6)
                     if not _sf_blocked:
                         handle_filtered_signal(signal_filter_result, instrument_id, last_price)
     except Exception as hft_e:
@@ -350,7 +369,16 @@ def execute_pursuit_exit(svc, hft: Any, exit_signal: Dict[str, Any], instrument_
         order_svc = svc._state_store.get_ref('_order_service') if svc._state_store else None
         if order_svc:
             try:
-                signal_strength = 1.0
+                # V4-FIX-O4: signal_strength使用实际评估强度(非硬编码1.0)
+                # 从pursuit_signal获取strength_delta, 无法获取时fail-closed使用0.0
+                _exit_strength_delta = 0.0
+                try:
+                    _pos = hft._positions.get(instrument_id) if hft else None
+                    if _pos:
+                        _exit_strength_delta = getattr(_pos, 'current_stop_profit', 0.0) - getattr(_pos, 'current_stop_loss', 0.0)
+                except Exception:
+                    pass
+                signal_strength = min(abs(_exit_strength_delta) / max(abs(price) * 0.01, 1e-6), 1.0) if _exit_strength_delta != 0.0 else 0.0
                 defensive_orders = order_svc.send_defensive_order(
                     instrument_id=instrument_id,
                     volume=volume,
@@ -383,7 +411,7 @@ def execute_pursuit_exit(svc, hft: Any, exit_signal: Dict[str, Any], instrument_
                 reason=f"hft_{reason}",
                 priority=10,
                 cooldown_seconds=0,
-                signal_strength=1.0,
+                signal_strength=signal_strength,  # V4-FIX-O4: 使用实际评估强度
             )
             if close_signal:
                 logging.info("[HFT] pursuit exit signal emitted: %s %s vol=%d reason=%s",
@@ -481,10 +509,13 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
         ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
         bids = [(bid_price, 100)] if bid_price > 0 else None
         asks = [(ask_price, 100)] if ask_price > 0 else None
+        # V4-FIX-O4: signal_strength使用实际评估强度(非硬编码0.9)
+        # 加仓信号强度=入场强度的80%(加仓应弱于首次入场)
+        _add_signal_strength = min(abs(strength_delta) / 0.3, 1.0) * 0.8 if strength_delta != 0.0 else 0.0
         order_ids = order_svc.send_order_split(
             instrument_id=instrument_id, volume=add_volume, price=price,
             direction=direction, action='OPEN', exchange=exchange,
-            signal_strength=0.9, bids=bids, asks=asks,
+            signal_strength=_add_signal_strength, bids=bids, asks=asks,
             open_reason='HIGH_FREQ',  # [FIX-20260712-S1] 改为HIGH_FREQ以使用60秒持仓/1分钟硬止损
             signal_id=pursuit_signal.get('signal_id', ''),
         )
@@ -743,15 +774,23 @@ class DynamicPursuitEngine:
         #       使用价格动量作为替代触发条件，不依赖width_resonance
         _effective_threshold = self._surge_threshold
         if current_strength == 0 and prev_strength == 0:
-            # 数据降级模式: 使用价格本身作为动量信号
-            if current_price > 0 and hasattr(self, '_last_price_cache'):
-                _cached = self._last_price_cache.get(instrument_id, 0.0)
-                if _cached > 0:
-                    _price_change = abs(current_price - _cached) / _cached
-                    if _price_change >= 0.001:  # 0.1%价格变动即可触发
-                        _effective_threshold = 0  # 降级模式下直接放行
-            self._last_price_cache = getattr(self, '_last_price_cache', {})
-            self._last_price_cache[instrument_id] = current_price
+            # V4-FIX-O2: 数据降级模式=不追仓(fail-closed)
+            # 原则: 数据不可用=不开仓，而非数据不可用=用0.1%价格变动替代共振
+            # FIX-NOISE-O2-20260724: 日志限频(60s全局冷却+汇总计数), 原per-instrument限频不够
+            #   期权品种数>300，per-instrument=60s仍产生3.6万次/40min
+            #   改为全局60s冷却+汇总计数模式：60s内只输出1次+累计计数
+            _o2_now = time.time()
+            _o2_last = self.__class__.__dict__.get('_o2_warn_ts', {})
+            if not isinstance(_o2_last, dict):
+                _o2_last = {}
+            _o2_count = _o2_last.get('_count', 0) + 1
+            _o2_last['_count'] = _o2_count
+            if _o2_now - _o2_last.get('_last_log', 0.0) >= 60:
+                logging.info("[V4-FIX-O2] 数据降级模式, 不追仓 (strength=0) (数据不可用=不开仓) ×%d instruments", _o2_count)
+                _o2_last['_last_log'] = _o2_now
+                _o2_last['_count'] = 0
+            setattr(self.__class__, '_o2_warn_ts', _o2_last)
+            return None
         if strength_delta < _effective_threshold:
             return None
         self._stats['surge_detected'] += 1
@@ -837,11 +876,28 @@ class DynamicPursuitEngine:
                 pending_sec = time.time() - pos.created_at
                 if pending_sec < 30.0:
                     return None
+                # V4-FIX-C6: platform_confirmed超时, 生成CLOSE信号(防止持仓泄漏), 而非静默关闭
+                # 原则: 平台未确认≠交易所无持仓, 静默关闭(is_open=False+return None)会导致本地无持仓+交易所有持仓=泄漏
+                # 修复: 返回CLOSE_ALL信号, 让调用方执行平仓操作(fail-safe, 宁可多平也不泄漏)
+                _direction = pos.direction
                 pos.is_open = False
                 self._stats['positions_closed'] += 1
-                logging.warning("[DynamicPursuitEngine] %s exit unconfirmed position (timed out %.0fs)",
-                                instrument_id, pending_sec)
-                return None
+                _dpe_log_level = logging.DEBUG
+                if not getattr(self, '_dpe_first_timeout_logged', False):
+                    _dpe_log_level = logging.WARNING
+                    self._dpe_first_timeout_logged = True
+                logging.log(_dpe_log_level,
+                    "[V4-FIX-C6] %s platform_confirmed超时(%.0fs), 生成CLOSE信号 (防止持仓泄漏) dir=%s",
+                    instrument_id, pending_sec, _direction)
+                pnl = self._calc_pnl(pos, current_price)
+                return {
+                    'action': 'CLOSE_ALL', 'instrument_id': instrument_id,
+                    'direction': 'SELL' if _direction == 'BUY' else 'BUY',
+                    'volume': pos.total_volume, 'price': current_price,
+                    'reason': 'platform_confirmed_timeout', 'pnl': pnl,
+                    'entries': len(pos.entries),
+                    'platform_order_ids': list(pos.platform_order_ids),
+                }
             direction = pos.direction
             should_exit = False
             reason = ''

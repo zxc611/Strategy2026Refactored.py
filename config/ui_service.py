@@ -212,7 +212,7 @@ class StrategyUI:
 
                 self.root.destroy()
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 logger.error(f"关闭UI失败: {e}")
 
@@ -262,7 +262,7 @@ class StrategyUI:
 
             self.root.mainloop()
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"UI error: {e}")
 
@@ -315,7 +315,7 @@ class StrategyUI:
 
 
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"Build control panel error: {e}")
 
@@ -343,7 +343,7 @@ class StrategyUI:
 
 
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"Build status panel error: {e}")
 
@@ -372,7 +372,7 @@ class StrategyUI:
 
 
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"Build log panel error: {e}")
 
@@ -393,7 +393,7 @@ class StrategyUI:
 
                 self.root.after(500, self._update_loop)
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"Update loop error: {e}")
 
@@ -437,7 +437,7 @@ class StrategyUI:
 
                 text.config(state="disabled")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"Update status error: {e}")
 
@@ -462,7 +462,7 @@ class StrategyUI:
 
             pass
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"Process messages error: {e}")
 
@@ -483,7 +483,7 @@ class StrategyUI:
 
                 text.see("end")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.error(f"Append log error: {e}")
 
@@ -540,7 +540,7 @@ class StrategyUI:
                 from pythongo import infini
                 infini.pause_strategy(_sid)
                 logging.info("[UI-R4-DUAL-PAUSE] infini.pause_strategy(%s) 已调用", _sid)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _infini_err:
+        except Exception as _infini_err:
             logging.warning("[UI-R4-DUAL-PAUSE] infini.pause_strategy失败(非致命): %s", _infini_err)
 
         # 通道2: 直接执行Python侧暂停逻辑（不依赖C++回调）
@@ -569,7 +569,7 @@ class StrategyUI:
                 from pythongo import infini
                 infini.pause_strategy(_sid)
                 logging.info("[UI-R4-DUAL-RESUME] infini.pause_strategy(%s) 已调用(恢复需C++重新启动)", _sid)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _infini_err:
+        except Exception as _infini_err:
             logging.warning("[UI-R4-DUAL-RESUME] infini调用失败(非致命): %s", _infini_err)
 
         # 通道2: 直接执行Python侧恢复逻辑
@@ -639,7 +639,7 @@ class UIDiagnosisTool:
 
             result["error"] = str(e)
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             result["error"] = str(e)
 
@@ -666,7 +666,7 @@ class UIDiagnosisTool:
 
             result["issues"].append("使用queue进行线程间通信")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             result["issues"].append(str(e))
 

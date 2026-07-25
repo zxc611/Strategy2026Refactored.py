@@ -752,13 +752,16 @@ def tick_dispatch_layer(svc, tick: Any, instrument_id_raw: str) -> None:
 
         # [FIX-20260708-TICK-NO-DROP] 背压降级：过载时走轻量路径
         _degraded = getattr(svc, '_tick_degraded_mode', False)
-        # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，止损平仓订单也无法提交
+        # FIX-MARKET-CLOSE-20260720: 改用缓存式判断（避免每tick调用 is_market_open()）
+        # 根因: 原代码每tick调用 is_market_open() 性能差（高频tick下增加10-50ms/秒 CPU）
+        # 用户要求: "只在固定时间（开盘/收市）收市门控判断"
+        # 修复: 使用 MarketOpenCache 缓存（常规30秒刷新，固定时间点附近5秒刷新）
         _market_closed = False
         try:
-            from infra.scheduler_service import is_market_open
-            if not is_market_open():
+            from infra.market_time_service import get_market_open_cache
+            if not get_market_open_cache().is_open():
                 _market_closed = True
-        except (ImportError, AttributeError, TypeError):
+        except Exception:  # NEW-1: 实时回调路径必须用except Exception
             pass
         if _degraded:
             # 轻量路径：仅更新价格缓存+止损检查，跳过classify等重操作
@@ -1240,13 +1243,20 @@ def flush_tick_buffer(svc) -> None:
     if total_flushed:
         logging.info("[_flush_tick_buffer] Total flushed: %d", total_flushed)
 
-    # FIX-M8-3: flush_tick_buffer是周期性调用，顺便flush未完成的K线
-    # 解决稀疏tick场景下K线永不完成的问题
+    # FIX-KLINE-FLUSH-20260725: 恢复flush_incomplete_klines调用(原FIX-M8-3被误删)
+    # 根因澄清: 见query_service.py:flush()方法注释
+    # 此处是周期性flush(在tick buffer flush时调用), 不是inline flush
+    # 作用: 把稀疏tick下未跨周期完成的K线强制落库, 恢复K线数据管道
+    # 最低质量标准: agg.flush()仅在kline_start_time不为None且close_price不为None时返回K线
+    # 不制造虚假K线, 不绕过S3/S4箱体≥3根周K线的策略条件
     try:
-        if _storage_flush and hasattr(_storage_flush, 'flush_incomplete_klines'):
-            _storage_flush.flush_incomplete_klines()
+        # FIX-KLINE-FLUSH-20260725-VAR: 使用本函数已获取的_storage_flush, 原ds未定义会导致NameError
+        if _storage_flush is not None and hasattr(_storage_flush, 'flush_incomplete_klines'):
+            _kline_flushed = _storage_flush.flush_incomplete_klines()
+            if _kline_flushed > 0:
+                logging.debug("[FIX-KLINE-FLUSH] flush_incomplete_klines: %d条K线落库", _kline_flushed)
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _kline_flush_err:
-        logging.debug("[FIX-M8-3] flush_incomplete_klines调用失败(非致命): %s", _kline_flush_err)
+        logging.debug("[FIX-KLINE-FLUSH] flush_incomplete_klines失败(非致命): %s", _kline_flush_err)
 
 
 def dispatch_tick(svc, tick: Any, instrument_id: str, last_price: float, volume: int, exchange: str) -> None:
@@ -1461,6 +1471,19 @@ def _dispatch_tick_inner(svc, tick: Any, instrument_id: str, last_price: float, 
                     record_tick_probe('db_insert_fail', instrument_id, last_price, f'{type(e).__name__}: {e}')
                     with shard_lock:
                         svc._shard_buffers.setdefault(shard_idx, []).extend(ticks_to_flush)
+                # FIX-KLINE-FLUSH-20260725: 恢复inline flush调用(原FIX-KLINE-FLUSH-20260724被误删)
+                # 根因澄清: 见query_service.py:flush()方法注释
+                # inline flush在tick落库后调用flush_incomplete_klines, 把未完成K线强制落库
+                # 最低质量标准: agg.flush()仅在kline_start_time不为None且close_price不为None时返回K线
+                # 不制造虚假K线, 不绕过S3/S4箱体≥3根周K线的策略条件
+                try:
+                    # FIX-KLINE-FLUSH-20260725-VAR: 使用本函数已获取的_stor3, 原ds未定义会导致NameError
+                    if _stor3 is not None and hasattr(_stor3, 'flush_incomplete_klines'):
+                        _kline_flushed = _stor3.flush_incomplete_klines()
+                        if _kline_flushed > 0:
+                            logging.debug("[FIX-KLINE-FLUSH] inline flush: %d条K线落库 inst=%s", _kline_flushed, instrument_id)
+                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _kline_inline_err:
+                    logging.debug("[FIX-KLINE-FLUSH] inline flush失败(非致命): %s", _kline_inline_err)
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as e:
             from infra.health_monitor import record_tick_probe
             record_tick_probe('error', instrument_id, last_price, f"Storage: {e}")

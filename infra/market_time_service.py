@@ -319,14 +319,173 @@ class MarketTimeService:
 
 
 # ============================================================================
+# FIX-MARKET-CLOSE-20260720: 市场开收盘状态缓存
+# ============================================================================
+# 用户要求: "只在固定时间（开盘/收市）收市门控判断"
+# 设计原则:
+#   1. onTick 只读缓存，零开销（避免每tick调用 is_market_open()）
+#   2. 常规30秒刷新一次
+#   3. 固定时间点（开盘/收盘）±5分钟窗口内使用5秒刷新
+#   4. 初始化失败时默认返回 True（开盘），避免漏处理tick
+# ============================================================================
+
+class MarketOpenCache:
+    """市场开收盘状态缓存 — onTick调用零开销
+
+    FIX-MARKET-CLOSE-20260720
+    根因: strategy_2026.py onTick入口没有市场时间门控，
+          15:00收市后PQS更新/信号生成/诊断日志仍持续运行4分钟以上。
+          现有门控(tick_dispatch.py L758)每tick调用 is_market_open() 性能差。
+    修复:
+      1. 本类提供缓存式 is_open() 接口，onTick 只读缓存
+      2. 后台定时刷新（常规30秒，固定时间点附近5秒）
+      3. 固定时间点覆盖所有交易所开盘/收盘:
+         09:00(SHFE/DCE/CZCE/INE/GFEX开盘)
+         09:30(CFFEX开盘)
+         10:15(日盘休盘)
+         10:30(日盘复盘)
+         11:30(上午收盘)
+         13:00(CFFEX下午开盘)
+         13:30(SHFE等下午开盘)
+         15:00(全部收盘)
+         21:00(夜盘开盘)
+         23:00(SHFE等夜盘休盘)
+         23:30(CZCE夜盘休盘)
+    """
+
+    _instance: Optional['MarketOpenCache'] = None
+    _lock = threading.Lock()
+
+    # 类级常量（避免实例化时重建）
+    _REFRESH_INTERVAL_NORMAL = 30.0       # 常规30秒刷新
+    _REFRESH_INTERVAL_CRITICAL = 5.0      # 固定时间点附近5秒刷新
+    _CRITICAL_WINDOW_MINUTES = 5          # ±5分钟窗口
+
+    # 全部交易所开盘/收盘时间点 (hour, minute)
+    _CRITICAL_WINDOWS = [
+        (9, 0), (9, 30), (10, 15), (10, 30), (11, 30),
+        (13, 0), (13, 30), (15, 0),
+        (21, 0), (23, 0), (23, 30),
+    ]
+
+    def __init__(self):
+        # 默认 True（开盘），避免启动时漏处理tick
+        # 若启动时实际已收盘，第一次刷新后会立即纠正
+        self._cache: bool = True
+        self._last_refresh: float = 0.0
+        self._refresh_count: int = 0
+        self._last_status_change: float = 0.0
+        self._prev_cache: bool = True
+
+    def is_open(self) -> bool:
+        """onTick调用 — 只读缓存，零开销
+
+        若距上次刷新超过间隔则触发刷新。
+        刷新失败时保留原值（不抛异常）。
+        """
+        try:
+            now = time.time()
+            if now - self._last_refresh >= self._get_refresh_interval():
+                self._refresh()
+        except Exception:
+            # 任何异常都保留当前缓存值，避免 onTick 崩溃
+            pass
+        return self._cache
+
+    def is_closed(self) -> bool:
+        """便捷方法 — 市场是否已收盘"""
+        return not self.is_open()
+
+    def force_refresh(self) -> bool:
+        """强制刷新缓存（用于关键时间点触发）"""
+        self._refresh()
+        return self._cache
+
+    def get_status(self) -> Dict[str, Any]:
+        """获取缓存详细状态（诊断用）"""
+        return {
+            'is_open': self._cache,
+            'last_refresh': self._last_refresh,
+            'refresh_count': self._refresh_count,
+            'last_status_change': self._last_status_change,
+            'current_interval': self._get_refresh_interval(),
+        }
+
+    def _get_refresh_interval(self) -> float:
+        """根据当前时间判断刷新间隔
+
+        在固定时间点±5分钟窗口内使用5秒刷新，否则使用30秒刷新。
+        """
+        try:
+            from infra.shared_utils import CHINA_TZ
+            now = datetime.now(CHINA_TZ)
+            now_minutes = now.hour * 60 + now.minute
+            for ch, cm in self._CRITICAL_WINDOWS:
+                target_minutes = ch * 60 + cm
+                # 处理跨午夜（如23:30 vs 00:10）
+                diff = abs(now_minutes - target_minutes)
+                diff = min(diff, 24 * 60 - diff)
+                if diff <= self._CRITICAL_WINDOW_MINUTES:
+                    return self._REFRESH_INTERVAL_CRITICAL
+        except Exception:
+            pass
+        return self._REFRESH_INTERVAL_NORMAL
+
+    def _refresh(self) -> None:
+        """刷新缓存 — 调用 MarketTimeService.is_market_open()
+
+        失败时保留原值，不抛异常。
+        """
+        try:
+            new_value = get_market_time_service().is_market_open()
+            if new_value != self._cache:
+                self._prev_cache = self._cache
+                self._cache = new_value
+                self._last_status_change = time.time()
+                # 状态变化时输出日志（开盘→收盘 / 收盘→开盘）
+                status_str = 'OPEN' if new_value else 'CLOSED'
+                logging.info(
+                    "[FIX-MARKET-CLOSE-20260720] 市场状态切换: %s->%s (refresh_count=%d)",
+                    'OPEN' if self._prev_cache else 'CLOSED',
+                    status_str,
+                    self._refresh_count + 1,
+                )
+            self._last_refresh = time.time()
+            self._refresh_count += 1
+        except Exception as _refresh_err:
+            # 刷新失败保留原值，记录debug日志
+            logging.debug("[MarketOpenCache] 刷新失败(保留原值=%s): %s", self._cache, _refresh_err)
+
+
+# MarketOpenCache 单例
+_market_open_cache_instance: Optional[MarketOpenCache] = None
+_market_open_cache_lock = threading.Lock()
+
+
+def get_market_open_cache() -> MarketOpenCache:
+    """获取 MarketOpenCache 单例
+
+    FIX-MARKET-CLOSE-20260720: 提供 onTick 调用的零开销市场状态判断。
+    """
+    global _market_open_cache_instance
+    if _market_open_cache_instance is None:
+        with _market_open_cache_lock:
+            if _market_open_cache_instance is None:
+                _market_open_cache_instance = MarketOpenCache()
+    return _market_open_cache_instance
+
+
+# ============================================================================
 # 模块导出
 # ============================================================================
 
 __all__ = [
     'MarketTimeService',
+    'MarketOpenCache',
     'is_market_open',
     'get_market_status',
     'get_market_time_service',
+    'get_market_open_cache',
     'TimeSyncChecker',
     'get_time_sync_checker',
 ]

@@ -598,8 +598,15 @@ class DrawdownMonitorService:
                 except Exception:
                     pass
             if _dry_run_mode:
-                logging.warning("[SafetyMetaLayer] dry_run模式日回撤%s超阈值但跳过硬止(虚拟equity不阻断): %s",
-                                f"{self._daily_drawdown*100:.2f}%", reason)
+                # FIX-PP3 (NOISE-REDUCTION): dry_run日回撤WARNING添加冷却
+                # 根因: 每tick调用check_daily_drawdown→should_stop=True→每tick打印WARNING(225次/小时)
+                # 修复: 5分钟冷却，仅首次和冷却到期时打印
+                _now_ts = time.time()
+                _last_warn_ts = getattr(self, '_dry_run_drawdown_warn_ts', 0.0)
+                if _now_ts - _last_warn_ts >= 300:  # 5分钟冷却
+                    logging.warning("[SafetyMetaLayer] dry_run模式日回撤%s超阈值但跳过硬止(虚拟equity不阻断): %s",
+                                    f"{self._daily_drawdown*100:.2f}%", reason)
+                    self._dry_run_drawdown_warn_ts = _now_ts
             else:
                 logging.warning("[SafetyMetaLayer] 🛑 日最大回撤硬停止触发: %s", reason)
 

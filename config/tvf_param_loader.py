@@ -862,10 +862,10 @@ SORTER_CONFIG = {
     'tier1_wilson_threshold': 0.50,        # Tier1: Wilson下界≥0.50
     'tier2_coverage_threshold': 0.20,      # FIX-N: 与TIER2_COVERAGE_THRESHOLD常量同步(0.40→0.20)
     'tier2_correct_up_threshold': 0.45,    # Tier2: 正确上涨比≥0.45
-    'tier3_correct_up_threshold': 0.35,    # Tier3: 正确上涨比≥0.35
+    'tier3_correct_up_threshold': 0.20,    # FIX-P0-3-RC10 (2026-07-23): 从0.35→0.20，放宽Tier3门槛，减少冷启动期间Tier4误判
 
     # --- v2.6/v2.7 共振模块参数 ---
-    'resonance_enabled': False,            # 默认关闭（安全闸门：Phase 2 完成前必须为 False）
+    'resonance_enabled': True,             # FIX-P0-2-RC1 (2026-07-23): 从False→True，启用三维共振增强(D_term_structure/D_momentum/D_type_balance)
     'resonance_weight': 0.50,              # v2.7: 等权融合（消除未经证明的先验）
     'resonance_weight_note': 'Equal-weight default. V7 walk-forward optimization required before production deployment.',
     'resonance_binary_mode': False,        # False=连续值加权, True=二值化
@@ -889,7 +889,7 @@ SORTER_CONFIG = {
     # scheme_2: product_score=D, 主信号=D/Q正交分解
     # scheme_3: product_score=D, 主信号=entropy/concentration/direction_bias
     # all: 全特征输出(research模式)
-    'scoring_scheme': 'scheme_1',          # 实盘默认方案一（稳妥）
+    'scoring_scheme': 'scheme_2',          # FIX-P1-1-RC2 (2026-07-23): 从scheme_1→scheme_2，使用D/Q四象限正交分解替代已弃用net_score
 }
 
 

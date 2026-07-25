@@ -520,8 +520,28 @@ class WidthCacheStateService:
                     elif current_price < _opt_prev_price:
                         option_direction = False
             if option_direction is None:
-                return False  # 三级回退都失败（首tick数据不足）
-            future_rising = bool(option_direction)
+                # FIX-P1-3-RC6 (2026-07-23): 四级回退 — 期货已初始化但方向未知
+                # 原三级回退全部失败时直接return False，导致_sync_otm_count永不增加
+                # → width_resonance=0 → 所有策略resonance_strength=0 → 信号弱化
+                #
+                # FIX-B (2026-07-23批判修复): 原"return True"是半拉子工程，绕过了:
+                #   1) future_price<=0守卫 → 零价期货误计同步
+                #   2) is_otm检查 → ITM期权误计为OTM同步
+                #   3) is_correct检查 → 方向不匹配也计入
+                # 修复: 设置future_rising+option_direction一致默认值，继续走正常检查链路
+                #   - future_price<=0时仍return False（保留零价守卫）
+                #   - is_otm检查仍过滤ITM期权
+                #   - is_correct基于默认方向评估（弱信号，但安全）
+                if future_state.get('initialized'):
+                    # 保守默认: 假设期货上涨
+                    # CALL: option_direction=True (涨), PUT: option_direction=False (跌) → 与Delta特性一致
+                    future_rising = True
+                    option_direction = True if opt_type == 'CALL' else False
+                    # 跳过L539的 future_rising=bool(option_direction)，因为已显式设置
+                else:
+                    return False
+            else:
+                future_rising = bool(option_direction)
         else:
             future_rising = bool(_future_rising_raw)
 
@@ -753,6 +773,10 @@ class WidthCacheStateService:
                     self._future_rising[future_internal_id] = None
                     self._classify_pending_options(future_internal_id)
                     logging.info("[FutureZeroPrice] fid=%s price<=0但仍标记initialized=True(rising=None)", future_internal_id)
+                # FIX-D (2026-07-23): 在price<=0早退路径也检查pending超时
+                # 原代码在L776 return，导致_check_pending_timeout(L791)不可达
+                # 当多个期货都price<=0时，pending期权永远无法被超时检查
+                self._check_pending_timeout()
             return
         with self._lock:
             # ✅ 从 id_cache 获取 product 和 month
@@ -787,6 +811,8 @@ class WidthCacheStateService:
             
             if not was_initialized:
                 self._classify_pending_options(future_internal_id)
+            # FIX-P1-2-RC5 (2026-07-23): 定期检查pending超时期权并强制分类
+            self._check_pending_timeout()
 
     def on_future_instrument_tick(self, future_internal_id: int, price: float):
         """✅ 按期货 internal_id 更新价格，ID语义主入口。"""
@@ -914,6 +940,7 @@ class WidthCacheStateService:
                         'month': month,
                         'opt_type': opt_type,
                         'price': price,
+                        'pending_since': time.time(),  # FIX-P1-2-RC5 (2026-07-23): 记录pending时间戳，用于超时强制分类
                     })
                     self._set_current_status(internal_id, info, 'other')
                     if not hasattr(self, '_future_init_pending_count'):
@@ -985,6 +1012,63 @@ class WidthCacheStateService:
 
             self._set_current_status(internal_id, info, status)
             self._update_sort_bucket(internal_id, info, future_internal_id, month, opt_type)
+
+    # FIX-P1-2-RC5 (2026-07-23): 定期检查pending超时期权
+    # 当期货持续未初始化时（如price<=0），pending期权超过60秒后强制分类
+    # 避免期权永远停留在'other'状态，不入排序桶
+    _PENDING_TIMEOUT_SEC = 60.0
+    _PENDING_CHECK_INTERVAL_SEC = 30.0
+
+    def _check_pending_timeout(self, now: float = None):
+        """检查并处理超时的pending期权，强制分类"""
+        if now is None:
+            now = time.time()
+        if not self._pending_classify_options:
+            return
+        # 节流：每30秒检查一次
+        _last_check = getattr(self, '_pending_timeout_last_check', 0.0)
+        if now - _last_check < self._PENDING_CHECK_INTERVAL_SEC:
+            return
+        self._pending_timeout_last_check = now
+
+        _total_timed_out = 0
+        _futures_to_clear = []
+        for future_id, pending_list in list(self._pending_classify_options.items()):
+            _timed_out = []
+            _still_pending = []
+            for item in pending_list:
+                _pending_duration = now - item.get('pending_since', now)
+                if _pending_duration > self._PENDING_TIMEOUT_SEC:
+                    _timed_out.append(item)
+                else:
+                    _still_pending.append(item)
+            if _timed_out:
+                # 强制分类超时期权
+                for item in _timed_out:
+                    internal_id = item['internal_id']
+                    info = item['info']
+                    month = item['month']
+                    opt_type = item['opt_type']
+                    price = item['price']
+                    try:
+                        status = self._classify_status(future_id, month, opt_type, price, price, option_direction=None)
+                        self._set_current_status(internal_id, info, status)
+                        self._update_sort_bucket(internal_id, info, future_id, month, opt_type)
+                    except Exception as _to_err:
+                        logging.debug("[PendingTimeout] force-classify failed: %s", _to_err)
+                _total_timed_out += len(_timed_out)
+            # 更新pending列表
+            if _still_pending:
+                self._pending_classify_options[future_id] = _still_pending
+            else:
+                _futures_to_clear.append(future_id)
+        for fid in _futures_to_clear:
+            self._pending_classify_options.pop(fid, None)
+        if _total_timed_out > 0:
+            logging.warning(
+                "[FIX-P1-2-RC5] PendingTimeout: %d个期权pending超时(>%ds)，已强制分类",
+                _total_timed_out, self._PENDING_TIMEOUT_SEC,
+            )
 
     def _recalc_all_state_for_underlying(self, future_internal_id: int):
         """期货方向变化时，重新计算该标的下所有期权的当前状态和同步计数，并同步更新排序桶。

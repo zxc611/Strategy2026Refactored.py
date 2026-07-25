@@ -29,6 +29,83 @@ from order.order_executor_validation import _OrderExecutorBase, OrderContext
 from order.execution_backend_base import OrderExecutionBackend
 
 
+def _place_hft_take_profit(
+    svc: Any,
+    instrument_id: str,
+    open_direction: str,
+    open_price: float,
+    volume: float,
+    tick_size: float,
+) -> float:
+    """HFT开仓成功后挂一个最小变动单位的止盈单
+
+    核心逻辑:
+    - 买入开仓 → 止盈卖价 = 开仓价 + 1个tick_size
+    - 卖出开仓 → 止盈买价 = 开仓价 - 1个tick_size
+    - 止盈方向与开仓方向相反, action=CLOSE
+    - tick_size从品种ID自带属性中读取(一个生命周期仅定一次)
+
+    Args:
+        svc: OrderService实例
+        instrument_id: 合约ID
+        open_direction: 开仓方向 'BUY'/'SELL'
+        open_price: 开仓成交价
+        volume: 开仓手数
+        tick_size: 最小变动价位(从instrument_meta.tick_size读取)
+    Returns:
+        止盈单价格, 0表示未下单
+    """
+    if tick_size <= 0:
+        return 0.0
+
+    # 确定止盈方向和价格
+    if open_direction == TradeDirection.BUY:
+        # 买入开仓 → 卖出止盈(赚一个tick)
+        tp_direction = TradeDirection.SELL
+        tp_price = open_price + tick_size
+    elif open_direction == TradeDirection.SELL:
+        # 卖出开仓 → 买入止盈(赚一个tick)
+        tp_direction = TradeDirection.BUY
+        tp_price = max(tick_size, open_price - tick_size)
+    else:
+        return 0.0
+
+    # 价格校正
+    tp_price = svc._correct_price(tp_price, instrument_id)
+
+    # 发送止盈单(CLOSE动作), 最多重试3次
+    # FIX-HFT-TP-RETRY-20260724: 止盈单失败需重试,连续失败触发告警
+    last_error = None
+    for attempt in range(1, 4):
+        tp_result = svc.send_order(
+            instrument_id=instrument_id,
+            volume=volume,
+            price=tp_price,
+            direction=tp_direction,
+            action='CLOSE',
+            signal_id='HFT_TP',
+            open_reason='hft_take_profit_1tick',
+        )
+
+        if tp_result and tp_result.success:
+            return tp_price
+
+        last_error = getattr(tp_result, 'error_message', None) or getattr(tp_result, 'error_code', None) or 'unknown'
+        if attempt < 3:
+            logging.debug(
+                "[HFT-TP] 止盈单第%d次尝试失败, %.1fms后重试: %s err=%s",
+                attempt, 10.0 * attempt, instrument_id, last_error
+            )
+            time.sleep(0.01 * attempt)
+
+    # 三次均失败,触发告警(不影响已开仓订单)
+    logging.warning(
+        "[HFT-TP-ALERT] 止盈单连续3次失败: %s %s @%.2f volume=%s err=%s",
+        instrument_id, tp_direction, tp_price, volume, last_error
+    )
+    return 0.0
+
+
 class OrderExecutor(_OrderExecutorBase):
     """订单执行器 — 组合模式: 编排 + 后端委托
 
@@ -96,7 +173,20 @@ class OrderExecutor(_OrderExecutorBase):
             return OrderResult.fail(ctx.reject_code, ctx.reject_message)
 
         # 委托给后端 (不再 if-else 分支)
-        return self._backend.execute(ctx)
+        _result = self._backend.execute(ctx)
+
+        # FIX-PP2 (RETURN-TYPE): 后端返回类型归一化
+        # 根因: live_backend.py L85/105/132/213/267/294 在错误路径return ctx(OrderContext)
+        #       而非OrderResult→调用方order_id.success抛AttributeError(6次ERROR)
+        # 修复: 编排层统一归一化返回类型，确保调用方始终收到OrderResult
+        if isinstance(_result, OrderContext):
+            if ctx._cyclic_guard:
+                ctx._cyclic_guard.exit("order_send_order")
+            if getattr(_result, 'rejected', False):
+                return OrderResult.fail(_result.reject_code, _result.reject_message)
+            return OrderResult.ok(_result.order_id)
+
+        return _result
 
     # ==================================================================
     # 共享编排方法 — 所有 Backend 通过 _orchestrator._post_send_persist 调用
@@ -275,6 +365,37 @@ class OrderExecutor(_OrderExecutorBase):
             if not instrument_id or price <= 0:
                 continue
 
+            # FIX-FAKE-INSTR-FILTER-20260723: 过滤假合约信号（半拉子工程双重保险）
+            # 根因: S5/S6 fallback信号使用假合约ID(S5_ARB_FALLBACK/S5_ARB/S6_MM/S6_MM_FALLBACK)
+            #   → execute_by_ranking不过滤capital_allocation/instrument_id → send_order创建持仓
+            #   → resolve_product_exchange解析失败82次 → 持仓无法平仓（半拉子工程）
+            # 修复: 在下游下单入口过滤假合约ID，与strategy_business_layer源头过滤形成双重保险
+            #   正常S5/S6信号instrument_id为真实合约ID（如rb2609/CU609等），不受影响
+            #   S6_MM_FALLBACK: market_making_monitor.py L1052 在instrument_id为空时设置的fallback
+            if instrument_id in ('S5_ARB_FALLBACK', 'S5_ARB', 'S6_MM', 'S6_MM_FALLBACK'):
+                _fake_filter_count = getattr(svc, '_fake_inst_filter_count', 0) + 1
+                svc._fake_inst_filter_count = _fake_filter_count
+                if _fake_filter_count <= 5 or _fake_filter_count % 100 == 0:
+                    logging.info("[FIX-FAKE-INSTR-FILTER-20260723] 过滤假合约信号: inst=%s reason=%s simulated=%s (累计%d次)",
+                                 instrument_id, target.get('open_reason', ''), _is_simulated, _fake_filter_count)
+                continue
+
+            # FIX-S5-FAKE-CONTRACT-20260723: 过滤模拟信号/零资金分配信号，防止进入PositionService
+            # 根因: S5/S6(以及S1等)模拟信号使用capital_allocation=0.0 + simulated=True，
+            #   execute_by_ranking原不检查这两个字段 → 真实合约模拟信号调用send_order创建持仓 → 进入PositionService
+            #   → 造成虚假持仓/无法平仓
+            # 修复: 在下游下单入口对simulated=True或capital_allocation=0.0的信号执行continue跳过，
+            #   与strategy_business_layer源头过滤形成双重保险。真实交易信号capital_allocation>0且simulated=False，不受影响
+            _capital_allocation_raw = target.get('capital_allocation', 1.0)
+            _capital_allocation = float(_capital_allocation_raw) if _capital_allocation_raw is not None else 1.0
+            if _is_simulated or _capital_allocation <= 0.0:
+                _sim_filter_count = getattr(svc, '_simulated_filter_count', 0) + 1
+                svc._simulated_filter_count = _sim_filter_count
+                if _sim_filter_count <= 5 or _sim_filter_count % 100 == 0:
+                    logging.info("[FIX-SIMULATED-FILTER-20260723] 过滤模拟信号: inst=%s reason=%s simulated=%s capital=%.2f (累计%d次)",
+                                 instrument_id, target.get('open_reason', ''), _is_simulated, _capital_allocation, _sim_filter_count)
+                continue
+
             # FIX-OPEN-UNIQUE-07: OPEN动作时检查同合约同方向是否已有未成交订单
             if target_action == 'OPEN':
                 _dedup_key = (instrument_id, target_direction)
@@ -343,7 +464,24 @@ class OrderExecutor(_OrderExecutorBase):
             if order_id and order_id.success:
                 results.append(order_id.order_id)
                 # FIX-DD R10-4-7: TTL后置到send_order成功后更新
-                svc._cross_cycle_open_attempted[_cross_key] = _now_ts
+                # FIX-EXEC-CLOSE-20260724: 仅在OPEN动作时更新_cross_cycle_open_attempted,
+                #   CLOSE动作无_cross_key定义, 原代码会触发NameError/AttributeError并影响平仓成功率统计。
+                if target_action == 'OPEN':
+                    svc._cross_cycle_open_attempted[_cross_key] = _now_ts
+                # HFT-TAKE-PROFIT-20260724: 高频交易开仓成功后自动挂一个最小变动单位的止盈单
+                # 从品种ID中直接读取tick_size(一个生命周期仅需定一次的属性)
+                if target_action == 'OPEN' and getattr(svc, '_hft_enabled', False):
+                    try:
+                        _tp_result = _place_hft_take_profit(
+                            svc, instrument_id, target_direction, price, volume, tick_size
+                        )
+                        if _tp_result:
+                            logging.info(
+                                "[HFT-TP] 开仓止盈单已挂: %s %s @%.2f+%.4f=%.2f",
+                                instrument_id, target_direction, price, tick_size, _tp_result
+                            )
+                    except Exception as _tp_err:
+                        logging.debug("[HFT-TP] 止盈单异常(不影响开仓): %s", _tp_err)
             else:
                 # FIX-R31-ERR-LOG: 修复运算符优先级问题
                 if order_id is not None:

@@ -973,12 +973,20 @@ class MarketMakingMonitorV2:
         base_half = max(base_half, min_half)
 
         # 毒流调整: 扩大价差
-        toxicity_spread_mult = 1.0 + toxicity * 0.5
+        # FIX-S6-V2-ROOT-20260724: 在乘法源头cap toxicity,防止累乘溢出
+        # 根因: toxicity值可>100→toxicity_spread_mult>50→base_half异常大→bid_half/ask_half溢出
+        #   仅截断输出端(bid_half/ask_half)是bypass修复,溢出仍发生(19次截断)
+        # 修复: cap toxicity上限为2.0(即最大扩大2倍价差), 在乘法源头阻止溢出
+        _capped_toxicity = min(max(toxicity, 0.0), 2.0)
+        if toxicity > 2.0:
+            self._diag_stats['toxicity_capped'] = self._diag_stats.get('toxicity_capped', 0) + 1
+        toxicity_spread_mult = 1.0 + _capped_toxicity * 0.5
         base_half *= toxicity_spread_mult
 
         # 库存偏斜
+        # FIX-S6-V2-ROOT-20260724: cap asym_factor防止(1+asym_factor)溢出
         skew = self.get_inventory_skew()
-        asym_factor = skew * 0.5
+        asym_factor = min(max(skew * 0.5, -0.8), 0.8)  # cap在±0.8, bid_half/ask_half最多1.8x/0.2x
         bid_half = base_half * (1.0 + asym_factor)
         ask_half = base_half * (1.0 - asym_factor)
         bid_half = max(bid_half, min_half * 0.3)

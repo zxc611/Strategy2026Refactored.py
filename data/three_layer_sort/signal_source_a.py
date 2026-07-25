@@ -185,7 +185,8 @@ class RankNormalizer:
         history = self._history[product_id]
 
         # 历史不足时，不做标准化
-        if len(history) < 5:
+        # FIX-P2-3-RC12 (2026-07-23): 降低最低要求从5→3，加快冷启动标准化
+        if len(history) < 3:
             history.append(score)
             return score, None
 

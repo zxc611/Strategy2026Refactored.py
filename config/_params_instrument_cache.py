@@ -25,6 +25,24 @@ from typing import Any, Dict, List, Optional
 
 
 
+def _inject_tick_size_to_info(info: Dict[str, Any], instrument_id: str) -> None:
+    """向instrument info中注入tick_size(如尚未存在或无效)
+
+    统一注入入口: cache_instrument_info、_cache_temp_instrument_info、
+    _make_instrument_info 等均调用此函数,确保新建品种ID必带tick_size。
+    若info中已有有效tick_size,则保留原值(生命周期仅定一次)。
+    """
+    existing = info.get('tick_size')
+    if existing is not None and existing > 0:
+        return
+    try:
+        from config.instrument_spec import get_tick_size_for_instrument
+        ts = get_tick_size_for_instrument(instrument_id)
+        if ts > 0:
+            info['tick_size'] = ts
+    except (ImportError, AttributeError, ValueError):
+        pass
+
 
 
 class InstrumentCacheService:
@@ -155,26 +173,24 @@ class InstrumentCacheService:
             
 
             # _ID三层架构 - 检查internal_id冲突
-
             existing = self._instrument_meta_by_id.get(cid)
-
             if existing and existing.get('instrument_id') != instrument_id:
-
                 raise RuntimeError(
-
                     "检测到重复 internal_id=%s: %s _%s 冲突" % (
-
                         cid,
-
                         existing.get('instrument_id'),
-
                         instrument_id,
-
                     )
-
                 )
-
             
+            # FIX-TICK-SIZE-20260724: 注入tick_size作为instrument自带属性(一个生命周期仅定一次)
+            # 同一期货品种的所有期权合约tick_size相同(交易所统一规则)
+            # 优先级: 已缓存的有效tick_size > 本次传入的有效tick_size > instrument_spec注入
+            _existing_tick = existing.get('tick_size') if existing else None
+            if _existing_tick is not None and _existing_tick > 0:
+                cached_info['tick_size'] = _existing_tick
+            else:
+                _inject_tick_size_to_info(cached_info, normalized_instrument_id)
             
             # _更新ID三层架构缓存（在锁内存 仅写入新架构2个字典
             # 5.1.2: instrument_id -> internal_id
@@ -1031,7 +1047,12 @@ class InstrumentCacheService:
 
                 )
 
-
+            # FIX-TICK-SIZE-20260724: 临时缓存也注入tick_size(兜底,调用方可能已注入)
+            _existing_tick = existing.get('tick_size') if existing else None
+            if _existing_tick is not None and _existing_tick > 0:
+                cached_info['tick_size'] = _existing_tick
+            else:
+                _inject_tick_size_to_info(cached_info, normalized_instrument_id)
 
             temp_instrument_id_to_internal_id[normalized_instrument_id] = cid
 
@@ -1089,22 +1110,22 @@ class InstrumentCacheService:
                         shard_key = ShardRouter._deterministic_hash(product_code)
 
                     info = {
-
                         'internal_id': row['internal_id'],
-
                         'type': 'future',
-
                         'product': row['product'],
-
                         'exchange': row['exchange'],
-
                         'year_month': row['year_month'],
-
                         'product_code': product_code,
-
                         'shard_key': shard_key,
-
                     }
+                    # FIX-TICK-SIZE-20260724: 注入tick_size作为期货合约自带属性
+                    try:
+                        from config.instrument_spec import get_tick_size
+                        _ts = get_tick_size(row['product'])
+                        if _ts > 0:
+                            info['tick_size'] = _ts
+                    except (ImportError, AttributeError, ValueError):
+                        pass
 
                     _cache_temp_instrument_info(row['instrument_id'], info)
 
@@ -1150,30 +1171,27 @@ class InstrumentCacheService:
                         shard_key = ShardRouter._deterministic_hash(product_code)
 
                     info = {
-
                         'internal_id': row['internal_id'],
-
                         'type': 'option',
-
                         'product': row['product'],
-
                         'exchange': row['exchange'],
-
                         'underlying_future_id': row['underlying_future_id'],
-
                         'underlying_product': row['underlying_product'],
-
                         'year_month': row['year_month'],
-
                         'option_type': row['option_type'],
-
                         'strike_price': row['strike_price'],
-
                         'product_code': product_code,
-
                         'shard_key': shard_key,
-
                     }
+                    # FIX-TICK-SIZE-20260724: 注入tick_size作为期权合约自带属性
+                    # 同一期货品种之所有期权合约的tick_size相同
+                    try:
+                        from config.instrument_spec import get_option_tick_size
+                        _ots = get_option_tick_size(row.get('underlying_product') or row['product'])
+                        if _ots > 0:
+                            info['tick_size'] = _ots
+                    except (ImportError, AttributeError, ValueError):
+                        pass
 
                     _cache_temp_instrument_info(row['instrument_id'], info)
 

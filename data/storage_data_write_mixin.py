@@ -523,47 +523,73 @@ class StorageDataWriteService:
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _agg_err:
             logging.debug("[FIX-M3] aggregate_kline_only failed (non-fatal): %s", _agg_err)
 
+    # FIX-KLINE-FLUSH-20260725: 恢复flush_incomplete_klines方法(原FIX-M8-3被误删)
+    # 根因澄清: 见query_service.py:flush()方法注释
+    # 此方法遍历所有_aggregators调用agg.flush()返回未完成K线(有最低质量标准):
+    #   - agg.flush()仅在kline_start_time不为None且close_price不为None时返回K线
+    #   - 空aggregator返回None(不合成虚假K线)
+    # 落库的K线被S3/S4箱体检测使用, 但箱体检测仍需≥3根周K线(策略逻辑不修改)
     @requires_phase(InitPhase.READY)
     def flush_incomplete_klines(self) -> int:
-        """FIX-M8-3: 强制刷新所有未完成的K线，解决稀疏tick场景下K线永不完成的问题。
+        """周期性flush所有aggregator的未完成K线
 
-        场景: 736 real ticks / 16288 instruments = ~0.045 tick/instrument
-        大多数instrument只有1个tick，_KlineAggregator.update()初始化后永不返回completed_kline
-        导致klines_real=0，即使tick数据已正常落库。
-
-        此方法遍历所有_aggregators，调用flush()强制返回当前未完成的K线，
-        确保每个收到tick的instrument至少有一根K线落库。
-        应由周期性任务(flush_tick_buffer)调用。
+        Returns:
+            flush的K线数量
         """
-        flushed_count = 0
+        flushed = 0
         try:
-            with self._agg_lock:
-                aggregators = list(self._aggregators.items())
-            for (instrument, period), agg in aggregators:
+            aggregators = getattr(self, '_aggregators', {})
+            if not aggregators:
+                return 0
+            # FIX-KLINE-FLUSH-20260725-STRUCT: _aggregators类型为
+            #   Dict[Tuple[str, str], _KlineAggregator], 键是(instrument, period)元组,
+            #   不是{instrument: {period: agg}}嵌套结构。此处必须按元组键遍历,
+            #   否则会把agg对象当成dict跳过, 导致永远flush不出K线(半拉子工程)。
+            # 加锁复制items避免与process_tick/aggregate_kline_only并发修改冲突。
+            with getattr(self, '_agg_lock', threading.Lock()):
+                agg_items = list(aggregators.items())
+            for (instrument_id, period), agg in agg_items:
+                if agg is None:
+                    continue
                 try:
                     kline = agg.flush()
-                    if kline:
-                        if self._is_ext_kline_missing(instrument, period, time.time()):
-                            self.save_external_kline(kline)
-                            flushed_count += 1
+                    if kline is not None:
+                        # FIX-KLINE-FLUSH-20260725-RESET: 先落库, 成功后reset
+                        # 根因: 原顺序(reset→save)在save_external_kline因合约未注册/入队失败等
+                        #   原因静默跳过时, 该K线会从aggregator中丢失且未落库。
+                        # 修复: save_external_kline返回bool, 仅落库成功后才reset。
+                        #   失败时不reset, 下次flush会重试同一K线, 避免数据丢失。
+                        kline_instrument_id = kline.get('instrument_id', instrument_id)
+                        if self.save_external_kline(kline):
+                            agg.reset()
+                            flushed += 1
+                        else:
+                            logging.debug(
+                                "[FIX-KLINE-FLUSH] K线落库跳过, 不reset aggregator "
+                                "inst=%s period=%s (下次flush重试)",
+                                kline_instrument_id, period,
+                            )
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _flush_err:
-                    logging.debug("[FIX-M8-3] flush aggregator failed: inst=%s period=%s err=%s",
-                                  instrument, period, _flush_err)
-            if flushed_count > 0:
-                logging.info("[FIX-M8-3] flush_incomplete_klines: 刷新 %d 根未完成K线", flushed_count)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _bulk_err:
-            logging.warning("[FIX-M8-3] flush_incomplete_klines bulk failed: %s", _bulk_err)
-        return flushed_count
+                    logging.debug("[FIX-KLINE-FLUSH] agg.flush失败 inst=%s period=%s: %s",
+                                  instrument_id, period, _flush_err)
+        except Exception as _flush_ex:
+            logging.warning("[FIX-KLINE-FLUSH] flush_incomplete_klines整体异常: %s", _flush_ex)
+        return flushed
 
     @requires_phase(InitPhase.READY)
-    def save_external_kline(self, kline_data: Dict[str, Any]) -> None:
+    def save_external_kline(self, kline_data: Dict[str, Any]) -> bool:
+        """保存外部K线到klines_raw表
+
+        Returns:
+            bool: 是否成功入队(或已存在被跳过视为成功)。失败返回False, 调用方可决定是否重试。
+        """
         if not self._validate_kline(kline_data):
-            return
+            return False
         kline_data = kline_data.copy()
         ts = self._to_timestamp(kline_data.get('ts') or kline_data.get('timestamp'))
         if ts is None:
             logging.error("save_external_kline 时间戳转换失败：%s", kline_data.get('ts') or kline_data.get('timestamp'))
-            return
+            return False
         kline_data['ts'] = ts
         instrument_id = kline_data.get('instrument_id')
         period = kline_data.get('period') or '1min'
@@ -578,19 +604,20 @@ class StorageDataWriteService:
                 if warn_key not in self._runtime_missing_warned:
                     self._runtime_missing_warned.add(warn_key)
                     logging.debug("[save_external_kline] 合约未预注册，跳过运行时自动注册/建表：%s", normalized_id)
-            return
+            return False
 
         internal_id = self._get_info_internal_id(info)
         instrument_type = info.get('type', 'future')
         if internal_id is None:
-            return
+            return False
 
         if not self._enqueue_write('_save_kline_impl', internal_id, instrument_type, [kline_data], period):
             logging.warning("[save_external_kline] K线入队失败，已跳过：%s %s", instrument_id, period)
-            return
+            return False
 
         with self._ext_kline_lock:
             self._last_ext_kline[(instrument_id, period)] = ts
+        return True
 
     @requires_phase(InitPhase.READY)
     def batch_write_kline(self, instrument_id: str, kline_data: List[Dict], period: str = '1min') -> None:

@@ -24,6 +24,18 @@ class LifecycleResource:
         #       新增线程时需同步修改三处，易遗漏（历史根因 R-4 即由此产生）。
         # 修复: 一处注册（on_start 调用 register_thread），多处复用（on_stop/pause 调用 stop_managed_threads）。
         self._managed_threads: List[Dict[str, Any]] = []
+        # FIX-RH-1 (2026-07-19): 实例化时立即注册为全局默认资源管理器
+        # 根因: 模块级 _default_resource_manager 从未被设置 → register_thread_pool 模块函数
+        #       检查到 None 时静默返回（仅 debug 日志），导致 callback_registry_pool /
+        #       diagnosis_pool / heartbeat_pool / close_retry_pool 4 个 ThreadPoolExecutor
+        #       注册全部失败 → on_stop L814 shutdown_thread_pools 关闭不到这些池
+        #       → 仅靠 atexit 兜底回收（55 线程倒查 H-1 断点）
+        # 修复: 在 LifecycleResource.__init__ 末尾调用 set_default_resource_manager(self)
+        #       确保后续 register_thread_pool 调用能命中本实例
+        # 原则: 12原则之6（根因一次修复）+ 7（代码精简：仅 1 行调用）
+        # 注: 多策略实例场景下，最后一个 LifecycleResource 实例会覆盖前面的；
+        #     当前架构每个进程只创建一个策略实例，无冲突。
+        set_default_resource_manager(self)
 
     def register_resource(self, name: str, resource: Any) -> None:
         with self._resource_lock:
@@ -94,8 +106,17 @@ class LifecycleResource:
             shutdown = getattr(pool, 'shutdown', None)
             if callable(shutdown):
                 try:
-                    shutdown(wait=wait, timeout=timeout if wait else None)
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    # FIX-RESTART-20260720-3: Python 3.10的ThreadPoolExecutor.shutdown()
+                    # 不支持timeout参数（仅3.13+支持），需版本检查避免TypeError
+                    # 证据: 13:11:05.675 WARNING "线程池callback_registry_pool关闭失败:
+                    #       shutdown() got an unexpected keyword argument 'timeout'"
+                    #       position_close_retry同样失败，导致on_stop流程线程池未优雅关闭
+                    import sys as _sys
+                    if _sys.version_info >= (3, 13) and wait:
+                        shutdown(wait=wait, timeout=timeout if wait else 0)
+                    else:
+                        shutdown(wait=wait)
+                except Exception as e:  # FIX-RESTART-20260720-3: 扩展为Exception（实时回调路径）
                     logging.warning("[LifecycleResource] 线程池%s关闭失败: %s", name, e)
         self._thread_pools.clear()
 
@@ -169,30 +190,53 @@ class LifecycleResource:
 
 # 模块级函数（用于向后兼容）
 _default_resource_manager: Optional[LifecycleResource] = None
+# FIX-RH-2 (2026-07-19): pending_pools 懒注册机制
+# 根因: 即使 FIX-RH-1 修复后，部分模块（infra.health_monitor / infra.heartbeat /
+#       infra.close_retry）的 ThreadPoolExecutor 在 lazy import 时才创建，
+#       若 _lifecycle_resource 已先于这些模块构造完成，则注册时 _default_resource_manager
+#       指向的是另一个 LifecycleResource 实例（或被后续实例覆盖），仍会注册失败。
+#       沙箱日志 L14 反复出现 "register_thread_pool called but no default manager set"
+#       即此场景（55 线程倒查 H-2 断点）
+# 修复: 模块级 _pending_thread_pools 列表暂存未命中注册的池；
+#       set_default_resource_manager 被调用后批量补注册 pending 中的池到新 manager
+_pending_thread_pools: List[tuple] = []  # [(name, pool), ...]
 
 
 def register_thread_pool(name: str, pool: Any) -> None:
     """注册线程池（模块级函数，用于向后兼容）
-    
+
     Args:
         name: 线程池名称
         pool: 线程池实例
     """
-    global _default_resource_manager
+    global _default_resource_manager, _pending_thread_pools
     if _default_resource_manager is None:
-        logging.debug("[lifecycle_resource] register_thread_pool called but no default manager set")
+        # FIX-RH-2: manager 未设置时入 pending，等待 set_default_resource_manager 被调用后补注册
+        _pending_thread_pools.append((name, pool))
+        logging.debug("[lifecycle_resource] register_thread_pool deferred (pending): name=%s", name)
         return
     _default_resource_manager.register_thread_pool(name, pool)
 
 
 def set_default_resource_manager(manager: LifecycleResource) -> None:
     """设置默认资源管理器
-    
+
     Args:
         manager: LifecycleResource实例
     """
-    global _default_resource_manager
+    global _default_resource_manager, _pending_thread_pools
     _default_resource_manager = manager
+    # FIX-RH-2: 补注册 pending 中的所有线程池
+    if _pending_thread_pools:
+        for _name, _pool in _pending_thread_pools:
+            try:
+                manager.register_thread_pool(_name, _pool)
+                logging.info("[lifecycle_resource] pending pool 补注册成功: name=%s", _name)
+            except Exception as _pending_err:
+                logging.warning("[lifecycle_resource] pending pool 补注册失败: name=%s err=%s",
+                                _name, _pending_err)
+        _pending_thread_pools.clear()
+        logging.info("[lifecycle_resource] pending pools 全部补注册完成")
 
 
 __all__ = [

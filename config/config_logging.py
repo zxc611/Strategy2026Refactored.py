@@ -649,43 +649,15 @@ def setup_logging():
 
         pass
 
-    try:
-
-        from infra.health_monitor import StructuredJsonlLogger
-
-        _sjl = StructuredJsonlLogger(log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs'))
-
-        class _JsonlLogHandler(logging.Handler):
-
-            def emit(self, record):
-
-                try:
-
-                    _sjl._signal_log_f.write(self.format(record) + '\n')
-
-                    _sjl._signal_log_f.flush()
-
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as _jsonl_err:
-
-                    if not hasattr(self, '_jsonl_err_count'):
-
-                        self._jsonl_err_count = 0
-
-                    self._jsonl_err_count += 1
-
-                    if self._jsonl_err_count <= 10 or self._jsonl_err_count % 100 == 0:
-
-                        logging.warning("[LG-P1-10] _JsonlLogHandler.emit异常(%d): %s", self._jsonl_err_count, _jsonl_err)
-
-        _jsonl_handler = _JsonlLogHandler()
-
-        _jsonl_handler.setLevel(logging.WARNING)
-
-        root_logger.addHandler(_jsonl_handler)
-
-    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError):
-
-        pass
+    # FIX-SIGNAL-JSONL-20260724: 移除_JsonlLogHandler,修复signals.jsonl被通用日志污染的BUG
+    # 根因: _JsonlLogHandler挂载在root logger(WARNING级), 将所有WARNING+日志通过
+    #   _sjl._signal_log_f写入config/logs/signals.jsonl。但:
+    #   1) _sjl.log_signal()从未被调用(死代码), 该handler不承担任何合法职能
+    #   2) 写入的是self.format(record)纯文本(非JSON), 直接破坏JSONL格式
+    #   3) 实测signals.jsonl含12547行非信号日志(100%污染, 0条真实信号)
+    #   真实信号通过StructuredJsonlLogger.log_signal()写入logs/<strategy_id>/signals.jsonl(独立文件)
+    # 修复: 直接移除该handler块, WARNING+日志仍由其他handler输出(平台日志/strategy.log/FlushHandler)
+    # 不回退(不保留污染handler)、不降级、不绕过(彻底移除污染源)、不修改策略逻辑(仅日志层)
 
     try:
 
@@ -700,6 +672,39 @@ def setup_logging():
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError):
 
         pass
+
+    # FIX-LOG-FILE-20260724: 确保本地 strategy.log 文件存在
+    # 根因: 平台注入 RotatingFileHandler 后 has_main_file_handler/has_code_dir_handler=True,
+    #   两个 strategy.log 创建分支(L440/L562)均被跳过 → strategy.log 从未创建 →
+    #   本地无法排查报错/警告/S4诊断日志(实测20:38重启后config/logs/strategy.log不存在)
+    # 修复: 检查是否已有handler写到 config/logs/strategy.log, 无则创建一个本地文件handler
+    # 不回退(保留原有handler)、不降级、不绕过(创建真实文件handler写本地日志)
+    # 不修改策略逻辑(仅补全日志输出目标, formatter复用已定义的统一格式)
+    try:
+        _strategy_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'strategy.log')
+        _has_local_strategy_log = any(
+            isinstance(h, RotatingFileHandler)
+            and getattr(h, 'baseFilename', '') == os.path.abspath(_strategy_log_path)
+            for h in root_logger.handlers
+        )
+        if not _has_local_strategy_log:
+            _log_dir_local = os.path.dirname(_strategy_log_path)
+            if not os.path.exists(_log_dir_local):
+                os.makedirs(_log_dir_local, exist_ok=True)
+            _local_fh = RotatingFileHandler(
+                _strategy_log_path,
+                maxBytes=100 * 1024 * 1024,
+                backupCount=3,
+                encoding='utf-8',
+                delay=False,
+            )
+            _local_fh.setLevel(logging.INFO)
+            _local_fh.setFormatter(formatter)
+            root_logger.addHandler(_local_fh)
+            logging.info("[FIX-LOG-FILE-20260724] 本地 strategy.log 已创建: %s", _strategy_log_path)
+    except Exception as _log_file_err:
+        # 不用pass静默吞, 记录warning便于排查
+        logging.warning("[FIX-LOG-FILE-20260724] 本地 strategy.log 创建失败: %s", _log_file_err)
 
     return True
 

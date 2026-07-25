@@ -139,6 +139,24 @@ class AdaptiveHMM:
                 self._em_thread = threading.Thread(target=self._async_em_worker, daemon=True)
                 self._em_thread.start()
 
+    # FIX-ORDERED-SHUTDOWN-20260721: 新增stop_em_thread方法
+    # 根因: AdaptiveHMM._em_thread (B1) 在pause/on_stop/on_destroy时未被关闭
+    #       导致HMM EM工作线程在策略停止后仍持续运行
+    # 修复: 新增stop_em_thread方法，由lifecycle_callbacks统一调用
+    def stop_em_thread(self, timeout: float = 2.0) -> None:
+        """停止HMM EM工作线程 (FIX-ORDERED-SHUTDOWN-20260721)"""
+        try:
+            with self._lock:
+                self._needs_em = False
+                self._em_running = False
+            if self._em_thread is not None and self._em_thread.is_alive():
+                self._em_thread.join(timeout=timeout)
+                if self._em_thread.is_alive():
+                    logging.warning("[FIX-ORDERED-SHUTDOWN] HMM _em_thread join超时(%.1fs)", timeout)
+            self._em_thread = None
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] stop_em_thread异常(非阻断): %s", _e)
+
     # R27-P0-FC-02修复: 转移矩阵行和验证
     def _validate_transition_matrix(self) -> bool:
         """验证转移矩阵每行和为1(容差1e-6)，不满足则归一化修正"""

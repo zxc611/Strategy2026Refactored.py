@@ -81,6 +81,12 @@ class StorageQueryBaseService:
             'shard_key': shard_key,
         }
         info.update(extra)
+        # FIX-TICK-SIZE-20260724: 新建品种ID时自动注入tick_size
+        try:
+            from config._params_instrument_cache import _inject_tick_size_to_info
+            _inject_tick_size_to_info(info, instrument_id)
+        except (ImportError, AttributeError, ValueError):
+            pass
         return info
 
     @staticmethod

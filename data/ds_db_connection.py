@@ -863,6 +863,19 @@ class DBConnectionMixin:
                 closed_count += 1
             except Exception as e:
                 logger.debug(f"Failed to close connection: {e}")
+        # FIX-LEAK-1 (2026-07-19): close_all() 必须同步 shutdown _executor
+        # 根因: close() (L241-245) 有 self._executor.shutdown(wait=False)，但 close_all() 遗漏，
+        #       导致 DataService 单例的实例级 ThreadPoolExecutor(max_workers=1) worker 线程泄漏
+        #       (线程名 ThreadPoolExecutor-N_M, daemon=False，永不退出)。
+        #       沙箱证据: sandbox_evidence_20260719.json final_thread_count=3 (期望 1)，
+        #       泄漏线程 ThreadPoolExecutor-2_0 来自 ds_db_connection.py L206 self._executor.submit()。
+        # 12 原则映射: 4 (资源不泄漏) + 6 (根因一次修复) + 12 (非半拉子工程)
+        try:
+            if getattr(self, '_executor', None) is not None:
+                self._executor.shutdown(wait=False)
+                logger.info("[FIX-LEAK-1] DataService close_all() 已 shutdown _executor (ThreadPoolExecutor)")
+        except Exception as _exec_shutdown_err:
+            logger.debug("[FIX-LEAK-1] _executor shutdown 异常(非阻断): %s", _exec_shutdown_err)
         self._connection_generation = getattr(self, '_connection_generation', 0) + 1
         self._thread_local.conn = None
         self._thread_local.conn_healthy = False

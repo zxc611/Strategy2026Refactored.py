@@ -146,6 +146,14 @@ class StorageInitService:
         self._queue_priority_levels = {'risk_cancel': 0, 'order': 1, 'tick': 2, 'kline': 2, 'diagnosis': 3}
         self._maintenance_writer_thread = None
         self._stop_event = threading.Event()
+        # FIX-RC-1 (2026-07-19): 暂停标志 — pause 期间阻止 writer 消费队列但不退出线程
+        # 根因: 18 个 daemon=False async writer (TickWriter×16 + KlineWriter + MaintenanceWriter)
+        #       在 pause 期间继续消费队列并尝试写入 DuckDB；pause 后 resume 时 DuckDB 连接可能
+        #       被显式关闭 → writer 写入失败 → 重试 → DATA_LOSS spill 风暴 (55 线程倒查 C-1 断点)
+        # 修复: 新增 _paused Event，pause 时 set() 阻止消费，resume 时 clear() 恢复消费
+        # 原则: 12 原则之 6 (根因一次修复) + 8 (资源不泄漏: 不退出线程, 仅 set 标志)
+        # 注: Event 默认 clear() = 未暂停状态, 不影响现有启动路径
+        self._paused = threading.Event()
         self._pending_on_stop_data: list = []
         # 锁获取顺序(LOCK_ORDER): 编号小的先获取,禁止反向嵌套
         #   L1 _pending_data_lock    — 保护 _pending_on_stop_data

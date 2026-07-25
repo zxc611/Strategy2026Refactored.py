@@ -534,7 +534,13 @@ class SubscriptionWALService:
             need_cleanup = bool(
                 self._config.enable_cleanup_thread and (self._cleanup_thread is None or not self._cleanup_thread.is_alive())
             )
-            if not (need_async or need_retry or need_cleanup):
+            # FIX-RESTART-20260720-2: 补充watchdog线程存活检查 + 单线程级重启
+            # 根因: 原逻辑只检查async/retry/cleanup三个线程，遗漏watchdog；
+            #       且调用_start_background_threads()被_bg_threads_started=True守卫拦截，
+            #       导致任何线程死亡后都无法自愈。
+            # 修复: 1) 补充watchdog检查 2) 直接重启死亡线程，不依赖_start_background_threads
+            need_watchdog = bool(self._watchdog_thread is None or not self._watchdog_thread.is_alive())
+            if not (need_async or need_retry or need_cleanup or need_watchdog):
                 return
 
             rearm_details = []
@@ -544,12 +550,42 @@ class SubscriptionWALService:
                 rearm_details.append(f"retry(alive={self._retry_thread is not None and self._retry_thread.is_alive()})")
             if need_cleanup:
                 rearm_details.append(f"cleanup(alive={self._cleanup_thread is not None and self._cleanup_thread.is_alive()})")
+            if need_watchdog:
+                rearm_details.append(f"watchdog(alive={self._watchdog_thread is not None and self._watchdog_thread.is_alive()})")
             logger.info(
                 "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
                 "Rearming background threads (rearm_reason=ensure-alive, close_policy=process-lifetime, "
-                "details=%s)", ", ".join(rearm_details)
+                "details=%s) [FIX-RESTART-20260720-2]", ", ".join(rearm_details)
             )
-            self._start_background_threads()
+            # FIX-RESTART-20260720-2: 只重启死亡的线程，避免被_bg_threads_started守卫拦截
+            # 原 _start_background_threads() 有守卫 if self._bg_threads_started: return，
+            # 导致 ensure 检测到线程死亡后仍无法重启。改为直接创建死亡线程。
+            if need_async and self._config.enable_wal:
+                self._stop_async.clear()
+                self._async_thread = threading.Thread(
+                    target=self._wal_writer_loop, name="SubAsyncWriter[shared-service]", daemon=True)
+                self._async_thread.start()
+            if need_retry:
+                self._stop_retry.clear()
+                self._retry_thread = threading.Thread(
+                    target=self._retry_loop, name="SubRetry[shared-service]", daemon=True)
+                self._retry_thread.start()
+            if need_cleanup and self._config.enable_cleanup_thread:
+                self._stop_cleanup.clear()
+                self._cleanup_thread = threading.Thread(
+                    target=self._cleanup_loop, name="SubCleanup[shared-service]", daemon=True)
+                self._cleanup_thread.start()
+                logger.info(
+                    "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
+                    "Cleanup thread restarted (interval=%.1fs)", self._config.cleanup_interval)
+            if need_watchdog:
+                self._stop_watchdog.clear()
+                self._watchdog_thread = threading.Thread(
+                    target=self._tick_watchdog_loop, name="TickWatchdog[shared-service]", daemon=True)
+                self._watchdog_thread.start()
+                logger.info("[R27-P0-DR-05] Tick看门狗线程已重启(interval=%.1fs, timeout=%.1fs)",
+                            self._watchdog_interval_sec, self._tick_timeout_sec)
+            self._bg_threads_started = True
 
     def stop_background_threads(self, join_timeout: float = 2.0, silent: bool = False) -> None:
         """优雅停止所有后台线程
@@ -582,6 +618,26 @@ class SubscriptionWALService:
                             "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
                             "Thread %s exited cleanly (close_policy=graceful-join)", t.name
                         )
+
+        # FIX-RESTART-20260720-1: 重置_bg_threads_started标志和线程引用
+        # 根因: stop_background_threads未重置_bg_threads_started，导致on_start重新调用
+        #       _start_background_threads时被守卫(if self._bg_threads_started: return)拦截，
+        #       4个共享线程(SubAsyncWriter/SubRetry/SubCleanup/TickWatchdog)不会重启。
+        # 证据: 13:11:02 on_stop→13:11:12 on_start(4秒快速切换)后，16288合约Subscribe成功
+        #       但20个诊断目标全部no_tick(first_tick=0)，ContractWatch 30秒超时后策略卡死。
+        # 影响: 被on_stop(lifecycle_callbacks.py L840/L1446)和close(L686)调用，
+        #       属实时回调路径，必须保证重启可靠性。
+        self._bg_threads_started = False
+        self._async_thread = None
+        self._retry_thread = None
+        self._cleanup_thread = None
+        self._watchdog_thread = None
+        if not silent:
+            logger.info(
+                "[SubscriptionManagerV2][owner_scope=shared-service][source_type=shared-service] "
+                "Background threads state reset (bg_threads_started=False, refs cleared) "
+                "[FIX-RESTART-20260720-1]"
+            )
 
     def _wal_writer_loop(self):
         """WAL写入线程 - 批量异步落盘"""

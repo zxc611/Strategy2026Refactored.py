@@ -30,7 +30,7 @@ def example_minimal_integration():
     config = HookConfig(
         symbol="rb",
         strategy_id="high_freq_rb_v3",
-        strategy_type="high_freq",
+        strategy_type="s1_hft",
         output_dir="./策略评判断output",
     )
 
@@ -87,7 +87,7 @@ def example_with_cycle_resonance():
     config = HookConfig(
         symbol="au",
         strategy_id="resonance_au_v2",
-        strategy_type="resonance",
+        strategy_type="s2_resonance",
     )
 
     hooks = BacktestIntegrationHooks(config)
@@ -192,7 +192,7 @@ def example_arbitrage_judgment():
     config = HookConfig(
         symbol="rb",
         strategy_id="arbitrage_rb_v1",
-        strategy_type="arbitrage",
+        strategy_type="s5_arbitrage",
     )
 
     hooks = BacktestIntegrationHooks(config)
@@ -252,7 +252,7 @@ def example_market_making_judgment():
     config = HookConfig(
         symbol="au",
         strategy_id="market_making_au_v1",
-        strategy_type="market_making",
+        strategy_type="s6_market_making",
     )
 
     hooks = BacktestIntegrationHooks(config)
@@ -316,7 +316,7 @@ def example_standalone_diagnosis():
 
     diagnose = StrategyBehaviorDiagnosis(
         strategy_id="test_strategy",
-        strategy_type="high_freq",
+        strategy_type="s1_hft",
     )
 
     from strategy_judgment.market_snapshot_collector import MarketSnapshot
@@ -351,7 +351,7 @@ def example_standalone_diagnosis():
     engine = StrategyJudgmentEngine()
     judgment = engine.judge(
         strategy_id="test_strategy",
-        strategy_type="high_freq",
+        strategy_type="s1_hft",
         symbol='rb',
         backtest_period='2025-01',
         diagnosis_report=report,

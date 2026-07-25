@@ -175,10 +175,49 @@ class StorageAsyncWriterService:
         if total_saved:
             logging.info("[AsyncWriter] 停止时共保存 %d 条任务到内存", total_saved)
 
+    # ==================== FIX-RC-1 (2026-07-19) ====================
+    # pause_async_writers / resume_async_writers
+    # 根因: 18 个 daemon=False async writer 在 pause 期间继续消费队列并写入 DuckDB，
+    #       与 pause 后 DuckDB 连接显式关闭冲突 → writer 写入失败 → DATA_LOSS spill 风暴
+    #       (55 线程倒查 C-1 断点)
+    # 修复: pause 时 set _paused Event, writer loop 检测到后 sleep 0.1s continue
+    #       不退出线程，确保 resume 后能立即恢复消费, 不需要重启线程
+    # 原则: 12 原则之 6 (根因一次修复) + 8 (资源不泄漏: 线程不退出)
+    # ============================================================
+    def pause_async_writers(self) -> None:
+        """暂停所有 async writer 消费 (不退出线程)
+
+        被 lifecycle_callbacks.pause() 调用。
+        writer 线程继续运行但不再从队列消费新数据,
+        resume_async_writers() 后立即恢复消费。
+        """
+        if not hasattr(self, '_paused') or self._paused is None:
+            # 防御性兜底: 若 _paused 未初始化（极端场景），临时创建
+            self._paused = threading.Event()
+        was_paused = self._paused.is_set()
+        self._paused.set()
+        if not was_paused:
+            logging.info("[FIX-RC-1] async writers 已暂停 (writers 继续运行但停止消费队列)")
+
+    def resume_async_writers(self) -> None:
+        """恢复所有 async writer 消费"""
+        if not hasattr(self, '_paused') or self._paused is None:
+            self._paused = threading.Event()
+            return  # 新建的 Event 默认 clear = 未暂停, 直接返回
+        was_paused = self._paused.is_set()
+        self._paused.clear()
+        if was_paused:
+            logging.info("[FIX-RC-1] async writers 已恢复 (writers 立即恢复消费队列)")
+
     def _async_shard_writer_loop(self, shard_indices: List[int], batch_tasks: int, name: str, writer_idx: int = 0):  # [R22-P2-TS17]
         batch = []
         idx = 0
         while not self._stop_event.is_set():
+            # FIX-RC-1 (2026-07-19): pause 期间停止消费队列但不退出线程
+            # 检查 _paused Event: set 时 sleep 0.1s 让出 CPU, 等待 resume_async_writers 清除
+            if getattr(self, '_paused', None) is not None and self._paused.is_set():
+                time.sleep(0.1)
+                continue
             try:
                 for _ in range(len(shard_indices)):
                     si = shard_indices[idx % len(shard_indices)]
@@ -257,6 +296,11 @@ class StorageAsyncWriterService:
     def _async_writer_loop(self, task_queue, batch_tasks, name):
         batch = []
         while not self._stop_event.is_set():
+            # FIX-RC-1 (2026-07-19): pause 期间停止消费队列但不退出线程
+            # 检查 _paused Event: set 时 sleep 0.1s 让出 CPU, 等待 resume_async_writers 清除
+            if getattr(self, '_paused', None) is not None and self._paused.is_set():
+                time.sleep(0.1)
+                continue
             try:
                 try:
                     item = task_queue.get(timeout=0.1)

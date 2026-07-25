@@ -364,6 +364,10 @@ class GracefulDegradation:
 # ============================================================
 
 class Watchdog:
+    # FIX-ORDERED-SHUTDOWN-20260721: 类级实例追踪，支持stop_all统一关闭
+    _all_instances: List['Watchdog'] = []
+    _instances_lock = threading.Lock()
+
     def __init__(self, timeout_sec: float = 30.0, on_timeout: Optional[Callable] = None,
                  name: str = 'watchdog'):
         self._timeout = timeout_sec
@@ -374,6 +378,9 @@ class Watchdog:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._timeout_count = 0
+        # FIX-ORDERED-SHUTDOWN-20260721: 注册到类级实例列表
+        with Watchdog._instances_lock:
+            Watchdog._all_instances.append(self)
 
     def start(self) -> None:
         with self._lock:
@@ -391,6 +398,30 @@ class Watchdog:
             self._thread.join(timeout=2.0)
             if self._thread.is_alive():
                 logging.warning("[R23-P2-17] 看门狗线程'%s'未在2.0s内终止", self._name)
+
+    # FIX-ORDERED-SHUTDOWN-20260721: 新增stop_all类方法
+    # 根因: 多个Watchdog实例(wd_*)在pause/on_stop/on_destroy时未被统一关闭
+    # 修复: 类级追踪所有实例，stop_all统一关闭所有活跃Watchdog
+    @classmethod
+    def stop_all(cls, timeout: float = 2.0) -> int:
+        """停止所有活跃的Watchdog实例 (FIX-ORDERED-SHUTDOWN-20260721)
+
+        Returns:
+            int: 已停止的Watchdog数量
+        """
+        stopped_count = 0
+        with cls._instances_lock:
+            instances = list(cls._all_instances)
+        for wd in instances:
+            try:
+                if wd._thread is not None and wd._thread.is_alive():
+                    wd.stop()
+                    stopped_count += 1
+            except Exception as _e:
+                logging.debug("[FIX-ORDERED-SHUTDOWN] Watchdog.stop_all单个实例异常(非阻断): %s", _e)
+        if stopped_count > 0:
+            logging.info("[FIX-ORDERED-SHUTDOWN] Watchdog.stop_all已停止%d个看门狗线程", stopped_count)
+        return stopped_count
 
     def feed(self) -> None:
         with self._lock:

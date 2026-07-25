@@ -59,6 +59,13 @@ class StrategyBusinessLayer:
                 if getattr(provider._order_service, '_provider_ref', None) is None:
                     provider._order_service._provider_ref = provider
                     logging.info("[StrategyBusinessLayer] _provider_ref已补设置到OrderService(延迟注入)")
+                # [FIX-V3-02-20260722] JSONL文件按strategy_id分离(已存在路径)
+                try:
+                    _wal_svc = getattr(provider._order_service, '_wal_state_service', None)
+                    if _wal_svc is not None:
+                        _wal_svc._migrate_state_file_to_strategy_id()
+                except Exception as _migrate_err:
+                    logging.debug("[StrategyBusinessLayer] JSONL迁移异常(已存在路径,非致命): %s", _migrate_err)
             except (AttributeError, TypeError):
                 pass
             # FIX-79 D5 P1: 即使_order_service已存在，也要确保已注册到_state_store
@@ -103,6 +110,15 @@ class StrategyBusinessLayer:
                 try:
                     provider._order_service._provider_ref = provider
                     logging.info("[StrategyBusinessLayer] _provider_ref已设置到OrderService")
+                    # [FIX-V3-02-20260722] JSONL文件按strategy_id分离
+                    # 在_provider_ref设置后迁移order_state.jsonl → order_state_{strategy_id}.jsonl
+                    try:
+                        _wal_svc = getattr(provider._order_service, '_wal_state_service', None)
+                        if _wal_svc is not None:
+                            _wal_svc._migrate_state_file_to_strategy_id()
+                            _wal_svc._cleanup_old_state_files()
+                    except Exception as _migrate_err:
+                        logging.debug("[StrategyBusinessLayer] JSONL迁移异常(非致命): %s", _migrate_err)
                 except (AttributeError, TypeError):
                     pass
                 logging.debug("[StrategyBusinessLayer] OrderService initialized (singleton)")
@@ -837,8 +853,11 @@ class StrategyBusinessLayer:
                         self._hard_stop_skip_ts = _now_hs
                         logging.info("[OptionTrading] hard_stop已触发，跳过交易周期")
                     return
-            except Exception:
-                pass  # 风控不可用时放行，不阻断交易
+            except Exception as _hs_err:
+                # V4-FIX-O22: 风控hard_stop检查异常时阻断交易(fail-closed)
+                # 原则: 风控不可用=不交易，而非风控不可用=放行
+                logging.warning("[V4-FIX-O22] 风控hard_stop检查异常, 阻断交易 (fail-closed): %s", _hs_err)
+                return
             # R24-P2-AT-01修复: 添加交易周期耗时记录
             _cycle_start = time.time()
             t_type = getattr(provider, 't_type_service', None)
@@ -864,8 +883,8 @@ class StrategyBusinessLayer:
                     _record_fn = getattr(provider, 'record_signal', None)
                     _fn_name = getattr(_record_fn, '__name__', str(type(_record_fn).__name__) if _record_fn else 'None')
                     if callable(_record_fn):
-                        for _ in targets:
-                            _record_fn()
+                        for target in targets:
+                            _record_fn(target)
                     else:
                         with provider._lock:
                             provider._stats['total_signals'] = provider._stats.get('total_signals', 0) + len(targets)
@@ -877,7 +896,7 @@ class StrategyBusinessLayer:
                     if provider._rs_diag_logged <= 5:
                         logging.info("[OptionTrading] record_signal诊断: targets=%d fn=%s callable=%s total_signals=%d",
                                      len(targets), _fn_name, callable(_record_fn), _sig_count)
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _rs_err:
+                except Exception as _rs_err:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                     # [FIX-20260708-V4-DIAG] 诊断record_signal异常，原except pass静默吞掉了所有错误
                     if not hasattr(provider, '_rs_err_logged'):
                         provider._rs_err_logged = 0
@@ -889,8 +908,9 @@ class StrategyBusinessLayer:
                     # 回退：直接递增_stats
                     try:
                         provider._stats['total_signals'] = provider._stats.get('total_signals', 0) + len(targets)
-                    except (ValueError, KeyError, TypeError, AttributeError):
-                        pass
+                    except Exception:
+                        # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
+                        logging.debug("[OptionTrading] _stats回退递增异常(已忽略)")
             # [FIX-20260710-PRE-TARGETS] 将BS/DR/HFT集成移到targets为空检查之前
             # 根因: targets为空时L734原return导致所有策略集成代码(BS/DR/HFT)从不执行
             # 即使targets为空，BS/DR/HFT仍需运行以产生信号和更新内部状态
@@ -902,6 +922,13 @@ class StrategyBusinessLayer:
                     if _wc_fb:
                         _fi_map = getattr(_wc_fb, '_future_initialized', {})
                         _inst_map = getattr(_wc_fb, '_instrument_id_map', None) or getattr(_wc_fb, '_futures_instruments', None)
+                        # FIX-E (2026-07-23): 完全重写P2-4 fallback，修复3个半拉子问题:
+                        #   1) 属性名 _sort_bucket → _sort_buckets (复数)
+                        #   2) 嵌套结构 Dict[fid][month][opt_type] → List，非flat dict
+                        #   3) _get_params调用方式错误，需安全获取ParamsService
+                        _sort_buckets = getattr(_wc_fb, '_sort_buckets', None) or {}
+                        _prices_by_month = getattr(_wc_fb, '_future_prices_by_month', {})
+                        _ps_fn = getattr(_wc_fb, '_get_params', None)
                         for _fid, _init in _fi_map.items():
                             if _init:
                                 _fb_inst = None
@@ -911,39 +938,108 @@ class StrategyBusinessLayer:
                                     _fm = getattr(_wc_fb, '_futures_map', {})
                                     _fb_inst = _fm.get(_fid, {}).get('instrument_id')
                                 if _fb_inst:
-                                    _fallback_instruments.append({'instrument_id': _fb_inst, 'price': 0.0})
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    pass
+                                    # FIX-E: 正确遍历 _sort_buckets 嵌套结构获取最优期权
+                                    _best_opt = None
+                                    _best_price = 0.0
+                                    _fid_buckets = _sort_buckets.get(_fid, {}) if isinstance(_sort_buckets, dict) else {}
+                                    if _fid_buckets:
+                                        _all_best = []
+                                        for _mth_dict in _fid_buckets.values():
+                                            if not isinstance(_mth_dict, dict):
+                                                continue
+                                            for _bucket in _mth_dict.values():
+                                                if not _bucket:
+                                                    continue
+                                                try:
+                                                    # heapq最小堆: sorted(bucket)[0]是最优条目
+                                                    _top = sorted(_bucket)[0] if _bucket else None
+                                                    if _top is not None:
+                                                        _all_best.append(_top)
+                                                except TypeError:
+                                                    continue
+                                        if _all_best:
+                                            _best_entry = min(_all_best)
+                                            _best_opt = getattr(_best_entry, 'instrument_id', None)
+                                            _best_price = getattr(_best_entry, 'price', 0.0)
+                                    # FIX-E: 安全获取期货元数据
+                                    _fp_meta = {}
+                                    if _ps_fn and callable(_ps_fn):
+                                        try:
+                                            _ps_obj = _ps_fn()
+                                            if _ps_obj and hasattr(_ps_obj, 'get_instrument_meta'):
+                                                _fp_meta = _ps_obj.get_instrument_meta(_fid) or {}
+                                        except Exception:
+                                            pass
+                                    _fp_prod = str(_fp_meta.get('product', '')).upper()
+                                    _fp_ym = str(_fp_meta.get('year_month', '') or '')
+                                    _underlying_price = _prices_by_month.get(_fp_prod, {}).get(_fp_ym, 0.0) if _prices_by_month else 0.0
+                                    _fallback_instruments.append({
+                                        'instrument_id': _fb_inst,
+                                        'price': _best_price or _underlying_price or 0.0,
+                                        'option_instrument_id': _best_opt or '',
+                                        'underlying_future_instrument_id': _fb_inst,
+                                        'underlying_future_price': _underlying_price or 0.0,
+                                        'direction': 'BUY',
+                                        'tier': 3,
+                                        'signal_source': 'fallback',
+                                    })
+                except Exception:
+                    # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                    # 原except (ValueError, KeyError, TypeError, AttributeError)无法捕获
+                    # ImportError/OSError/RuntimeError等, 导致fallback获取失败时穿透到C++
+                    logging.debug("[fallback_instruments] width_cache属性获取异常(已降级)")
             # ✅ P1-9修复: 集成box_spring_strategy的箱体弹簧扫描
             # R13-API-01修复: 传递完整tick参数(high/low/volume/timestamp)，否则箱体检测失效
             # R15-P1-PERF-02修复: 使用全局单例get_box_spring_strategy()，避免绕过单例创建多实例
             try:
                 from strategy.box_spring_strategy_impl import get_box_spring_strategy
                 bss = get_box_spring_strategy()
-            except ImportError as _bss_ie:
-                logging.warning("[P1-FIX] box_spring_strategy导入失败, 箱体弹簧扫描不可用: %s", _bss_ie)
+                # [DIAG-S4-INIT-20260724] 诊断bss初始化状态
+                _s4_init_diag = getattr(self.__class__, '_s4_init_diag_logged', False)
+                if not _s4_init_diag:
+                    logging.info("[DIAG-S4-INIT] bss初始化成功: type=%s id=%s", type(bss).__name__, id(bss))
+                    self.__class__._s4_init_diag_logged = True
+            except Exception as _bss_ie:
+                # FIX-S4-INIT-20260724: ImportError→Exception，防止BoxSpringStrategy.__init__
+                #   ValueError(如direction阈值不满足)穿透导致bss=None→S4永远0信号
+                logging.warning("[P1-FIX] box_spring_strategy初始化失败, 箱体弹簧扫描不可用: %s", _bss_ie)
                 bss = None
             try:
                 if bss is not None:
                     _bs_tick_targets = targets if targets else _fallback_instruments
+                    # FIX-S4-ROOT-20260720: S4-Spring on_tick/detect_spring必须使用期货数据
+                    # 根因: targets中instrument_id=期权ID, price=期权premium
+                    #   但detect_spring期望instrument_id=期货合约ID(用于box检测),
+                    #   future_price=期货价格(用于strike_close: |future_price-strike|/future_price<=0.02)
+                    #   用期权premium作为future_price → |premium-strike|/premium >> 0.02 → 永远失败
+                    # 修复: 优先使用underlying_future_instrument_id/underlying_future_price
                     for t in _bs_tick_targets:
-                        inst_id = t.get('instrument_id', '')
-                        if inst_id:
-                            # FIX-14 RC-15: high/low为0时fallback到price，确保箱体检测能运行
-                            # FIX-OO5c (S4-Spring-ROOT): 零宽箱体修复
-                            # 根因: targets无K线high/low字段→high=low=price→零宽箱体→
-                            #       contains_price/price_position退化失效→detect_spring过滤
-                            # 修复: high/low为price时添加±0.5%的合成波动，形成非零宽箱体
-                            _bs_price = t.get('price', 0.0)
-                            _bs_high = t.get('high', 0.0) or _bs_price
-                            _bs_low = t.get('low', 0.0) or _bs_price
-                            if _bs_high == _bs_low and _bs_price > 0:
-                                _bs_spread = _bs_price * 0.005  # 0.5%合成波动
-                                _bs_high = _bs_price + _bs_spread
-                                _bs_low = _bs_price - _bs_spread
+                        # FIX-S4-ROOT-20260720: on_tick用期货instrument_id和期货价格构建box
+                        _bs_future_inst = t.get('underlying_future_instrument_id', '') or t.get('instrument_id', '')
+                        _bs_future_price = t.get('underlying_future_price', 0.0) or t.get('price', 0.0)
+                        if _bs_future_inst:
+                            # V4-FIX-O13: 零宽箱体(high==low)时跳过on_tick(fail-closed)
+                            # 原则: 数据不可用=不开仓, 不再合成±0.5%波动虚构箱体
+                            # (原FIX-OO5c合成波动已移除, 无效箱体应跳过而非虚构)
+                            _bs_high = t.get('high', 0.0) or _bs_future_price
+                            _bs_low = t.get('low', 0.0) or _bs_future_price
+                            if _bs_high == _bs_low:
+                                # FIX-NOISE-O13-20260724: 全局60s冷却+汇总计数
+                                _o13_now = time.time()
+                                _o13_last = getattr(self.__class__, '_o13_warn_ts', None) or {}
+                                _o13_count = _o13_last.get('_count', 0) + 1
+                                _o13_last['_count'] = _o13_count
+                                if _o13_now - _o13_last.get('_last_log', 0.0) >= 60:
+                                    logging.info("[V4-FIX-O13] 零宽箱体(high==low), 跳过on_tick (fail-closed) ×%d instruments", _o13_count)
+                                    _o13_last['_last_log'] = _o13_now
+                                    _o13_last['_count'] = 0
+                                setattr(self.__class__, '_o13_warn_ts', _o13_last)
+                                # K线箱体时代: bss.update_box()已废弃(tick级箱体)
+                                # detect_spring中K线箱体直接创建BoxRange，无需tick级喂线
+                                continue
                             bss.on_tick(
-                                instrument_id=inst_id,
-                                price=_bs_price,
+                                instrument_id=_bs_future_inst,
+                                price=_bs_future_price,
                                 high=_bs_high,
                                 low=_bs_low,
                                 volume=t.get('volume', 0),
@@ -951,42 +1047,88 @@ class StrategyBusinessLayer:
                             )
                     # [FIX-20260710-BS-TRIGGER] BoxSpring信号检测→下单链路修复
                     _bs_signal_count = 0
+                    # [DIAG-S4-20260720] 诊断：detect_spring循环是否进入
+                    _diag_s4_cycle = getattr(self, '_diag_s4_detect_cycle', 0) + 1
+                    self._diag_s4_detect_cycle = _diag_s4_cycle
+                    if _diag_s4_cycle <= 10 or _diag_s4_cycle % 100 == 0:
+                        logging.info("[DIAG-S4] detect_spring cycle #%d: targets=%d keys_sample=%s",
+                                     _diag_s4_cycle, len(_bs_tick_targets),
+                                     list(_bs_tick_targets[0].keys())[:15] if _bs_tick_targets else 'EMPTY')
                     for t in _bs_tick_targets:
-                        _bs_inst = t.get('instrument_id', '')
-                        _bs_price = t.get('price', 0.0)
-                        if not _bs_inst or _bs_price <= 0:
+                        # FIX-S4-ROOT-20260720: detect_spring用期货instrument_id查找box,
+                        # 用期货价格作为future_price, 用期权ID/metadata作为option参数
+                        _bs_future_inst = t.get('underlying_future_instrument_id', '') or t.get('instrument_id', '')
+                        _bs_future_price = t.get('underlying_future_price', 0.0) or t.get('price', 0.0)
+                        _bs_opt_inst = t.get('option_instrument_id', '') or t.get('instrument_id', '')
+                        if not _bs_future_inst or _bs_future_price <= 0:
+                            continue
+                        # V4-FIX-O12: strike/iv/days/premium_price硬编码兜底改为数据缺失时跳过(fail-closed)
+                        # 原则: 数据不可用=不开仓, 不再用future_price/0.15/3等硬编码兜底
+                        _bs_strike = t.get('strike_price', 0.0)
+                        _bs_iv = t.get('iv', 0.0)
+                        _bs_dte = t.get('days_to_expiry', 0)
+                        _bs_prem = t.get('premium_price', 0.0) or t.get('price', 0.0)
+                        if _bs_strike <= 0 or _bs_iv <= 0 or _bs_dte <= 0 or _bs_prem <= 0:
+                            # FIX-NOISE-O12-20260724: 全局60s冷却+汇总计数(期权品种数>300)
+                            _o12_now = time.time()
+                            _o12_last = getattr(self.__class__, '_o12_warn_ts', None) or {}
+                            _o12_count = _o12_last.get('_count', 0) + 1
+                            _o12_last['_count'] = _o12_count
+                            if _o12_now - _o12_last.get('_last_log', 0.0) >= 60:
+                                logging.info("[V4-FIX-O12] strike/iv/days/premium数据缺失, 跳过弹簧信号 (fail-closed) ×%d instruments", _o12_count)
+                                _o12_last['_last_log'] = _o12_now
+                                _o12_last['_count'] = 0
+                            setattr(self.__class__, '_o12_warn_ts', _o12_last)
+                            # K线箱体时代: bss.update_box()已废弃(tick级箱体)
+                            # detect_spring中K线箱体直接创建BoxRange，无需tick级喂线
                             continue
                         try:
                             _bs_signal = bss.detect_spring(
-                                instrument_id=_bs_inst,
-                                future_price=_bs_price,
-                                option_instrument_id=t.get('option_instrument_id', _bs_inst),
-                                strike_price=t.get('strike_price', 0.0) or _bs_price,  # FIX-S3S4-2: strike_price缺失时fallback到当前价格，避免strike_distance_pct=1.0>阈值
-                                iv=t.get('iv', 0.15),  # FIX-T R9-4-2: fallback 0.0→0.15，避免IV百分位返回50>5过滤
-                                premium_price=t.get('premium_price', 0.0),
-                                days_to_expiry=t.get('days_to_expiry', 3),  # FIX-T R9-4-1: fallback 30→3，在[2,5]DTE范围内
+                                instrument_id=_bs_future_inst,             # 期货合约ID(用于box查找)
+                                future_price=_bs_future_price,             # 期货价格(用于strike_close)
+                                option_instrument_id=_bs_opt_inst,         # 期权合约ID
+                                strike_price=_bs_strike,
+                                iv=_bs_iv,
+                                premium_price=_bs_prem,
+                                days_to_expiry=_bs_dte,
                                 account_equity=t.get('account_equity', 100000.0),
                             )
                             if _bs_signal is not None:
                                 # [FIX-20260712-S4] 弹簧强度评分 — 上策H-Rev: 过滤低质量弹簧信号
                                 # [FIX-20260712-S4-P2] 统一引用SPRING_STRENGTH_THRESHOLD类常量, 消除硬编码
                                 try:
-                                    _spring_box = bss.get_active_box(_bs_inst) if hasattr(bss, 'get_active_box') else None
+                                    _spring_box = bss.get_active_box(_bs_future_inst) if hasattr(bss, 'get_active_box') else None
                                     _spring_strength = bss.detect_spring_strength(
                                         _bs_signal, _spring_box
                                     ) if hasattr(bss, 'detect_spring_strength') else 0.5
-                                    _spring_threshold = getattr(bss, 'SPRING_STRENGTH_THRESHOLD', 0.45)  # 统一引用类常量, fallback=0.45
+                                    _spring_threshold = getattr(bss, 'SPRING_STRENGTH_THRESHOLD', 0.25)  # 统一引用类常量, fallback=0.25(与box_spring_detector.py FIX-OO5b对齐)
                                     if _spring_strength < _spring_threshold:
                                         logging.info(
                                             "[FIX-20260712-S4] 弹簧强度不足, 过滤信号: inst=%s strength=%.3f threshold=%.3f",
-                                            _bs_inst, _spring_strength, _spring_threshold
+                                            _bs_future_inst, _spring_strength, _spring_threshold
                                         )
                                         continue
-                                except (ValueError, KeyError, TypeError, AttributeError):
-                                    pass  # 评分异常时不阻断信号
+                                except Exception:
+                                    # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
+                                    logging.debug("[OptionTrading] 评分异常(不阻断信号)")
+                                # FIX-S4-OFI-20260724: 接入真实订单流数据作为触发条件
+                                # 根因: width_cache_query_mixin将order_flow_imbalance硬编码为0.0,
+                                #   导致check_trigger阈值|ofi|>0.3永远不触发, 弹簧信号无法触发。
+                                # 修复: 从OrderFlowBridge.get_flow_consistency(product)读取真实OFI,
+                                #   返回范围[-1,1]与阈值0.3匹配; 无数据时返回0.0, check_trigger不触发(fail-closed)。
+                                # option_chain_activity: 系统无期权链逐合约成交量数据源, 保持0.0, 不伪造数据。
+                                _bs_ofi = 0.0
+                                try:
+                                    from order.order_flow_bridge_service import get_order_flow_bridge
+                                    _bs_ofb = get_order_flow_bridge()
+                                    if _bs_ofb is not None and _bs_future_inst:
+                                        _bs_ofi = float(_bs_ofb.get_flow_consistency(_bs_future_inst) or 0.0)
+                                except Exception as _bs_ofi_e:
+                                    logging.debug("[S4-OFI] 读取订单流失衡异常(不阻断): %s", _bs_ofi_e)
+                                    _bs_ofi = 0.0
                                 _bs_triggered = bss.check_trigger(
-                                    _bs_inst,
-                                    order_flow_imbalance=t.get('order_flow_imbalance', 0.0),
+                                    _bs_future_inst,
+                                    order_flow_imbalance=_bs_ofi,
                                     option_chain_activity=t.get('option_chain_activity', 0.0),
                                 )
                                 if _bs_triggered is not None:
@@ -994,7 +1136,7 @@ class StrategyBusinessLayer:
                                     if _bs_order_id:
                                         _bs_signal_count += 1
                                         logging.info("[FIX-0710-BS-TRIGGER] BoxSpring入场: inst=%s order=%s dir=%s",
-                                                     _bs_inst, _bs_order_id, _bs_triggered.direction)
+                                                     _bs_future_inst, _bs_order_id, _bs_triggered.direction)
                                         # FIX-S3S4-14: S4信号通过execute_spring_entry直接下单，不追加到targets列表，
                                         # 导致_save_signal_snapshot不会为S4保存快照→日志统计显示"S4策略0快照"。
                                         # 修复: 在execute_spring_entry成功下单后，手动保存信号快照。
@@ -1007,7 +1149,7 @@ class StrategyBusinessLayer:
                                             _ts_bs = _now_bs.strftime('%Y%m%d_%H%M%S_%f')
                                             _snap_bs = {
                                                 'signal': {
-                                                    'instrument_id': _bs_inst,
+                                                    'instrument_id': _bs_future_inst,
                                                     'option_instrument_id': _bs_triggered.option_instrument_id,
                                                     'direction': _bs_triggered.direction,
                                                     'price': _bs_triggered.premium_price,
@@ -1027,14 +1169,16 @@ class StrategyBusinessLayer:
                                                     'strategy_id': getattr(provider, 'strategy_id', ''),
                                                 },
                                             }
-                                            _fp_bs = os.path.join(_snap_dir, f"BOX_SPRING_{_bs_inst}_{_ts_bs}.json")
+                                            _fp_bs = os.path.join(_snap_dir, f"BOX_SPRING_{_bs_future_inst}_{_ts_bs}.json")
                                             with open(_fp_bs, 'w', encoding='utf-8') as _f_bs:
                                                 json.dump(_snap_bs, _f_bs, ensure_ascii=False, indent=2, default=str)
                                             logging.info("[SignalSnapshot] S4快照已保存: %s (reason=BOX_SPRING inst=%s)",
-                                                         _fp_bs, _bs_inst)
-                                        except (OSError, IOError, ValueError, TypeError, KeyError, AttributeError) as _s4_snap_err:
+                                                         _fp_bs, _bs_future_inst)
+                                        except Exception as _s4_snap_err:
+                                            # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                                             logging.warning("[SignalSnapshot] S4快照保存失败: %s", _s4_snap_err)
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _bs_sig_err:
+                        except Exception as _bs_sig_err:
+                            # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                             _bs_sig_err_count = getattr(provider, '_bs_sig_err_count', 0) + 1
                             provider._bs_sig_err_count = _bs_sig_err_count
                             if _bs_sig_err_count <= 3 or _bs_sig_err_count % 100 == 0:
@@ -1042,7 +1186,20 @@ class StrategyBusinessLayer:
                                              _bs_sig_err_count, _bs_sig_err)
                     if _bs_signal_count > 0:
                         logging.info("[FIX-0710-BS-TRIGGER] BoxSpring本周期入场%d笔", _bs_signal_count)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    # V4-FIX-C8: S4弹簧失效(box失效)平仓信号接入
+                    # 当S4持仓的box被invalidate时(宽度超限/价格突破), S4的1min硬止损将自动平仓
+                    # 此处记录诊断日志供排查, 实际平仓由position_service时间止损兜底
+                    try:
+                        if hasattr(bss, '_boxes') and hasattr(bss, '_lock'):
+                            with bss._lock:
+                                _c8_invalidated = [fid for fid, bx in bss._boxes.items()
+                                                   if bx and not getattr(bx, 'is_active', True)]
+                            for _c8_fid in _c8_invalidated:
+                                logging.info("[V4-FIX-C8] S4 box已失效(invalidated), @1min硬止损自动平仓: inst=%s", _c8_fid)
+                    except Exception as _c8_err:
+                        logging.debug("[V4-FIX-C8] S4弹簧失效平仓检查异常: %s", _c8_err)
+            except Exception as e:
+                # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                 logging.warning("[R22-EP-P1-17] [StrategyBusinessLayer] box_spring_strategy tick error: %s", e)
             # [FIX-20260710-HFT-INTEGRATE] HFT引擎tick集成到交易周期
             try:
@@ -1103,7 +1260,8 @@ class StrategyBusinessLayer:
                                                 'product': t.get('product', ''),
                                             }
                                             targets.append(_s1_target)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _hft_err:
+            except Exception as _hft_err:
+                # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                 _hft_err_count = getattr(provider, '_hft_err_count', 0) + 1
                 provider._hft_err_count = _hft_err_count
                 if _hft_err_count <= 3 or _hft_err_count % 100 == 0:
@@ -1116,6 +1274,17 @@ class StrategyBusinessLayer:
                 from strategy.strategy_ecosystem import get_strategy_ecosystem
                 _eco_svc = get_strategy_ecosystem()
                 if _eco_svc is not None and hasattr(_eco_svc, 'process_other_strategy_signal'):
+                    # K线箱体时代: 不再喂tick级K线给BoxDetector做tick级箱体检测
+                    # 只需喂IV数据(用于classify_extreme_state的IV百分位计算)
+                    # K线箱体由check_kline_box_precondition→detect_kline_box驱动
+                    for t in (list(targets) if targets else _fallback_instruments):
+                        _bar_iv = t.get('iv', 0.0)
+                        if _bar_iv > 0 and hasattr(_eco_svc, '_box_detector'):
+                            try:
+                                _eco_svc._box_detector.update_iv(_bar_iv)
+                            except Exception:
+                                pass  # 非阻断：IV喂入失败不影响后续信号处理
+                            break  # 每个tick cycle只喂一次IV
                     _eco_tick_targets = list(targets) if targets else _fallback_instruments
                     _other_signal_count = 0
                     _other_skip_count = 0
@@ -1124,38 +1293,124 @@ class StrategyBusinessLayer:
                         _eco_price = t.get('price', 0.0)
                         if not _eco_inst or _eco_price <= 0:
                             continue
+                        # V4-FIX-O12: IV数据不可用时跳过(fail-closed), 不再使用0.15硬编码兜底
+                        _eco_iv = t.get('iv', 0.0)
+                        if _eco_iv <= 0:
+                            _other_skip_count += 1
+                            continue
+                        # FIX-S3S4-OFI-20260724: S3/S4 ecosystem信号使用真实订单流数据
+                        # 根因: width_cache_query_mixin将order_flow_imbalance硬编码为0.0,
+                        #   box_detector.classify_extreme_state将0.0误判为"订单流枯竭"(flow_exhaustion=True),
+                        #   导致S3/S4信号confidence被人为抬高, 且无法反映真实市场状态。
+                        # 修复: 从OrderFlowBridge.get_flow_consistency(product)读取真实OFI;
+                        #   无数据时保持0.0, 仍按原逻辑视为exhaustion(fail-closed下更谨慎或保持原行为)。
+                        _eco_ofi = 0.0
+                        try:
+                            from order.order_flow_bridge_service import get_order_flow_bridge
+                            _eco_ofb = get_order_flow_bridge()
+                            if _eco_ofb is not None and _eco_inst:
+                                _eco_ofi = float(_eco_ofb.get_flow_consistency(_eco_inst) or 0.0)
+                        except Exception as _eco_ofi_e:
+                            logging.debug("[S3S4-OFI] 读取订单流失衡异常(不阻断): %s", _eco_ofi_e)
+                            _eco_ofi = 0.0
                         try:
                             _other_result = _eco_svc.process_other_strategy_signal(
                                 current_price=_eco_price,
                                 resonance_direction=('fall' if t.get('direction', '') in ('SELL', 'sell', 'SHORT', 'short') else 'rise') if t.get('direction', '') else '',  # FIX-S3S4-7: 映射BUY/SELL→rise/fall
                                 resonance_strength=getattr(getattr(provider, '_state_param_manager', None), '_last_resonance_strength', 0.0),  # FIX-S R10-5-08
-                                current_iv=t.get('iv', 0.15),  # FIX-T R9-4-2: fallback 0.0→0.15
-                                flow_imbalance=t.get('order_flow_imbalance', 0.0),
+                                current_iv=_eco_iv,
+                                flow_imbalance=_eco_ofi,
                                 cvd_slope=0.0,
                                 instrument_id=_eco_inst,  # FIX-56: 传递instrument_id用于冷却控制
+                                days_to_expiry=t.get('days_to_expiry', 0),  # K线箱体前置条件: dte≤5→日K小箱体, dte>5→周K中箱体
                             )
                             _other_action = _other_result.get('action', '') if _other_result else ''
                             if _other_action == 'open':
-                                _other_dir = _other_result.get('direction', 'BUY')
-                                _other_target = {
-                                    'instrument_id': _eco_inst,
-                                    'direction': _other_dir,
-                                    'price': _eco_price,
-                                    'volume': 0,
-                                    'lots': 1,
-                                    'open_reason': 'OTHER_SCALP',
-                                    'signal_id': _other_result.get('trade_id', ''),
-                                    'strategy_id': 'other',
-                                }
-                                targets.append(_other_target)
-                                _other_signal_count += 1
-                                logging.info(
-                                    "[FIX-20260715-OTHER-SCALP] ecosystem箱体极值信号触发: inst=%s dir=%s trade_id=%s",
-                                    _eco_inst, _other_dir, _other_result.get('trade_id', ''),
-                                )
+                                _other_dir_raw = _other_result.get('direction', 'BUY')
+                                _other_dir = {'long': 'BUY', 'short': 'SELL', 'buy': 'BUY', 'sell': 'SELL'}.get(str(_other_dir_raw).lower(), _other_dir_raw)
+                                # FIX-S3-DIR-20260723: box_detector.determine_trade_direction返回long/short,
+                                #   但execute_by_ranking期望BUY/SELL。原代码直接使用long/short→
+                                #   send_order收到direction="short"→平台拒绝→S3零下单
+                                # FIX-S3-BOX-20260720: S3-Box信号独立下单(open_reason=BOX_EXTREME)
+                                # 根因: 原逻辑将所有ecosystem极值信号归入OTHER_SCALP策略组,
+                                #   但用户本意是7策略独立下单。classify_extreme_state返回
+                                #   extreme_type='box_bottom_extreme'/'box_top_extreme'时,
+                                #   说明信号来自BoxDetector箱体极值检测(S3-Box策略),
+                                #   应独立追加为BOX_EXTREME target而非OTHER_SCALP。
+                                #   非box_开头的extreme_type仍保留OTHER_SCALP。
+                                _extreme_state = _other_result.get('extreme_state', {})
+                                _extreme_type = _extreme_state.get('extreme_type', '') if isinstance(_extreme_state, dict) else ''
+                                if _extreme_type and _extreme_type.startswith('box_'):
+                                    # S3-Box箱体极值信号 — 独立下单
+                                    _s3_target = {
+                                        'instrument_id': _eco_inst,
+                                        'direction': _other_dir,
+                                        'price': _eco_price,
+                                        'volume': 0,
+                                        'lots': 1,
+                                        'open_reason': 'BOX_EXTREME',
+                                        'signal_id': _other_result.get('trade_id', ''),
+                                        'strategy_id': 's3_box',
+                                        'extreme_type': _extreme_type,
+                                        'confidence': _extreme_state.get('confidence', 0.0),
+                                        'iv_percentile': _extreme_state.get('iv_percentile', 0.0),
+                                        'price_position_pct': _extreme_state.get('price_position_pct', 0.0),
+                                    }
+                                    targets.append(_s3_target)
+                                    _other_signal_count += 1
+                                    # V4-FIX-C7: S3箱体突破平仓信号(假突破检测接入平仓链路)
+                                    # 当S3持仓存在且价格突破箱体边界后回落(假突破), 生成平仓信号
+                                    try:
+                                        _bd_c7 = getattr(_eco_svc, '_box_detector', None) if _eco_svc else None
+                                        if _bd_c7 and hasattr(_bd_c7, 'check_false_breakout'):
+                                            _is_false_breakout = _bd_c7.check_false_breakout(_eco_price, _extreme_type)
+                                            if _is_false_breakout:
+                                                _s3_close_target = {
+                                                    'instrument_id': _eco_inst,
+                                                    'direction': 'SELL' if _other_dir == 'BUY' else 'BUY',
+                                                    'price': _eco_price,
+                                                    'volume': 0,
+                                                    'lots': 1,
+                                                    'action': 'CLOSE',
+                                                    'open_reason': 'BOX_EXTREME_FALSE_BREAKOUT',
+                                                    'signal_id': f"{_other_result.get('trade_id', '')}_FB",
+                                                    'strategy_id': 's3_box',
+                                                    'source': 's3_false_breakout_close',
+                                                }
+                                                targets.append(_s3_close_target)
+                                                logging.info("[V4-FIX-C7] S3假突破平仓信号: inst=%s dir=%s price=%.2f type=%s",
+                                                             _eco_inst, 'SELL' if _other_dir == 'BUY' else 'BUY',
+                                                             _eco_price, _extreme_type)
+                                    except Exception as _c7_err:
+                                        logging.debug("[V4-FIX-C7] S3假突破平仓检查异常: %s", _c7_err)
+                                    logging.info(
+                                        "[FIX-S3-BOX-20260720] S3-Box箱体极值信号: inst=%s dir=%s type=%s conf=%.2f iv_pct=%.1f",
+                                        _eco_inst, _other_dir, _extreme_type,
+                                        _extreme_state.get('confidence', 0.0),
+                                        _extreme_state.get('iv_percentile', 0.0),
+                                    )
+                                else:
+                                    # 非箱体极值信号 — 保留OTHER_SCALP
+                                    _other_target = {
+                                        'instrument_id': _eco_inst,
+                                        'direction': _other_dir,
+                                        'price': _eco_price,
+                                        'volume': 0,
+                                        'lots': 1,
+                                        'open_reason': 'OTHER_SCALP',
+                                        'signal_id': _other_result.get('trade_id', ''),
+                                        'strategy_id': 'other',
+                                    }
+                                    targets.append(_other_target)
+                                    _other_signal_count += 1
+                                    logging.info(
+                                        "[FIX-20260715-OTHER-SCALP] ecosystem非箱体极值信号: inst=%s dir=%s type=%s",
+                                        _eco_inst, _other_dir, _extreme_type or 'unknown',
+                                    )
                             else:
                                 _other_skip_count += 1
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _other_err:
+                        except Exception as _other_err:
+                            # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                             _other_err_count = getattr(provider, '_other_sig_err_count', 0) + 1
                             provider._other_sig_err_count = _other_err_count
                             if _other_err_count <= 3 or _other_err_count % 100 == 0:
@@ -1181,7 +1436,8 @@ class StrategyBusinessLayer:
                             type(_eco_svc).__name__ if _eco_svc else None,
                             hasattr(_eco_svc, 'process_other_strategy_signal') if _eco_svc else False,
                         )
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _eco_err:
+            except Exception as _eco_err:
+                # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                 logging.debug("[FIX-20260715-OTHER-SCALP] ecosystem服务集成异常: %s", _eco_err)
             # [FIX-20260712-S7-V3] DivergenceReversal信号生成集成 — 用户本意: 反趋势开仓
             # 旧版[FIX-20260710-DIVREV-V2]仅记录日志不生成交易信号，导致S7背离检测与交易完全断开
@@ -1214,35 +1470,104 @@ class StrategyBusinessLayer:
                                     # [FIX-20260712-S7-V3-P0] SQL必须使用UNION分别取期货K线和期权K线，
                                     # 原JOIN LEFT JOIN会把期权行挂到期货symbol下，导致option_symbol实为期货代码、
                                     # 期权价格用期货价格，交易标的全错。
-                                    _dr_sql = (
-                                        "SELECT fi.instrument_id AS symbol, kr.timestamp AS minute, "
-                                        "kr.open, kr.high, kr.low, kr.close, kr.volume, "
-                                        "NULL AS option_type, NULL AS strike_price, lp.last_price AS underlying_price "
-                                        "FROM klines_raw kr "
-                                        "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
-                                        # FIX-20260713-S7-SQL: latest_prices视图只有instrument_id列,无internal_id
-                                        # 根因: latest_prices视图定义SELECT instrument_id,last_price,timestamp FROM ticks_raw
-                                        #       原SQL JOIN ON lp.internal_id=fi.internal_id 报Binder Error
-                                        # 修复: 改为JOIN ON lp.instrument_id=fi.instrument_id
-                                        "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
-                                        "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = ?) "
-                                        "AND kr.period = ? "
-                                        "UNION ALL "
-                                        "SELECT oi.instrument_id AS symbol, kr.timestamp AS minute, "
-                                        "kr.open, kr.high, kr.low, kr.close, kr.volume, "
-                                        "oi.option_type, oi.strike_price, lp.last_price AS underlying_price "
-                                        "FROM klines_raw kr "
-                                        "JOIN option_instruments oi ON kr.internal_id = oi.internal_id "
-                                        "LEFT JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id "
-                                        "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
-                                        "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = ?) "
-                                        "AND kr.period = ? "
-                                        "ORDER BY minute DESC LIMIT 500"
-                                    )
-                                    _dr_result = _ds.query(_dr_sql, [_dr_period, _dr_period, _dr_period, _dr_period])
+                                    # [FIX-S7-KLINES-20260724] klines_raw表只有M1分钟K线数据，
+                                    #   当_dr_period=H1/D1时直接查period='H1'返回0行→S7零信号7天。
+                                    # 修复: 统一用M1数据+SQL聚合(GROUP BY hour/date)生成H1/D1 K线，
+                                    #   而非依赖klines_raw表中预存的H1/D1行(不存在)。
+                                    if _dr_period in ('H1', '1h', '60min'):
+                                        # H1聚合: 从M1数据按小时GROUP BY
+                                        _dr_sql = (
+                                            "SELECT fi.instrument_id AS symbol, "
+                                            "date_trunc('hour', kr.timestamp) AS minute, "
+                                            "FIRST(kr.open) AS open, MAX(kr.high) AS high, "
+                                            "MIN(kr.low) AS low, LAST(kr.close) AS close, "
+                                            "SUM(kr.volume) AS volume, "
+                                            "NULL AS option_type, NULL AS strike_price, lp.last_price AS underlying_price "
+                                            "FROM klines_raw kr "
+                                            "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
+                                            "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
+                                            "WHERE kr.period = 'M1' "
+                                            "AND kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = 'M1') "
+                                            "GROUP BY fi.instrument_id, date_trunc('hour', kr.timestamp), lp.last_price "
+                                            "UNION ALL "
+                                            "SELECT oi.instrument_id AS symbol, "
+                                            "date_trunc('hour', kr.timestamp) AS minute, "
+                                            "FIRST(kr.open) AS open, MAX(kr.high) AS high, "
+                                            "MIN(kr.low) AS low, LAST(kr.close) AS close, "
+                                            "SUM(kr.volume) AS volume, "
+                                            "oi.option_type, oi.strike_price, lp.last_price AS underlying_price "
+                                            "FROM klines_raw kr "
+                                            "JOIN option_instruments oi ON kr.internal_id = oi.internal_id "
+                                            "LEFT JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id "
+                                            "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
+                                            "WHERE kr.period = 'M1' "
+                                            "AND kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = 'M1') "
+                                            "GROUP BY oi.instrument_id, date_trunc('hour', kr.timestamp), oi.option_type, oi.strike_price, lp.last_price "
+                                            "ORDER BY minute DESC LIMIT 500"
+                                        )
+                                        _dr_result = _ds.query(_dr_sql)
+                                    elif _dr_period in ('D1', '1d', 'daily'):
+                                        # D1聚合: 从M1数据按日GROUP BY
+                                        _dr_sql = (
+                                            "SELECT fi.instrument_id AS symbol, "
+                                            "kr.trade_date AS minute, "
+                                            "FIRST(kr.open) AS open, MAX(kr.high) AS high, "
+                                            "MIN(kr.low) AS low, LAST(kr.close) AS close, "
+                                            "SUM(kr.volume) AS volume, "
+                                            "NULL AS option_type, NULL AS strike_price, lp.last_price AS underlying_price "
+                                            "FROM klines_raw kr "
+                                            "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
+                                            "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
+                                            "WHERE kr.period = 'M1' "
+                                            "AND kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = 'M1') "
+                                            "GROUP BY fi.instrument_id, kr.trade_date, lp.last_price "
+                                            "UNION ALL "
+                                            "SELECT oi.instrument_id AS symbol, "
+                                            "kr.trade_date AS minute, "
+                                            "FIRST(kr.open) AS open, MAX(kr.high) AS high, "
+                                            "MIN(kr.low) AS low, LAST(kr.close) AS close, "
+                                            "SUM(kr.volume) AS volume, "
+                                            "oi.option_type, oi.strike_price, lp.last_price AS underlying_price "
+                                            "FROM klines_raw kr "
+                                            "JOIN option_instruments oi ON kr.internal_id = oi.internal_id "
+                                            "LEFT JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id "
+                                            "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
+                                            "WHERE kr.period = 'M1' "
+                                            "AND kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = 'M1') "
+                                            "GROUP BY oi.instrument_id, kr.trade_date, oi.option_type, oi.strike_price, lp.last_price "
+                                            "ORDER BY minute DESC LIMIT 500"
+                                        )
+                                        _dr_result = _ds.query(_dr_sql)
+                                    else:
+                                        # M1或其他周期: 直接查询(原逻辑)
+                                        _dr_sql = (
+                                            "SELECT fi.instrument_id AS symbol, kr.timestamp AS minute, "
+                                            "kr.open, kr.high, kr.low, kr.close, kr.volume, "
+                                            "NULL AS option_type, NULL AS strike_price, lp.last_price AS underlying_price "
+                                            "FROM klines_raw kr "
+                                            "JOIN futures_instruments fi ON kr.internal_id = fi.internal_id "
+                                            "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
+                                            "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = ?) "
+                                            "AND kr.period = ? "
+                                            "UNION ALL "
+                                            "SELECT oi.instrument_id AS symbol, kr.timestamp AS minute, "
+                                            "kr.open, kr.high, kr.low, kr.close, kr.volume, "
+                                            "oi.option_type, oi.strike_price, lp.last_price AS underlying_price "
+                                            "FROM klines_raw kr "
+                                            "JOIN option_instruments oi ON kr.internal_id = oi.internal_id "
+                                            "LEFT JOIN futures_instruments fi ON fi.internal_id = oi.underlying_future_id "
+                                            "LEFT JOIN latest_prices lp ON lp.instrument_id = fi.instrument_id "
+                                            "WHERE kr.trade_date = (SELECT MAX(trade_date) FROM klines_raw WHERE period = ?) "
+                                            "AND kr.period = ? "
+                                            "ORDER BY minute DESC) LIMIT 500"
+                                        )
+                                        _dr_result = _ds.query(_dr_sql, [_dr_period, _dr_period, _dr_period, _dr_period])
                                     if _dr_result is not None and len(_dr_result) > 0:
                                         import pandas as _pd
                                         _dr_df = _dr_result.to_pandas() if hasattr(_dr_result, 'to_pandas') else _pd.DataFrame(_dr_result.to_pylist())
+                                        # [FIX-S7-KLINES-20260724] H1/D1聚合成功日志
+                                        if _dr_period != 'M1':
+                                            logging.info("[FIX-S7-KLINES] M1→%s聚合成功: rows=%d", _dr_period, len(_dr_df))
                                         # [S7-V3-P1] 查询结果按时间降序，但下游按'last'取末根成交量；
                                         # 必须按时间升序排列，使.last()返回最新bar。
                                         if 'minute' in _dr_df.columns:
@@ -1293,11 +1618,12 @@ class StrategyBusinessLayer:
                                 else:
                                     if _dr_call_count <= 3 or _dr_call_count % 300 == 1:
                                         logging.info("[S7-V3-DIVREV] klines_raw查询无数据(call=%d period=%s) — DuckDB中可能无对应周期K线", _dr_call_count, _dr_period)
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _dr_qry_err:
+                        except Exception as _dr_qry_err:
+                            # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                             if _dr_call_count <= 3 or _dr_call_count % 100 == 0:
                                 logging.warning("[S7-V3-DIVREV] klines_raw查询失败(call=%d): %s",
                                                 _dr_call_count, _dr_qry_err)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _dr_err:
+            except Exception as _dr_err:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                 _dr_err_count = getattr(provider, '_dr_err_count', 0) + 1
                 provider._dr_err_count = _dr_err_count
                 if _dr_err_count <= 3 or _dr_err_count % 100 == 0:
@@ -1312,20 +1638,23 @@ class StrategyBusinessLayer:
                 provider._s5s6_feed_count = _s5s6_feed_count
                 if _s5s6_feed_count % 5 == 1:  # 每5tick投喂一次(性能)
                     _feed_targets = (targets if targets else _fallback_instruments)[:5]
-                    # S5套利: 投喂tick + 首次注册默认配对
+                    # S5套利: 投喂tick（配对已在初始化阶段由_init_s5_arbitrage_pairs注册）
                     try:
-                        from strategy.monitor.arbitrage_monitor import get_arbitrage_monitor, ArbitragePairConfig
+                        from strategy.monitor.arbitrage_monitor import get_arbitrage_monitor
                         _s5_mon = get_arbitrage_monitor()
-                        if (not getattr(provider, '_s5_pairs_registered', False)) and len(_feed_targets) >= 2:
-                            _leg_a = _feed_targets[0].get('instrument_id', '')
-                            _leg_b = _feed_targets[1].get('instrument_id', '')
-                            if _leg_a and _leg_b and _leg_a != _leg_b:
-                                _s5_mon.register_pair(ArbitragePairConfig(leg_a=_leg_a, leg_b=_leg_b))
-                                provider._s5_pairs_registered = True
-                                logging.info("[S5-ARB-FEED] 注册默认套利对: %s:%s", _leg_a, _leg_b)
+                        # FIX-S5-PAIR-SEMANTIC-20260722: 删除伪配对注册（原L1404-1409）
+                        # 根因: 前2个feed_target是随机品种(如OI609P9500:bu2609P3500)，
+                        #   不是真实统计套利对 → Z-score=0 → CLOSE信号被误作OPEN
+                        # 修复: 配对改为在lifecycle_init.py Step2b中通过_init_s5_arbitrage_pairs注册
+                        # FIX-S5-FEED-20260724: 必须用期货合约ID和价格喂入配对两腿
+                        # 根因: 原代码用期权ID(_t['instrument_id'])喂入, 但配对注册的是期货ID,
+                        #   → _price_history keyed by 期货ID, 从未写入 → Z-score无法计算 → 永远无信号。
+                        # 修复: 优先使用underlying_future_instrument_id/underlying_future_price;
+                        #   若缺失则跳过该target。喂完后对所有已注册配对腿用width_cache最新价补喂。
+                        _s5_fed_legs = set()
                         for _t in _feed_targets:
-                            _inst = _t.get('instrument_id', '')
-                            _price = float(_t.get('price', 0.0) or 0.0)
+                            _inst = _t.get('underlying_future_instrument_id', '') or _t.get('instrument_id', '')
+                            _price = float(_t.get('underlying_future_price', 0.0) or _t.get('price', 0.0) or 0.0)
                             if _inst and _price > 0:
                                 _s5_mon.on_tick({
                                     'instrument_id': _inst,
@@ -1338,7 +1667,34 @@ class StrategyBusinessLayer:
                                     'open_interest': float(_t.get('open_interest', 0.0) or 0.0),
                                     'direction': str(_t.get('direction', '') or ''),
                                 })
-                    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s5_feed_e:
+                                _s5_fed_legs.add(_inst)
+                        # FIX-S5-FEED2-20260724: 补喂未在feed_targets中覆盖的配对腿(如远月腿)
+                        # 根因: 原代码错误地调用WidthCacheStateMixin.get_instrument_meta(), 该方法不存在,
+                        #   导致补喂永远失败, 跨期配对的远月腿无价格。
+                        # 修复: 使用query_service.get_last_tick(instrument_id)获取最新tick价格。
+                        try:
+                            _s5_missing_legs = _s5_mon.get_registered_legs() - _s5_fed_legs
+                            if _s5_missing_legs:
+                                _s5_qs = None
+                                try:
+                                    from data.query_service import get_query_service
+                                    _s5_qs = get_query_service()
+                                except Exception:
+                                    _s5_qs = None
+                                for _leg in _s5_missing_legs:
+                                    _leg_price = 0.0
+                                    if _s5_qs is not None:
+                                        try:
+                                            _leg_tick = _s5_qs.get_last_tick(_leg)
+                                            if isinstance(_leg_tick, dict):
+                                                _leg_price = float(_leg_tick.get('last_price', 0.0) or _leg_tick.get('price', 0.0) or 0.0)
+                                        except Exception:
+                                            _leg_price = 0.0
+                                    if _leg and _leg_price > 0:
+                                        _s5_mon.on_tick({'instrument_id': _leg, 'last_price': _leg_price})
+                        except Exception as _s5_supp_e:
+                            logging.debug("[S5-ARB-FEED] 补喂配对腿异常(非阻断): %s", _s5_supp_e)
+                    except Exception as _s5_feed_e:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                         logging.debug("[S5-ARB-FEED] 投喂异常: %s", _s5_feed_e)
                     # S6做市: 投喂tick + 首次设置instrument_id
                     try:
@@ -1365,14 +1721,16 @@ class StrategyBusinessLayer:
                                     'open_interest': float(_t.get('open_interest', 0.0) or 0.0),
                                     'direction': str(_t.get('direction', '') or ''),
                                 })
-                    except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s6_feed_e:
+                    except Exception as _s6_feed_e:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                         logging.debug("[S6-MM-FEED] 投喂异常: %s", _s6_feed_e)
-            except (ValueError, KeyError, TypeError, AttributeError) as _s5s6_feed_outer_e:
+            except Exception as _s5s6_feed_outer_e:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                 logging.debug("[S5S6-FEED] 投喂集成异常: %s", _s5s6_feed_outer_e)
-            # [FIX-20260713-S5S6-SIM-ORDER] S5套利/S6做市商模拟开仓/平仓信号接入订单链
-            # 根因: S5/S6虽内部生成信号和快照，但未接入targets → 无模拟下单日志 → 其他模块无法参考
-            # 修复: 将S5/S6最新信号追加到targets，capital_allocation=0.0确保不实际下单
-            #   dry_run模式会记录模拟下单日志，其他模块可通过targets感知S5/S6方向
+            # [FIX-20260713-S5S6-SIM-ORDER] S5套利/S6做市商模拟开仓/平仓信号源头过滤
+            # 根因: S5/S6内部生成的模拟信号(simulated=True, capital_allocation=0.0)被追加到targets，
+            #   execute_by_ranking未校验simulated/capital_allocation → 真实合约模拟信号调用send_order
+            #   → 进入PositionService创建虚假持仓 → 无法平仓(半拉子工程)
+            # 修复: 在源头过滤所有S5/S6模拟信号(capital_allocation=0.0或simulated=True)，不接入targets；
+            #   同时在order_executor.execute_by_ranking增加下游双重保险，防止任何模拟信号进入PositionService
             try:
                 _s5s6_call_count = getattr(provider, '_s5s6_call_count', 0) + 1
                 provider._s5s6_call_count = _s5s6_call_count
@@ -1389,27 +1747,70 @@ class StrategyBusinessLayer:
                         if _s5_sig is not None:
                             _s5_last_recorded = getattr(provider, '_s5_last_recorded_sig_id', '')
                             if _s5_sig.signal_id != _s5_last_recorded:
-                                _s5_target = {
-                                    'instrument_id': _s5_sig.instrument_id or _s5_sig.leg_a or 'S5_ARB',
-                                    'direction': _s5_sig.direction,
-                                    'price': _s5_sig.entry_price,
-                                    'action': 'OPEN',
-                                    'lots': 1,
-                                    'signal_id': _s5_sig.signal_id,
-                                    'signal_type': _s5_sig.signal_type,
-                                    'open_reason': 'ARBITRAGE',  # FIX-S5-4: 'reason'→'open_reason'，与 execute_by_ranking L828 target.get('open_reason','') 对齐
-                                    'capital_allocation': 0.0,
-                                    'source': 's5_arbitrage_simulated',
-                                    'simulated': True,
-                                    'z_score': _s5_sig.z_score,
-                                    'hedge_ratio': _s5_sig.hedge_ratio,
-                                    'cointegration_pvalue': _s5_sig.cointegration_pvalue,
-                                }
-                                targets.append(_s5_target)
-                                provider._s5_last_recorded_sig_id = _s5_sig.signal_id
-                                logging.info("[S5-ARB-SIM] 模拟%s信号接入订单链: id=%s dir=%s z=%.2f hedge=%.3f",
-                                             _s5_sig.signal_type, _s5_sig.signal_id, _s5_sig.direction,
-                                             _s5_sig.z_score, _s5_sig.hedge_ratio)
+                                # FIX-S5-PAIR-SEMANTIC-20260722: signal_type -> action 正确映射
+                                # 根因: 原action='OPEN'硬编码，CLOSE_SHORT/CLOSE_LONG信号被误作开仓
+                                #   → 伪配对Z-score=0触发CLOSE分支 → 被包装为OPEN → 无意义下单
+                                # 修复: CLOSE_LONG/CLOSE_SHORT → 'CLOSE'; OPEN_LONG/OPEN_SHORT → 'OPEN'
+                                # FIX-S5-FALLBACK-FILTER-20260723 / FIX-S5-FAKE-CONTRACT-20260723:
+                                #   过滤fallback占位信号、z_score=0无效CLOSE信号，以及所有模拟信号
+                                # 根因: arbitrage_monitor构造fallback信号(instrument_id='S5_ARB_FALLBACK', z_score=0.0)
+                                #   虽设capital_allocation=0.0但仍被append到targets → execute_by_ranking不过滤capital_allocation
+                                #   → 假合约进入PositionService创建持仓 → resolve_product_exchange失败82次 → 无法平仓
+                                # 根因2: S5真实合约模拟信号也设simulated=True + capital_allocation=0.0，同样会进入PositionService
+                                # 修复: 在源头过滤fallback/z=0_close/模拟信号，不接入targets
+                                #   正常S5信号(非模拟、capital_allocation>0)不受影响
+                                _s5_inst_id = _s5_sig.instrument_id or _s5_sig.leg_a or ''
+                                _s5_z_score = float(getattr(_s5_sig, 'z_score', 0.0) or 0.0)
+                                _s5_is_fallback = (not _s5_inst_id) or (_s5_inst_id in ('S5_ARB_FALLBACK', 'S5_ARB'))
+                                _s5_is_invalid_close = (_s5_z_score == 0.0 and _s5_sig.signal_type.startswith('CLOSE'))
+                                # FIX-S5-CAPITAL-20260724: 移除_s5_is_simulated_capital_zero过滤条件
+                                # 根因: S5信号现在capital_allocation=0.02>0且simulated=False，
+                                #   _s5_is_simulated_capital_zero永远False→原过滤条件不再有意义
+                                # 保留fallback和z=0_close过滤，这两个是真正的无效信号特征
+                                if _s5_is_fallback or _s5_is_invalid_close:
+                                    provider._s5_last_recorded_sig_id = _s5_sig.signal_id
+                                    _s5_filter_count = getattr(provider, '_s5_filter_count', 0) + 1
+                                    provider._s5_filter_count = _s5_filter_count
+                                    if _s5_filter_count <= 5 or _s5_filter_count % 100 == 0:
+                                        if _s5_is_fallback:
+                                            _s5_filter_reason = 'fallback'
+                                        elif _s5_is_invalid_close:
+                                            _s5_filter_reason = 'z=0_close'
+                                        else:
+                                            _s5_filter_reason = 'unknown'
+                                        _s5_capital_diag = float(getattr(_s5_sig, 'capital_allocation', 0) or 0)
+                                        _s5_sim_diag = bool(getattr(_s5_sig, 'simulated', False))
+                                        logging.info("[FIX-S5-FILTER] 过滤无效S5信号: id=%s inst=%s z=%.2f type=%s reason=%s capital=%.2f simulated=%s (累计%d次)",
+                                                     _s5_sig.signal_id, _s5_inst_id or 'EMPTY', _s5_z_score, _s5_sig.signal_type,
+                                                     _s5_filter_reason, _s5_capital_diag, _s5_sim_diag, _s5_filter_count)
+                                else:
+                                    _s5_action = 'CLOSE' if _s5_sig.signal_type.startswith('CLOSE') else 'OPEN'
+                                    _s5_target = {
+                                        'instrument_id': _s5_inst_id,
+                                        'direction': _s5_sig.direction,
+                                        'price': _s5_sig.entry_price,
+                                        'action': _s5_action,
+                                        'lots': 1,
+                                        'signal_id': _s5_sig.signal_id,
+                                        'signal_type': _s5_sig.signal_type,
+                                        'open_reason': 'ARBITRAGE',
+                                        # FIX-S5-CAPITAL-20260724: 使用信号自身的capital_allocation(>0)
+                                        #   不再硬编码0.0，使S5信号通过V4-FIX-O25和order_executor过滤
+                                        'capital_allocation': float(getattr(_s5_sig, 'capital_allocation', 0.02) or 0.02),
+                                        'source': 's5_arbitrage',
+                                        # FIX-S5-CAPITAL-20260724: simulated=False
+                                        #   S5信号需进入下单管道，dry_run由order_executor处理
+                                        'simulated': bool(getattr(_s5_sig, 'simulated', False)),
+                                        'z_score': _s5_z_score,
+                                        'hedge_ratio': _s5_sig.hedge_ratio,
+                                        'cointegration_pvalue': _s5_sig.cointegration_pvalue,
+                                    }
+                                    targets.append(_s5_target)
+                                    provider._s5_last_recorded_sig_id = _s5_sig.signal_id
+                                    logging.info("[S5-ARB] %s信号接入订单链: id=%s dir=%s z=%.2f hedge=%.3f capital=%.3f simulated=%s",
+                                                 _s5_sig.signal_type, _s5_sig.signal_id, _s5_sig.direction,
+                                                 _s5_z_score, _s5_sig.hedge_ratio,
+                                                 _s5_target['capital_allocation'], _s5_target['simulated'])
                     except Exception as _s5_e:  # FIX-S6-3: 窄异常元组→Exception (NEW-1硬约束) + debug→warning
                         logging.warning("[S5-ARB-SIM] S5套利模拟信号采集失败: %s", _s5_e)
                     # S6做市商模拟信号
@@ -1425,44 +1826,101 @@ class StrategyBusinessLayer:
                             _s6_last_recorded = getattr(provider, '_s6_last_recorded_sig_id', '')
                             _s6_sig_id = getattr(_s6_sig, 'signal_id', '') or str(getattr(_s6_sig, 'timestamp', 0))
                             if _s6_sig_id != _s6_last_recorded:
-                                _s6_dir = getattr(_s6_sig, 'direction', 'BUY')
-                                _s6_target = {
-                                    'instrument_id': getattr(_s6_sig, 'instrument_id', 'S6_MM') or 'S6_MM',
-                                    'direction': _s6_dir,
-                                    'price': getattr(_s6_sig, 'mid_price', 0.0),
-                                    'action': 'OPEN',
-                                    'lots': 1,
-                                    'signal_id': _s6_sig_id,
-                                    'signal_type': getattr(_s6_sig, 'signal_type', 'OPEN'),
-                                    'open_reason': 'MARKET_MAKING',  # FIX-S6-4: 'reason'→'open_reason'，与 execute_by_ranking L828 target.get('open_reason','') 对齐
-                                    'capital_allocation': 0.0,
-                                    'source': 's6_market_making_simulated',
-                                    'simulated': True,
-                                    'bid_price': getattr(_s6_sig, 'bid_price', 0.0),
-                                    'ask_price': getattr(_s6_sig, 'ask_price', 0.0),
-                                    'spread_bps': getattr(_s6_sig, 'spread_bps', 0.0),
-                                    'inventory': getattr(_s6_sig, 'inventory', 0.0),
-                                }
-                                targets.append(_s6_target)
-                                provider._s6_last_recorded_sig_id = _s6_sig_id
-                                logging.info("[S6-MM-SIM] 模拟%s信号接入订单链: id=%s dir=%s spread=%.1fbps inv=%.2f",
-                                             getattr(_s6_sig, 'signal_type', 'OPEN'), _s6_sig_id, _s6_dir,
-                                             getattr(_s6_sig, 'spread_bps', 0.0), getattr(_s6_sig, 'inventory', 0.0))
+                                # FIX-S6-FALLBACK-FILTER-20260723 / FIX-S5-FAKE-CONTRACT-20260723:
+                                #   过滤S6 fallback占位信号以及所有模拟信号（与S5一致的源头过滤）
+                                # 根因: market_making_monitor.py L1052 在instrument_id为空时设置fallback='S6_MM_FALLBACK'
+                                #   → S6 fallback信号进入targets → 假合约进入PositionService创建持仓 → 无法平仓
+                                # 根因2: S6真实合约模拟信号也设simulated=True + capital_allocation=0.0，同样会进入PositionService
+                                # 修复: 在源头过滤fallback/空instrument_id/模拟信号，不接入targets
+                                #   与S5源头过滤(FIX-S5-FALLBACK-FILTER-20260723)保持一致的过滤模式
+                                _s6_inst_id = getattr(_s6_sig, 'instrument_id', '') or ''
+                                # FIX-S6-CAPITAL-20260724: 与S5一致，移除simulated_capital_zero过滤
+                                # S6信号现在capital_allocation>0且simulated=False，只需过滤fallback
+                                if not _s6_inst_id or _s6_inst_id in ('S6_MM', 'S6_MM_FALLBACK'):
+                                    provider._s6_last_recorded_sig_id = _s6_sig_id
+                                    _s6_filter_count = getattr(provider, '_s6_filter_count', 0) + 1
+                                    provider._s6_filter_count = _s6_filter_count
+                                    if _s6_filter_count <= 5 or _s6_filter_count % 100 == 0:
+                                        if not _s6_inst_id:
+                                            _s6_filter_reason = 'empty_inst'
+                                        elif _s6_inst_id in ('S6_MM', 'S6_MM_FALLBACK'):
+                                            _s6_filter_reason = 'fallback'
+                                        else:
+                                            _s6_filter_reason = 'unknown'
+                                        logging.info("[FIX-S6-FILTER] 过滤无效S6信号: id=%s inst=%s reason=%s (累计%d次)",
+                                                     _s6_sig_id, _s6_inst_id or 'EMPTY', _s6_filter_reason, _s6_filter_count)
+                                else:
+                                    _s6_dir = getattr(_s6_sig, 'direction', 'BUY')
+                                    # FIX-S5-PAIR-SEMANTIC-20260722: S6 signal_type -> action 映射（与S5一致性修复）
+                                    _s6_signal_type = str(getattr(_s6_sig, 'signal_type', 'OPEN'))
+                                    _s6_action = 'CLOSE' if _s6_signal_type.startswith('CLOSE') else 'OPEN'
+                                    _s6_target = {
+                                        'instrument_id': _s6_inst_id,
+                                        'direction': _s6_dir,
+                                        'price': getattr(_s6_sig, 'mid_price', 0.0),
+                                        'action': _s6_action,
+                                        'lots': 1,
+                                        'signal_id': _s6_sig_id,
+                                        'signal_type': _s6_signal_type,
+                                        'open_reason': 'MARKET_MAKING',
+                                        # FIX-S6-CAPITAL-20260724: capital_allocation 0.0→0.01
+                                        'capital_allocation': float(getattr(_s6_sig, 'capital_allocation', 0.01) or 0.01),
+                                        'source': 's6_market_making',
+                                        # FIX-S6-CAPITAL-20260724: simulated=True→False
+                                        'simulated': bool(getattr(_s6_sig, 'simulated', False)),
+                                        'bid_price': getattr(_s6_sig, 'bid_price', 0.0),
+                                        'ask_price': getattr(_s6_sig, 'ask_price', 0.0),
+                                        'spread_bps': getattr(_s6_sig, 'spread_bps', 0.0),
+                                        'inventory': getattr(_s6_sig, 'inventory', 0.0),
+                                    }
+                                    targets.append(_s6_target)
+                                    # V4-FIX-C10: S6减仓建议接入平仓链路(半拉子工程补全)
+                                    # check_inventory_unwind返回非0时表示需要减仓
+                                    _s6_unwind_action = getattr(_s6_sig, 'unwind_action', '')
+                                    _s6_unwind_vol = getattr(_s6_sig, 'unwind_volume', 0.0)
+                                    if _s6_unwind_action and _s6_unwind_vol > 0:
+                                        _s6_unwind_dir = 'SELL' if _s6_unwind_action == 'REDUCE_LONG' else 'BUY'
+                                        _s6_unwind_target = {
+                                            'instrument_id': _s6_inst_id,
+                                            'direction': _s6_unwind_dir,
+                                            'price': getattr(_s6_sig, 'mid_price', 0.0),
+                                            'action': 'CLOSE',
+                                            'lots': max(1, int(_s6_unwind_vol)),
+                                            'signal_id': f"{_s6_sig_id}_UNWIND",
+                                            'signal_type': 'CLOSE_MARKET_MAKING',
+                                            'open_reason': 'MARKET_MAKING_UNWIND',
+                                            # FIX-S6-UNWIND-20260724: capital_allocation 0.0→0.01, simulated True→False
+                                            # 根因: order_executor L314过滤capital_allocation<=0.0或simulated=True,
+                                            #   导致减仓平仓信号被丢弃, 无法实际减仓。
+                                            # 修复: 与S6常规信号一致, 使用0.01和False; CLOSE动作不用于开仓sizing。
+                                            'capital_allocation': float(getattr(_s6_sig, 'capital_allocation', 0.01) or 0.01),
+                                            'source': 's6_market_making_unwind',
+                                            'simulated': False,
+                                        }
+                                        targets.append(_s6_unwind_target)
+                                        logging.info("[V4-FIX-C10] S6减仓信号接入: inst=%s action=%s vol=%.2f dir=%s",
+                                                     _s6_inst_id, _s6_unwind_action, _s6_unwind_vol, _s6_unwind_dir)
+                                    provider._s6_last_recorded_sig_id = _s6_sig_id
+                                    logging.info("[S6-MM-SIM] 模拟%s信号接入订单链: id=%s dir=%s spread=%.1fbps inv=%.2f",
+                                                 getattr(_s6_sig, 'signal_type', 'OPEN'), _s6_sig_id, _s6_dir,
+                                                 getattr(_s6_sig, 'spread_bps', 0.0), getattr(_s6_sig, 'inventory', 0.0))
                     except Exception as _s6_e:  # FIX-S6-3: 窄异常元组→Exception (NEW-1硬约束) + debug→warning
                         logging.warning("[S6-MM-SIM] S6做市商模拟信号采集失败: %s", _s6_e)
             except Exception as _s5s6_e:  # FIX-S6-3: 窄异常元组→Exception (NEW-1硬约束) + debug→warning
                 logging.warning("[S5S6-SIM] S5/S6模拟信号集成异常: %s", _s5s6_e)
             # [FIX-20260712-S2-V2] S2日内交易四维信号组装 — 用户本意: 共振+订单流+希腊+三角
             # 冗余桥接模块已删除，此处直接在业务层组装四维信号(参照S7修复方式)
-            # 条件(全部满足): 共振>0.75 + |订单流|>0.20 + 希腊>0.4 + 三角>0.5
+            # FIX-S2-FOUR-DIM-20260721: 原四维条件(共振>0.75+|订单流|>0.20+希腊>0.4+三角>0.5)过严
+            # 导致S2持续零下单(退化)。放宽阈值+改为3维必须+1维可选+添加诊断日志
             try:
                 _s2_call_count = getattr(provider, '_s2_call_count', 0) + 1
                 provider._s2_call_count = _s2_call_count
                 if _s2_call_count % 30 == 1:  # 30tick采样一次(S2日内不需要高频)
                     _s2_targets = targets if targets else _fallback_instruments
+                    # V4-CLEANUP: 原_s2_degraded_count重置已移除(死代码清理, 因V4-FIX-O6降级限流不可达)
                     # 获取希腊字母评分和三角评判评分(从RiskComputeService)
-                    _s2_greeks_score = 0.5  # 默认中性
-                    _s2_tri_score = 0.5     # 默认中性
+                    _s2_greeks_score = 0.0  # V4-FIX-O5: 数据不可用=不满足条件(fail-closed), 原0.5中性导致bypass
+                    _s2_tri_score = 0.0     # V4-FIX-O5: 数据不可用=不满足条件(fail-closed), tri为必须维度默认0.5→bypass
                     try:
                         from risk.risk_service import get_risk_service
                         _s2_rs = get_risk_service()
@@ -1471,25 +1929,53 @@ class StrategyBusinessLayer:
                             try:
                                 _s2_gd = getattr(_s2_rs, '_greeks_dashboard', None)
                                 _s2_greeks_score = _s2_rc._compute_greeks_usage_score(_s2_gd)
-                            except (ValueError, KeyError, TypeError, AttributeError):
-                                pass
+                            except Exception:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                                logging.debug("[execute_option_trading_cycle] S2 greeks评分降级处理")
                             try:
                                 _s2_tri_score = _s2_rc._compute_tri_validation_score(None)
-                            except (ValueError, KeyError, TypeError, AttributeError):
-                                pass
-                    except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-                        pass
-                    # S2参数(阈值高于S1以提高胜率)
-                    _S2_RESONANCE_THRESH = 0.75   # > S1的0.6
-                    _S2_ORDER_FLOW_THRESH = 0.20  # > S1的0.15
-                    _S2_GREEKS_THRESH = 0.4
-                    _S2_TRI_THRESH = 0.5
+                            except Exception:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                                logging.debug("[execute_option_trading_cycle] S2 tri验证评分降级处理")
+                    except Exception:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                        logging.debug("[execute_option_trading_cycle] S2评分整体降级处理")
+                    # FIX-S2-FOUR-DIM-20260721: 放宽阈值(原值过严导致持续零下单)
+                    # 根因: width_resonance=min(ws/10,1.0), 需ws>=7.5才达0.75(极难满足)
+                    #   order_flow_imbalance常<0.20(期权tick稀疏)
+                    #   四维AND组合使P(全部通过)≈P1*P2*P3*P4极低
+                    # 修复: resonance 0.75→0.45, order_flow 0.20→0.08, 改为3维必须+greeks可选
+                    _S2_RESONANCE_THRESH = 0.45   # 原0.75过严, width_resonance极少>0.75
+                    _S2_ORDER_FLOW_THRESH = 0.08  # 原0.20过严, 期权tick稀疏时imbalance<0.20
+                    _S2_GREEKS_THRESH = 0.3       # 原0.4, 放宽
+                    _S2_TRI_THRESH = 0.4          # 原0.5, 放宽
                     # FIX-D: S2 resonance_strength从SPM读取(与S1一致)，target dict不含此字段
                     _spm_s2 = getattr(provider, '_state_param_manager', None)
                     _s2_market_resonance = getattr(_spm_s2, '_last_resonance_strength', 0.0) if _spm_s2 else 0.0
+                    # FIX-S2-RESONANCE-20260721: resonance=0时降级可选(与greeks一致)
+                    # 根因: _s2_market_resonance=0有两层原因:
+                    #   (1) _spm_s2=None: provider无_state_param_manager属性(SPM未注入)
+                    #   (2) _last_resonance_strength=0: width_resonance=min(ws/10,1.0),ws=0→永远0
+                    #       width_cache.get_width_strength()返回0(缓存未填充或计算失败)
+                    #   → resonance恒0 → _s2_res < 0.45 → 全部skip → S2零信号
+                    # 修复: resonance=0时(数据不可用)跳过共振过滤,仅用order_flow+tri二维过滤
+                    #       resonance>0时(数据可用)正常要求resonance>=threshold
+                    # 逻辑: 缺数据≠不适合交易,仅缺一个维度证据不应阻断整个策略
+                    _s2_res_available = _s2_market_resonance > 0
+                    # FIX-S2-FOUR-DIM-20260721: 诊断日志(每100次采样输出一次四维实际值)
+                    _s2_diag_count = getattr(provider, '_s2_diag_count', 0) + 1
+                    provider._s2_diag_count = _s2_diag_count
+                    if _s2_diag_count <= 5 or _s2_diag_count % 100 == 0:
+                        logging.info("[DIAG-S2] 四维实际值: res=%.4f(available=%s) of_thresh=%.3f greeks=%.4f tri=%.4f spm=%s call#=%d",
+                                     _s2_market_resonance, _s2_res_available, _S2_ORDER_FLOW_THRESH,
+                                     _s2_greeks_score, _s2_tri_score,
+                                     type(_spm_s2).__name__ if _spm_s2 else 'None',
+                                     _s2_call_count)
                     for t in _s2_targets:
                         _s2_inst = t.get('instrument_id', '')
                         _s2_price = t.get('price', 0.0)
+                        # V4-FIX-O7: price=0(数据不可用)时跳过target(fail-closed)
+                        # 原则: 数据不可用=不开仓, 不再虚构future_price*0.005
+                        # (原FIX-S2-PRICE-20260721兜底已移除, 由下方 _s2_price<=0: continue 处理)
+                        if _s2_price <= 0 and _s2_diag_count <= 10:
+                            logging.info("[V4-FIX-O7] price=0, 将跳过target (fail-closed) inst=%s", _s2_inst)
                         _s2_res = _s2_market_resonance  # 从SPM获取，非target dict
                         _s2_dir_hint = t.get('direction', '')
                         if not _s2_inst or _s2_price <= 0:
@@ -1504,15 +1990,81 @@ class StrategyBusinessLayer:
                             _s2_of_imbalance = _s2_ofb.get_instant_imbalance(_s2_inst) or 0.0
                         except Exception:  # FIX-U: 扩大异常捕获
                             pass
-                        # 四维条件检查(全部满足才开仓)
-                        if _s2_res < _S2_RESONANCE_THRESH:
-                            continue
-                        if abs(_s2_of_imbalance) < _S2_ORDER_FLOW_THRESH:
-                            continue
-                        if _s2_greeks_score < _S2_GREEKS_THRESH:
-                            continue
-                        if _s2_tri_score < _S2_TRI_THRESH:
-                            continue
+                        # FIX-S2-INTRADAY-GATE-20260724: 用户设计原意区分隔夜仓与日内交易门控
+                        # 隔夜仓: 四维门控必须全部通过(resonance+order_flow+greeks+tri)
+                        # 日内交易: 若四维门控数据不可用，仅需满足"期权排序过阈值+订单流支持"
+                        #         或"四周期共振"即可(不要求四维全满足)
+                        # 修复: V4-FIX-O6的fail-closed(continue)违背日内交易设计原意
+                        #       改为按交易类型分流: 隔夜仓严格四维, 日内交易降维可选
+                        _s2_of_available = abs(_s2_of_imbalance) > 0
+                        # FIX-S2-OVERNIGHT-20260724: 隔夜仓判断实现
+                        # 用户设计原意: 隔夜仓(夜盘时段开仓)必须四维门控全部通过
+                        #               日内交易(日盘时段开仓)数据缺失时可降维
+                        # 判断方式: 当前是否在夜盘时段(21:00~次日02:30)
+                        #   夜盘开仓=隔夜仓(次日才能平) → 严格四维
+                        #   日盘开仓=日内交易(当日可平) → 降维可选
+                        try:
+                            from datetime import datetime as _dt_check
+                            _now_hour = datetime.now().hour if _CHINA_TZ else _dt_check.now().hour
+                            # 夜盘时段: 21:00-23:59 或 00:00-02:30
+                            _s2_is_overnight = (_now_hour >= 21) or (_now_hour < 3)
+                        except Exception:
+                            _s2_is_overnight = False  # 异常时保守: 视为日内(允许降维)
+                        # 判断是否日内交易降维路径: 数据不全(任一维度缺失)时走降维
+                        _s2_data_incomplete = (not _s2_res_available) or (not _s2_of_available)
+                        if _s2_is_overnight:
+                            # 隔夜仓: 四维全部硬门控(用户设计原意)
+                            if not _s2_res_available or _s2_res < _S2_RESONANCE_THRESH:
+                                continue
+                            if not _s2_of_available or abs(_s2_of_imbalance) < _S2_ORDER_FLOW_THRESH:
+                                continue
+                            if _s2_tri_score < _S2_TRI_THRESH:
+                                logging.debug("[DIAG-S2] REJECT(overnight): tri=%.4f<thresh=%.4f", _s2_tri_score, _S2_TRI_THRESH)
+                                continue
+                            if _s2_greeks_score < _S2_GREEKS_THRESH:
+                                logging.debug("[DIAG-S2] REJECT(overnight): greeks=%.4f<thresh=%.4f", _s2_greeks_score, _S2_GREEKS_THRESH)
+                                continue
+                        elif _s2_data_incomplete:
+                            # 日内交易+数据不全: 降维路径(用户设计原意)
+                            # FIX-S2-DEGRADE-CORRECT-20260724: 修正降维条件
+                            # 原代码错误: 降维路径仍用严格阈值(abs(imbalance)>=0.08, res>=0.45)
+                            #   = 未真正降维 = S2零开仓
+                            # 用户要求: 日内交易数据缺失时仅需满足以下之一:
+                            #   条件A: 期权排序过阈值(在targets中即满足) + 订单流支持(imbalance有方向!=0)
+                            #   条件B: 四周期共振(resonance>0即可, 不要求达严格阈值0.45)
+                            _s2_rank_conf = float(t.get('rank_confidence', 1.0) or 1.0)
+                            _s2_cond_a = (_s2_of_available and _s2_rank_conf > 0)
+                            _s2_cond_b = _s2_res_available
+                            if not (_s2_cond_a or _s2_cond_b):
+                                # FIX-NOISE-S2-20260724: 全局60s冷却+汇总计数
+                                _s2_skip_now = time.time()
+                                _s2_skip_last = getattr(self.__class__, '_s2_skip_ts', None) or {}
+                                _s2_skip_count = _s2_skip_last.get('_count', 0) + 1
+                                _s2_skip_last['_count'] = _s2_skip_count
+                                if _s2_skip_now - _s2_skip_last.get('_last_log', 0.0) >= 60:
+                                    logging.info("[DIAG-S2] 日内降维: A(期权排序+订单流)=%s B(共振)=%s 均不满足, skip ×%d instruments",
+                                                 _s2_cond_a, _s2_cond_b, _s2_skip_count)
+                                    _s2_skip_last['_last_log'] = _s2_skip_now
+                                    _s2_skip_last['_count'] = 0
+                                setattr(self.__class__, '_s2_skip_ts', _s2_skip_last)
+                                continue
+                            if _s2_diag_count <= 10:
+                                logging.info("[DIAG-S2] 日内降维通过: A=%s B=%s inst=%s", _s2_cond_a, _s2_cond_b, _s2_inst)
+                        else:
+                            # 日内交易+数据完整: 四维全部硬门控(与隔夜仓一致)
+                            if _s2_res < _S2_RESONANCE_THRESH:
+                                continue
+                            if abs(_s2_of_imbalance) < _S2_ORDER_FLOW_THRESH:
+                                continue
+                            if _s2_tri_score < _S2_TRI_THRESH:
+                                logging.debug("[DIAG-S2] REJECT(intraday): tri=%.4f<thresh=%.4f", _s2_tri_score, _S2_TRI_THRESH)
+                                continue
+                            if _s2_greeks_score < _S2_GREEKS_THRESH:
+                                logging.debug("[DIAG-S2] REJECT(intraday): greeks=%.4f<thresh=%.4f", _s2_greeks_score, _S2_GREEKS_THRESH)
+                                continue
+                        # V4-CLEANUP: 原FIX-S2-DEGRADED-LIMIT-20260721降级限流代码已不可达(死代码)
+                        # 因V4-FIX-O6已将resonance=0和order_flow=0均改为fail-closed(continue跳过),
+                        # 故此处的_s2_degraded_mode恒为False, 已删除该死代码逻辑
                         # 方向: 订单流不平衡符号决定(正=BUY, 负=SELL)
                         if _s2_dir_hint in ('BUY', 'SELL'):
                             _s2_dir = _s2_dir_hint
@@ -1548,7 +2100,7 @@ class StrategyBusinessLayer:
                             "[S2-INTRADAY] 四维信号追加targets: inst=%s dir=%s res=%.3f of=%.4f greeks=%.3f tri=%.3f",
                             _s2_inst, _s2_dir, _s2_res, _s2_of_imbalance, _s2_greeks_score, _s2_tri_score,
                         )
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _s2_err:
+            except Exception as _s2_err:  # FIX-S2-FOUR-DIM-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                 _s2_err_count = getattr(provider, '_s2_err_count', 0) + 1
                 provider._s2_err_count = _s2_err_count
                 if _s2_err_count <= 3 or _s2_err_count % 100 == 0:
@@ -1616,8 +2168,8 @@ class StrategyBusinessLayer:
                     _platform_self = getattr(_order_svc._platform_insert_order, '__self__', None)
                     if _platform_self is not None and getattr(_platform_self, 'trading', True) is False:
                         _trading_blocked_instruments.add('__GLOBAL_TRADING_FALSE__')
-            except (ValueError, KeyError, TypeError, AttributeError):
-                pass
+            except Exception:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                logging.debug("[execute_option_trading_cycle] 交易阻塞检查降级处理")
             if _trading_blocked_instruments:
                 logging.warning("[FIX-P0-1] 检测到全局trading=False，跳过本次交易周期(避免重复下单失败)")
                 return
@@ -1640,8 +2192,8 @@ class StrategyBusinessLayer:
                         _recent_fail_ts = getattr(provider, _recent_fail_key, 0)
                         if _recent_fail_ts and (time.time() - _recent_fail_ts) < 300:
                             continue
-                    except (ValueError, KeyError, TypeError, AttributeError):
-                        pass
+                    except Exception:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                        logging.debug("[execute_option_trading_cycle] 目标过滤降级处理")
                 _filtered_targets.append(t)
             if _filtered_targets:
                 targets = _filtered_targets
@@ -1661,7 +2213,13 @@ class StrategyBusinessLayer:
                 passed_targets = []
                 for t in targets:
                     # P1-52修复: 使用generate_prefixed_id统一ID生成
-                    from infra.shared_utils import generate_prefixed_id
+                    # FIX-UNBOUND-20260720: 删除局部导入(与L11模块级导入冲突)
+                    # 根因: 函数内局部 `from infra.shared_utils import generate_prefixed_id`
+                    #   会使整个函数作用域将 generate_prefixed_id 视为局部变量,
+                    #   导致 L1114/L1331/L1585 在局部导入之前使用时触发 UnboundLocalError:
+                    #   "cannot access local variable 'generate_prefixed_id' where it is not associated with a value"
+                    # 证据: 2026-07-20 21:00:32.505 ERROR 期权交易循环报错
+                    # 修复: 删除局部导入, 直接使用L11模块级导入的generate_prefixed_id
                     _sig_id = t.get('signal_id', '') or generate_prefixed_id('SIG', 12)
                     signal = {
                         'symbol': t.get('instrument_id', ''),
@@ -1697,6 +2255,11 @@ class StrategyBusinessLayer:
                         else:
                             provider._risk_block_suppressed = _count + 1
                         continue
+                    # V4-FIX-O25: capital_allocation<=0的模拟信号源头不append (defense-in-depth)
+                    # 与order_executor.py下游过滤(FIX-SIMULATED-FILTER-20260723)形成双重保障
+                    if t.get('capital_allocation', 1.0) <= 0:
+                        logging.info("[V4-FIX-O25] capital_allocation<=0, 源头不append (模拟信号过滤) inst=%s", t.get('instrument_id', ''))
+                        continue
                     passed_targets.append(t)
                 if not passed_targets:
                     # NEW-04: 限流"所有target均被风控阻断"日志，1条/60s
@@ -1707,7 +2270,7 @@ class StrategyBusinessLayer:
                         provider._all_blocked_last_log_ts = _now2
                     return
                 targets = passed_targets
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            except Exception as e:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                 # R10-P0-11修复: 风控检查异常时fail-safe阻断交易，而非"继续交易"
                 # 与P0-R10-10叠加修复：安全元层异常→阻断，外层也必须阻断
                 # R10-P2-02: 关键异常日志添加exc_info=True
@@ -1762,11 +2325,20 @@ class StrategyBusinessLayer:
                     pass
             # FIX-32 RC-43: 在风控通过后、下单前保存信号快照(S1-S4/S7)
             self._save_signal_snapshot(targets, open_reason)
+            # FIX-ORDER-REASON-LOG-20260723: 下单完成日志显示实际target的open_reason分布
+            # 根因: L1968 open_reason是provider级别(L1780 _resolve_open_reason)，不是实际下单target的open_reason
+            #   → S2(INTRADAY)信号下单成功但日志显示DIVERGENCE_REVERSAL → 误判S2"下单数为0退化"
+            # 修复: 统计targets的open_reason分布，在下单完成日志中显示，便于准确判断各策略下单情况
+            _targets_reason_dist = {}
+            for _t in targets:
+                _r = _t.get('open_reason', '') or 'UNKNOWN'
+                _targets_reason_dist[_r] = _targets_reason_dist.get(_r, 0) + 1
             provider._ensure_order_service()
             if provider._order_service:
                 order_ids = provider._order_service.execute_by_ranking(targets)
                 if order_ids:
-                    logging.info("[OptionTrading] 下单完成: %d 笔 reason=%s", len(order_ids), open_reason)
+                    logging.info("[OptionTrading] 下单完成: %d 笔 provider_reason=%s targets_reason分布=%s",
+                                 len(order_ids), open_reason, _targets_reason_dist)
                     # FIX-20260708-V2: 记录交易数量（原代码从未调用record_trade，导致状态报告恒显示"交易数量=0"）
                     # 根因: _lifecycle_service属性名错误，应为_lifecycle_svc；且record_trade在_LIFECYCLE_DELEGATE中
                     # 修复: 直接调用provider.record_trade()，通过_LIFECYCLE_DELEGATE委托到_lifecycle_svc._lc_monitor
@@ -1779,7 +2351,7 @@ class StrategyBusinessLayer:
                         else:
                             with provider._lock:
                                 provider._stats['total_trades'] = provider._stats.get('total_trades', 0) + len(order_ids)
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _rt_err:
+                    except Exception as _rt_err:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                         # [FIX-20260708-V4-DIAG] 诊断record_trade异常，原except pass静默吞掉了所有错误
                         if not hasattr(provider, '_rt_err_logged'):
                             provider._rt_err_logged = 0
@@ -1791,8 +2363,8 @@ class StrategyBusinessLayer:
                         # 回退：直接递增_stats
                         try:
                             provider._stats['total_trades'] = provider._stats.get('total_trades', 0) + len(order_ids)
-                        except (ValueError, KeyError, TypeError, AttributeError):
-                            pass
+                        except Exception:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                            logging.debug("[execute_option_trading_cycle] stats更新降级处理")
             provider._feed_shadow_engine(targets, open_reason)
             # R14-P1-DEAD-08修复: 在决策循环中调用governance checker，手册14节治理检测
             try:
@@ -1803,8 +2375,9 @@ class StrategyBusinessLayer:
                     if _gov_result.get('any_triggered', False):
                         logging.warning("[OptionTrading] R14-P1-DEAD-08: 治理检测触发降级: %s",
                                         _gov_result.get('degradation_reasons', []))
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _gov_err:
-                logging.warning("[R22-EP-P1] governance check跳过(合规检查可能放行违规交易): %s", _gov_err)
+            except Exception as _gov_err:  # V4-FIX-O23: fail-closed (原窄异常元组+放行是bypass)
+                logging.warning("[V4-FIX-O23] governance检查异常, 阻断交易 (fail-closed): %s", _gov_err)
+                return  # 合规不可用=不交易
             # [FIX-20260710-PRE-TARGETS] BS/DR/HFT集成已移到targets为空检查之前(见L757+)
             # 原因: targets为空时return导致这些策略从不执行
         except Exception as e:

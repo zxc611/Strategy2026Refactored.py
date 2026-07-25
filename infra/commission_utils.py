@@ -243,11 +243,12 @@ REASON_MULTIPLIERS = {
     "CORRECT_RESONANCE":    {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
     "HIGH_FREQ":            {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
     "DIVERGENCE_REVERSAL":  {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.67},  # FIX-20260711-P2: tp_mult/sl_mult从0.83/1.0修正为1.0（TP_SL_REASON_DEFAULTS已提供1.3/0.50）
-    "BOX_SPRING":           {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.8},  # FIX-20260711-P2: sl_mult从0.8修正为1.0（TP_SL_REASON_DEFAULTS已提供2.0/0.40）；time_mult=0.8保持
+    "BOX_SPRING":           {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},  # FIX-20260711-P2: sl_mult从0.8修正为1.0（TP_SL_REASON_DEFAULTS已提供2.0/0.40）；[FIX-20260712-S4] time_mult 0.8→1.0(配合hold_override=5min, 实际时间止损5×1.0=5min, 与弹簧快进快出特性对齐)
     "OTHER_SCALP":          {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.33},  # FIX-20260711-P2: tp_mult/sl_mult从0.73/0.6修正为1.0（TP_SL_REASON_DEFAULTS已提供1.1/0.30）
-    "BOX_EXTREME":          {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.33},  # FIX-20260711-P2: tp_mult/sl_mult从0.73/0.6修正为1.0（TP_SL_REASON_DEFAULTS已提供1.2/0.40）
+    "BOX_EXTREME":          {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.50},  # FIX-20260711-P2: tp_mult/sl_mult从0.73/0.6修正为1.0（TP_SL_REASON_DEFAULTS已提供1.2/0.40）；[FIX-20260712-S3] time_mult 0.33→0.50(时间止损19.8min→30min, 给突破更多确认窗口)
     "ARBITRAGE":            {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 0.25},  # FIX-20260711-P2: tp_mult/sl_mult从0.5/0.5修正为1.0（TP_SL_REASON_DEFAULTS已提供1.2/0.30；S5不开仓但保持一致性）
     "MARKET_MAKING":        {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},  # FIX-20260711-P2: sl_mult从0.8修正为1.0（TP_SL_REASON_DEFAULTS已提供1.1/0.20；S6不开仓但保持一致性）
+    "INTRADAY":             {"tp_mult": 1.5,  "sl_mult": 0.5,  "time_mult": 2.0},  # [FIX-20260712-S2] S2日内: 高止盈/严止损/长持仓
     "MANUAL":               {"tp_mult": 1.0,  "sl_mult": 1.0,  "time_mult": 1.0},
 }
 

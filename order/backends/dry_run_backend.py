@@ -172,5 +172,48 @@ class DryRunExecutionBackend(OrderExecutionBackend):
             svc._dry_run_check_logged = time.time()
         return _dry_run
 
+    def invoke_cancel(self, platform_id) -> None:
+        """[FIX-DRY-CANCEL-20260720] dry_run 虚拟撤单 — 不调用平台API
+
+        根因: DryRunExecutionBackend未实现invoke_cancel，OrderService委托时
+        抛NotImplementedError(184次ERROR)。
+        修复: dry_run模式下撤单仅标记CANCELLED状态，不调用平台撤单API。
+        与LiveExecutionBackend.invoke_cancel对称，但无平台调用。
+
+        Args:
+            platform_id: 平台订单ID (dry_run模式下可能为int/str/None，均虚拟处理)
+        """
+        svc = self._svc
+        _pid_str = str(platform_id) if platform_id else ''
+
+        # 查找对应的internal order_id
+        _order_id = None
+        with svc._lock:
+            if _pid_str and _pid_str in svc._platform_id_to_order_id:
+                _order_id = svc._platform_id_to_order_id[_pid_str]
+            elif _pid_str:
+                # fallback: 遍历查找
+                for _pid, _oid in svc._platform_id_to_order_id.items():
+                    if str(_pid) == _pid_str:
+                        _order_id = _oid
+                        break
+
+        if _order_id and _order_id in svc._orders_by_id:
+            _order = svc._orders_by_id[_order_id]
+            _order['status'] = 'CANCELLED'
+            _order['updated_at'] = _dt.now()
+            try:
+                svc._wal_write(_order_id, 'CANCELLED', _order)
+                svc._append_order_state(_order_id, 'CANCELLED', _order)
+            except Exception as _cancel_persist_err:
+                # 实时回调路径硬约束: except Exception
+                logging.warning("[DRY-RUN] 虚拟撤单持久化失败(非阻断): %s err=%s",
+                                _order_id, _cancel_persist_err)
+            logging.info("[DRY-RUN] 虚拟撤单成功: order=%s platform_id=%s",
+                         _order_id, _pid_str)
+        else:
+            logging.debug("[DRY-RUN] 虚拟撤单: 未找到订单 platform_id=%s (可能已平仓)",
+                          _pid_str)
+
 
 __all__ = ['DryRunExecutionBackend']

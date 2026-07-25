@@ -286,8 +286,15 @@ def compute_final_score(
         }
 
     # Step 3: 同号或任一为零：按权重融合
+    # FIX-F (2026-07-23): 冷启动安全融合 — resonance_score=0时使用100%product_score_ts
+    # 原代码: final = (1-w)*ts + w*rs，当rs=0时final=0.5*ts（分数腰斩，比禁用更差）
+    # 修复: 当resonance_score=0时，权重完全分配给product_score_ts（等价于禁用模式）
     w = resonance_weight
-    final = (1.0 - w) * product_score_ts + w * resonance_score
+    if abs(resonance_score) < 1e-9:
+        # 冷启动/无共振信号: 退化为v2.5行为 final=product_score_ts
+        final = product_score_ts
+    else:
+        final = (1.0 - w) * product_score_ts + w * resonance_score
 
     return {
         'final_score': round(final, 6),

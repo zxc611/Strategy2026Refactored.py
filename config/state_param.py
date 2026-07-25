@@ -284,9 +284,17 @@ class StateTransitionCapture:
 
                 self._pending_entries[point.transition_id] = point
 
-        logging.info("[StateTransitionCapture] %s -> %s event=%s entry=%s strength=%.3f",
-
-                     old_state, new_state, event.name, 'YES' if entry_signal else 'NO', resonance_strength)
+        # FIX-20260723-THROTTLE: 日志限频(60s冷却)，原每状态切换打INFO→28468次/20分钟
+        _stc_now = time.time()
+        _stc_key = f"{old_state}->{new_state}"
+        if not hasattr(StateTransitionCapture, '_stc_log_ts'):
+            StateTransitionCapture._stc_log_ts = {}
+        _stc_last = StateTransitionCapture._stc_log_ts
+        if _stc_now - _stc_last.get(_stc_key, 0.0) >= 60:
+            logging.info("[StateTransitionCapture] %s -> %s event=%s entry=%s strength=%.3f",
+                         
+                         old_state, new_state, event.name, 'YES' if entry_signal else 'NO', resonance_strength)
+            _stc_last[_stc_key] = _stc_now
 
         return entry_signal
 
@@ -779,7 +787,7 @@ class StateParamManager:
         yaml_path: Optional[str] = None,
 
         strategy_id: Optional[str] = None,  # P2-R11-01修复: 策略级参数隔离
-        state_confirm_bars: int = 2,
+        state_confirm_bars: int = 1,  # FIX-P2-1-RC4 (2026-07-23): 从2→1，缩短状态确认延迟(30s→15s)
 
         state_check_interval_sec: float = 15.0,
 
@@ -787,7 +795,7 @@ class StateParamManager:
 
         non_other_ratio_threshold: float = 0.40,
 
-        min_state_hold_seconds: float = 120.0,
+        min_state_hold_seconds: float = 60.0,  # FIX-P2-1-RC4 (2026-07-23): 从120→60，缩短最小持有时间
 
         history_max_len: Optional[int] = None,  # R13-P2-LOG-15修复: 可配置历史上线
     ):
@@ -1435,8 +1443,9 @@ class StateParamManager:
 
 
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-
+            except Exception as e:  # FIX-20260720-9: 窄异常元组扩展为Exception (NEW-1硬约束)
+                # 根因: "not all arguments converted" 是 TypeError 子类但可能被
+                #       字符串格式化内部抛出，窄元组无法覆盖 IndexError 等
                 logging.warning("[StateParamManager.update_state_from_width_cache] Error: %s", e)
 
 
@@ -1500,7 +1509,7 @@ class StateParamManager:
 
                         logging.warning(
 
-                            "[StateParamManager] P2-4: 检测到状态循环振）%s_s (窗口口d_, 考虑调整state_confirm_bars或min_state_hold_seconds",
+                            "[StateParamManager] P2-4: 检测到状态循环振荡: %s_%s (窗口=%d), 考虑调整state_confirm_bars或min_state_hold_seconds",
 
                             pair[0], pair[1], count
 

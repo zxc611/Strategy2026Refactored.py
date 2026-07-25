@@ -509,9 +509,27 @@ class TradingEVService:
         flow_imbalance: float = 0.0,
         cvd_slope: float = 0.0,
         instrument_id: str = '',
+        days_to_expiry: int = 0,
     ) -> Dict[str, Any]:
         if self._other.paused:
             return {'action': 'skip', 'reason': 'other策略已暂停'}
+
+        # K线箱体前置条件 — S3/S4策略箱体标准化
+        # 日内交易(dte≤5): 必须有日K小箱体确认(INTRADAY_SMALL)
+        # 隔夜交易(dte>5): 必须有周K中箱体确认(OVERNIGHT_MEDIUM)
+        kline_passed, kline_box = self._box_detector.check_kline_box_precondition(
+            instrument_id=instrument_id, days_to_expiry=days_to_expiry)
+        if not kline_passed:
+            _kb_type = 'INTRADAY_SMALL' if days_to_expiry <= 5 else 'OVERNIGHT_MEDIUM'
+            logging.info(
+                "[S3-KLINE-BOX] REJECT: K线箱体未确认 inst=%s dte=%d box_type=%s",
+                instrument_id, days_to_expiry, _kb_type,
+            )
+            return {
+                'action': 'filtered',
+                'reason': f'K线箱体未确认({_kb_type})',
+                'kline_box_type': _kb_type,
+            }
 
         extreme = self._box_detector.classify_extreme_state(
             current_price=current_price,

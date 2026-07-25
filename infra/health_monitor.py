@@ -2121,6 +2121,39 @@ class DiagnosisProbeManager:
                      run.get('run_id', '-'), reason, run.get('finished', False))
         cls.emit_contract_watch_summary(reason=reason, final=True)
 
+    # FIX-ORDERED-SHUTDOWN-20260721: 新增stop_all_threads统一关闭方法
+    # 根因: health_monitor模块创建的多个线程(I5 health_push/I6 ContractWatchSummary)
+    #       在pause/on_stop/on_destroy时未被统一关闭
+    # 修复: 提供stop_all_threads类方法，由lifecycle_callbacks统一调用
+    # 覆盖: I5 health_push + I6 ContractWatchSummary
+    # 注: I7 log_worker_thread实际不运行(_start_log_worker未被调用)，不在此处覆盖
+    @classmethod
+    def stop_all_threads(cls, reason: str = 'ordered_shutdown') -> Dict[str, int]:
+        """统一关闭health_monitor模块所有线程 (FIX-ORDERED-SHUTDOWN-20260721)
+
+        Returns:
+            Dict[str, int]: 各线程关闭状态统计
+        """
+        stats = {'contract_watch': 0, 'health_push': 0, 'errors': 0}
+        # 1. 停止 ContractWatchSummary 线程 (I6)
+        try:
+            cls.stop_contract_watch(reason=reason)
+            stats['contract_watch'] = 1
+        except Exception as _e:
+            stats['errors'] += 1
+            logging.debug("[FIX-ORDERED-SHUTDOWN] stop_contract_watch异常(非阻断): %s", _e)
+        # 2. 停止 health_push 线程 (I5)
+        try:
+            _hm = get_health_monitor()
+            if _hm is not None and hasattr(_hm, 'stop_push'):
+                _hm.stop_push()
+                stats['health_push'] = 1
+        except Exception as _e:
+            stats['errors'] += 1
+            logging.debug("[FIX-ORDERED-SHUTDOWN] stop_push异常(非阻断): %s", _e)
+        logging.info("[FIX-ORDERED-SHUTDOWN] health_monitor.stop_all_threads: %s", stats)
+        return stats
+
     @classmethod
     def begin_startup_timeline(cls, source: str, strategy_id: str = None, reset: bool = False) -> str:
         with cls._startup_lock:

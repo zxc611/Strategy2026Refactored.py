@@ -218,6 +218,11 @@ class HistoricalDataManager:
             progress_callback=_on_progress,
             stop_check=lambda: bool(
                 mgr_self._historical_stop_flag
+                # FIX-HKL-PAUSE-RESPOND-20260722: 增加_is_paused检查，HKL加载期间响应暂停
+                # 根因: 原stop_check仅检查_is_running/_destroyed/_stop_requested，
+                #   但暂停操作设置_is_paused=True时_is_running可能仍为True(异步状态同步窗口)
+                #   导致HKL线程不感知暂停，继续占用GIL 67分钟
+                or self._state_store.get('_is_paused', False)
                 or self._state_store.get('_destroyed', False)
                 or self._state_store.get('_stop_requested', False)
                 or not self._state_store.get('_is_running', False)

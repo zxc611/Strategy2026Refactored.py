@@ -1132,21 +1132,22 @@ class StrategyEcosystem:
         """策略成功执行后重置异常计数"""
         self._strategy_error_counts[strategy_name] = 0
 
-    def on_bar_update(self) -> None:
+    def on_bar_update(self, bar_data: Optional[Dict[str, float]] = None) -> None:
+        # K线箱体时代: tick级箱体已废弃
+        # 只需喂IV数据(用于classify_extreme_state的IV百分位计算)
+        # K线箱体由check_kline_box_precondition→detect_kline_box→DataService驱动
         self._bar_counter += 1
+        _bar = bar_data if bar_data else (self._last_bar_data if hasattr(self, '_last_bar_data') and self._last_bar_data else None)
         try:
-            if hasattr(self, '_last_bar_data') and self._last_bar_data:
+            if _bar:
                 bd = self._box_detector
-                d = self._last_bar_data
-                bd.update_bar(
-                    high=d.get('high', 0.0), low=d.get('low', 0.0),
-                    close=d.get('close', 0.0), volume=d.get('volume', 0.0),
-                )
-                if d.get('iv', 0.0) > 0:
-                    bd.update_iv(d['iv'])
-                bd.detect_box()
+                # IV数据仍需喂入(用于classify_extreme_state的IV百分位计算)
+                if _bar.get('iv', 0.0) > 0:
+                    bd.update_iv(_bar['iv'])
+                # tick级update_bar+detect_box已废弃:
+                # K线箱体由detect_kline_box从DataService获取日K线数据驱动
         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as _bd_err:
-            logging.warning("[StrategyEcosystem] BoxDetector update/detect failed: %s", _bd_err)
+            logging.warning("[StrategyEcosystem] BoxDetector IV update failed: %s", _bd_err)
         if self._bar_counter % 60 == 0:
             try:
                 self.validate_position_consistency()

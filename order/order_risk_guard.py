@@ -208,6 +208,24 @@ class OrderRiskGuard:
 
             logging.debug("[OrderRiskGuard.get_tick_size] Failed: %s", e)
 
+        # FIX-TICK-SIZE-FALLBACK-20260724: 缓存未命中时fallback到instrument_spec.py
+        # 避免默认返回1.0导致价格校正错误
+        try:
+
+            from config.instrument_spec import get_tick_size_for_instrument
+
+            spec_tick = get_tick_size_for_instrument(instrument_id)
+
+            if spec_tick > 0:
+
+                logging.debug("[OrderRiskGuard.get_tick_size] 从instrument_spec获取: %s=%s", instrument_id, spec_tick)
+
+                return spec_tick
+
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+
+            logging.debug("[OrderRiskGuard.get_tick_size] instrument_spec fallback失败: %s", e)
+
         default_tick_sizes = {
 
             'IF': 0.2, 'IC': 0.2, 'IH': 0.2, 'IM': 0.2,

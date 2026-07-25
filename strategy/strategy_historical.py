@@ -58,7 +58,7 @@ def load_historical_klines_with_stop(
     def _should_stop() -> bool:
         try:
             return bool(stop_check and stop_check())
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+        except Exception as exc:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常(OSError等)穿透崩溃HKL线程
             logging.debug("[Storage] 历史K线 stop_check 失败: %s", exc)
             return False
 
@@ -82,6 +82,14 @@ def load_historical_klines_with_stop(
     consecutive_empty_batches = 0
 
     for batch_index, start in enumerate(range(0, len(instruments), effective_batch_size), start=1):
+        # FIX-HKL-GIL-RELEASE-20260722: 批次循环开始处释放GIL，确保C++的safe_call(on_stop)能获取GIL
+        # 根因(经20260722调研报告铁证验证): HKL异步线程长时间占用GIL(67分钟加载16282个合约)，
+        #   C++的PyGILState_Ensure()阻塞等待GIL释放 → safe_call(on_stop)从未执行 → 暂停无效
+        # 修复: 每个批次开始前time.sleep(0.001)释放GIL，给C++回调(on_stop/pause)获取GIL的机会
+        # 开销: 0.001秒/批次 × 326批次 ≈ 0.3秒(可忽略，相对67分钟加载时间)
+        # 铁证: lifecycle_probe.jsonl显示22:00-23:00期间0条on_stop记录(C++从未获取到GIL)
+        time.sleep(0.001)
+
         if _should_stop():
             logging.info("[Storage] 历史K线加载收到停止信号，批次开始前退出")
             break
@@ -160,7 +168,7 @@ def load_historical_klines_with_stop(
                                 'open_interest': getattr(kline, 'open_interest', 0),
                                 'period': normalized_period,
                             })
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+                        except Exception as exc:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                             logging.warning(f"[Storage] 保存K线失败 {instrument_id}: {exc}")
 
                     if _kline_ts_warn_count > 0:
@@ -212,7 +220,7 @@ def load_historical_klines_with_stop(
                         f"当前系统时间 {_now_diag.isoformat()}, 非交易时段/周末/节假日可能返回空数据)"
                     )
                     return {'failed': True, 'instrument_id': instrument_id, 'reason': 'no_data'}
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+            except Exception as exc:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                 logging.error(f"[Storage] 加载历史K线失败 {instrument_str}: {exc}")
                 return {'failed': True, 'instrument_id': instrument_str, 'error': str(exc)}
 
@@ -220,10 +228,16 @@ def load_historical_klines_with_stop(
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"hkl-batch{batch_index}") as executor:
                 futures = {executor.submit(_load_single, inst): inst for inst in batch_instruments}
+                _as_completed_counter = 0
                 for future in as_completed(futures):
                     if _should_stop():
                         _stopped[0] = True
                         break
+                    # FIX-HKL-GIL-RELEASE-20260722: as_completed循环中每10个future释放一次GIL
+                    # 根因: 批次内50个合约全部快速失败时，as_completed循环密集持有GIL
+                    _as_completed_counter += 1
+                    if _as_completed_counter % 10 == 0:
+                        time.sleep(0.001)
                     result = future.result()
                     if result is None:
                         continue
@@ -241,9 +255,15 @@ def load_historical_klines_with_stop(
                                 _batch_api_error[0] = True
         else:
             # 单线程模式（max_workers=1），保持原有串行逻辑
+            _single_thread_counter = 0
             for instrument_str in batch_instruments:
                 if _should_stop():
                     break
+                # FIX-HKL-GIL-RELEASE-20260722: 串行模式下每10个合约释放一次GIL
+                # 根因: 串行模式无ThreadPoolExecutor，主线程持续持有GIL处理合约
+                _single_thread_counter += 1
+                if _single_thread_counter % 10 == 0:
+                    time.sleep(0.001)
                 result = _load_single(instrument_str)
                 if result is None:
                     continue
@@ -288,7 +308,7 @@ def load_historical_klines_with_stop(
                     'batch_index': batch_index,
                     'total_batches': total_batches,
                 })
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as exc:
+            except Exception as exc:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                 logging.debug(f"[Storage] 历史K线进度回调失败: {exc}")
 
         if empty_batch_limit and consecutive_empty_batches >= empty_batch_limit:
@@ -566,6 +586,11 @@ class HistoricalKlineMixin:
             progress_callback=_on_progress,
             stop_check=lambda: bool(
                 getattr(self, '_historical_stop_flag', False)
+                # FIX-HKL-PAUSE-RESPOND-20260722: 增加_is_paused检查，HKL加载期间响应暂停
+                # 根因: 原stop_check仅检查_is_running/_destroyed/_stop_requested，
+                #   但暂停操作设置_is_paused=True时_is_running可能仍为True(异步状态同步窗口)
+                #   导致HKL线程不感知暂停，继续占用GIL 67分钟
+                or getattr(self, '_is_paused', False)
                 or getattr(self, '_destroyed', False)
                 or getattr(self, '_stop_requested', False)
                 or not getattr(self, '_is_running', False)
@@ -647,7 +672,7 @@ class HistoricalKlineMixin:
                     'persisted_klines': persisted,
                     'kline_instruments_count': len(kline_instruments) if kline_instruments else 0,
                 })
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
             logging.debug(
                 "[HKL][strategy_id=%s] Failed to publish HistoricalKlineLoaded event: %s",
                 self.strategy_id, e,
@@ -692,7 +717,7 @@ class HistoricalKlineMixin:
                             return
                         try:
                             self._start_historical_kline_load()
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        except Exception as e:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                             logging.error(f"[HKL] Provider retry failed: {e}", exc_info=True)
                     t = threading.Thread(target=_retry_after_delay, name=f"hkl-retry-{self.strategy_id}", daemon=True)
                     # ✅ P1修复：加锁保护_background_threads.append
@@ -734,7 +759,7 @@ class HistoricalKlineMixin:
                 )
                 
                 self._load_historical_klines_once(_instruments, provider, provider_source)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                 logging.error(
                     f"[HKL][strategy_id={self.strategy_id}][owner_scope=strategy-instance]"
                     f"[source_type=historical-loader] Load failed: {e}", exc_info=True
@@ -756,7 +781,7 @@ class HistoricalKlineMixin:
                         _storage_ref2._ext_kline_load_in_progress = False
                     try:
                         _storage_ref2.close_connection()
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                    except Exception as e:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                         logger.debug(f"[{self.strategy_id}] Failed to close connection: {e}")
 
         thread = threading.Thread(target=_runner, name=f"hkl-{self.strategy_id}", daemon=True)
@@ -939,7 +964,7 @@ class HistoricalKlineMixin:
         def _async_kline_load():
             try:
                 self._start_historical_kline_load()
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                 import logging
                 logging.error(
                     "[HistoricalLoadTick][strategy_id=%s][owner_scope=strategy-instance]"

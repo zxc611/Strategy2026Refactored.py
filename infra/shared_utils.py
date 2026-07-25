@@ -832,6 +832,14 @@ def atomic_replace_file(target_path: str, new_content: str,
     Returns:
         Dict: {success: bool, backup_path: str, error: str}
     """
+    # FIX-WAL-RETRY-EXT (2026-07-20): 函数内全部 6 处窄异常元组扩展为 except Exception
+    # 根因: FIX-WAL-RETRY 仅修了 os.replace 重试循环 (L900)，遗漏同函数内 6 处窄元组
+    #   (备份/写入/验证/回滚路径)，_shutil.copy2/open/os.fsync 可能抛 OSError(WinError)
+    #   未被窄元组捕获 → 穿透到 C++ 平台导致策略崩溃。
+    # 证据: atomic_replace_file 被 order_persistence/position_persistence/
+    #   strategy/persistence_service/risk_support 等实时回调路径调用。
+    # 修复: 6 处 (ValueError,KeyError,TypeError,RuntimeError,AttributeError,IOError)
+    #   全部替换为 except Exception，符合 NEW-1 硬约束。
     result = {'success': False, 'backup_path': '', 'error': ''}
     backup_path = target_path + backup_suffix
 
@@ -840,24 +848,31 @@ def atomic_replace_file(target_path: str, new_content: str,
         if os.path.exists(target_path):
             _shutil.copy2(target_path, backup_path)
             result['backup_path'] = backup_path
-    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as e:
+    except Exception as e:
         result['error'] = f"备份失败: {e}"
         return result
 
     # 步骤2: 写入临时文件
-    temp_path = target_path + ".tmp"
+    # FIX-WAL-TEMP-RACE-20260724: 使用唯一临时文件名消除并发竞争
+    # 根因: temp_path = target_path + ".tmp" 在并发调用时共享同一文件名，
+    #   同一order_id毫秒级并发写入(实测DRY_zn2608P24600_1784871000335 19ms内3次)
+    #   导致: A) 线程A写入后读回得到线程B覆盖的内容→"写入内容验证不匹配"
+    #         B) 线程B os.replace移走temp文件→线程A os.replace→WinError 2
+    # 修复: 每次调用生成唯一temp文件名，各调用独立管理自己的temp文件生命周期，
+    #   不回退(保留backup+write+verify+replace全流程)、不降级、不绕过验证。
+    temp_path = f"{target_path}.tmp.{_uuid.uuid4().hex}"
     try:
         with open(temp_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
             f.flush()
             os.fsync(f.fileno())
-    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as e:
+    except Exception as e:
         result['error'] = f"写入临时文件失败: {e}"
         # 回滚: 恢复备份
         if backup_path and os.path.exists(backup_path):
             try:
                 _shutil.copy2(backup_path, target_path)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as rb_err:
+            except Exception as rb_err:
                 logging.error("UPG-P1-07: 回滚失败! backup=%s error=%s", backup_path, rb_err)
         # 清理临时文件
         try:
@@ -873,13 +888,13 @@ def atomic_replace_file(target_path: str, new_content: str,
             written = f.read()
         if written != new_content:
             raise RuntimeError("写入内容验证不匹配")
-    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as e:
+    except Exception as e:
         result['error'] = f"验证失败: {e}"
         # 回滚
         if backup_path and os.path.exists(backup_path):
             try:
                 _shutil.copy2(backup_path, target_path)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as rb_err:
+            except Exception as rb_err:
                 logging.error("UPG-P1-07: 回滚失败! error=%s", rb_err)
         try:
             os.unlink(temp_path)
@@ -897,11 +912,22 @@ def atomic_replace_file(target_path: str, new_content: str,
             os.replace(temp_path, target_path)
             _replace_err = None
             break
-        except PermissionError as _pe:
-            _replace_err = _pe
+        except OSError as _os_err:
+            # FIX-WAL-RETRY (2026-07-20, RC-3): 扩展为 OSError 覆盖 WinError 87/5/32 等
+            # 根因: 原 except 仅 PermissionError(WinError 5)，未覆盖 OSError(WinError 87 参数错误)
+            # 证据: 2026-07-20 11:21:33 日志 "[WinError 87] 参数错误" 重复发生
+            # PermissionError 是 OSError 子类，统一捕获后通过 errno 分流：
+            #   - errno 13 (EACCES) / errno 32 (ESHARE) → 瞬时占用，重试
+            #   - errno 22 (EINVAL, WinError 87) → 参数错误（如非法文件名字符），不重试直接返回
+            _replace_err = _os_err
+            _errno = getattr(_os_err, 'errno', None)
+            if _errno == errno.EINVAL:
+                # 参数错误（非法字符等）不可重试，直接返回失败
+                break
             if _attempt < 2:
                 time.sleep(0.1 * (_attempt + 1))
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
+            # 实时回调路径硬约束: except Exception（NEW-1）
             _replace_err = e
             break
     if _replace_err is not None:
@@ -911,7 +937,7 @@ def atomic_replace_file(target_path: str, new_content: str,
         if backup_path and os.path.exists(backup_path):
             try:
                 _shutil.copy2(backup_path, target_path)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as rb_err:
+            except Exception as rb_err:
                 logging.error("UPG-P1-07: 回滚失败! error=%s", rb_err)
         try:
             os.unlink(temp_path)
@@ -945,14 +971,22 @@ def sanitize_filename(name: str) -> str:
 
     将路径分隔符替换为下划线，防止路径遍历攻击。
     统一替代分散在 order_persistence/order_wal_state_service 中的
-    内联 replace('/', '_').replace('\\', '_') 实现。'
+    内联 replace('/', '_').replace('\\', '_') 实现。
+    [FIX-WAL-WIN-20260720] 追加Windows非法字符替换 (: * ? " < > |)，
+    防止含冒号的套利价差instrument_id (如 OI609C10400:br2609C14000)
+    导致WAL文件创建失败 WinError 87。
     Args:
         name: 原始文件名（如 order_id）
 
     Returns:
         安全的文件名字符串
     """
-    return name.replace('/', '_').replace('\\', '_')
+    # FIX-WAL-WIN: 先替换路径分隔符，再替换Windows非法字符
+    safe = name.replace('/', '_').replace('\\', '_')
+    # Windows非法字符: : * ? " < > | (冒号在套利价差instrument_id中常见)
+    for _ch in ':*?"<>|':
+        safe = safe.replace(_ch, '_')
+    return safe
 
 
 # ============================================================================

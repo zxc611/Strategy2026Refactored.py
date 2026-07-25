@@ -15,12 +15,60 @@ from infra.resilience import safe_float_to_int
 from strategy.box_spring_detector import (
     SpringState, SpringSignal, SpringPosition,
 )
-def _compute_hedge_ratio(self_or_signal, signal=None) -> float:
-    return 1.0
+def _compute_hedge_ratio(self_or_signal, signal=None) -> Optional[float]:
+    """V4-FIX-O15: 对冲比率计算(上策增强版)
+
+    STRADDLE（买入同行权价Call+Put）: 天然delta中性, hedge_ratio=1.0
+    非STRADDLE: 基于delta/underlying_price计算, delta不可用时fail-closed返回None
+    """
+    _signal_type = ''
+    _delta = None
+    _underlying_price = 0.0
+    try:
+        _sig = signal if signal is not None else self_or_signal
+        _signal_type = getattr(_sig, 'signal_type', '') or ''
+        _delta = getattr(_sig, 'delta', None)
+        _underlying_price = getattr(_sig, 'underlying_price', 0.0) or getattr(_sig, 'future_price', 0.0)
+    except Exception:
+        pass
+    # STRADDLE: 天然delta中性, hedge_ratio=1.0语义正确
+    if 'STRADDLE' in _signal_type.upper() or _signal_type == '':
+        return 1.0
+    # 非STRADDLE: 需要delta数据
+    if _delta is None or _underlying_price <= 0:
+        logging.warning("[V4-FIX-O15] 非STRADDLE场景delta/underlying_price不可用, 返回None (fail-closed)")
+        return None
+    hedge_ratio = abs(_delta) / _underlying_price
+    return min(max(hedge_ratio, 0.0), 2.0)  # 合理范围[0, 2]
 
 
 def _check_cross_strategy_risk(self_or_signal, signal=None) -> bool:
-    return True
+    """V4-FIX-O14: 跨策略风控检查（fail-closed）
+
+    原则: 数据不可用=不开仓（return False）
+    检查维度: S4净敞口（数据可用时检查，不可用时fail-closed阻断）
+    """
+    try:
+        from risk.risk_service import get_risk_service
+        rs = get_risk_service()
+        # 检查S4净敞口
+        _net_exposure = None
+        if hasattr(rs, 'get_strategy_net_exposure'):
+            _net_exposure = rs.get_strategy_net_exposure('s4_spring')
+        if _net_exposure is None:
+            # 数据不可用=fail-closed阻断
+            logging.warning("[S4-V4-FIX-O14] 跨策略净敞口数据不可用, fail-closed阻断")
+            return False
+        # 检查净敞口是否超限
+        _max_exposure = getattr(rs, 'get_strategy_max_exposure', lambda s: 10.0)('s4_spring') if hasattr(rs, 'get_strategy_max_exposure') else 10.0
+        if abs(_net_exposure) > _max_exposure:
+            logging.warning("[S4-V4-FIX-O14] S4净敞口超限: exposure=%.2f max=%.2f", _net_exposure, _max_exposure)
+            return False
+        return True
+    except Exception as _csre:
+        # 异常=fail-closed阻断
+        logging.warning("[S4-V4-FIX-O14] 跨策略风控检查异常, fail-closed阻断: %s", _csre)
+        return False
 
 
 def _record_spring_trade(self_or_signal, signal=None) -> Dict[str, Any]:
@@ -35,19 +83,126 @@ def _record_spring_trade(self_or_signal, signal=None) -> Dict[str, Any]:
     return {"recorded": True, "signal_id": sig_id}
 
 
+def _construct_straddle_pair_from_id(
+    option_instrument_id: str, paired_opt_type: str, width_cache: Any
+) -> Optional[Tuple[str, float, str]]:
+    """FIX-S4-STRADDLE-FALLBACK-20260722: 从期权ID构造配对期权ID并在width_cache中查找。
+
+    根因: 部分期权(如al2608P22800)不在width_cache._option_info中→原_find_straddle_pair
+          找不到→STRADDLE REJECT→S4仅3次下单(190次TRIGGERED)。
+
+    策略: 从期权ID中提取品种+行权价+月份，构造反类型期权ID，在width_cache中模糊匹配。
+    期权ID格式: al2608P22800, cu2608P104000, nr2608C14800, IO2609-P-4700 等
+    """
+    import re
+
+    # 格式1: 小写品种+数字+P/C+行权价 (如al2608P22800, nr2608C14800)
+    m1 = re.match(r'^([a-z]+\d+)([CP])(\d+)$', option_instrument_id)
+    # 格式2: 大写品种+数字+-P/C-+行权价 (如IO2609-P-4700, HO2609-C-3200)
+    m2 = re.match(r'^([A-Z]+\d+)-([CP])-(\d+)$', option_instrument_id)
+
+    if not m1 and not m2:
+        return None
+
+    if m1:
+        underlying = m1.group(1)   # e.g. al2608
+        orig_type = m1.group(2)    # P or C
+        strike = m1.group(3)       # e.g. 22800
+        # 构造配对: al2608C22800 (P→C) or al2608P22800 (C→P)
+        paired_id_constructed = f"{underlying}{paired_opt_type}{strike}"
+    else:
+        underlying = m2.group(1)
+        orig_type = m2.group(2)
+        strike = m2.group(3)
+        paired_id_constructed = f"{underlying}-{paired_opt_type}-{strike}"
+
+    orig_opt_type = 'PUT' if orig_type == 'P' else 'CALL'
+
+    # 在width_cache中查找构造的配对期权
+    if width_cache is not None and hasattr(width_cache, '_option_info'):
+        for _piid, _pinfo in width_cache._option_info.items():
+            _iid = _pinfo.get('instrument_id', _piid)
+            if _iid == paired_id_constructed:
+                _paired_prem = width_cache._option_price.get(_piid, 0.0)
+                logging.info("[DIAG-S4-EXEC] _construct_straddle_pair: 找到配对 %s→%s prem=%.4f",
+                             option_instrument_id, paired_id_constructed, _paired_prem)
+                return paired_id_constructed, _paired_prem, orig_opt_type
+
+    # 模糊匹配: 遍历同品种+同行权价+反类型的期权
+    if width_cache is not None and hasattr(width_cache, '_option_info'):
+        for _piid, _pinfo in width_cache._option_info.items():
+            _iid = _pinfo.get('instrument_id', _piid)
+            _opt_type = _pinfo.get('option_type', '')
+            # 同品种前缀+同行权价+反类型
+            if (_iid.startswith(underlying) and
+                _opt_type == paired_opt_type and
+                paired_id_constructed[-6:] in _iid):  # 行权价后6位模糊匹配
+                _paired_prem = width_cache._option_price.get(_piid, 0.0)
+                logging.info("[DIAG-S4-EXEC] _construct_straddle_pair(模糊): 找到配对 %s→%s prem=%.4f",
+                             option_instrument_id, _iid, _paired_prem)
+                return _iid, _paired_prem, orig_opt_type
+
+    logging.debug("[DIAG-S4-EXEC] _construct_straddle_pair: 无法构造配对 for %s", option_instrument_id)
+    return None
+
+
 def _find_straddle_pair(self_or_signal, signal=None) -> Tuple[str, float, str]:
     actual_signal = signal if signal is not None else self_or_signal
     # FIX-20260718-SANDBOX-E2E: 兼容 SpringSignal dataclass（原仅支持 dict）
     if isinstance(actual_signal, dict):
-        instrument_id = actual_signal.get("instrument_id", "")
+        option_instrument_id = actual_signal.get("option_instrument_id", "")
         premium = actual_signal.get("premium", 0.0)
-        opt_type = actual_signal.get("option_type", "CALL")
+        _dir = actual_signal.get("direction", "")
+        opt_type = "PUT" if "PUT" in _dir else "CALL"
     else:
-        instrument_id = getattr(actual_signal, "instrument_id", "")
+        option_instrument_id = getattr(actual_signal, "option_instrument_id", "")
         premium = getattr(actual_signal, "premium_price", 0.0)
         _dir = getattr(actual_signal, "direction", "")
         opt_type = "PUT" if "PUT" in _dir else "CALL"
-    return instrument_id, premium, opt_type
+
+    # FIX-S4-STRADDLE-PAIR-20260721: 从width_cache查找配对期权而非返回期货ID
+    # 根因: 原返回signal.instrument_id(期货ID如p2608)，不是PUT期权ID(如IO2607P4000)
+    #   → _execute_straddle_entry中put_instrument=期货ID → send_order(instrument_id=期货ID)
+    #   → L754 price<=0检查可能通过但instrument_id不是期权 → 下单失败或映射错误
+    # 修复: 从width_cache中查找同underlying_future_id+同strike_price+反类型的期权
+    paired_opt_type = 'PUT' if opt_type == 'CALL' else 'CALL'
+    try:
+        from data.width_cache import get_width_cache
+        _wc = get_width_cache()
+        if _wc is not None and hasattr(_wc, '_option_info'):
+            _found_original = False
+            for _iid, _info in _wc._option_info.items():
+                if _info.get('instrument_id', '') == option_instrument_id or _iid == option_instrument_id:
+                    _underlying_fid = _info.get('underlying_future_id', '')
+                    _strike = _info.get('strike_price', 0.0)
+                    _month = _info.get('month', '')
+                    _found_original = True
+                    # 在同underlying+同strike+同month中查找反类型
+                    for _piid, _pinfo in _wc._option_info.items():
+                        if (_pinfo.get('underlying_future_id', '') == _underlying_fid
+                            and abs(_pinfo.get('strike_price', 0.0) - _strike) < 0.01
+                            and _pinfo.get('month', '') == _month
+                            and _pinfo.get('option_type', '') == paired_opt_type):
+                            _paired_id = _pinfo.get('instrument_id', _piid)
+                            _paired_prem = _wc._option_price.get(_piid, 0.0)
+                            return _paired_id, _paired_prem, opt_type
+                    break  # 找到原期权信息但无配对，退出外层循环
+
+            # FIX-S4-STRADDLE-FALLBACK-20260722: width_cache中找不到原期权时的fallback
+            # 根因: _option_info中不含某些期权(如al2608P22800)→_found_original=False
+            #   → 跳过整个查找逻辑 → 返回空 → STRADDLE REJECT: no pair found
+            #   → 190次TRIGGERED仅3次入场(仅走BUY_PUT/BUY_CALL非STRADDLE路径)
+            # 修复: 从期权ID中提取underlying+strike+month，构造配对期权ID进行查找
+            if not _found_original and option_instrument_id:
+                logging.info("[DIAG-S4-EXEC] _find_straddle_pair fallback: 期权%s不在width_cache中，尝试ID构造配对",
+                             option_instrument_id)
+                _paired_constructed = _construct_straddle_pair_from_id(option_instrument_id, paired_opt_type, _wc)
+                if _paired_constructed:
+                    return _paired_constructed
+    except Exception:
+        logging.debug("[BoxSpring] _find_straddle_pair: width_cache查找失败，返回原始信号信息")
+    # fallback: 无配对时返回空(而非期货ID)，让_execute_straddle_entry正确拒绝
+    return "", 0.0, opt_type
 
 
 class BoxSpringExecutorService:
@@ -152,7 +307,7 @@ class BoxSpringExecutorService:
             cache = get_width_cache()
             if cache is None:
                 return None
-        except (ImportError, RuntimeError):
+        except Exception:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
             return None
 
         current_info = None
@@ -211,34 +366,54 @@ class BoxSpringExecutorService:
     # ========================================================================
 
     def execute_spring_entry(self, signal: SpringSignal) -> Optional[str]:
+        # [DIAG-S4-EXEC-20260721] 诊断日志：定位execute_spring_entry返回None的根因
+        _diag_exec_count = getattr(self, '_diag_exec_count', 0) + 1
+        self._diag_exec_count = _diag_exec_count
+        if _diag_exec_count <= 10 or _diag_exec_count % 100 == 0:
+            logging.info("[DIAG-S4-EXEC] execute_spring_entry #%d: opt=%s prem=%.4f dir=%s state=%s",
+                         _diag_exec_count, signal.option_instrument_id, signal.premium_price,
+                         signal.direction, signal.spring_state)
         with self._lock:
             active_count = sum(1 for p in self._positions.values() if p.is_open)
             if active_count >= self._max_active_positions:
-                logging.debug("[BoxSpring] Max positions reached: %d", active_count)
+                logging.info("[DIAG-S4-EXEC] REJECT: max_positions=%d limit=%d", active_count, self._max_active_positions)
                 return None
 
             if not self._check_cross_strategy_risk(signal):
+                logging.info("[DIAG-S4-EXEC] REJECT: cross_strategy_risk")
                 logging.warning("[BoxSpring] 跨策略风控阻断, 跳过Spring入场")
                 return None
 
             # ✅ P1-10修复: 铁律检查——防止趋势转换
+            # FIX-S4-ROOT-20260720: signal.instrument_id现在是期货合约ID(如IF2607),
+            # 但is_spring_position匹配的是option_instrument_id(如IO2607C4000)
+            # 必须传option_instrument_id才能正确匹配
             if not self.prevent_trend_conversion(
-                signal.instrument_id, 'OPEN', signal.open_reason
+                signal.option_instrument_id, 'OPEN', signal.open_reason
             ):
-                logging.warning("[BoxSpring] 铁律阻断: 趋势转换被阻止 %s", signal.instrument_id)
+                logging.info("[DIAG-S4-EXEC] REJECT: trend_conversion_blocked opt=%s", signal.option_instrument_id)
+                logging.warning("[BoxSpring] 铁律阻断: 趋势转换被阻止 %s", signal.option_instrument_id)
                 return None
 
             estimated_plr = 0.0
             if self._min_estimated_plr > 0 or self._dynamic_tp_sl_enabled:
                 estimated_plr = self.estimate_plr_before_entry(signal.instrument_id)
                 if self._min_estimated_plr > 0 and estimated_plr < self._min_estimated_plr:
-                    logging.debug("[BoxSpring] PLR过滤: estimated_plr=%.2f < min=%.2f", estimated_plr, self._min_estimated_plr)
+                    logging.info("[DIAG-S4-EXEC] REJECT: plr=%.2f < min=%.2f", estimated_plr, self._min_estimated_plr)
                     return None
 
             try:
                 from order.order_service import get_order_service
                 osvc = get_order_service()
                 if not osvc:
+                    logging.info("[DIAG-S4-EXEC] REJECT: order_service is None")
+                    return None
+
+                # FIX-S4-PREM-EXEC-20260721: premium_price<=0时send_order被L754拒绝
+                # 根因: premium_price=0→send_order(price=0)→order_executor_platform L754 `if price<=0: continue`
+                # FIX-S4-PREM已在targets构建时用future_price*0.005兜底,此处作最后防线
+                if signal.premium_price <= 0:
+                    logging.info("[DIAG-S4-EXEC] REJECT: premium_price=%.4f<=0 (L754会拒绝)", signal.premium_price)
                     return None
 
                 self._record_spring_trade(signal)
@@ -264,6 +439,7 @@ class BoxSpringExecutorService:
                         signal.direction,
                     )
                     if cheaper is None:
+                        logging.info("[DIAG-S4-EXEC] REJECT: lots=0且无更低价候选 opt=%s prem=%.4f", signal.option_instrument_id, signal.premium_price)
                         logging.warning("[BoxSpring] 资金不足且无更低权利金候选, 跳过: %s", signal.option_instrument_id)
                         return None
                     signal.option_instrument_id = cheaper['instrument_id']
@@ -320,7 +496,9 @@ class BoxSpringExecutorService:
                     )
                     return order_id
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+            except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
+                # 原except (ValueError,KeyError,TypeError,RuntimeError,AttributeError,ImportError)
+                # 遗漏ZeroDivisionError/OverflowError/OSError/RecursionError等→穿透到C++平台
                 logging.error("[BoxSpring] Entry error: %s", e)
 
         return None
@@ -329,8 +507,8 @@ class BoxSpringExecutorService:
         paired_instrument_id, paired_premium, signal_opt_type = self._find_straddle_pair(signal)
 
         if not paired_instrument_id or not signal_opt_type:
-            logging.warning("[BoxSpring] STRADDLE: no pair found for %s (opt_type=%s)",
-                            signal.option_instrument_id, signal_opt_type)
+            logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: no pair found for %s (paired_id=%s opt_type=%s)",
+                         signal.option_instrument_id, paired_instrument_id, signal_opt_type)
             return None
 
         is_call = signal_opt_type == 'CALL'
@@ -339,12 +517,26 @@ class BoxSpringExecutorService:
         call_premium = signal.premium_price if is_call else paired_premium
         put_premium = paired_premium if is_call else signal.premium_price
 
+        # FIX-S4-STRADDLE-PREM-20260721: STRADDLE路径premium<=0纵深防线
+        # 根因: call_premium或put_premium<=0时send_order被L754拒绝
+        #   call_premium=signal.premium_price(已在execute_spring_entry检查>0)
+        #   put_premium=paired_premium(从width_cache获取,可能为0)
+        if call_premium <= 0:
+            logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: call_premium=%.4f<=0 opt=%s",
+                         call_premium, call_instrument)
+            return None
+        if put_premium <= 0:
+            logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: put_premium=%.4f<=0 opt=%s",
+                         put_premium, put_instrument)
+            return None
+
         try:
             from order.order_service import get_order_service
             osvc = get_order_service()
             if not osvc:
+                logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: order_service is None")
                 return None
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
             logging.error("[BoxSpring] STRADDLE: get_order_service failed: %s", e)
             return None
 
@@ -389,7 +581,7 @@ class BoxSpringExecutorService:
                                 _rec.closing_order_id = f"PENDING_SPRING_ABORT_{_rec.position_id}"
                                 _rec.close_method = 'spring_straddle_abort'
                                 _rec.close_reason = 'STRADDLE_ABORT_CLOSE'
-            except (ValueError, KeyError, TypeError, AttributeError, ImportError):
+            except Exception:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
                 pass
             try:
                 _spring_close_result = osvc.send_order(
@@ -413,7 +605,7 @@ class BoxSpringExecutorService:
                                     if getattr(_rec, 'closing_order_id', '').startswith('PENDING_SPRING_ABORT_'):
                                         _rec.closing_order_id = _spring_actual_oid
                                         break
-            except (ImportError, AttributeError, RuntimeError) as e:
+            except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
                 logging.error("[BoxSpring] STRADDLE: failed to close Call leg after Put failure: %s", e)
             return None
 
@@ -584,7 +776,7 @@ class BoxSpringExecutorService:
                                         _rec.close_method = f'spring_{reason.lower()}'
                                         _rec.close_reason = f'SPRING_{reason}'
                                         break
-                except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _a5_err:
+                except Exception as _a5_err:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception
                     logging.debug("[R37-UNIQUE-CLOSE] A5设置_closing失败: %s", _a5_err)
                 osvc.send_order(
                     instrument_id=pos.option_instrument_id,
@@ -606,7 +798,7 @@ class BoxSpringExecutorService:
                                         _rec.closing_order_id = f"PENDING_SPRING_{_rec.position_id}"
                                         _rec.close_method = f'spring_{reason.lower()}_paired'
                                         _rec.close_reason = f'SPRING_{reason}'
-                        except (ValueError, KeyError, TypeError, AttributeError):
+                        except Exception:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception
                             pass
                     paired_close_dir = _CLOSE_DIRECTION_MAP.get(pos.direction, 'SELL')
                     osvc.send_order(
@@ -623,10 +815,19 @@ class BoxSpringExecutorService:
                     close_reason=f'SIG_{reason}',
                     pnl=(pos.current_premium + pos.paired_current_premium) - pos.entry_premium if pos.direction == 'BUY_STRADDLE' else pos.current_premium - pos.entry_premium,
                 )
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception
             logging.error("[BoxSpring] Close error: %s", e)
+            _close_success = False
+        else:
+            _close_success = True
 
-        pos.is_open = False
+        # V4-FIX-C5: is_open仅在send_order成功后设置False
+        # 原则: send_order失败时保留is_open=True供后续重试，而非无条件标记已平仓
+        if _close_success:
+            pos.is_open = False
+        else:
+            logging.error("[V4-FIX-C5] 平仓send_order失败, 保留is_open=True供重试: pos_id=%s",
+                          getattr(pos, 'position_id', ''))
         if reason == 'TIME_EXPIRE':
             sig = self._signals.get(pos.signal_id)
             if sig:
@@ -649,7 +850,7 @@ class BoxSpringExecutorService:
             from risk.risk_service import get_risk_service
             rs = get_risk_service()
             rs.record_trade_result('s4_spring', pnl, self._capital_scale)
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception
             logging.debug("[BoxSpring] record_trade_result failed: %s", e)
 
         try:
@@ -660,7 +861,7 @@ class BoxSpringExecutorService:
             _est_slippage = abs(pnl) * 3.0 / 10000 if pnl != 0 else 0.0
             eco.record_strategy_pnl('s4_spring', pnl, commission=_est_commission, slippage=_est_slippage)
             eco.update_plr_stats('s4_spring')
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+        except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception
             logging.debug("[BoxSpring] record_strategy_pnl/update_plr_stats failed: %s", e)
 
         logging.info(

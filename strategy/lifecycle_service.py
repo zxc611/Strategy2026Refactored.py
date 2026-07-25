@@ -161,7 +161,7 @@ class LifecycleService:
                             p._storage = get_instrument_data_manager()
                         else:
                             return None
-                    except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as e:
+                    except Exception as e:  # FIX-F4-EXT (NEW-R4 衍生, 2026-07-18): 扩展窄异常元组为 Exception
                         logging.warning("[Storage] Init failed: %s", e)
                         return None
         return p._storage
@@ -268,8 +268,12 @@ class LifecycleService:
                         _ss.set('_is_running', _new_running)
                         _ss.set('_is_paused', _new_paused)
                         _ss.set('_is_trading', _new_trading)
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    pass
+                except Exception as _ss_sync_err:  # FIX-F4 (NEW-R4, 2026-07-18): 扩展窄异常元组为 Exception
+                    # 根因: 原 except (ValueError, KeyError, TypeError, AttributeError) 是窄异常元组，
+                    #       无法覆盖所有运行时异常（如 OSError/RuntimeError/OverflowError 等），
+                    #       违反 project_memory NEW-1 约束（实时/状态转换路径必须用 except Exception）。
+                    # 修复: 扩展为 except Exception，并添加 debug 日志便于诊断。
+                    logging.debug("[LifecycleService.transition_to] _state_store 同步失败(非阻断): %s", _ss_sync_err)
             logging.info(
                 "[LifecycleService.transition_to] %s -> %s (4-state synced: running=%s paused=%s trading=%s)",
                 current_state, new_state,
@@ -415,15 +419,15 @@ class LifecycleService:
             _warm_timer.cancel()
             try:
                 p._storage_warm_timer = None
-            except (AttributeError,):
-                pass
+            except Exception as _attr_clr_err:  # FIX-F5 (NEW-R5, 2026-07-18): 扩展窄异常元组为 Exception
+                logging.debug("[_cancel_all_timers] setattr 清理失败(非阻断): %s", _attr_clr_err)
         _warm_thread = getattr(p, '_storage_warm_thread', None)
         if _warm_thread is not None and _warm_thread.is_alive():
             _warm_thread.join(timeout=5.0)
             try:
                 p._storage_warm_thread = None
-            except (AttributeError,):
-                pass
+            except Exception as _attr_clr_err:  # FIX-F5 (NEW-R5, 2026-07-18): 扩展窄异常元组为 Exception
+                logging.debug("[_cancel_all_timers] setattr 清理失败(非阻断): %s", _attr_clr_err)
         _sub_thread = getattr(p, '_platform_subscribe_thread', None)
         if _sub_thread is not None and _sub_thread.is_alive():
             _stop_event = getattr(p, '_platform_subscribe_stop', None)
@@ -432,8 +436,8 @@ class LifecycleService:
             _sub_thread.join(timeout=5.0)
             try:
                 p._platform_subscribe_thread = None
-            except (AttributeError,):
-                pass
+            except Exception as _attr_clr_err:  # FIX-F5 (NEW-R5, 2026-07-18): 扩展窄异常元组为 Exception
+                logging.debug("[_cancel_all_timers] setattr 清理失败(非阻断): %s", _attr_clr_err)
         # FIX-20260716-THREAD-V2: 恢复W7/W8/W9/W11停止循环
         # 根因: FIX-20260716-THREAD-V1错误删除此循环，基于"W1-W5已注册到LifecycleResource"的假设，
         #       但实测register_thread从未被调用，stop_managed_threads从未被调用，
@@ -456,8 +460,8 @@ class LifecycleService:
                     _t.join(timeout=2.0)
                     try:
                         setattr(p, _thread_attr, None)
-                    except (AttributeError,):
-                        pass
+                    except Exception as _attr_clr_inner_err:  # FIX-F5-EXT (NEW-R5 衍生, 2026-07-18): 扩展窄异常元组为 Exception
+                        logging.debug("[_cancel_all_timers] setattr 清理失败(非阻断): %s", _attr_clr_inner_err)
             except Exception:  # FIX-X R11-REG-03: 扩大异常捕获，防止OSError跳过后续线程停止
                 pass
 
@@ -490,8 +494,10 @@ class LifecycleService:
     def record_trade(self):
         return self._lc_monitor.record_trade()
 
-    def record_signal(self):
-        return self._lc_monitor.record_signal()
+    def record_signal(self, target=None):
+        # FIX-A (2026-07-23): 传递target参数到_lc_monitor，修复P0-1 RC13半拉子工程
+        # 原代码 record_signal(self) 不接受target，导致strategy_business_layer传递的target被丢弃
+        return self._lc_monitor.record_signal(target)
 
     def record_error(self, msg):
         return self._lc_monitor.record_error(msg)

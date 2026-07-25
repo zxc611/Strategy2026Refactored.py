@@ -189,7 +189,33 @@ class StorageLifecycleService:
         logging.info("关闭完成")
 
     def close_connection(self):
-        pass
+        # FIX-RH-3 (2026-07-19): 显式关闭所有 DuckDB 连接 (含 PerfMonitor 线程)
+        # 根因: 原方法为空实现(pass), destroy() 路径仅调用 _shutdown_runtime_services
+        #       → _shutdown_historical_services (停止 historical loader)
+        #       → _stop_async_writer (停止 18 个 writer 线程)
+        #       但未关闭 DuckDB 连接池, 导致:
+        #       - DuckDB-PerfMonitor (daemon=True, 由 _stop_monitor 控制) 不会停止
+        #       - 每个 _TimedDuckDBConnection._executor (ThreadPoolExecutor max_workers=1)
+        #         不会被 shutdown, 工作线程持续存活
+        #       (55 线程倒查 H-3 断点)
+        # 修复: 通过 _data_service.close_all() 显式关闭所有 DuckDB 连接,
+        #       close_all 内部会:
+        #       1. set _stop_monitor → DuckDB-PerfMonitor 线程退出
+        #       2. 遍历 _all_connections 调用每个 _TimedDuckDBConnection.close()
+        #          → _executor.shutdown(wait=False) + _conn.close()
+        #       3. 清空连接池 _pool 和 _all_connections
+        # 原则: 12 原则之 4 (资源不泄漏) + 6 (根因一次修复) + 7 (代码精简)
+        # 注: close_all 已注册到 atexit (data_service.py L540), 此处显式调用确保
+        #     destroy 路径同步关闭而非依赖 atexit 兜底
+        try:
+            _ds = getattr(self, '_data_service', None)
+            if _ds is not None and hasattr(_ds, 'close_all'):
+                _ds.close_all()
+                logging.info("[FIX-RH-3] DuckDB 连接池已显式关闭 (close_all)")
+            else:
+                logging.debug("[FIX-RH-3] _data_service 无 close_all 方法 (可能未初始化)")
+        except Exception as _rh3_err:
+            logging.warning("[FIX-RH-3] close_connection 异常(非阻断): %s", _rh3_err)
 
     def _start_cleanup_thread(self):
         if self._cleanup_thread and self._cleanup_thread.is_alive():

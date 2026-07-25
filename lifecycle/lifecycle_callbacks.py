@@ -158,6 +158,17 @@ class LifecycleCallbacks:
                     if _osvc is not None:
                         _osvc._dry_run_mode = True
                         logging.info("[DRY-RUN] 已同步_dry_run_mode=True到OrderService")
+                        # FIX-PP1 (BACKEND-ROUTE): _dry_run_mode设置后必须重建OrderExecutor
+                        # 根因: OrderExecutor.__init__在_dry_run_mode设置前创建，_resolve_default_backend
+                        #       读取getattr(svc,'_dry_run_mode',False)=False→选择LiveExecutionBackend
+                        #       后续设置_dry_run_mode=True但不重建executor→后端仍为LiveExecutionBackend
+                        #       →平台下单result=-1(374次)+cyclic_call(62次)+HFT加仓失败(130次)
+                        # 修复: 设置_dry_run_mode后重建OrderExecutor，_resolve_default_backend
+                        #       重新读取_dry_run_mode=True→选择DryRunExecutionBackend
+                        from order.order_executor import OrderExecutor
+                        _osvc._executor = OrderExecutor(_osvc)
+                        _backend_type = type(_osvc._executor._backend).__name__
+                        logging.info("[FIX-PP1] OrderExecutor已重建，后端=%s", _backend_type)
                 except Exception as _pass_err_2:
                     logging.debug("[on_start] 异常(非阻断): %s", _pass_err_2)
         except Exception as mode_e:
@@ -189,7 +200,7 @@ class LifecycleCallbacks:
             _caller_stack_start = ""
             logging.debug("[on_start] format_stack失败(非阻断): %s", _fs_err)
         try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个on_start
-            logging.critical(
+            logging.info(
                 "[FIX-20260709-PAUSE-DIAG] on_start ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
                 "caller_stack:\n%s",
                 getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
@@ -636,7 +647,7 @@ class LifecycleCallbacks:
             _caller_stack = ""
             logging.debug("[on_stop] format_stack失败(非阻断): %s", _fs_err)
         try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个on_stop
-            logging.critical(
+            logging.info(
                 "[FIX-20260709-PAUSE-DIAG] on_stop ENTER: strategy_id=%s run_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
                 "caller_stack:\n%s",
                 getattr(p, 'strategy_id', 'N/A'), run_id, getattr(p, '_state', 'N/A'),
@@ -723,13 +734,61 @@ class LifecycleCallbacks:
             jobs_zero = False
         try:
             from infra.health_monitor import DiagnosisProbeManager, reset_diagnosis_grace_period
-            DiagnosisProbeManager.stop_contract_watch(reason='strategy_stop')
+            # FIX-ORDERED-SHUTDOWN-20260721: 扩展为stop_all_threads统一关闭
+            # 覆盖: I5 health_push + I6 ContractWatchSummary
+            if hasattr(DiagnosisProbeManager, 'stop_all_threads'):
+                DiagnosisProbeManager.stop_all_threads(reason='strategy_stop')
+            else:
+                DiagnosisProbeManager.stop_contract_watch(reason='strategy_stop')
             reset_diagnosis_grace_period()
         except Exception as contract_watch_e:
             logging.warning(
                 f"[StrategyCoreService.on_stop][strategy_id={p.strategy_id}]"
                 f"[run_id={run_id}] contract_watch stop error: {contract_watch_e}"
             )
+        # FIX-ORDERED-SHUTDOWN-20260721: 补全未关闭的辅助线程
+        # 根因: 以下线程在pause/on_stop/on_destroy时未被关闭:
+        #   I8 PathCounterAutoPersist / I9 wd_* Watchdog / B1 HMM _em_thread / B2 HotConfig _watcher_thread
+        # 修复: 统一调用各自stop方法，由lifecycle_callbacks集中管理
+        try:
+            from infra.metrics_registry import PathCounter
+            if hasattr(PathCounter, 'stop_auto_persist'):
+                PathCounter.stop_auto_persist()
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] PathCounter.stop_auto_persist异常(非阻断): %s", _e)
+        try:
+            from infra.resilience import Watchdog
+            if hasattr(Watchdog, 'stop_all'):
+                _wd_count = Watchdog.stop_all(timeout=2.0)
+                if _wd_count > 0:
+                    logging.info("[FIX-ORDERED-SHUTDOWN] on_stop已停止%d个Watchdog线程", _wd_count)
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] Watchdog.stop_all异常(非阻断): %s", _e)
+        try:
+            _hmm = getattr(p, '_hmm_model', None) or getattr(p, '_adaptive_hmm', None)
+            if _hmm is not None and hasattr(_hmm, 'stop_em_thread'):
+                _hmm.stop_em_thread(timeout=2.0)
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] HMM.stop_em_thread异常(非阻断): %s", _e)
+        try:
+            _hot_cfg = getattr(p, '_hot_config_manager', None) or getattr(p, '_hot_config', None)
+            if _hot_cfg is not None and hasattr(_hot_cfg, 'stop_watching'):
+                _hot_cfg.stop_watching()
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] HotConfig.stop_watching异常(非阻断): %s", _e)
+        # [FIX-PAUSE-DELAY-EXT-20260721] 关闭OrderStateRecover线程(纳入55+工作关闭管理)
+        # 根因: 新增的OrderStateRecover后台线程(daemon=True)未被stop方法管理
+        #       策略实例停止≠进程退出, daemon不够, 必须显式join
+        # 修复: 在on_stop中调用stop_order_state_recover, 与5个stop方法并列
+        try:
+            from order.order_base import get_order_service
+            _osvc = get_order_service()
+            _wal_svc = getattr(_osvc, '_wal_state_service', None)
+            if _wal_svc is not None and hasattr(_wal_svc, 'stop_order_state_recover'):
+                _wal_svc.stop_order_state_recover(timeout=2.0)
+                logging.info("[FIX-PAUSE-DELAY-EXT-20260721] on_stop已关闭OrderStateRecover线程")
+        except Exception as _e:
+            logging.debug("[FIX-PAUSE-DELAY-EXT-20260721] stop_order_state_recover异常(非阻断): %s", _e)
         # FIX-20260716-THREAD-V2: 统一由_cancel_all_timers停止所有托管线程
         # 根因: 原on_stop中有3处重复停止逻辑（_platform_subscribe清理+降级循环+_cancel_all_timers调用），
         #       违反方法唯一原则，且降级循环与_cancel_all_timers功能完全重复。
@@ -833,6 +892,38 @@ class LifecycleCallbacks:
                         logging.info("[FIX-38] on_stop: SubscriptionWALService已关闭")
         except Exception as _sub_err:
             logging.warning("[FIX-38] on_stop: SubscriptionWALService停止失败(非阻断): %s", _sub_err)
+        # FIX-RM-4 (2026-07-19): onStop-worker 超时控制
+        # 根因: on_stop 内部 fork 的 onStop-worker 线程无超时控制,
+        #       若子任务阻塞 (如网络 unsubscribe 长轮询), on_stop 会无限等待
+        #       (55 线程倒查 M-4 断点)
+        # 修复: 在 on_stop 末尾添加统一超时等待, 检查所有名为 'onStop-worker' 前缀的线程,
+        #       join(timeout=10.0); 超时后记录 warning 但不阻断 on_stop 完成
+        # 原则: 12 原则之 4 (资源不泄漏: 超时后由 daemon 兜底) + 6 (根因一次修复)
+        # 注: 当前 on_stop 无显式 ThreadPoolExecutor submit, 此为防御性保护;
+        #     未来若添加 async worker (如批量 unsubscribe), 此处自动覆盖
+        try:
+            import threading as _threading_rm4
+            _onstop_workers = [
+                t for t in _threading_rm4.enumerate()
+                if t.name and t.name.startswith('onStop-worker') and t.is_alive()
+            ]
+            if _onstop_workers:
+                logging.info("[FIX-RM-4] on_stop: 等待 %d 个 onStop-worker 退出 (timeout=10s)",
+                             len(_onstop_workers))
+                _deadline = time.time() + 10.0
+                for _w in _onstop_workers:
+                    _remaining = max(0.1, _deadline - time.time())
+                    if _remaining <= 0:
+                        break
+                    _w.join(timeout=_remaining)
+                _still_alive = [w.name for w in _onstop_workers if w.is_alive()]
+                if _still_alive:
+                    logging.warning("[FIX-RM-4] on_stop: %d 个 onStop-worker 10s 后仍存活: %s",
+                                    len(_still_alive), _still_alive[:5])
+                else:
+                    logging.info("[FIX-RM-4] on_stop: 所有 onStop-worker 已退出")
+        except Exception as _rm4_err:
+            logging.warning("[FIX-RM-4] on_stop: onStop-worker 等待失败(非阻断): %s", _rm4_err)
         return True
 
     def on_destroy(self) -> None:
@@ -845,7 +936,7 @@ class LifecycleCallbacks:
             _caller_stack_destroy = ""
             logging.debug("[on_destroy] format_stack失败(非阻断): %s", _fs_err)
         try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个on_destroy
-            logging.critical(
+            logging.info(
                 "[FIX-20260709-PAUSE-DIAG] on_destroy ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s\n"
                 "caller_stack:\n%s",
                 getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
@@ -870,6 +961,58 @@ class LifecycleCallbacks:
     def stop(self) -> bool:
         return self.on_stop()
 
+    # ==================== FIX-RM-1/2/3 (2026-07-19) ====================
+    # _cancel_pause_scope_aux_timers: pause 期间停止辅助 timer/thread (不清空引用)
+    # 根因: pause() 仅停止 W6/W7/W8/W9/W10/W14, 但漏停 3 项辅助 timer/thread:
+    #   - M-1 (FIX-RM-1): _storage_warm_timer (Timer) 在 pause 期间继续触发
+    #   - M-2 (FIX-RM-2): _historical_kline_thread (kline-load-async) 在 pause 期间继续运行
+    #   - M-3 (FIX-RM-3): _storage_warm_thread 在 pause 期间继续运行
+    # 修复: 抽取此方法, 在 pause() 中调用, set stop + join, 但不清空引用
+    #      (resume 后可由用户重新触发, 不影响业务)
+    # 原则: 12 原则之 4 (资源不泄漏) + 6 (根因一次修复) + 7 (代码精简)
+    # 注: 与 _cancel_all_timers (lifecycle_service.py, 用于 stop/destroy) 区别:
+    #     后者清空引用 (setattr None), 本方法保留引用以便 resume 重启
+    # ============================================================
+    def _cancel_pause_scope_aux_timers(self) -> None:
+        p = self.p
+        # M-1 (FIX-RM-1): _storage_warm_timer
+        _warm_timer = getattr(p, '_storage_warm_timer', None)
+        if _warm_timer is not None:
+            try:
+                _warm_timer.cancel()
+                logging.info("[FIX-RM-1] pause: _storage_warm_timer 已 cancel (引用保留供 resume)")
+            except Exception as _e1:
+                logging.warning("[FIX-RM-1] pause: _storage_warm_timer cancel 失败(非阻断): %s", _e1)
+        # M-3 (FIX-RM-3): _storage_warm_thread
+        _warm_thread = getattr(p, '_storage_warm_thread', None)
+        if _warm_thread is not None and _warm_thread.is_alive():
+            try:
+                _warm_thread.join(timeout=2.0)
+                if _warm_thread.is_alive():
+                    logging.warning("[FIX-RM-3] pause: _storage_warm_thread 2s 后仍存活 (daemon, 将在后台退出)")
+                else:
+                    logging.info("[FIX-RM-3] pause: _storage_warm_thread 已 join (引用保留供 resume)")
+            except Exception as _e3:
+                logging.warning("[FIX-RM-3] pause: _storage_warm_thread join 失败(非阻断): %s", _e3)
+        # M-2 (FIX-RM-2): _historical_kline_thread (kline-load-async)
+        _kline_thread = getattr(p, '_historical_kline_thread', None)
+        if _kline_thread is not None and _kline_thread.is_alive():
+            _kline_stop = getattr(p, '_historical_kline_stop', None)
+            if _kline_stop is not None:
+                try:
+                    _kline_stop.set()
+                    logging.info("[FIX-RM-2] pause: _historical_kline_stop 已 set")
+                except Exception as _e2a:
+                    logging.warning("[FIX-RM-2] pause: _historical_kline_stop set 失败(非阻断): %s", _e2a)
+            try:
+                _kline_thread.join(timeout=2.0)
+                if _kline_thread.is_alive():
+                    logging.warning("[FIX-RM-2] pause: _historical_kline_thread 2s 后仍存活 (daemon, 将在后台退出)")
+                else:
+                    logging.info("[FIX-RM-2] pause: _historical_kline_thread 已 join (引用保留供 resume)")
+            except Exception as _e2:
+                logging.warning("[FIX-RM-2] pause: _historical_kline_thread join 失败(非阻断): %s", _e2)
+
     def pause(self) -> bool:
         p = self.p
         # FIX-20260709-PAUSE-DIAG: 入口诊断日志，追踪平台/UI回调
@@ -880,7 +1023,7 @@ class LifecycleCallbacks:
             _caller_stack_pause = ""
             logging.debug("[pause] format_stack失败(非阻断): %s", _fs_err)
         try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个pause
-            logging.critical(
+            logging.info(
                 "[FIX-20260709-PAUSE-DIAG] pause ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
                 "caller_stack:\n%s",
                 getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
@@ -960,22 +1103,81 @@ class LifecycleCallbacks:
                     logging.info("[StrategyCoreService] pause: drain完成 %s", drain_result)
             except Exception as e:
                 logging.warning("[StrategyCoreService] pause: drain失败: %s", e)
+        # FIX-RC-1 (2026-07-19): pause 期间暂停 18 个 async writer 消费队列
+        # 根因: TickWriter×16 + KlineWriter + MaintenanceWriter (daemon=False) 在 pause 期间
+        #       继续消费队列并写入 DuckDB; 若 pause 后 DuckDB 被显式关闭或连接被回收,
+        #       writer 写入失败 → batch 重试 → DATA_LOSS spill 风暴 (55 线程倒查 C-1 断点)
+        # 修复: drain 完成后调用 storage.pause_async_writers() set _paused Event,
+        #       writer loop 检测到 _paused 后 sleep 0.1s continue (不退出线程, 仅停止消费)
+        # 原则: 12 原则之 6 (根因一次修复) + 8 (资源不泄漏: 线程不退出, resume 后立即恢复)
+        if storage is not None and hasattr(storage, 'pause_async_writers'):
+            try:
+                storage.pause_async_writers()
+            except Exception as _rc1_pause_err:
+                logging.warning("[StrategyCoreService] pause: pause_async_writers失败(非阻断): %s", _rc1_pause_err)
+        else:
+            logging.debug("[StrategyCoreService] pause: storage 无 pause_async_writers 方法(可能未升级)")
+        # FIX-RM-1/2/3 (2026-07-19): pause 期间停止辅助 timer/thread
+        # 根因: pause() 漏停 _storage_warm_timer / _storage_warm_thread / _historical_kline_thread
+        #       导致 pause 期间这些辅助 timer/thread 继续运行 (55 线程倒查 M-1/M-2/M-3 断点)
+        # 修复: 调用 _cancel_pause_scope_aux_timers set stop + join (不清空引用, 保留供 resume)
+        # 原则: 12 原则之 4 (资源不泄漏) + 6 (根因一次修复)
+        try:
+            self._cancel_pause_scope_aux_timers()
+        except Exception as _rm123_err:
+            logging.warning("[StrategyCoreService] pause: _cancel_pause_scope_aux_timers失败(非阻断): %s", _rm123_err)
         # FIX-20260714-PAUSE-STOP: 补全暂停时漏停的工作
         # 根因R4: pause()漏停W6(DiagnosisProbeManager)/W10(_platform_subscribe_thread)/W14(TickBufferFlushFallback)
         # 修复: 暂停时停止这3个工作（冻结后台活动，不销毁线程）
         # W6: 停止合约监控（on_start使用DiagnosisProbeManager.start_contract_watch类方法启动）
+        # FIX-ORDERED-SHUTDOWN-20260721: 扩展为stop_all_threads统一关闭
+        # 覆盖: I5 health_push + I6 ContractWatchSummary + I8 PathCounter + I9 Watchdog + B1 HMM + B2 HotConfig
         try:
-            _diag_mgr = getattr(p, '_diagnosis_probe_manager', None)
-            if _diag_mgr is not None and hasattr(_diag_mgr, 'stop_contract_watch'):
-                _diag_mgr.stop_contract_watch()
-                logging.info("[StrategyCoreService] pause: DiagnosisProbeManager(_diagnosis_probe_manager)合约监控已停止")
+            from infra.health_monitor import DiagnosisProbeManager
+            if hasattr(DiagnosisProbeManager, 'stop_all_threads'):
+                DiagnosisProbeManager.stop_all_threads(reason='pause')
             else:
-                from infra.health_monitor import DiagnosisProbeManager
-                DiagnosisProbeManager.stop_contract_watch()
-                logging.info("[StrategyCoreService] pause: DiagnosisProbeManager类方法合约监控已停止")
+                _diag_mgr = getattr(p, '_diagnosis_probe_manager', None)
+                if _diag_mgr is not None and hasattr(_diag_mgr, 'stop_contract_watch'):
+                    _diag_mgr.stop_contract_watch()
+                else:
+                    DiagnosisProbeManager.stop_contract_watch()
+            logging.info("[StrategyCoreService] pause: DiagnosisProbeManager线程已统一停止")
         except Exception as e:
-            logging.warning("[StrategyCoreService] pause: stop_contract_watch失败: %s", e)
+            logging.warning("[StrategyCoreService] pause: stop_all_threads失败: %s", e)
+        # FIX-ORDERED-SHUTDOWN-20260721: pause时补全未关闭的辅助线程
+        try:
+            from infra.metrics_registry import PathCounter
+            if hasattr(PathCounter, 'stop_auto_persist'):
+                PathCounter.stop_auto_persist()
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] pause PathCounter.stop_auto_persist异常(非阻断): %s", _e)
+        try:
+            from infra.resilience import Watchdog
+            if hasattr(Watchdog, 'stop_all'):
+                Watchdog.stop_all(timeout=2.0)
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] pause Watchdog.stop_all异常(非阻断): %s", _e)
+        try:
+            _hmm = getattr(p, '_hmm_model', None) or getattr(p, '_adaptive_hmm', None)
+            if _hmm is not None and hasattr(_hmm, 'stop_em_thread'):
+                _hmm.stop_em_thread(timeout=2.0)
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] pause HMM.stop_em_thread异常(非阻断): %s", _e)
+        try:
+            _hot_cfg = getattr(p, '_hot_config_manager', None) or getattr(p, '_hot_config', None)
+            if _hot_cfg is not None and hasattr(_hot_cfg, 'stop_watching'):
+                _hot_cfg.stop_watching()
+        except Exception as _e:
+            logging.debug("[FIX-ORDERED-SHUTDOWN] pause HotConfig.stop_watching异常(非阻断): %s", _e)
         # FIX-20260714-R4/R9: 暂停时若W7/W8/W9仍在运行，设置退出标志让其自行退出
+        # FIX-RM-6/7/8 (2026-07-19): join timeout 1.0s → 2.0s
+        # 根因: join timeout=1.0s 过短, 若 retry/bulk_subscribe/deferred_subscribe 任务
+        #       正在长轮询(如网络订阅重试), 1.0s 内可能无法退出 → 线程在 pause 后仍存活
+        #       (55 线程倒查 M-6/M-7/M-8 断点)
+        # 修复: 提高到 2.0s, 与 stop_background_threads(join_timeout=2.0) 和
+        #       _cancel_all_timers 中的 W7/W8/W9/W11 join(timeout=2.0) 保持一致
+        # 原则: 12 原则之 6 (根因一次修复) + 7 (代码精简: 与现有 timeout 对齐)
         for _thread_attr, _stop_attr, _desc in [
             ('_bulk_subscribe_thread', '_bulk_subscribe_stop', 'db-subscribe'),
             ('_subscribe_retry_thread', '_subscribe_retry_stop', 'subscribe-retry'),
@@ -988,17 +1190,31 @@ class LifecycleCallbacks:
                     logging.info("[StrategyCoreService] pause: %s停止事件已设置", _desc)
                 _t = getattr(p, _thread_attr, None)
                 if _t is not None and _t.is_alive():
-                    _t.join(timeout=1.0)
+                    _t.join(timeout=2.0)
                     if _t.is_alive():
                         logging.warning("[StrategyCoreService] pause: %s线程仍存活（daemon，将在后台自行退出）", _desc)
             except Exception as _pause_thread_err:  # FIX-40: 扩展异常类型
                 logging.warning("[StrategyCoreService] pause: %s线程停止失败: %s", _desc, _pause_thread_err)
-        # W10: 停止平台订阅线程（设置stop标志，让其自行退出）
+        # W10: 停止平台订阅线程（设置stop标志 + join等待退出，与W7/W8/W9一致）
+        # FIX-F6 (NEW-R8, 2026-07-18): pause 时未 join _platform_subscribe_thread
+        # 根因: 原 pause() 仅 set _platform_subscribe_stop 事件，未 join 线程，
+        #       导致暂停期间线程仍存活；resume() L1141 仅重启 TickBufferFlushFallback，
+        #       不重启 _platform_subscribe_thread → 恢复后线程已退出但引用残留，状态不一致。
+        # 修复: 与 pause() 中 W7/W8/W9（L979-995）一致，set + join(timeout=1.0)，
+        #       让线程在暂停时彻底退出；resume 路径需重新创建线程（与本修复配套）。
+        # FIX-RM-6/7/8 (2026-07-19): W10 同步提高到 timeout=2.0 与 W7/W8/W9 一致
         try:
             _stop_event = getattr(p, '_platform_subscribe_stop', None)
             if _stop_event is not None:
                 _stop_event.set()
                 logging.info("[StrategyCoreService] pause: _platform_subscribe_stop已设置")
+            _sub_thread = getattr(p, '_platform_subscribe_thread', None)
+            if _sub_thread is not None and _sub_thread.is_alive():
+                _sub_thread.join(timeout=2.0)
+                if _sub_thread.is_alive():
+                    logging.warning("[StrategyCoreService] pause: _platform_subscribe_thread仍存活（daemon，将在后台自行退出）")
+                else:
+                    logging.info("[StrategyCoreService] pause: _platform_subscribe_thread已退出")
         except Exception as e:  # FIX-40: 扩展异常类型
             logging.warning("[StrategyCoreService] pause: _platform_subscribe_stop设置失败: %s", e)
         # W14: 停止TickBufferFlushFallback线程
@@ -1021,7 +1237,7 @@ class LifecycleCallbacks:
         # 根因1: 原仅接受PAUSED状态，STOPPED状态调用resume静默返回False
         # 根因2: _resume_in_progress不在try/finally中，异常时标志残留导致PAUSE-GUARD永久放行
         try:  # FIX-56: 保护入口诊断日志的属性访问，防止极端场景下跳过整个resume
-            logging.critical(
+            logging.info(
                 "[FIX-20260713-RESUME] resume ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s",
                 getattr(p, 'strategy_id', 'N/A'), getattr(p, '_state', 'N/A'),
                 getattr(p, '_is_running', 'N/A'), getattr(p, '_is_paused', 'N/A'),
@@ -1079,6 +1295,15 @@ class LifecycleCallbacks:
             finally:
                 # FIX-20260713: 确保标志一定被清除，防止PAUSE-GUARD永久放行
                 p._resume_in_progress = False
+        # FIX-RC-1 (2026-07-19): resume 时恢复 18 个 async writer 消费
+        # 对称于 pause() 中 pause_async_writers() 调用, clear _paused Event
+        # 必须在恢复其他工作之前执行: writer 立即恢复消费新入队数据
+        _resume_storage = getattr(p, 'storage', None)
+        if _resume_storage is not None and hasattr(_resume_storage, 'resume_async_writers'):
+            try:
+                _resume_storage.resume_async_writers()
+            except Exception as _rc1_resume_err:
+                logging.warning("[StrategyCoreService] resume: resume_async_writers失败(非阻断): %s", _rc1_resume_err)
         # FIX-20260711-PAUSE-ACTION: 恢复时必须逐个恢复暂停时关闭的工作
         # 对称于pause()中暂停scheduler和取消timer的操作
         try:
@@ -1218,6 +1443,28 @@ class LifecycleCallbacks:
                     f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}]"
                     f"[run_id={run_id}][owner_scope=strategy-instance][source_type=lifecycle] Failed: {e}"
                 )
+                # FIX-F1 (NEW-R1, 2026-07-18): destroy except 块必须调用 EventBus.shutdown
+                # 根因: 主路径 L1182-1188 调用 EventBus.shutdown(wait=False)，但 except 块
+                #       未调用，若 on_stop() L1172 抛异常，EventBus.shutdown 永远不会被调用，
+                #       导致 ThreadPoolExecutor 工作线程泄漏（虽有 atexit 兜底但长期运行仍泄漏）。
+                # 修复: 在 except 块中也调用 EventBus.shutdown，与主路径一致。
+                # 原则: 12原则之4（资源不泄漏）+ 7（不绕过根因）。
+                try:
+                    _eb = getattr(p, '_event_bus', None)
+                    if _eb is not None and hasattr(_eb, 'shutdown'):
+                        _eb.shutdown(wait=False)
+                        logging.info(f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}][run_id={run_id}] EventBus.shutdown(except路径)已完成")
+                except Exception as _eb_except_err:
+                    logging.warning(f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}][run_id={run_id}] EventBus.shutdown(except路径)失败(非阻断): {_eb_except_err}")
+                # FIX-RC-2~5 (2026-07-19): except 块统一紧急资源清理
+                # 根因: except 块仅 EventBus.shutdown + cleanup_all(final), 缺失 4 项关键清理
+                #       (C-2/C-3/C-4/C-5, 详见 _emergency_cleanup_resources 注释)
+                # 修复: 调用统一方法批量清理 (idempotent, 非阻断, 不阻塞)
+                # 原则: 12 原则之 4 (资源不泄漏) — except 路径也必须释放资源
+                try:
+                    self._emergency_cleanup_resources(run_id=run_id)
+                except Exception as _erc_err:
+                    logging.warning(f"[StrategyCoreService.destroy][strategy_id={p.strategy_id}][run_id={run_id}] _emergency_cleanup_resources 失败(非阻断): {_erc_err}")
                 # FIX-44: 即使destroy失败也必须设置_destroyed=True和执行final cleanup
                 try:
                     p._destroyed = True
@@ -1233,6 +1480,104 @@ class LifecycleCallbacks:
                 p._stats['last_error_message'] = str(e)
                 return False
 
+    # ==================== FIX-RC-2~5 (2026-07-19) ====================
+    # _emergency_cleanup_resources: destroy except 块的统一紧急资源清理
+    # 根因: destroy() except 块（L1252-1283）仅调用 EventBus.shutdown + cleanup_all(final),
+    #       缺失主路径 L1208-1242 中的 4 项关键清理:
+    #       - C-2 (FIX-RC-2): _shutdown_runtime_services 未调用
+    #         → DuckDB-PerfMonitor / DuckDB-WAL-Flush 线程未关闭 (daemon=False)
+    #       - C-3 (FIX-RC-3): shutdown_thread_pools 未调用
+    #         → callback_registry/diagnosis/heartbeat/close_retry 4 个 ThreadPoolExecutor 未关闭
+    #       - C-4 (FIX-RC-4): subscription_manager.stop_background_threads 未调用
+    #         → SubAsyncWriter/SubRetry/SubCleanup/TickWatchdog 4 个共享线程未停止
+    #       - C-5 (FIX-RC-5): _cancel_all_timers 未调用
+    #         → _storage_warm_timer/_platform_subscribe_thread/W7/W8/W9/W11 未停止
+    # 修复: 提取统一方法, 在 destroy except 块中调用; 主路径已分别调用各自清理 (不重复调用)
+    # 原则: 12 原则之 4 (资源不泄漏) + 7 (代码精简: 单一清理入口) + 6 (根因一次修复)
+    # ============================================================
+    def _emergency_cleanup_resources(self, run_id: str = 'N/A') -> None:
+        """destroy except 块的统一紧急资源清理 (idempotent, 非阻断)"""
+        p = self.p
+        _sid = getattr(p, 'strategy_id', 'N/A')
+        # C-2 (FIX-RC-2): _shutdown_runtime_services (DuckDB 等)
+        try:
+            if hasattr(p, '_shutdown_runtime_services'):
+                p._shutdown_runtime_services()
+                logging.info(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-2 _shutdown_runtime_services 已完成")
+        except Exception as _e1:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-2 _shutdown_runtime_services 失败(非阻断): {_e1}")
+        # C-3 (FIX-RC-3): shutdown_thread_pools (4 个 ThreadPoolExecutor)
+        try:
+            _lr = getattr(p, '_lifecycle_resource', None)
+            if _lr is not None and hasattr(_lr, 'shutdown_thread_pools'):
+                _lr.shutdown_thread_pools(wait=False)  # except 路径不阻塞, 防止死锁
+                logging.info(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-3 shutdown_thread_pools 已完成")
+        except Exception as _e2:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-3 shutdown_thread_pools 失败(非阻断): {_e2}")
+        # C-4 (FIX-RC-4): subscription_manager.stop_background_threads
+        try:
+            _ds = getattr(p, '_data_service', None) or getattr(p, 'storage', None)
+            if _ds is not None:
+                _sm = getattr(_ds, 'subscription_manager', None)
+                if _sm is not None and hasattr(_sm, 'stop_background_threads'):
+                    _sm.stop_background_threads(join_timeout=2.0)
+                    logging.info(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-4 stop_background_threads 已完成")
+        except Exception as _e3:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-4 stop_background_threads 失败(非阻断): {_e3}")
+        # C-5 (FIX-RC-5): _cancel_all_timers (统一停止所有托管线程)
+        try:
+            if hasattr(p, '_cancel_all_timers'):
+                p._cancel_all_timers()
+                logging.info(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-5 _cancel_all_timers 已完成")
+        except Exception as _e4:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-5 _cancel_all_timers 失败(非阻断): {_e4}")
+        # C-6 (FIX-ORDERED-SHUTDOWN-20260721): 紧急关闭辅助线程
+        # 根因: on_stop抛异常时，I5/I6/I8/I9/B1/B2辅助线程不会被关闭
+        # 修复: 在_emergency_cleanup_resources中也调用stop_all，确保except路径覆盖
+        try:
+            from infra.health_monitor import DiagnosisProbeManager
+            if hasattr(DiagnosisProbeManager, 'stop_all_threads'):
+                DiagnosisProbeManager.stop_all_threads(reason='emergency_cleanup')
+                logging.info(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 health_monitor.stop_all_threads 已完成")
+        except Exception as _e5:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 health_monitor.stop_all_threads 失败(非阻断): {_e5}")
+        try:
+            from infra.metrics_registry import PathCounter
+            if hasattr(PathCounter, 'stop_auto_persist'):
+                PathCounter.stop_auto_persist()
+        except Exception as _e6:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 PathCounter.stop_auto_persist 失败(非阻断): {_e6}")
+        try:
+            from infra.resilience import Watchdog
+            if hasattr(Watchdog, 'stop_all'):
+                Watchdog.stop_all(timeout=2.0)
+        except Exception as _e7:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 Watchdog.stop_all 失败(非阻断): {_e7}")
+        try:
+            _hmm = getattr(p, '_hmm_model', None) or getattr(p, '_adaptive_hmm', None)
+            if _hmm is not None and hasattr(_hmm, 'stop_em_thread'):
+                _hmm.stop_em_thread(timeout=2.0)
+        except Exception as _e8:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 HMM.stop_em_thread 失败(非阻断): {_e8}")
+        try:
+            _hot_cfg = getattr(p, '_hot_config_manager', None) or getattr(p, '_hot_config', None)
+            if _hot_cfg is not None and hasattr(_hot_cfg, 'stop_watching'):
+                _hot_cfg.stop_watching()
+        except Exception as _e9:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 HotConfig.stop_watching 失败(非阻断): {_e9}")
+        # [FIX-PAUSE-DELAY-EXT-20260721] 紧急关闭OrderStateRecover线程(纳入55+工作关闭管理)
+        # 根因: on_stop抛异常时, OrderStateRecover线程不会被关闭, 导致线程泄漏
+        # 修复: 在_emergency_cleanup_resources中也调用stop_order_state_recover, 确保except路径覆盖
+        try:
+            from order.order_base import get_order_service
+            _osvc = get_order_service()
+            _wal_svc = getattr(_osvc, '_wal_state_service', None)
+            if _wal_svc is not None and hasattr(_wal_svc, 'stop_order_state_recover'):
+                _wal_svc.stop_order_state_recover(timeout=2.0)
+                logging.info(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 stop_order_state_recover 已完成")
+        except Exception as _e10:
+            logging.warning(f"[emergency_cleanup][{_sid}][run_id={run_id}] C-6 stop_order_state_recover 失败(非阻断): {_e10}")
+
     def save_state(self) -> bool:
         p = self.p
         try:
@@ -1243,6 +1588,15 @@ class LifecycleCallbacks:
                 'strategy_id': p.strategy_id,
                 'state': p._state.value,
                 'stats': p._stats,
+                # FIX-F7 (NEW-R12, 2026-07-18): save_state 保存四元状态
+                # 根因: 原仅保存 _state（枚举值），未保存 _is_paused/_is_running/_is_trading，
+                #       进程崩溃重启后 load_state 无法恢复运行态；当前架构重启从 INITIALIZING 开始
+                #       可接受，但状态报告/诊断可能不一致。
+                # 修复: 追加四元状态字段到 state_data，便于未来扩展恢复逻辑。
+                # 原则: 12原则之2（四元状态原子同步）—持久化也需完整保存。
+                'is_paused': getattr(p, '_is_paused', False),
+                'is_running': getattr(p, '_is_running', False),
+                'is_trading': getattr(p, '_is_trading', False),
                 'saved_at': datetime.now(CHINA_TZ).isoformat()
             }
             save_result = p._storage.save(f'strategy_state_{p.strategy_id}', state_data)
@@ -1271,6 +1625,18 @@ class LifecycleCallbacks:
                 p._storage._stop_async_writer()
             except Exception as e:
                 logging.warning(f"[StrategyCoreService] Storage async writer stop error: {e}")
+        # FIX-RH-3 (2026-07-19): 显式关闭 DuckDB 连接池
+        # 根因: _stop_async_writer 仅停止 18 个 writer 线程, 不关闭 DuckDB 连接池,
+        #       导致 DuckDB-PerfMonitor 线程 + 每个 _TimedDuckDBConnection._executor
+        #       持续存活 (55 线程倒查 H-3 断点)
+        # 修复: 调用 storage.close_connection() (实现在 storage_lifecycle_mixin.py)
+        #       内部委托 _data_service.close_all() 关闭所有连接 + 停止 PerfMonitor
+        # 原则: 12 原则之 4 (资源不泄漏) + 6 (根因一次修复)
+        if p._storage is not None and hasattr(p._storage, 'close_connection'):
+            try:
+                p._storage.close_connection()
+            except Exception as _rh3_err:
+                logging.warning(f"[StrategyCoreService] FIX-RH-3 close_connection error: {_rh3_err}")
         try:
             from risk.risk_service import get_risk_service
             _rs = get_risk_service()

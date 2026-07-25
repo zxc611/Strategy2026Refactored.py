@@ -297,6 +297,58 @@ class WidthCacheQueryService:
         spread = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
         return max(0.0, (center - spread) / denom)
 
+    # FIX-S4-ROOT-20260720-v2: DTE/IV近似计算（替代不存在的DataWriterMixin方法）
+
+    @staticmethod
+    def _approx_dte_from_year_month(year_month: str) -> int:
+        """从year_month(如'2607')推算距到期日的交易日数
+
+        中国金融期货(CFFEX)期权到期日: 合约月份第三个周五
+        商品期货期权到期日略有不同，此处统一用第三个周五近似
+        """
+        if not year_month or len(year_month) < 4:
+            return 3  # fallback
+        try:
+            from datetime import date, timedelta
+            _yy = int(year_month[:2]) + 2000
+            _mm = int(year_month[2:4]) if len(year_month) >= 4 else 1
+            # 找当月第三个周五
+            first_day = date(_yy, _mm, 1)
+            # 周一=0, 周五=4
+            first_friday = first_day + timedelta(days=(4 - first_day.weekday()) % 7)
+            third_friday = first_friday + timedelta(days=14)
+            today = date.today()
+            dte = (third_friday - today).days
+            # 转换为交易日(约70%)
+            trading_days = max(1, int(dte * 0.7))
+            return trading_days
+        except (ValueError, TypeError):
+            return 3  # fallback
+
+    @staticmethod
+    def _approx_iv_from_moneyness(premium: float, strike: float, underlying: float,
+                                   dte: int, option_type: str) -> float:
+        """从moneyness简单近似IV
+
+        使用Breakeven-Vol近似: IV ≈ premium / (underlying * sqrt(dte/252))
+        这是一个粗略近似，但比硬编码0.15更好
+        """
+        if underlying <= 0 or dte <= 0 or premium <= 0:
+            return 0.15  # fallback
+        try:
+            import math
+            _t = dte / 252.0  # 年化时间
+            _sqrt_t = math.sqrt(_t) if _t > 0 else 0.1
+            # 简单近似: IV = premium / (underlying * sqrt_t)
+            # 对于ATM期权: premium ≈ 0.4 * underlying * IV * sqrt_t
+            # → IV ≈ premium / (0.4 * underlying * sqrt_t)
+            _iv = premium / (0.4 * underlying * _sqrt_t)
+            # 合理范围限制
+            _iv = max(0.05, min(_iv, 2.0))
+            return _iv
+        except (ValueError, ZeroDivisionError):
+            return 0.15
+
     @staticmethod
     def resolve_month_weights(n_months: int) -> Tuple[float, ...]:
         """Resolve month weights for n months (design report Section 4.3).
@@ -429,7 +481,8 @@ class WidthCacheQueryService:
         return result
 
     @staticmethod
-    def determine_tier(coverage: float, wilson: float, correct_up_pct: float, noise_ratio: float) -> int:
+    def determine_tier(coverage: float, wilson: float, correct_up_pct: float, noise_ratio: float,
+                       tier3_correct_up_override: float = None) -> int:
         """Determine tier (design report Section 3.5).
 
         五唯一性修复：对齐规范阈值和运算符
@@ -455,6 +508,9 @@ class WidthCacheQueryService:
         _tier2_coverage = SORTER_CONFIG.get('tier2_coverage_threshold', TIER2_COVERAGE_THRESHOLD)
         _tier2_correct_up = SORTER_CONFIG.get('tier2_correct_up_threshold', TIER2_CORRECT_UP_THRESHOLD)
         _tier3_correct_up = SORTER_CONFIG.get('tier3_correct_up_threshold', TIER3_CORRECT_UP_THRESHOLD)
+        # FIX-C (2026-07-23): 支持参数覆盖tier3阈值，避免临时修改全局SORTER_CONFIG的线程安全问题
+        if tier3_correct_up_override is not None:
+            _tier3_correct_up = tier3_correct_up_override
         if correct_up_pct > 0:
             if coverage >= 0.8 and wilson >= _tier1_wilson:
                 return 1
@@ -594,20 +650,10 @@ class WidthCacheQueryService:
 
                 tier = self.determine_tier(coverage, wilson, correct_up_pct, noise_ratio)
 
-                # BUG-9 fix: filter out Tier 4 (design report: "Tier 4 = 不交易")
-                if tier == 4:
-                    # FIX-P0-19: Tier 4 静默过滤无日志，添加计数与周期日志
-                    # 根因: if tier == 4: continue 无日志，是最大的期权信号丢失源
-                    # 修复: 添加计数器与周期性告警日志，便于排查
-                    _tier4_skip_count = getattr(self, '_tier4_skip_count', 0) + 1
-                    self._tier4_skip_count = _tier4_skip_count
-                    if _tier4_skip_count <= 5 or _tier4_skip_count % 100 == 0:
-                        logging.info(
-                            "[FIX-P0-19] 期货 %s 被判定为 Tier 4(不交易), 跳过(累计%d个期货跳过)",
-                            fid, _tier4_skip_count,
-                        )
-                    continue
-
+                # FIX-P0-3-RC10 (2026-07-23): Tier4自适应降级机制
+                # 当>80%的期货被判定为Tier4时，自动将Tier4降级为Tier3
+                # 避免冷启动/低数据量期间大量期货被排除
+                # 第一遍：收集所有tier，暂不过滤
                 future_scores.append({
                     'future_internal_id': fid,
                     'tier': tier,
@@ -620,9 +666,71 @@ class WidthCacheQueryService:
                     'ra': ra,
                 })
 
+            # FIX-P0-3-RC10: Tier4自适应降级 — 检查Tier4占比
+            _total_futures = len(future_scores)
+            if _total_futures > 0:
+                _tier4_count = sum(1 for fs in future_scores if fs['tier'] == 4)
+                _tier4_ratio = _tier4_count / _total_futures
+                _auto_upgrade = _tier4_ratio > 0.80
+
+                if _auto_upgrade:
+                    # FIX-C (2026-07-23): 使用参数覆盖而非修改全局SORTER_CONFIG
+                    # 原代码临时修改SORTER_CONFIG['tier3_correct_up_threshold']存在线程安全问题
+                    # 其他线程并发调用determine_tier可能读到被修改的阈值
+                    _orig_tier3 = SORTER_CONFIG.get('tier3_correct_up_threshold', 0.35)
+                    _relaxed_tier3 = max(0.05, _orig_tier3 * 0.5)
+                    logging.warning(
+                        "[FIX-P0-3-RC10] Tier4自适应降级触发: tier4=%d/%d(%.1f%%), "
+                        "tier3_threshold %.2f→%.2f",
+                        _tier4_count, _total_futures, _tier4_ratio * 100,
+                        _orig_tier3, _relaxed_tier3,
+                    )
+                    # 重新计算tier（通过参数传递relaxed阈值，不修改全局配置）
+                    for fs in future_scores:
+                        if fs['tier'] == 4:
+                            fs['tier'] = self.determine_tier(
+                                fs['coverage'], fs['wilson'], fs['correct_up_pct'], fs['noise_ratio'],
+                                tier3_correct_up_override=_relaxed_tier3,
+                            )
+
+                # 过滤Tier4（经过自适应降级后可能减少）
+                _filtered_scores = [fs for fs in future_scores if fs['tier'] != 4]
+                _post_filter_tier4 = sum(1 for fs in future_scores if fs['tier'] == 4)
+                if _post_filter_tier4 > 0:
+                    _tier4_skip_count = getattr(self, '_tier4_skip_count', 0) + _post_filter_tier4
+                    self._tier4_skip_count = _tier4_skip_count
+                    if _tier4_skip_count <= 5 or _tier4_skip_count % 100 == 0:
+                        logging.info(
+                            "[FIX-P0-19] Tier4过滤: %d/%d个期货被跳过(累计%d), auto_upgrade=%s",
+                            _post_filter_tier4, _total_futures, _tier4_skip_count, _auto_upgrade,
+                        )
+                future_scores = _filtered_scores
+
             # 排序：tier升序, correct_up_pct降序, wilson降序
             future_scores.sort(key=lambda x: (x['tier'], -x['correct_up_pct'], -x['wilson']))
             top_futures = future_scores[:self.TOP_FUTURES_COUNT]
+            # FIX-OPTION-RANKING-OBSERVABILITY-20260723: 添加期权五态排序可观测性日志
+            # 根因: select_otm_targets_by_volume被调用(OptionTrading日志449条证明)但内部日志都是debug级别
+            #   或条件性输出 → 日志中option_ranking/select_otm_targets/五态全部为0 → 无法验证排序是否真正起作用
+            # 修复: 添加INFO级别排序结果日志，关键字[OPTION_RANKING]，便于从日志验证功能运行
+            # 原则: 每100次调用输出1次摘要(首次5次每次输出)，包含候选数/过滤后/top数/tier分布/首位信息
+            _opt_ranking_count = getattr(self, '_opt_ranking_log_count', 0) + 1
+            self._opt_ranking_log_count = _opt_ranking_count
+            if _opt_ranking_count <= 5 or _opt_ranking_count % 100 == 0:
+                _tier_summary = {}
+                for fs in future_scores:
+                    _t = fs['tier']
+                    _tier_summary[_t] = _tier_summary.get(_t, 0) + 1
+                _top_info = 'None'
+                if top_futures:
+                    _tf = top_futures[0]
+                    _top_info = "fid=%s tier=%d cup=%.4f wilson=%.4f" % (
+                        _tf['future_internal_id'], _tf['tier'],
+                        _tf['correct_up_pct'], _tf['wilson'])
+                logging.info(
+                    "[OPTION_RANKING] 五态排序完成: 候选=%d 过滤Tier4后=%d top=%d tier分布=%s 首位=%s call#=%d",
+                    _total_futures, len(future_scores), len(top_futures), _tier_summary, _top_info, _opt_ranking_count
+                )
             if not top_futures:
                 return []
 
@@ -676,14 +784,26 @@ class WidthCacheQueryService:
                 _fp_ym = str(_fp_meta.get('year_month', '') or '')
                 _underlying = self._future_prices_by_month.get(_fp_prod, {}).get(_fp_ym, 0.0)
                 _opt_inst = best.get('instrument_id', '')
-                try:
-                    from data.ds_data_writer import DataWriterMixin
-                    _dte = DataWriterMixin._compute_days_to_expiry(_opt_inst)
-                    _iv = DataWriterMixin._compute_implied_volatility(
-                        best.get('price', 0.0), best.get('strike_price', 0.0),
-                        _dte, best.get('option_type', ''), _underlying)
-                except (ImportError, RuntimeError, AttributeError):
-                    _dte, _iv = None, None
+                # FIX-S4-WAF-20260720: underlying_future_instrument_id空值守卫
+                # 根因: _fp_meta可能为None或instrument_id为空 → fallback到期权ID
+                #   → strategy_business_layer.py L937 `or t.get('instrument_id', '')` 兜底为期权ID
+                #   → bss.on_tick收到期权ID而非期货ID → box存储key错乱 → detect_spring失败
+                # 修复: 空时跳过该target, 避免污染下游S4-Spring集成路径
+                _future_inst_id_str = str(_fp_meta.get('instrument_id', ''))
+                if not _future_inst_id_str or _underlying <= 0:
+                    logging.debug(
+                        "[select_otm_targets_by_volume] SKIP: fid=%s future_inst_id=%r underlying=%.4f (空值守卫)",
+                        fid, _future_inst_id_str, _underlying,
+                    )
+                    continue
+                # FIX-S4-ROOT-20260720-v2: 用year_month推算DTE，不再依赖不存在的DataWriterMixin
+                # 原DataWriterMixin._compute_days_to_expiry/_compute_implied_volatility不存在
+                # → ImportError被except捕获 → _dte/_iv=None → 永远fallback到默认值(半拉子)
+                # 修复: 直接从year_month字段推算DTE，IV用简单moneyness近似
+                _dte = self._approx_dte_from_year_month(best.get('month', ''))
+                _iv = self._approx_iv_from_moneyness(
+                    best.get('price', 0.0), best.get('strike_price', 0.0),
+                    _underlying, _dte, best.get('option_type', ''))
                 # BUG-11 fix: include all design report 9.3 fields
                 targets.append({
                     **best,
@@ -699,6 +819,9 @@ class WidthCacheQueryService:
                     'tc': fs['tc'],
                     'th': fs['th'],
                     'ra': fs['ra'],
+                    # FIX-S4-ROOT-20260720: 期货元数据（S4-Spring box检测和strike_close条件需要）
+                    'underlying_future_instrument_id': str(_fp_meta.get('instrument_id', '')),
+                    'underlying_future_price': _underlying,
                     # FIX-21 RC-25: detect_spring所需期权元数据
                     'option_instrument_id': _opt_inst,
                     'premium_price': best.get('price', 0.0),
@@ -867,6 +990,28 @@ class WidthCacheQueryService:
         else:
             sorted_products = result_c.get('sorted_products', [])
 
+        # FIX-OPTION-RANKING-OBSERVABILITY-20260723: select_otm_targets_signal_sources也添加排序结果日志
+        # 根因: 该函数是另一个排序入口(signal_source A/B/C)，与select_otm_targets_by_volume并列
+        #   但之前只在select_otm_targets_by_volume添加了[OPTION_RANKING]日志，此函数没有 → 半拉子工程
+        # 修复: 补充可观测性日志，确保两个排序入口都有日志输出，便于从日志验证排序功能运行
+        _opt_ranking_count_ss = getattr(self, '_opt_ranking_log_count_ss', 0) + 1
+        self._opt_ranking_log_count_ss = _opt_ranking_count_ss
+        if _opt_ranking_count_ss <= 5 or _opt_ranking_count_ss % 100 == 0:
+            _tier_summary_ss = {}
+            for _sp in sorted_products:
+                _t = _sp.get('tier', 4)
+                _tier_summary_ss[_t] = _tier_summary_ss.get(_t, 0) + 1
+            _top_info_ss = 'None'
+            if sorted_products:
+                _sp0 = sorted_products[0]
+                _top_info_ss = "pid=%s tier=%s score=%.4f" % (
+                    _sp0.get('product_id', ''), _sp0.get('tier', 4),
+                    _sp0.get('best_score', 0.0))
+            logging.info(
+                "[OPTION_RANKING] 信号源%s排序完成: 候选=%d tier4过滤后=%d tier分布=%s 首位=%s call#=%d",
+                signal_source, len(source_a_results), len(sorted_products), _tier_summary_ss, _top_info_ss, _opt_ranking_count_ss
+            )
+
         targets = []
         for sp in sorted_products:
             if sp.get('tier', 4) == 4:
@@ -939,6 +1084,32 @@ class WidthCacheQueryService:
                 continue
 
             lots = self.TIER1_LOTS if sp.get('tier') == 1 else self.TIER2_LOTS
+            # FIX-S4-ROOT-20260720: 补充期货/期权元数据字段
+            # 根因: targets缺少underlying_future_instrument_id/underlying_future_price/
+            #   option_instrument_id/iv/premium_price/days_to_expiry等字段，
+            #   导致strategy_business_layer.py用期权ID和期权premium作为期货ID和期货价格
+            #   传入detect_spring→strike_close条件永远失败→S4零下单
+            _fp_meta = self._get_params().get_instrument_meta(fid) or {}
+            _fp_prod = str(_fp_meta.get('product', '')).upper()
+            _fp_ym = str(_fp_meta.get('year_month', '') or '')
+            _underlying_price = self._future_prices_by_month.get(_fp_prod, {}).get(_fp_ym, 0.0)
+            _future_inst_id = str(_fp_meta.get('instrument_id', ''))
+            _opt_inst = best.get('instrument_id', '')
+            # FIX-S4-WAF-20260720: underlying_future_instrument_id空值守卫(与select_otm_targets_by_volume对齐)
+            # 根因: _future_inst_id为空时, strategy_business_layer.py L964 fallback到期权ID
+            #   → bss.on_tick收到期权ID, box存储key错乱, detect_spring失败
+            # 修复: 空时跳过该target, 避免污染下游S4-Spring集成路径
+            if not _future_inst_id or _underlying_price <= 0:
+                logging.debug(
+                    "[select_otm_targets_signal_sources] SKIP: fid=%s future_inst_id=%r underlying=%.4f (空值守卫)",
+                    fid, _future_inst_id, _underlying_price,
+                )
+                continue
+            # FIX-S4-ROOT-20260720-v2: 用year_month推算DTE，不再依赖不存在的DataWriterMixin
+            _dte = self._approx_dte_from_year_month(best.get('month', ''))
+            _iv = self._approx_iv_from_moneyness(
+                best.get('price', 0.0), best.get('strike_price', 0.0),
+                _underlying_price, _dte, best.get('option_type', ''))
             targets.append({
                 **best,
                 'lots': lots,
@@ -946,11 +1117,21 @@ class WidthCacheQueryService:
                 'direction': 'BUY',
                 'tier': sp.get('tier', 4),
                 'correct_up_pct': sp.get('correct_up_pct', 0.0),
-                'wilson': 0.0,
-                'coverage': 0.0,
-                'noise_ratio': 0.0,
+                'wilson': sp.get('wilson', 0.0),       # FIX-P2-2-RC8 (2026-07-23): 从硬编码0.0→真实值
+                'coverage': sp.get('coverage', 0.0),   # FIX-P2-2-RC8: 从硬编码0.0→真实值
+                'noise_ratio': sp.get('noise_ratio', 0.0), # FIX-P2-2-RC8: 从硬编码0.0→真实值
                 'signal_source': signal_source,
                 'global_percentile': sp.get('global_percentile'),
+                # FIX-S4-ROOT-20260720: 期货元数据（S4-Spring box检测和strike_close条件需要）
+                'underlying_future_instrument_id': _future_inst_id,
+                'underlying_future_price': _underlying_price,
+                # FIX-S4-ROOT-20260720: 期权元数据（FIX-21 RC-25对齐select_otm_targets_by_volume）
+                'option_instrument_id': _opt_inst,
+                'premium_price': best.get('price', 0.0),
+                'days_to_expiry': _dte if _dte is not None else 3,
+                'iv': _iv if _iv and _iv > 0 else 0.15,
+                'order_flow_imbalance': 0.0,
+                'option_chain_activity': 0.0,
             })
 
         return targets

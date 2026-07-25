@@ -38,7 +38,7 @@ class LifecycleBind:
         #   使INFINIGO.subMarketData(StrategyObj=t_type_bootstrap)与C++持有的实例匹配
         _outer_ref = getattr(strategy_obj, '_outer_ref', None)
         _platform_strategy_obj = _outer_ref if _outer_ref is not None else strategy_obj
-        logging.critical("[FIX-20260715-STRATEGY-OBJ] bind_platform_apis: strategy_obj=%s(id=%d) outer_ref=%s(id=%d) platform_strategy_obj=%s(id=%d)",
+        logging.info("[FIX-20260715-STRATEGY-OBJ] bind_platform_apis: strategy_obj=%s(id=%d) outer_ref=%s(id=%d) platform_strategy_obj=%s(id=%d)",
                          type(strategy_obj).__name__, id(strategy_obj),
                          type(_outer_ref).__name__ if _outer_ref else 'None', id(_outer_ref) if _outer_ref else 0,
                          type(_platform_strategy_obj).__name__, id(_platform_strategy_obj))

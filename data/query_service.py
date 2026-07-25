@@ -197,21 +197,27 @@ class _KlineAggregator:
             'open_interest': self.open_interest,
         }
 
+    # FIX-KLINE-FLUSH-20260725: 恢复flush()方法(原FIX-M8-3被FIX-NO-ENHANCE-20260725误删)
+    # 根因澄清(用户2026-07-25决策复核):
+    #   - 用户"删除增强措施"是指**交易信号增强**(S1-HFT用缓存补充bid/ask、用volume推断方向)
+    #   - **不是**删除K线数据管道合成(K线合成是数据处理,不是交易信号制造)
+    #   - 误删flush()导致稀疏tick下K线永不完成→klines_raw=0→S3/S4永远0下单(条件永远不成就)
+    # 修复原则: 恢复K线管道 + 加入最低质量标准(避免虚假K线)
+    #   - 仅当kline_start_time不为None(至少有1个tick)且close_price不为None时才flush
+    #   - 空aggregator(kline_start_time is None)不flush(无数据=不合成)
+    #   - S3/S4箱体检测仍需≥3根周K线(策略逻辑不修改, K线合成不绕过策略条件)
     def flush(self) -> Optional[Dict[str, Any]]:
-        # FIX-M8-3: 新增flush方法，强制返回当前未完成的K线
-        # 解决稀疏tick场景下K线永不完成的问题(736 ticks / 16288 instruments = ~0.045 tick/instrument)
-        # 由flush_incomplete_klines定期调用，确保至少有一根K线落库
+        """强制返回当前未完成的K线(用于周期性flush)
+
+        最低质量标准:
+        - kline_start_time不为None(至少有1个tick进入)
+        - close_price不为None(至少有1个有效价格)
+        空aggregator返回None(不合成虚假K线)
+        """
         with self._lock:
-            if self.kline_start_time is None or self.open_price is None:
-                return None
-            kline = self._get_current_kline()
-            # 重置聚合器，开始新的K线周期
-            self.open_price = self.high_price = self.low_price = self.close_price = None
-            self.volume = 0
-            self.amount = 0.0
-            self.open_interest = None
-            self.kline_start_time = None
-            return kline
+            if self.kline_start_time is None or self.close_price is None:
+                return None  # 无数据=不合成(fail-closed)
+            return self._get_current_kline()
 
     def reset(self):
         self.open_price = self.high_price = self.low_price = self.close_price = None

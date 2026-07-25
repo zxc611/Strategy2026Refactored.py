@@ -120,8 +120,9 @@ class OrderChaseService:
 
                         _platform_cancel_ok = True
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
+                    # [FIX-WAL-EXCEPT-20260720] 扩展为except Exception，符合NEW-1硬约束
                     logging.error("[OrderChaseService] 平台撤单失败: %s %s", order_id, e)
 
                     return False
@@ -139,8 +140,9 @@ class OrderChaseService:
 
             return True
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
+            # [FIX-WAL-EXCEPT-20260720] 扩展为except Exception，符合NEW-1硬约束
             logging.error("[OrderChaseService] Cancel order error: %s", e)
 
             return False
@@ -179,8 +181,9 @@ class OrderChaseService:
 
                 logging.info("[R27-P0-RC-04] cancel_all_pending: 撤销%d/%d笔挂单", cancelled, len(pending_ids))
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
+            # [FIX-WAL-EXCEPT-20260720] 扩展为except Exception，符合NEW-1硬约束
             logging.error("[R27-P0-RC-04] cancel_all_pending异常: %s", e)
 
         return cancelled
@@ -350,8 +353,9 @@ class OrderChaseService:
 
                              caller_id, len(result['cancelled']), len(result['closed']), len(result['errors']))
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
+            # [FIX-WAL-EXCEPT-20260720] 扩展为except Exception，符合NEW-1硬约束
             logging.error("[R22-P0-EC-01] emergency_close_all_positions error: %s", e)
 
             result['errors'].append(str(e))

@@ -125,6 +125,9 @@ class MarketMakingSignal:
     vpin: float = 0.0
     optimal_spread_as: float = 0.0
     target_inventory_delta: float = 0.0
+    # V4-FIX-C10: 减仓行动字段(半拉子工程补全: check_inventory_unwind结果接入平仓链路)
+    unwind_action: str = ''          # 'REDUCE_LONG'/'REDUCE_SHORT'/''(无需减仓)
+    unwind_volume: float = 0.0      # 建议减仓量
     sigma: float = 0.0
     regime: str = "normal"           # normal / high_vol / low_vol
     expected_hit_prob: float = 0.0   # 报价命中概率
@@ -442,9 +445,35 @@ class _BidAskBounceDetector:
 class MarketMakingMonitor:
     """S6做市商策略实盘模拟监控模块 V1（顶级基金标准）。"""
 
-    PARTICIPATES_CAPITAL_ALLOCATION: bool = False
-    CAPITAL_ALLOCATION: float = 0.0
+    PARTICIPATES_CAPITAL_ALLOCATION: bool = True  # FIX-S6-CAPITAL-20260724: False→True
+    # FIX-S6-CAPITAL-20260724: CAPITAL_ALLOCATION从0.0→0.01，与S5对齐
+    CAPITAL_ALLOCATION: float = 0.01
     SENDS_REAL_ORDERS: bool = False
+    # FIX-S6-SNAPSHOT-PATH-20260724: 快照子目录常量(与S5对齐,使用os.path.join跨平台拼接)
+    SNAPSHOT_SUBDIR = os.path.join('logs', 'market_making_monitor')
+
+    @staticmethod
+    def _detect_base_dir() -> str:
+        # FIX-S6-SNAPSHOT-PATH-20260724: 锚定快照目录到模块所在项目根, 避免相对路径随cwd漂移
+        # 根因: _DEFAULT_SNAPSHOT_DIR="logs/market_making_monitor"是相对路径,
+        #   运行时cwd若为平台根(InfiniTrader_QhZijintianfengPythonX64/),
+        #   快照会落到平台根/logs/market_making_monitor/而非demo/strategy/monitor/logs/
+        #   导致与S5(arbitrage_monitor使用_detect_base_dir锚定)目录不一致, 统计误判为"0快照"
+        # 修复: 仿照S5 arbitrage_monitor._detect_base_dir, 从__file__向上查找__init__.py定位包根
+        # 不回退(保持目录锚定)、不降级、不绕过(正确解析绝对路径)
+        try:
+            current = os.path.dirname(os.path.abspath(__file__))
+        except (ValueError, OSError):
+            return os.getcwd()
+        for _ in range(6):
+            pkg_init = os.path.join(current, '', '__init__.py')
+            if os.path.isfile(pkg_init):
+                return current
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        return os.getcwd()
 
     def __init__(
         self,
@@ -530,6 +559,14 @@ class MarketMakingMonitor:
         self.adverse_window: int = int(adverse_window)
         self.adverse_threshold_bps: float = float(adverse_threshold_bps)
         self.snapshot_dir: str = snapshot_dir
+        # FIX-S6-SNAPSHOT-PATH-20260724: 相对路径锚定到模块所在项目根, 避免cwd漂移
+        # 根因: 默认snapshot_dir="logs/market_making_monitor"是相对路径,
+        #   运行时cwd为平台根时快照落到错误位置(平台根/logs/而非demo/strategy/monitor/logs/)
+        # 修复: 若snapshot_dir为相对路径, 拼接_detect_base_dir()得到绝对路径
+        #   若为绝对路径(外部显式传入), 保持原样不动 (向后兼容)
+        # 不回退、不降级、不绕过: 确保快照目录与S5 arbitrage_monitor对齐到同一项目根
+        if not os.path.isabs(self.snapshot_dir):
+            self.snapshot_dir = os.path.join(self._detect_base_dir(), self.snapshot_dir)
         self.price_tick: float = float(price_tick)
         self.signal_interval_ticks: int = int(signal_interval_ticks)
         self.snapshot_interval_sec: float = float(snapshot_interval_sec)
@@ -630,6 +667,8 @@ class MarketMakingMonitor:
         self._v2_optimal_size: float = 0.0
         self._v2_bid_size: float = 0.0
         self._v2_ask_size: float = 0.0
+        # FIX-S6-V2-ROOT-20260724: 诊断统计(溢出修复效果追踪)
+        self._diag_stats: dict = {}
         self._v2_corr_hedge: float = 0.0
 
         logger.info(
@@ -678,8 +717,20 @@ class MarketMakingMonitor:
         if sigma is None:
             vol_bps = self._estimate_volatility_bps()
             sigma = vol_bps * mid_price / 10000.0
+        # FIX-S6-V2-ROOT-20260724: cap sigma上限防止risk_component二次方溢出
+        # 根因: vol_bps无上限(实测可达100000+)→sigma=vol_bps*mid/10000异常大
+        #   →risk_component=γ*σ²*T/2二次方放大→base_half爆炸(75576445.53)
+        #   →仅截断bid_half/ask_half输出端是bypass修复,溢出仍在发生(24次截断)
+        # 修复: cap sigma上限为mid_price的5%(即最大半价差不超过5%*mid_price)
+        #   这意味着: 即使极端波动,半价差也不超过价格的5%(200bps单边,合理上限)
+        _sigma_cap = mid_price * 0.05
+        if sigma > _sigma_cap:
+            self._diag_stats['sigma_capped'] = self._diag_stats.get('sigma_capped', 0) + 1
+            sigma = _sigma_cap
         if sigma <= 0:
-            return self.base_spread_bps * mid_price / 10000.0
+            # V4-FIX-O20: 波动率无法估计(数据不可用)时返回0.0, 不再用base_spread_bps兜底
+            # 原则: 数据不可用=不开仓, 0 spread导致下游compute_bid_ask_quotes返回0,0,0
+            return 0.0
         T_minus_t = self.time_horizon_sec
         risk_component = self.risk_aversion * (sigma ** 2) * T_minus_t / 2.0
         adverse_component = math.log(1.0 + self.risk_aversion / self.order_arrival_kappa) / self.risk_aversion
@@ -698,9 +749,14 @@ class MarketMakingMonitor:
             volatility_bps = self._estimate_volatility_bps()
         vol_multiplier = max(1.0, volatility_bps / max(self.vol_target_bps, _DEFAULT_PRICE_EPS))
         effective_spread_bps = self.base_spread_bps * vol_multiplier / max(self.competition_factor, _DEFAULT_PRICE_EPS)
-        # FIX-20260713-S6-V1: effective_spread_bps 是全价差，需折半作为 half_spread_bps
+        # V4-FIX-O19: half_spread<=0(数据不可用)时不报价(fail-closed)
+        # 原则: 数据不可用=不开仓, 不再合成最小价差报价
+        # (原零价差修复L707-708是bypass, 应在half_spread<=0时直接拒绝报价)
         half_spread_bps = max(self.base_spread_bps, effective_spread_bps) / 2.0
         half_spread = half_spread_bps * mid_price / 10000.0
+        if half_spread <= 0:
+            logging.info("[V4-FIX-O19] half_spread<=0, 不报价 (fail-closed) mid=%.2f", mid_price)
+            return 0.0, 0.0, 0.0
         theo_price = self.compute_theoretical_price(mid_price)
         bid = self._align_to_tick(theo_price - half_spread)
         ask = self._align_to_tick(theo_price + half_spread)
@@ -717,21 +773,38 @@ class MarketMakingMonitor:
             return 0.0, 0.0, 0.0, 0.0, 0.0
         if volatility_bps is None:
             volatility_bps = self._estimate_volatility_bps()
+        # V4-FIX-O20: volatility_bps<=0(数据不可用)时不报价(fail-closed)
+        if volatility_bps <= 0:
+            logging.info("[V4-FIX-O20] volatility_bps<=0, 不报价 (fail-closed) mid=%.2f", mid_price)
+            return 0.0, 0.0, 0.0, 0.0, 0.0
         if sigma is None:
             sigma = volatility_bps * mid_price / 10000.0
 
         base_half = self.compute_optimal_spread_as(mid_price, sigma=sigma)
         min_half = self.base_spread_bps * mid_price / 10000.0
         base_half = max(base_half, min_half)
+        # FIX-S6-V2-ROOT-20260724: base_half源头cap
+        # 根因: base_half由A-S公式计算，sigma cap后仍可达mid_price*0.325(845/2600)
+        #   V2最大累乘15.6x→0.325*15.6=5.07→bid_half远超reservation→bid为负
+        #   仅截断输出端(bypass)不解决根因，溢出仍在发生(24次截断)
+        # 修复: 源头cap base_half不超过mid_price的15%(1500bps半价差)
+        #   合理性: 期权做市半价差>15%已非合理报价，A-S公式在极端波动下过宽
+        base_half = min(base_half, mid_price * 0.15)
 
         skew = self.get_inventory_skew()
         asym_factor = skew * 0.5
 
         # FIX-20260713-S6-MULTISRC: 订单簿不平衡作为额外 skew 因子
         # 买盘更厚(imbalance>0) → 市场偏多 → bid 更宽(不想买) ask 更窄(想卖)
-        # 卖盘更厚(imbalance<0) → 市场偏空 → bid 更窄(想买) ask 更宽(不想卖)
+        # 危盘更厚(imbalance<0) → 市场偏空 → bid 更窄(想买) ask 更宽(不想卖)
         ob_imbalance = self._order_book_imbalance
         asym_factor += ob_imbalance * 0.3  # 订单簿不平衡权重 0.3（inventory 0.5）
+
+        # FIX-S6-V2-ROOT-20260724: cap asym_factor在±0.8防止bid_half/ask_half溢出
+        # 根因: asym_factor无上限→bid_half=base_half*(1+asym_factor)可能远大于base_half
+        #   当base_half本身被sigma溢出放大后,asym_factor再放大就彻底爆炸
+        # 修复: cap asym_factor在±0.8, bid_half/ask_half最多1.8x/0.2x base_half
+        asym_factor = max(-0.8, min(0.8, asym_factor))
 
         bid_half = base_half * (1.0 + asym_factor)
         ask_half = base_half * (1.0 - asym_factor)
@@ -745,6 +818,11 @@ class MarketMakingMonitor:
             bid_half *= 1.3
             ask_half *= 1.3
             self._regime = "high_vol"
+            # FIX-S6-V2-ROOT-20260724: 高波动1.3x倍增后cap
+            # 根因: base_half已cap at 15%*mid，×1.3=19.5%*mid，再经V2累乘仍可溢出
+            # 修复: regime调整后cap at 20%*mid(2000bps半价差，极端波动合理上限)
+            bid_half = min(bid_half, mid_price * 0.20)
+            ask_half = min(ask_half, mid_price * 0.20)
         elif volatility_bps < self.vol_target_bps * 0.5:
             self._regime = "low_vol"
         else:
@@ -786,12 +864,18 @@ class MarketMakingMonitor:
             self._v2_oft = self._toxic_classifier.compute_oft()
             self._v2_pin = self._toxic_classifier.compute_informed_trader_prob()
             # 毒流高时加宽价差
+            # FIX-20260723-S6-MULT-SRC: 每个widen乘数独立限幅[1.0, 2.0]，防止上游数值异常(OFT/PIN>1.0)
+            #   导致累乘溢出(bid_half=23亿→reservation截断→15次WARNING)
+            # 根因: _v2_oft/_v2_pin数值可能超出[0,1]范围→widen因子无上界→累乘爆炸
+            # 修复: 每个widen因子限幅至[1.0, 2.0]，从源头阻断溢出链路
             if self._v2_oft > 0.5:
                 _toxic_widen = 1.0 + (self._v2_oft - 0.5) * 0.6
+                _toxic_widen = max(1.0, min(2.0, _toxic_widen))  # 限幅: 理论最大1.3，防御性上限2.0
                 bid_half *= _toxic_widen
                 ask_half *= _toxic_widen
             if self._v2_pin > 0.5:
                 _pin_widen = 1.0 + (self._v2_pin - 0.5) * 0.4
+                _pin_widen = max(1.0, min(2.0, _pin_widen))  # 限幅: 理论最大1.2，防御性上限2.0
                 bid_half *= _pin_widen
                 ask_half *= _pin_widen
 
@@ -799,6 +883,7 @@ class MarketMakingMonitor:
             self._v2_bounce_prob = self._bounce_detector.compute_bounce_prob()
             if self._v2_bounce_prob > 0.3:
                 _bounce_widen = 1.0 + (self._v2_bounce_prob - 0.3) * 0.5
+                _bounce_widen = max(1.0, min(2.0, _bounce_widen))  # 限幅: 理论最大1.35，防御性上限2.0
                 bid_half *= _bounce_widen
                 ask_half *= _bounce_widen
 
@@ -822,6 +907,23 @@ class MarketMakingMonitor:
         bid_half = max(bid_half, min_half * 0.3)
         ask_half = max(ask_half, min_half * 0.3)
 
+        # FIX-S6-V2-ROOT-20260724: 乘法链路源头cumulative cap（替代旧输出端bypass截断）
+        # 根因: 旧FIX-S6-BID-NEG在输出端(reservation-bid_half<0后)截断bid_half=reservation*0.9
+        #   这是bypass修复：溢出已经发生，截断只是掩盖症状
+        # 修复: 在乘法链路末端、输入bid/ask公式前约束bid_half/ask_half≤reservation*0.9
+        #   配合base_half源头cap(15%*mid)+regime cap(20%*mid)+V2各分量独立cap
+        #   三重源头防护确保bid始终>0，无需输出端截断
+        if reservation > 0:
+            _max_half = reservation * 0.9
+            if bid_half > _max_half:
+                logger.info("[S6-MMM-V1] bid_half=%.2f capped at reservation*0.9=%.2f (源头cumulative cap)",
+                             bid_half, _max_half)
+                bid_half = _max_half
+            if ask_half > _max_half:
+                logger.info("[S6-MMM-V1] ask_half=%.2f capped at reservation*0.9=%.2f (源头cumulative cap)",
+                             ask_half, _max_half)
+                ask_half = _max_half
+
         bid = self._align_to_tick(reservation - bid_half)
         ask = self._align_to_tick(reservation + ask_half)
 
@@ -831,6 +933,13 @@ class MarketMakingMonitor:
             jitter_ask = random.uniform(-self.quote_jitter_bps, self.quote_jitter_bps) * mid_price / 10000.0
             bid = self._align_to_tick(bid + jitter_bid)
             ask = self._align_to_tick(ask + jitter_ask)
+
+        # FIX-S6-BID-NEG-20260722: bid<=0兜底(抖动后仍可能<=0)
+        # FIX-S6-V2-ROOT-20260724: 降级为DEBUG — 三重源头cap(base_half+regime+cumulative)应保证bid>0
+        #   此兜底仅作防御性安全网，正常不应触发
+        if bid <= 0:
+            bid = self._align_to_tick(max(mid_price * 0.01, self.price_tick if self.price_tick > 0 else _DEFAULT_PRICE_EPS))
+            logger.debug("[S6-MMM-V1] bid<=0兜底修正为%.2f (源头cap应已防止)", bid)
 
         if ask <= bid:
             ask = self._align_to_tick(bid + (self.price_tick if self.price_tick > 0 else _DEFAULT_PRICE_EPS))
@@ -1005,35 +1114,18 @@ class MarketMakingMonitor:
                 self._ingest_tick(tick_data)
 
             mid_price = self._last_mid_price
-            # FIX-S6-1: mid_price <= 0 时使用 fallback 价格而非返回空信号
-            # 根因: mid_price <= 0 时返回空信号(mid_price=0) → execute_by_ranking L754 price<=0 跳过 → S6永远0模拟下单
-            # 修复: 依次尝试 _last_last_price → 默认价格1.0，确保模拟下单链路完整
+            # V4-FIX-O18: mid_price<=0(数据不可用)时返回None(fail-closed)
+            # 原则: 数据不可用=不开仓, 不再使用fallback价格(_last_last_price/1.0)
+            # (原FIX-S6-1 fallback价格已移除, 1.0默认价格是bypass)
             if mid_price <= 0:
-                _fallback_price = self._last_last_price
-                if _fallback_price <= 0:
-                    _fallback_price = 1.0  # 最终 fallback，确保模拟链路不中断
-                    logger.warning(
-                        "[S6-MMM-V1] _last_mid_price和_last_last_price均为0，使用默认价格%.2f "
-                        "(RC-S6-1/S6-2: 确保模拟下单链路完整)", _fallback_price
-                    )
-                else:
-                    logger.warning(
-                        "[S6-MMM-V1] _last_mid_price<=0，使用_last_last_price=%.6f 作为fallback "
-                        "(RC-S6-1: 单边行情或tick未投喂)", _fallback_price
-                    )
-                mid_price = _fallback_price
-                # 同步更新 _last_mid_price，使后续计算一致
-                self._last_mid_price = mid_price
+                logging.info("[V4-FIX-O18] mid_price<=0, 返回None (fail-closed)")
+                return None
 
-            # FIX-S6-3: 确保 instrument_id 非空
-            # 根因: 若 monitor 未通过 __init__ 或 _ingest_tick 设置 instrument_id，则为空
-            # 修复: 使用 fallback instrument_id
+            # V4-FIX-O18-RESIDUAL: instrument_id为空(数据不可用)时返回None, 不再用S6_MM_FALLBACK兜底
+            # 原则: 数据不可用=不开仓, fallback instrument_id 会让假合约进入下游排序/持仓系统
             if not self.instrument_id:
-                self.instrument_id = 'S6_MM_FALLBACK'
-                logger.warning(
-                    "[S6-MMM-V1] instrument_id为空，使用fallback='S6_MM_FALLBACK' "
-                    "(RC-S6-3: 确保模拟下单链路完整)"
-                )
+                logging.info("[V4-FIX-O18] instrument_id为空, 返回None (fail-closed)")
+                return None
 
             volatility_bps = self._estimate_volatility_bps()
             sigma = volatility_bps * mid_price / 10000.0
@@ -1105,6 +1197,9 @@ class MarketMakingMonitor:
                 vpin=vpin,
                 optimal_spread_as=optimal_spread_as,
                 target_inventory_delta=target_delta,
+                # V4-FIX-C10: 减仓行动接入(半拉子工程补全)
+                unwind_action='REDUCE_LONG' if target_delta > 0 else ('REDUCE_SHORT' if target_delta < 0 else ''),
+                unwind_volume=abs(target_delta) if target_delta != 0.0 else 0.0,
                 sigma=sigma,
                 regime=self._regime,
                 expected_hit_prob=round(hit_prob, 6),
@@ -1637,15 +1732,17 @@ class MarketMakingMonitor:
         """tick 收益率波动率（bps）。"""
         prices = list(self._price_history)
         if len(prices) < _MIN_VOL_SAMPLE:
-            return self.base_spread_bps
+            # V4-FIX-O20: 样本不足(数据不可用)时返回0.0(fail-closed)
+            # 原则: 数据不可用=不开仓, 不再使用base_spread_bps固定值fallback
+            return 0.0
         rets = [(prices[i] - prices[i - 1]) / prices[i - 1] for i in range(1, len(prices)) if prices[i - 1] > 0]
         if len(rets) < _MIN_VOL_SAMPLE - 1:
-            return self.base_spread_bps
+            return 0.0  # V4-FIX-O20: fail-closed
         mean = sum(rets) / len(rets)
         var = sum((r - mean) ** 2 for r in rets) / len(rets)
         std = math.sqrt(var)
         vol_bps = std * 10000.0 * self.vol_scale
-        return vol_bps if vol_bps > 0 else self.base_spread_bps
+        return vol_bps if vol_bps > 0 else 0.0  # V4-FIX-O20: vol_bps=0时返回0.0(fail-closed)
 
     def _simulate_quote_hit(self, signal: MarketMakingSignal) -> None:
         """模拟报价命中与成交。调用方需持锁。"""

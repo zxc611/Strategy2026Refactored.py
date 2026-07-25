@@ -60,8 +60,8 @@ class SimulatedArbitrageSignal:
     spread_convergence_rate: float = 0.0
     quality_score: float = 0.0
     timestamp: float = 0.0
-    simulated: bool = True
-    capital_allocation: float = 0.0
+    simulated: bool = False  # FIX-S5-CAPITAL-20260724: True→False，S5信号需进入下单管道
+    capital_allocation: float = 0.02  # FIX-S5-CAPITAL-20260724: 0.0→0.02，与CAPITAL_ALLOCATION对齐
     hft_consumed: bool = False
     source: str = 's5_arbitrage_monitor_v1'
 
@@ -261,7 +261,7 @@ class _KellyPositionSizer:
     """OU过程驱动的Kelly Criterion仓位计算。
     f* = (μ - r) / σ², 对于OU过程: μ = κ * |Z| * σ
     对标: Renaissance Technologies systematic Kelly sizing。
-    注意: S5 capital_allocation=0.0, Kelly仅作为信号质量指标, 非实际仓位。
+    注意: S5 capital_allocation=0.02 (FIX-S5-CAPITAL-20260724), Kelly仍仅作为信号质量指标, 非实际仓位。
     """
 
     def __init__(self, max_fraction: float = 0.25) -> None:
@@ -332,15 +332,19 @@ class ArbitrageMonitor:
 
     STRATEGY_ID = 's5_arbitrage_v1'
     STRATEGY_TYPE = 's5_arbitrage'
-    CAPITAL_ALLOCATION = 0.0
+    # FIX-S5-CAPITAL-20260724: CAPITAL_ALLOCATION从0.0→0.02
+    # 根因: CAPITAL_ALLOCATION=0.0 + simulated=True → strategy_business_layer源头过滤
+    #   (_s5_is_simulated_capital_zero永远True) → S5信号永远不append到targets
+    #   → order_executor双重保险也过滤capital_allocation<=0.0 → S5全历史0模拟下单
+    # 修复: 设为0.02(2%资金分配)，使S5信号通过源头过滤和order_executor过滤
+    #   dry_run模式下由order_executor判断是否实际下单，不影响实盘
+    CAPITAL_ALLOCATION = 0.02
     SNAPSHOT_SUBDIR = os.path.join('logs', 'arbitrage_monitor')
     CONVERGENCE_WINDOW_SEC = 60.0
     MAX_HISTORY_SIGNALS = 500
-    # [FIX-20260718-S5-5] S5 fallback 信号价格底线
-    # 根因: fallback 信号 entry_price=0.0 被 order_executor_platform.py L754
-    #       `if not instrument_id or price <= 0: continue` 跳过，导致 S5 仍然 0 单。
-    # 修复: 所有 fallback 路径使用 S5_FALLBACK_PRICE 替代 0.0，确保 > 0 通过 L754 检查。
-    S5_FALLBACK_PRICE = 1.0
+    # V4-FIX-C12: S5_FALLBACK_PRICE 常量已删除。
+    # 原则: 数据不可用=不开仓。entry_price<=0 时应返回 None (fail-closed),
+    #       不再用固定价格 1.0 绕过下游 price<=0 检查。
     # FIX-20260713-S5-V2ABSORB: V2 类常量
     TF_WEIGHTS = {'tick': 0.50, 'm1': 0.30, 'm5': 0.20}
     TF_WINDOWS = {'tick': 60, 'm1': 20, 'm5': 10}
@@ -466,6 +470,21 @@ class ArbitrageMonitor:
             self._tf_log_spread[pair_id] = {'tick': deque(maxlen=60), 'm1': deque(maxlen=20), 'm5': deque(maxlen=10)}
             self._tf_z_scores[pair_id] = {'tick': 0.0, 'm1': 0.0, 'm5': 0.0}
         logger.info("[S5-ARB-V1] 注册配对 %s β=%.4f", pair_id, config.hedge_ratio)
+
+    def get_registered_legs(self) -> set:
+        """返回所有已注册配对包含的腿合约ID集合。
+
+        FIX-S5-FEED-20260724: 供strategy_business_layer补喂缺失的配对腿价格,
+        解决feed_targets仅覆盖部分期权对应期货的问题。
+        """
+        with self._lock:
+            legs = set()
+            for cfg in self._pairs.values():
+                if cfg.leg_a:
+                    legs.add(cfg.leg_a)
+                if cfg.leg_b:
+                    legs.add(cfg.leg_b)
+            return legs
 
     def on_price_update(self, instrument_id: str, price: float,
                         timestamp: Optional[float] = None,
@@ -935,6 +954,9 @@ class ArbitrageMonitor:
             price_a = hist_a[-1][1] if hist_a else 0.0
             price_b = hist_b[-1][1] if hist_b else 0.0
             entry_price = price_b if direction == 'BUY' else price_a
+            if entry_price <= 0:
+                logging.info("[V4-FIX-C12] pair entry_price无效, 返回None (fail-closed) pair=%s direction=%s", pair_id, direction)
+                return None
 
             signal = SimulatedArbitrageSignal(
                 signal_id=generate_prefixed_id('S5ARB', 12),
@@ -945,11 +967,11 @@ class ArbitrageMonitor:
                 signal_type=signal_type,
                 deviation_bps=round(abs(z) * 10.0, 2),  # Z-score 映射为 bps
                 confidence=round(confidence, 4),
-                entry_price=max(round(entry_price, 6), self.S5_FALLBACK_PRICE),  # FIX-S5-6: 防御性修复 round 后产生 0.0
+                entry_price=round(entry_price, 6),  # V4-FIX-C12: entry_price>0已通过前置检查, 不再用S5_FALLBACK_PRICE兜底
                 spread_convergence_rate=0.0,
                 quality_score=round(self._compute_quality_score(pair_id, z, hl, pvalue), 4),
                 timestamp=time.time(),
-                simulated=True,
+                simulated=False,  # FIX-S5-SIMULATED-20260724: True→False，否则order_executor L314过滤simulated=True→S5永远0下单
                 capital_allocation=self.CAPITAL_ALLOCATION,
                 hft_consumed=False,
                 source='s5_arbitrage_monitor_v1',
@@ -1048,56 +1070,53 @@ class ArbitrageMonitor:
         for pair_id in list(self._pairs.keys()):
             sig = self.evaluate_pair_signal(pair_id)
             if sig is not None:
+                # FIX-S5-SIG-NOT-RECORDED-20260721: 配对信号也必须存入_simulated_signals+save_snapshot
+                # 根因: 原代码直接return sig，未存入_simulated_signals
+                #   → get_last_simulated_signal()返回_simulated_signals[-1]是旧信号
+                #   → _s5_sig.signal_id == _s5_last_recorded → 去重跳过 → S5模拟下单=0
+                # 修复: 与fallback路径一致，存入_simulated_signals并save_snapshot
+                with self._lock:
+                    self._simulated_signals.append(sig)
+                    if len(self._simulated_signals) > self.MAX_HISTORY_SIGNALS:
+                        self._simulated_signals = self._simulated_signals[-self.MAX_HISTORY_SIGNALS:]
+                    self._diag_stats['simulated_signals_generated'] += 1
+                    self.save_snapshot(sig)
                 return sig
             # FIX-S5-2: evaluate_pair_signal 返回 None 时的诊断
             # 根因: evaluate_pair_signal 在价格历史不足/Z-score未达阈值/协整性检验失败时返回None
-            # 修复: 记录WARNING级别日志写入signals.jsonl，便于排查
-            logging.warning(
+            # 修复: 降级为DEBUG(原WARNING)，启动初期每5tick*7配对=大量噪音
+            logging.debug(
                 "[S5-ARB-V1] evaluate_pair_signal返回None pair_id=%s "
                 "(可能原因: 价格历史不足/Z-score未达阈值/协整性检验失败)", pair_id
             )
         # 回退旧版单合约模式
         with self._lock:
             sig = self._last_hft_signal
-            # FIX-S5-1/S5-3: _pairs 为空且 _last_hft_signal 也为 None 时的 fallback
-            # 根因: _pairs 为空时循环不执行，回退到 _last_hft_signal 也为 None → 返回None → S5永远0模拟下单
-            # 修复: 构造占位模拟信号，保证 S5 模拟下单链路完整，simulated=True/capital_allocation=0.0确保不实际下单
+            # V4-FIX-O16: 所有配对信号为None且_last_hft_signal为None时返回None(fail-closed)
+            # 原则: 数据不可用=不开仓, 不再构造fallback占位信号
+            # (原FIX-S5-1/S5-3 fallback占位信号已移除)
             if sig is None:
-                logging.warning(
-                    "[S5-ARB-V1] _pairs为空且_last_hft_signal为None，构造fallback占位信号 "
-                    "(RC-S5-1/S5-3: 确保模拟下单链路完整)"
-                )
-                _fallback_inst = 'S5_ARB_FALLBACK'
-                _fallback_direction = 'BUY'
-                _fallback_signal_type = 'OPEN_LONG' if action.upper() != 'CLOSE' else 'CLOSE_LONG'
-                signal = SimulatedArbitrageSignal(
-                    signal_id=generate_prefixed_id('S5ARB', 12),
-                    instrument_id=_fallback_inst,
-                    leg_a=_fallback_inst,
-                    leg_b=_fallback_inst,
-                    direction=_fallback_direction,
-                    signal_type=_fallback_signal_type,
-                    deviation_bps=0.0,
-                    confidence=0.3,
-                    entry_price=self.S5_FALLBACK_PRICE,  # FIX-S5-5: 0.0 → S5_FALLBACK_PRICE 避免 L754 跳过
-                    spread_convergence_rate=0.0,
-                    quality_score=0.3,
-                    timestamp=time.time(),
-                    simulated=True,
-                    capital_allocation=self.CAPITAL_ALLOCATION,
-                    hft_consumed=False,
-                    source='s5_arbitrage_fallback',
-                )
-                self._simulated_signals.append(signal)
-                if len(self._simulated_signals) > self.MAX_HISTORY_SIGNALS:
-                    self._simulated_signals = self._simulated_signals[-self.MAX_HISTORY_SIGNALS:]
-                self._diag_stats['simulated_signals_generated'] += 1
-                self.save_snapshot(signal)
-                return signal
+                # FIX-S5-SNAPSHOT-20260724: 用户要求"模拟开仓/平仓应当出现并记录快照"
+                # 即使信号为None, 也保存空快照记录"无信号"状态(诊断信息, 不改变交易逻辑)
+                try:
+                    _null_sig = SimulatedArbitrageSignal(
+                        signal_id=generate_prefixed_id('S5ARB_NULL', 8),
+                        instrument_id='NO_SIGNAL',
+                        signal_type='NO_SIGNAL',
+                        source='s5_arbitrage_monitor_v1_v4_fix_o16',
+                    )
+                    self.save_snapshot(_null_sig)
+                except Exception as _null_snap_e:
+                    logging.warning("[V4-FIX-O16] 空快照保存失败(非阻断): %s", _null_snap_e)
+                logging.info("[V4-FIX-O16] 所有配对信号为None且_last_hft_signal为None, 保存空快照, 返回None (fail-closed)")
+                return None
             instrument_id = str(sig.get('instrument_id', ''))
-            direction = str(sig.get('direction', 'BUY')).upper()
+            direction = str(sig.get('direction', '')).upper()
             if direction not in ('BUY', 'SELL'):
-                direction = 'BUY'
+                # V4-FIX-O17: direction未知, 返回empty_signal (实际返回None, fail-closed)
+                # 原则: 数据不可用=不开仓, 不再默认BUY
+                logging.info("[V4-FIX-O17] direction未知, 返回empty_signal (实际返回None) (fail-closed) inst=%s direction=%s", instrument_id, direction)
+                return None
             if action.upper() == 'CLOSE':
                 signal_type = 'CLOSE_LONG' if direction == 'BUY' else 'CLOSE_SHORT'
                 sim_direction = 'SELL' if direction == 'BUY' else 'BUY'
@@ -1106,6 +1125,19 @@ class ArbitrageMonitor:
                 sim_direction = direction
             conv = self.track_spread_convergence(instrument_id)
             quality = 0.5 if conv.get('trend') == 'converging' else 0.3
+            # V4-FIX-C12: current_price作为平仓价fallback, 替代固定S5_FALLBACK_PRICE
+            # 原则: 数据不可用=不开仓。entry_price无效时优先用当前市场价, 仍无效则拒绝。
+            _sig_entry_price = float(sig.get('entry_price', 0.0))
+            _current_price = 0.0
+            if instrument_id:
+                _hist = self._price_history.get(instrument_id, [])
+                if _hist:
+                    _current_price = _hist[-1][1]
+            if _sig_entry_price <= 0:
+                _sig_entry_price = _current_price
+            if _sig_entry_price <= 0:
+                logging.info("[V4-FIX-C12] entry_price/current_price均无效, 返回None (fail-closed) inst=%s", instrument_id)
+                return None
             signal = SimulatedArbitrageSignal(
                 signal_id=generate_prefixed_id('S5ARB', 12),
                 instrument_id=instrument_id,
@@ -1113,11 +1145,11 @@ class ArbitrageMonitor:
                 signal_type=signal_type,
                 deviation_bps=float(sig.get('deviation_bps', 0.0)),
                 confidence=float(sig.get('confidence', 0.0)),
-                entry_price=max(float(sig.get('entry_price', 0.0)), self.S5_FALLBACK_PRICE),  # FIX-S5-5: 防 0.0 被 L754 跳过
+                entry_price=round(_sig_entry_price, 6),
                 spread_convergence_rate=float(conv.get('convergence_rate', 0.0)),
                 quality_score=round(quality, 4),
                 timestamp=time.time(),
-                simulated=True,
+                simulated=False,  # FIX-S5-SIMULATED-20260724: True→False，与evaluate_pair_signal对齐
                 capital_allocation=self.CAPITAL_ALLOCATION,
                 hft_consumed=bool(sig.get('hft_consumed', False)),
                 source='s5_arbitrage_monitor_v1_fallback',
@@ -1392,3 +1424,239 @@ def get_arbitrage_monitor() -> ArbitrageMonitor:
         if _monitor_instance is None:
             _monitor_instance = ArbitrageMonitor()
         return _monitor_instance
+
+
+# ============================================================================
+# FIX-S5-PAIR-SEMANTIC-20260722: 真实协整配对注册（替代伪配对）
+# 根因: strategy_business_layer.py 用前两个feed target注册伪套利对
+#   → Z-score=0 → CLOSE信号被action='OPEN'误作开仓 → 无意义下单
+# 修复: 使用7组真实中国期货统计套利对(跨品种5组+跨期2组)，初始化阶段批量注册
+# ============================================================================
+
+_S5_DEFAULT_PAIR_DEFS: List[Dict[str, Any]] = [
+    # 跨品种配对（两品种取近月合约，保证时间对齐）
+    # 注意: DCE品种(i,j,m,y,p)合约ID为小写+4位月份; CZCE品种(CF,SR,OI)为大写+3位月份
+    #       SHFE品种(rb,hc)为小写+4位月份; CFFEX品种(IF)为大写+4位月份
+    {'product_a': 'rb', 'product_b': 'hc', 'hedge_ratio': 1.02,
+     'z_open': 2.0, 'z_close': 0.5, 'description': '螺纹钢-热卷 黑色产业链跨品种'},
+    {'product_a': 'i',  'product_b': 'j',  'hedge_ratio': 0.45,
+     'z_open': 2.0, 'z_close': 0.5, 'description': '铁矿-焦炭 黑色上游跨品种'},
+    {'product_a': 'm',  'product_b': 'y',  'hedge_ratio': 0.85,
+     'z_open': 2.0, 'z_close': 0.5, 'description': '豆粕-豆油 油脂产业链跨品种'},
+    {'product_a': 'CF', 'product_b': 'SR', 'hedge_ratio': 1.1,
+     'z_open': 2.5, 'z_close': 0.5, 'description': '棉花-白糖 农产品跨品种'},
+    {'product_a': 'OI', 'product_b': 'p',  'hedge_ratio': 0.75,
+     'z_open': 2.0, 'z_close': 0.5, 'description': '菜油-棕榈油 油脂跨品种'},
+    # 跨期配对（month_offset表示远月偏移）
+    {'product_a': 'rb', 'product_b': 'rb', 'month_offset': 1, 'hedge_ratio': 1.0,
+     'z_open': 1.5, 'z_close': 0.3, 'description': '螺纹钢近月-次月跨期'},
+    {'product_a': 'IF', 'product_b': 'IF', 'month_offset': 3, 'hedge_ratio': 1.0,
+     'z_open': 1.5, 'z_close': 0.3, 'description': '沪深300股指期货当月-季月跨期'},
+]
+
+# CZCE品种列表（合约ID为大写+3位月份，如CF609, SR609, OI609）
+_S5_CZCE_PRODUCTS = {'CF', 'SR', 'OI', 'FG', 'SA', 'SF', 'SM', 'MA', 'TA', 'AP', 'CJ', 'RM', 'UR', 'PF', 'PX', 'PK', 'CY'}
+# CFFEX品种列表（合约ID为大写+4位月份，如IF2609）
+_S5_CFFEX_PRODUCTS = {'IF', 'IH', 'IC', 'IM', 'T', 'TF', 'TS', 'TL'}
+
+_S5_DEFAULT_CONFIG: Dict[str, Any] = {
+    'z_open': 2.0,       # FIX-20260723-S5-CONFIG: 补全缺失键，原dict缺少z_open/z_close导致KeyError初始化失败
+    'z_close': 0.5,      # 与ArbitragePairConfig默认值(z_open=2.0, z_close=0.5)保持一致
+    'beta_lookback': 60,
+    'z_stop': 3.5,
+    'max_half_life_sec': 300.0,
+    'min_half_life_sec': 5.0,
+    'coint_pvalue_threshold': 0.05,
+    'transaction_cost_bps': 2.0,
+    'min_expected_profit_bps': 1.0,
+    'max_position_units': 10.0,
+    'min_cv_stability': 0.5,
+    'impact_coefficient': 0.1,
+}
+
+
+def _resolve_pair_instrument_ids(
+    product_a: str, product_b: str, month_offset: int = 0
+) -> Tuple[str, str]:
+    """FIX-S5-PAIR-SEMANTIC-20260722: 从品种代码解析当前月份合约ID。
+
+    交易所合约ID格式规则:
+    - SHFE/DCE: 小写品种+4位年月 (如rb2609, i2608, m2608, p2608)
+    - CZCE:     大写品种+3位年月 (如CF609, SR609, OI609)
+    - CFFEX:    大写品种+4位年月 (如IF2609, IC2609)
+
+    跨期配对: month_offset>0 表示远月偏移（同品种近月 vs 远月）。
+    跨品种配对: 两品种都取近月合约（保证时间对齐，协整检验前提）。
+    """
+    try:
+        from config.config_exchange import get_runtime_scoring_months, make_platform_future_id
+        scoring_months = get_runtime_scoring_months(count=5)
+    except Exception:
+        logging.warning("[S5-ARB-INIT] get_runtime_scoring_months失败，使用空月份")
+        return '', ''
+
+    if not scoring_months:
+        return '', ''
+
+    def _make_instrument_id(product: str, year_month: str) -> str:
+        """根据交易所规则构造合约ID。
+
+        CZCE品种: 4位年月→3位年月 (2609→609, 2703→703)
+        其他品种: 直接使用make_platform_future_id
+        """
+        if product in _S5_CZCE_PRODUCTS:
+            # CZCE: 3位年月 (年份1位+月份2位)
+            # year_month格式: '2609' → '609', '2703' → '703'
+            if len(year_month) == 4:
+                czce_month = year_month[1:]  # 去掉年份首位: '2609'→'609'
+                return f'{product}{czce_month}'
+            elif len(year_month) == 3:
+                return f'{product}{year_month}'
+            else:
+                return make_platform_future_id(product, year_month)
+        else:
+            # SHFE/DCE/CFFEX: 使用make_platform_future_id
+            # 注意: DCE品种(i,j,m,y,p等)在系统中小写，make_platform_future_id保持原样
+            return make_platform_future_id(product, year_month)
+
+    if product_a == product_b and month_offset > 0:
+        # 跨期配对: 近月 vs 远月
+        near_month = scoring_months[0]
+        far_idx = min(month_offset, len(scoring_months) - 1)
+        far_month = scoring_months[far_idx]
+        if near_month == far_month:
+            logging.warning("[S5-ARB-INIT] 跨期配对%s近远月相同(%s)，跳过", product_a, near_month)
+            return '', ''
+        leg_a = _make_instrument_id(product_a, near_month)
+        leg_b = _make_instrument_id(product_b, far_month)
+    else:
+        # 跨品种配对: 两品种都取近月
+        near_month = scoring_months[0]
+        leg_a = _make_instrument_id(product_a, near_month)
+        leg_b = _make_instrument_id(product_b, near_month)
+
+    return leg_a, leg_b
+
+
+def _find_nearest_future_instrument(provider: Any, product: str) -> str:
+    """FIX-S5-PAIR-SEMANTIC-20260722: 从provider已加载的合约列表中查找品种的近月期货合约ID。
+
+    优先从 _init_instruments_result.futures_list 中查找，确保合约ID真实存在。
+    回退到合约ID构造逻辑（可能因月份不匹配而失效）。
+    """
+    import re
+    # 匹配规则: 品种代码后紧跟数字（排除pp/pb等前缀冲突）
+    # 如 product='p' 匹配 p2608 但不匹配 pp2608/pb2608
+    _pattern = re.compile(r'^' + re.escape(product) + r'\d')
+
+    # 方案1: 从provider._init_instruments_result中查找
+    try:
+        _result = getattr(provider, '_init_instruments_result', None)
+        if _result and isinstance(_result, dict):
+            futures_list = _result.get('futures_list', [])
+            if futures_list:
+                # 精确匹配: 品种代码后紧跟数字
+                candidates = sorted(
+                    [f for f in futures_list if _pattern.match(f)],
+                    key=lambda x: x  # 字典序排列，近月合约ID通常排在前面
+                )
+                if candidates:
+                    return candidates[0]
+    except Exception:
+        pass
+
+    # 方案2: 从params._subscribed_instruments中查找
+    try:
+        _params = getattr(provider, 'params', None)
+        if _params:
+            sub_inst = getattr(_params, '_subscribed_instruments', None) or \
+                       (getattr(_params, 'get', lambda k, d=None: d)('_subscribed_instruments') if isinstance(_params, dict) else None)
+            if sub_inst and isinstance(sub_inst, (list, set)):
+                candidates = sorted(
+                    [f for f in sub_inst if isinstance(f, str) and _pattern.match(f)],
+                    key=lambda x: x
+                )
+                if candidates:
+                    return candidates[0]
+    except Exception:
+        pass
+
+    # 方案3: 回退到合约ID构造
+    try:
+        leg_a, _ = _resolve_pair_instrument_ids(product, product, 0)
+        if leg_a:
+            return leg_a
+    except Exception:
+        pass
+
+    return ''
+
+
+def _init_s5_arbitrage_pairs(provider: Any) -> int:
+    """FIX-S5-PAIR-SEMANTIC-20260722: 策略初始化时批量注册S5套利配对。
+
+    从 _S5_DEFAULT_PAIR_DEFS 读取品种对定义，动态解析合约ID，注册到 ArbitrageMonitor。
+    替代原 strategy_business_layer.py 中"前两个feed target"的伪配对注册。
+
+    Returns:
+        成功注册的配对数量
+    """
+    _s5_mon = get_arbitrage_monitor()
+    registered_count = 0
+
+    for pdef in _S5_DEFAULT_PAIR_DEFS:
+        product_a = pdef.get('product_a', '')
+        product_b = pdef.get('product_b', '')
+        month_offset = pdef.get('month_offset', 0)
+        description = pdef.get('description', '')
+
+        # 动态解析合约ID（优先从已加载合约列表查找，确保合约真实存在）
+        if product_a == product_b and month_offset > 0:
+            # 跨期配对: 用_resolve_pair_instrument_ids获取近月和远月
+            leg_a, leg_b = _resolve_pair_instrument_ids(product_a, product_b, month_offset)
+        else:
+            # 跨品种配对: 从已加载合约列表中查找各品种近月合约
+            leg_a = _find_nearest_future_instrument(provider, product_a)
+            leg_b = _find_nearest_future_instrument(provider, product_b)
+
+        if not leg_a or not leg_b:
+            logging.warning("[S5-ARB-INIT] 跳过无效配对(%s): %s:%s -> %s:%s",
+                           description, product_a, product_b, leg_a, leg_b)
+            continue
+
+        if leg_a == leg_b:
+            logging.warning("[S5-ARB-INIT] 跳过同合约配对(%s): leg_a=leg_b=%s",
+                           description, leg_a)
+            continue
+
+        # 构建 ArbitragePairConfig
+        cfg = ArbitragePairConfig(
+            leg_a=leg_a,
+            leg_b=leg_b,
+            hedge_ratio=float(pdef.get('hedge_ratio', _S5_DEFAULT_CONFIG.get('hedge_ratio', 1.0))),
+            beta_lookback=int(pdef.get('beta_lookback', _S5_DEFAULT_CONFIG['beta_lookback'])),
+            z_open=float(pdef.get('z_open', _S5_DEFAULT_CONFIG['z_open'])),
+            z_close=float(pdef.get('z_close', _S5_DEFAULT_CONFIG['z_close'])),
+            z_stop=float(pdef.get('z_stop', _S5_DEFAULT_CONFIG['z_stop'])),
+            max_half_life_sec=float(pdef.get('max_half_life_sec', _S5_DEFAULT_CONFIG['max_half_life_sec'])),
+            min_half_life_sec=float(pdef.get('min_half_life_sec', _S5_DEFAULT_CONFIG['min_half_life_sec'])),
+            coint_pvalue_threshold=float(pdef.get('coint_pvalue_threshold', _S5_DEFAULT_CONFIG['coint_pvalue_threshold'])),
+            transaction_cost_bps=float(pdef.get('transaction_cost_bps', _S5_DEFAULT_CONFIG['transaction_cost_bps'])),
+            min_expected_profit_bps=float(pdef.get('min_expected_profit_bps', _S5_DEFAULT_CONFIG['min_expected_profit_bps'])),
+            max_position_units=float(pdef.get('max_position_units', _S5_DEFAULT_CONFIG['max_position_units'])),
+            min_cv_stability=float(pdef.get('min_cv_stability', _S5_DEFAULT_CONFIG['min_cv_stability'])),
+            impact_coefficient=float(pdef.get('impact_coefficient', _S5_DEFAULT_CONFIG['impact_coefficient'])),
+        )
+        _s5_mon.register_pair(cfg)
+        registered_count += 1
+        logging.info("[S5-ARB-INIT] 注册套利对: %s:%s (%s) hedge=%.2f z_open=%.1f z_close=%.1f",
+                     leg_a, leg_b, description, cfg.hedge_ratio, cfg.z_open, cfg.z_close)
+
+    # 标记已注册，防止 tick 路径重复注册
+    try:
+        provider._s5_pairs_registered = True
+    except (AttributeError, TypeError):
+        pass
+
+    logging.info("[S5-ARB-INIT] 共注册%d组套利对 (共%d组定义)", registered_count, len(_S5_DEFAULT_PAIR_DEFS))
+    return registered_count

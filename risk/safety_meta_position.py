@@ -22,7 +22,13 @@ from infra.shared_utils import safe_int, safe_float, CHINA_TZ as _CHINA_TZ  # P2
 
 from risk.risk_support import safe_get_float, api_version, _get_tz_aware_now, CircuitBreakerStateStore
 
-from position.margin_manager import MarginManager
+# FIX-S1-ROOT-20260720: 延迟导入MarginManager，避免risk↔position循环依赖
+# 根因: safety_meta_position模块级别导入position.margin_manager，运行时因
+#   risk.risk_service → risk.safety_meta_position → position.margin_manager
+#   与 position.position_service → risk.risk_support 的循环依赖导致ModuleNotFoundError
+#   → OrderService/PositionService初始化失败 → S1-HFT pursuit open risk check全部阻断(10464次)
+# 修复: 模块级别import改为延迟导入，仅在实例化时导入
+# from position.margin_manager import MarginManager  # OLD: 模块级别导入
 
 from governance.compliance_checker import ComplianceChecker
 
@@ -68,7 +74,13 @@ class HardTimeStopAndComplianceService:
 
 
 
-        self._margin_manager = MarginManager()
+        # FIX-S1-ROOT-20260720: 延迟导入MarginManager，避免risk↔position循环依赖
+        try:
+            from position.margin_manager import MarginManager
+            self._margin_manager = MarginManager()
+        except ImportError as _mm_err:
+            logging.warning("[SafetyMetaPosition] MarginManager延迟导入失败(非阻断): %s", _mm_err)
+            self._margin_manager = None
 
         self._compliance_checker = ComplianceChecker(owner)
 
@@ -296,6 +308,15 @@ class HardTimeStopAndComplianceService:
 
         daily_start = daily_start_equity or equity
 
+        # FIX-S1-ROOT-20260720: _margin_manager可能为None(延迟导入失败时)
+        if self._margin_manager is None:
+            # 降级: 无保证金管理器时，执行简化检查（非完全放行）
+            # 至少检查: equity>0, 持仓数未超限
+            if equity <= 0:
+                return {'sufficient': False, 'available_margin': 0.0, 'reason': 'equity_non_positive_degraded'}
+            if open_positions >= max_positions:
+                return {'sufficient': False, 'available_margin': 0.0, 'reason': 'position_limit_reached_degraded'}
+            return {'sufficient': True, 'reason': 'margin_manager_unavailable_degraded_check_passed'}
         return self._margin_manager.check_capital_sufficiency(
 
             equity, required_margin, open_positions, max_positions, existing_margin_used,
@@ -307,13 +328,15 @@ class HardTimeStopAndComplianceService:
 
 
     def reserve_margin(self, *args, **kwargs):
-
+        # FIX-S1-ROOT-20260720: _margin_manager可能为None
+        if self._margin_manager is None:
+            return None
         return self._margin_manager.reserve_margin(*args, **kwargs)
 
-
-
     def release_margin(self, *args, **kwargs):
-
+        # FIX-S1-ROOT-20260720: _margin_manager可能为None
+        if self._margin_manager is None:
+            return None
         return self._margin_manager.release_margin(*args, **kwargs)
 
 

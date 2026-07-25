@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from infra.shared_utils import CHINA_TZ
 from lifecycle.lifecycle_state_machine import StrategyState
@@ -49,9 +50,58 @@ class LifecycleMonitor:
         with self.p._lock:
             self.p._stats['total_trades'] += 1
 
-    def record_signal(self) -> None:
+    def record_signal(self, target: Optional[Dict[str, Any]] = None) -> None:
+        """记录信号数量，可选传递target信息用于信号统计和诊断。
+
+        FIX-P0-1-RC13 (2026-07-23): 原record_signal只递增计数器不传递target内容，
+        导致五态排序结果被丢弃。现增加target参数，支持:
+        - 按signal_source(A/B/C)统计信号分布
+        - 按tier统计信号质量分布
+        - 记录前N个信号的关键字段用于诊断
+        """
         with self.p._lock:
             self.p._stats['total_signals'] += 1
+            # FIX-P0-1-RC13: 信号源统计
+            # FIX-E2 (2026-07-23): 使用普通dict替代defaultdict，避免序列化风险和意外键创建
+            if target:
+                _signal_stats = self.p._stats.setdefault('signal_stats', {
+                    'by_source': {},                # {'A': N, 'B': N, 'C': N}
+                    'by_tier': {},                  # {1: N, 2: N, 3: N, 4: N}
+                    'by_direction': {},             # {'BUY': N, 'SELL': N}
+                    'last_targets': [],             # 最近N个target快照
+                    'first_seen_at': time.time(),
+                })
+                _ss = _signal_stats
+                _src = target.get('signal_source', 'unknown')
+                _tier = target.get('tier', 4)
+                _dir = target.get('direction', 'unknown')
+                _ss['by_source'][_src] = _ss['by_source'].get(_src, 0) + 1
+                _ss['by_tier'][_tier] = _ss['by_tier'].get(_tier, 0) + 1
+                _ss['by_direction'][_dir] = _ss['by_direction'].get(_dir, 0) + 1
+                # 保留最近20个target快照用于诊断
+                if len(_ss['last_targets']) < 20:
+                    _ss['last_targets'].append({
+                        'instrument_id': target.get('option_instrument_id', target.get('instrument_id', '')),
+                        'future_id': target.get('underlying_future_instrument_id', ''),
+                        'source': _src,
+                        'tier': _tier,
+                        'direction': _dir,
+                        'rank': target.get('product_rank', 0),
+                        'correct_up_pct': target.get('correct_up_pct', 0.0),
+                        'premium': target.get('premium_price', target.get('price', 0.0)),
+                    })
+                # 首次信号时记录关键信息
+                _total = self.p._stats['total_signals']
+                if _total <= 5 or _total % 500 == 0:
+                    _inst = target.get('option_instrument_id', target.get('instrument_id', 'N/A'))
+                    logging.info(
+                        "[SignalRecord] #%d inst=%s src=%s tier=%s dir=%s rank=%d "
+                        "correct_up=%.3f premium=%.4f",
+                        _total, _inst, _src, _tier, _dir,
+                        target.get('product_rank', 0),
+                        target.get('correct_up_pct', 0.0),
+                        target.get('premium_price', target.get('price', 0.0)),
+                    )
 
     def record_error(self, error_message: str) -> None:
         with self.p._lock:

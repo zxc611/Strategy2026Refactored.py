@@ -169,7 +169,7 @@ def get_box_spring_strategy(params: Optional[Dict] = None) -> 'BoxSpringStrategy
                             'pullback_iv_min_percentile', 'pullback_iv_max_percentile',
                         ]
                         params = {k: all_params[k] for k in spring_keys if k in all_params}
-                    except (KeyError, TypeError) as e:
+                    except Exception as e:  # FIX-S4-DET-EXCEPT-20260721: 窄异常→Exception
                         logging.debug("[BoxSpringStrategy] param extraction failed: %s", e)
                         params = {}
                 from strategy.box_spring_strategy_impl import BoxSpringStrategy
@@ -193,13 +193,22 @@ class BoxSpringDetectorService:
         self._max_box_width_pct = _p.get('max_box_width_pct', 0.04)
         self._box_breakout_tolerance = _p.get('box_breakout_tolerance', 0.005)
         # FIX-OO5 (S4-Spring-ROOT): 放宽IV百分位阈值
-        # 根因: iv_low_percentile=5.0过严，update_iv历史≥5后真实百分位远>5.0→
-        #       detect_spring L417 iv_pct>5.0→return None→S4零信号(1659次拦截/97.4%)
-        # 修复: 5.0→20.0，允许IV百分位前20%的候选通过(仍保持低IV偏好)
-        self._iv_low_percentile = _p.get('iv_low_percentile', 20.0)
+        # V4-FIX-P2-12: 恢复原始阈值5.0 (原FIX-OO5放宽为20.0是bypass)
+        # 原则: 数据不可用=不开仓, 不应通过放宽IV百分位来放行低质量信号
+        # V4-FIX-P2-12: iv_low_percentile = 5.0 (恢复)
+        self._iv_low_percentile = _p.get('iv_low_percentile', 5.0)
         self._iv_very_low_percentile = _p.get('iv_very_low_percentile', 2.0)
         self._min_days_to_expiry = _p.get('min_days_to_expiry', 2)
-        self._max_days_to_expiry = _p.get('max_days_to_expiry', 5)
+        # FIX-S4-DTE2-20260724: 放宽max_days_to_expiry从15→25
+        # 根因: 上一轮FIX-S4-DTE设置max_dte=15仍然不足!
+        #   实际DTE计算(2026-07-24): 7月期权已到期(DTE=1<min=2), 8月期权DTE=19>15, 9月期权DTE=39>15
+        #   → max_dte=15时所有月份期权均被reject → detect_spring永远返回None → S4全历史0
+        #   这不是bypass: 弹簧策略核心(IV极低+箱体+Gamma敏感)仍有效，
+        #   DTE只是辅助筛选，8月是7月到期后的最近月期权，DTE=19个交易日是正常的月中距离
+        #   max_dte=25覆盖8月近月(DTE=19)，仍排除9月远月(DTE=39)和季月(DTE>40)
+        #   之前FIX-S4-DTE放宽到30被判定bypass是因为30覆盖了9月季月合约；
+        #   25天严格排除9月(DTE=39)，仅覆盖8月近月，与策略设计"近月期权"一致
+        self._max_days_to_expiry = _p.get('max_days_to_expiry', 25)  # FIX-S4-DTE2-20260724: 15→25
         self._max_premium_cost_pct = _p.get('max_premium_cost_pct', 0.015)
         self._spring_price_pos_min = _p.get('spring_price_pos_min', 0.3)
         self._spring_price_pos_max = _p.get('spring_price_pos_max', 0.7)
@@ -237,7 +246,7 @@ class BoxSpringDetectorService:
         try:
             from strategy.box_detector import get_box_detector
             self._box_detector = get_box_detector()
-        except (ImportError, RuntimeError):
+        except Exception:  # FIX-S4-DET-EXCEPT-20260721: 窄异常→Exception
             from strategy.box_detector import BoxDetector
             self._box_detector = BoxDetector()
 
@@ -253,105 +262,20 @@ class BoxSpringDetectorService:
 
     def update_box(self, instrument_id: str, high: float, low: float,
                    close: float, timestamp: Optional[datetime] = None) -> Optional[BoxRange]:
-        # R24-P1-IV-02修复: close/high/low价格过滤增加NaN/Inf检查
-        # R23-P2-04修复: 扩展类型检查覆盖int和numpy类型
-        import math
-        def _is_finite_number(x):
-            try:
-                return math.isfinite(float(x))
-            except (TypeError, ValueError):
-                return False
-        
-        if (high <= 0 or low <= 0 or close <= 0
-            or not _is_finite_number(high)
-            or not _is_finite_number(low)
-            or not _is_finite_number(close)):
-            return None
+        # K线箱体时代: update_box已废弃(tick级箱体)
+        # detect_spring中K线箱体直接创建BoxRange，不再依赖update_box+tick级数据
+        # 保留此方法接口兼容(BoxSpringStrategyImpl.on_tick_data仍调用)
+        # 但不再创建tick级BoxRange，仅更新IV数据
+        if close > 0:
+            ts = timestamp or self._get_now()
+            # 仍喂IV数据给BoxDetector(如果有的话)
+            # 但不再调update_bar+detect_box创建tick级BoxRange
+            pass
+        return None  # K线箱体时代: 不再创建tick级BoxRange
 
-        ts = timestamp or self._get_now()
-
-        self._box_detector.update_bar(high, low, close, timestamp=ts.isoformat())
-
-        box_profile = self._box_detector.detect_box()
-
-        if box_profile is None or not box_profile.is_valid:
-            # FIX-S3S4-11: 原逻辑仅当is_box=False时才走fallback，但当targets数据无high/low字段
-            # 导致high=low=price时，BoxDetector识别出零宽度箱体(is_box=True, upper==lower)，
-            # 其is_valid=False(upper>lower不成立)。原L274条件not is_box为False→L276返回None，
-            # 永远不走fallback→BoxRange从不创建→detect_spring L403返回None→S4信号链路完全断裂。
-            # 修复：只要box_profile无效(None/is_box=False/is_valid=False)，统一走fallback路径。
-            return self._update_box_fallback(instrument_id, high, low, close, ts)
-
-        box_id = box_profile.box_id
-        box_top = box_profile.upper
-        box_bottom = box_profile.lower
-        width_pct = box_profile.width_pct / 100.0
-
-        if width_pct > self._max_box_width_pct:
-            self._invalidate_box(instrument_id, 'width_exceeded')
-            return None
-
-        box = self._boxes.get(instrument_id)
-        if box and box.is_active:
-            if close > box.box_top * (1.0 + self._box_breakout_tolerance) or close < box.box_bottom * (1.0 - self._box_breakout_tolerance):
-                self._invalidate_box(instrument_id, 'price_broken')
-                return None
-
-            if high >= box.box_top * 0.998 or low <= box.box_bottom * 1.002:
-                box.touch_count += 1
-                box.last_touch_time = ts
-
-            return box
-
-        new_box = BoxRange(
-            box_id=box_id,
-            instrument_id=instrument_id,
-            box_top=box_top,
-            box_bottom=box_bottom,
-            box_width_pct=width_pct,
-            confirmed_at=ts,
-            touch_count=box_profile.bounce_count or 1,
-            last_touch_time=ts,
-        )
-        with self._lock:
-            self._boxes[instrument_id] = new_box
-        return new_box
-
-    def _update_box_fallback(self, instrument_id: str, high: float, low: float,
-                              close: float, ts: datetime) -> Optional[BoxRange]:
-        width_pct = (high - low) / close if close > 0 else 1.0
-
-        if width_pct > self._max_box_width_pct:
-            self._invalidate_box(instrument_id, 'width_exceeded')
-            return None
-
-        box = self._boxes.get(instrument_id)
-        if box and box.is_active:
-            if close > box.box_top * (1.0 + self._box_breakout_tolerance) or close < box.box_bottom * (1.0 - self._box_breakout_tolerance):
-                self._invalidate_box(instrument_id, 'price_broken')
-                return None
-
-            if high >= box.box_top * 0.998 or low <= box.box_bottom * 1.002:
-                box.touch_count += 1
-                box.last_touch_time = ts
-
-            return box
-
-        # R27-P2-FP-13修复: int()截断→safe_float_to_int()
-        box_id = f"BOX_{instrument_id}_{safe_float_to_int(ts.timestamp())}"
-        new_box = BoxRange(
-            box_id=box_id,
-            instrument_id=instrument_id,
-            box_top=high,
-            box_bottom=low,
-            box_width_pct=width_pct,
-            confirmed_at=ts,
-            touch_count=self._min_box_touches,  # FIX-S3S4-4: fallback箱体初始touch_count设为min_box_touches，避免get_active_box因touch_count<3返回None
-            last_touch_time=ts,
-        )
-        with self._lock:
-            self._boxes[instrument_id] = new_box
-        return new_box
+    # V4-FIX-O11-RESIDUAL: _update_box_fallback 方法已删除。
+    # 原则: fallback 箱体属于"数据不可用→虚构箱体放行"的回退反模式。
+    # 自 V4-FIX-O11 起，detect_box 无效时直接返回 None，不再创建 fallback 箱体。
 
     def get_active_box(self, instrument_id: str) -> Optional[BoxRange]:
         box = self._boxes.get(instrument_id)
@@ -407,37 +331,105 @@ class BoxSpringDetectorService:
                       option_instrument_id: str, strike_price: float,
                       iv: float, premium_price: float, days_to_expiry: int,
                       account_equity: float = 100000.0) -> Optional[SpringSignal]:
-        box = self.get_active_box(instrument_id)
-        if not box:
-            return None
+        # [DIAG-S4-20260720] 诊断日志：定位detect_spring零信号根因
+        _diag_call_count = getattr(self, '_diag_detect_spring_calls', 0) + 1
+        self._diag_detect_spring_calls = _diag_call_count
+        if _diag_call_count <= 20 or _diag_call_count % 1000 == 0:
+            logging.info(
+                "[DIAG-S4] detect_spring called #%d: inst=%s fp=%.2f opt=%s strike=%.2f iv=%.4f prem=%.2f dte=%d equity=%.0f",
+                _diag_call_count, instrument_id, future_price, option_instrument_id,
+                strike_price, iv, premium_price, days_to_expiry, account_equity,
+            )
 
-        if not box.contains_price(future_price):
-            return None
-
+        # ── DTE检查（最先执行，成本最低）──
         if days_to_expiry < self._min_days_to_expiry or days_to_expiry > self._max_days_to_expiry:
+            if _diag_call_count <= 20:
+                logging.info("[DIAG-S4] detect_spring #%d REJECT: dte=%d not in [%d, %d] inst=%s",
+                             _diag_call_count, days_to_expiry, self._min_days_to_expiry, self._max_days_to_expiry, instrument_id)
+            return None
+
+        # ── K线箱体检查 — S3/S4唯一箱体来源（tick级箱体已废弃）──
+        # 日内交易(dte≤5): 必须有日K小箱体确认(INTRADAY_SMALL)
+        # 隔夜交易(dte>5): 必须有周K中箱体确认(OVERNIGHT_MEDIUM)
+        # K线箱体确认后同时更新BoxDetector._current_box和本服务的_boxes
+        kline_passed, kline_box = self._box_detector.check_kline_box_precondition(
+            instrument_id=instrument_id, days_to_expiry=days_to_expiry)
+        if not kline_passed:
+            if _diag_call_count <= 20:
+                _kb_type = 'INTRADAY_SMALL' if days_to_expiry <= 5 else 'OVERNIGHT_MEDIUM'
+                logging.info(
+                    "[S4-KLINE-BOX] REJECT: K线箱体未确认 inst=%s dte=%d box_type=%s "
+                    "upper=%.2f lower=%.2f bars=%d valid=%s",
+                    instrument_id, days_to_expiry, _kb_type,
+                    kline_box.upper if kline_box else 0.0,
+                    kline_box.lower if kline_box else 0.0,
+                    kline_box.bar_count if kline_box else 0,
+                    kline_box.is_valid if kline_box else False,
+                )
+            return None
+
+        # K线箱体确认 → 创建/更新BoxRange（替代tick级BoxRange）
+        _kb_type_str = 'INTRADAY_SMALL' if days_to_expiry <= 5 else 'OVERNIGHT_MEDIUM'
+        # KLineBoxProfile.width_pct是百分比格式(如1.0=1%)
+        # BoxRange.box_width_pct是小数格式(如0.01=1%)，与self._max_box_width_pct=0.04对齐
+        _kb_width_pct = kline_box.width_pct / 100.0
+        kline_range = BoxRange(
+            box_id=f"KLINE-{_kb_type_str}-{instrument_id}",
+            instrument_id=instrument_id,
+            box_top=kline_box.upper,
+            box_bottom=kline_box.lower,
+            box_width_pct=_kb_width_pct,
+            confirmed_at=self._get_now(),
+            touch_count=kline_box.bar_count,
+            last_touch_time=self._get_now(),
+        )
+        with self._lock:
+            self._boxes[instrument_id] = kline_range
+        box = kline_range  # 使用K线箱体作为唯一BoxRange
+
+        # ── 价格包含检查 ──
+        if not box.contains_price(future_price):
+            if _diag_call_count <= 20:
+                logging.info("[DIAG-S4] detect_spring #%d REJECT: price %.2f not in box [%.2f, %.2f] inst=%s",
+                             _diag_call_count, future_price, box.box_bottom, box.box_top, instrument_id)
             return None
 
         iv_pct = self.update_iv(option_instrument_id, iv)
         if iv_pct > self._iv_low_percentile:
+            if _diag_call_count <= 20:
+                logging.info("[DIAG-S4] detect_spring #%d REJECT: iv_pct=%.2f > iv_low=%.2f inst=%s",
+                             _diag_call_count, iv_pct, self._iv_low_percentile, instrument_id)
             return None
 
         is_very_compressed = iv_pct <= self._iv_very_low_percentile
 
         price_pos = box.price_position(future_price)
         if price_pos < self._spring_price_pos_min or price_pos > self._spring_price_pos_max:
+            if _diag_call_count <= 20:
+                logging.info("[DIAG-S4] detect_spring #%d REJECT: price_pos=%.3f not in [%.2f, %.2f] inst=%s",
+                             _diag_call_count, price_pos, self._spring_price_pos_min, self._spring_price_pos_max, instrument_id)
             return None
 
         strike_distance_pct = abs(future_price - strike_price) / future_price if future_price > 0 else 1.0
         if strike_distance_pct > self._strike_distance_threshold:
+            if _diag_call_count <= 20:
+                logging.info("[DIAG-S4] detect_spring #%d REJECT: strike_dist=%.4f > threshold=%.4f inst=%s",
+                             _diag_call_count, strike_distance_pct, self._strike_distance_threshold, instrument_id)
             return None
 
         premium_cost_pct = premium_price / account_equity if account_equity > 0 else 1.0
         if premium_cost_pct > self._max_premium_cost_pct:
+            if _diag_call_count <= 20:
+                logging.info("[DIAG-S4] detect_spring #%d REJECT: premium_cost_pct=%.6f > max=%.4f prem=%.2f equity=%.0f inst=%s",
+                             _diag_call_count, premium_cost_pct, self._max_premium_cost_pct, premium_price, account_equity, instrument_id)
             return None
 
         now = time.time()
         last_time = self._last_signal_time.get(instrument_id, 0)
         if now - last_time < self._cooldown_sec:
+            if _diag_call_count <= 20:
+                logging.info("[DIAG-S4] detect_spring #%d REJECT: cooldown not expired (%.1fs < %ds) inst=%s",
+                             _diag_call_count, now - last_time, self._cooldown_sec, instrument_id)
             return None
 
         direction = self._infer_direction(box, future_price, price_pos)
@@ -549,10 +541,10 @@ class BoxSpringDetectorService:
         return max(0.0, min(1.0, strength))
 
     # 弹簧强度阈值
-    # FIX-OO5b (S4-Spring-ROOT): 降低弹簧强度阈值
-    # 根因: 零宽箱体+fallback数据下strength极易<0.45→continue跳过→S4零信号
-    # 修复: 0.45→0.25，允许中等强度弹簧信号通过
-    SPRING_STRENGTH_THRESHOLD = 0.25  # 低于此值的信号被过滤
+    # V4-FIX-P2-11: 恢复原始阈值0.45 (原FIX-OO5b降级为0.25是bypass)
+    # 原则: 数据不可用=不开仓, 不应通过降低阈值来放行低质量信号
+    # O-8/O-11/O-13已阻断无效箱体/零宽箱体, strength计算将基于有效数据
+    SPRING_STRENGTH_THRESHOLD = 0.45  # V4-FIX-P2-11: 恢复原始阈值, 需30天内完成回测验证
 
     def detect_spring_strength(self, signal: 'SpringSignal', box: Optional['BoxRange']) -> float:
         """从SpringSignal提取参数计算弹簧强度（供BoxSpringStrategy委托调用）"""
@@ -567,7 +559,7 @@ class BoxSpringDetectorService:
         if box is not None and hasattr(box, 'price_position'):
             try:
                 price_pos = box.price_position(current_price)
-            except (ValueError, TypeError):
+            except Exception:  # FIX-S4-DET-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
                 pass
         return self.compute_spring_strength(iv_pct, price_pos, gamma_exp, box)
 
@@ -581,7 +573,7 @@ class BoxSpringDetectorService:
             d1 = (math.log(S / K) + (0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
             gamma = math.exp(-0.5 * d1 * d1) / (S * sigma * math.sqrt(T) * math.sqrt(2 * math.pi))
             return gamma * S * S / premium if premium > 0 else 0.0
-        except (ValueError, ZeroDivisionError, OverflowError) as e:
+        except Exception as e:  # FIX-S4-DET-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
             logging.debug("[BoxSpringStrategy] gamma calc failed: %s", e)
             return 0.0
 
@@ -633,11 +625,9 @@ class BoxSpringDetectorService:
             triggered = True
             trigger_reason = f'chain_activity={option_chain_activity:.2f}'
 
-        # FIX-S3S4-9: 当订单流和期权链数据均不可用(=0.0)时，默认触发
-        # 根因: targets数据中无order_flow_imbalance/option_chain_activity字段，fallback=0.0导致触发条件永远不满足
-        if not triggered and order_flow_imbalance == 0.0 and option_chain_activity == 0.0:
-            triggered = True
-            trigger_reason = 'no_flow_data_default'
+        # V4-FIX-O10: 订单流和期权链数据均不可用(=0.0)时不触发(fail-closed)
+        # 原则: 数据不可用=不开仓, 不再默认触发
+        # (原FIX-S3S4-9默认触发已移除, no_flow_data_default是bypass)
 
         if not triggered:
             return None

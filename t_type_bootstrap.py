@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+import time
 
 _demo_dir = os.path.dirname(os.path.abspath(__file__))
 if _demo_dir not in sys.path:
@@ -75,6 +76,8 @@ class t_type_bootstrap(BaseStrategy):
         self._real_strategy = None
         self._init_args = args
         self._init_kwargs = kwargs
+        # FIX-PAUSE-ROOT-20260721: 已删除 __setattr__ 拦截器(基于错误假设,从未触发)
+        # 原 _in_setattr_guard 初始化已移除
         # FIX-20260713-AUDIT: 标记on_init是否已被调用
         # 根因: _ensure_real_strategy在on_init前尝试创建Strategy2026实例可能触发DLL崩溃
         # (文件头注释#4: __init__中创建Strategy2026实例触发DLL崩溃)
@@ -108,8 +111,8 @@ class t_type_bootstrap(BaseStrategy):
             from infra.health_monitor import DiagnosisProbeManager as _DPM
             _DPM.on_lifecycle_call(method, phase, strategy_id=getattr(self, 'strategy_id', None),
                 trading=getattr(self, 'trading', None), inited=getattr(self, 'inited', None), extra=extra)
-        except Exception:
-            pass
+        except Exception as _probe_err:  # FIX-20260720-12 (维度15): 异常不静默
+            logging.debug("[_probe] 生命周期探针写入失败(非阻断): %s", _probe_err)
 
     def on_init(self):
         import threading
@@ -119,7 +122,7 @@ class t_type_bootstrap(BaseStrategy):
         except Exception as _fs_err:
             _caller = ""
             logging.debug("[on_init] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical("[DIAG-LIFECYCLE] on_init() CALLED thread=%s trading_before=%s caller_stack:\n%s",
+        logging.info("[DIAG-LIFECYCLE] on_init() CALLED thread=%s trading_before=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, _caller)
         self._probe('on_init', 'CALLED')
         self._on_init_called = True
@@ -165,7 +168,7 @@ class t_type_bootstrap(BaseStrategy):
         logging.info("[t_type_bootstrap] on_init完成, inited=%s, trading=%s (auto_start已禁用，等待用户手动点击运行)",
                      self.inited, self.trading)
         import threading
-        logging.critical("[DIAG-LIFECYCLE] on_init() RETURN thread=%s trading=%s inited=%s",
+        logging.info("[DIAG-LIFECYCLE] on_init() RETURN thread=%s trading=%s inited=%s",
                          threading.current_thread().name, self.trading, self.inited)
         self._probe('on_init', 'RETURNED')
         return result
@@ -182,12 +185,15 @@ class t_type_bootstrap(BaseStrategy):
         except Exception as _fs_err:
             _caller = ""
             logging.debug("[on_start] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical("[DIAG-LIFECYCLE] on_start() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
+        logging.info("[DIAG-LIFECYCLE] on_start() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
         self._probe('on_start', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             return None
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): on_start 入口防御性同步 strategy_id (修复半拉子)
+        # 根因: on_start 是平台启动入口，若 strategy_id 漂移则 C++ 无法匹配实例 → 后续 pause/destroy 失效。
+        self._sync_strategy_id_from_real(real, 'on_start')
         result = real.on_start()
         _actual_trading = getattr(real, 'trading', False)
         if _actual_trading != self.trading:
@@ -198,7 +204,7 @@ class t_type_bootstrap(BaseStrategy):
         _outer_ref_id = id(self)
         _real_ref_id = id(real)
         _sid = getattr(self, 'strategy_id', None)
-        logging.critical("[DIAG-LIFECYCLE] on_start() RETURN thread=%s trading=%s result=%s strategy_id=%s outer_id=%d real_id=%d",
+        logging.info("[DIAG-LIFECYCLE] on_start() RETURN thread=%s trading=%s result=%s strategy_id=%s outer_id=%d real_id=%d",
                          threading.current_thread().name, self.trading, result, _sid, _outer_ref_id, _real_ref_id)
         self._probe('on_start', 'RETURNED', extra={'result': result, 'outer_id': _outer_ref_id, 'real_id': _real_ref_id})
         return result
@@ -211,24 +217,33 @@ class t_type_bootstrap(BaseStrategy):
         except Exception as _fs_err:
             _caller = ""
             logging.debug("[on_stop] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical("[DIAG-LIFECYCLE] on_stop() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
+        logging.info("[DIAG-LIFECYCLE] on_stop() CALLED thread=%s trading_before=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
         self._probe('on_stop', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             return None
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): on_stop 入口防御性同步 strategy_id (修复半拉子)
+        # 根因: on_stop 是平台停止入口，若 strategy_id 漂移则 C++ 无法匹配实例 → destroy 后状态不一致。
+        self._sync_strategy_id_from_real(real, 'on_stop')
         result = real.on_stop()
         # FIX-20260713-PLATFORM-STATE: on_stop后设trading=False
         # 平台C++宿主通过trading属性判断策略运行状态, on_stop后必须为False
         self.trading = False
         logging.info("[t_type_bootstrap] on_stop完成, trading=False")
         import threading
-        logging.critical("[DIAG-LIFECYCLE] on_stop() RETURN thread=%s trading=%s result=%s",
+        logging.info("[DIAG-LIFECYCLE] on_stop() RETURN thread=%s trading=%s result=%s",
                          threading.current_thread().name, self.trading, result)
         self._probe('on_stop', 'RETURNED', extra={'result': result})
         return result
 
     def onTick(self, tick):
+        # [FIX-PAUSE-OVERHEAD-REMOVE-20260722] 已彻底删除C++平台暂停按钮的onTick开销
+        # 用户结论: "为次要的点击平台暂停功能增加扫描不划算"
+        # 策略UI按钮暂停已100%工作，不需要C++平台按钮的兜底机制
+        # 已删除: 检测层1(trading属性)、检测层2(UserLog扫描)、FIX-V2-02(状态自检)、
+        #         _check_userlog_pause_signal()方法
+
         real = self._ensure_real_strategy()
         if real is None:
             return None
@@ -290,6 +305,28 @@ class t_type_bootstrap(BaseStrategy):
                 return None
         return real
 
+    def _sync_strategy_id_from_real(self, real, method_name):
+        """FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): 防御性同步 strategy_id 的统一辅助方法
+
+        根因: FIX-F5 仅在 pause/resume 入口添加防御性 strategy_id 同步，但 t_type_bootstrap 共有
+              9 个委托方法 (pause/resume/on_pause/on_resume/on_stop/on_destroy/on_start/stop/destroy)，
+              均通过 real.X() 委托到 _real_strategy。若实盘出现 strategy_id 漂移（极端场景如热重载/
+              平台重新分配），未做同步的方法会带着旧 strategy_id 委托 → C++ 平台无法匹配实例。
+              这是 FIX-F5 半拉子工程 — 仅修了 2 个方法，遗漏 7 个。
+        修复: 抽取统一辅助方法 _sync_strategy_id_from_real(real, method_name)，在所有委托方法
+              入口（_ensure_real_strategy + None 检查之后）调用，确保 9 个方法对称同步。
+        设计: 以 real.strategy_id 为权威值回写到 bootstrap (与 on_init L138-139 一致)；real.strategy_id
+              为 None 时不回写 (避免 0 覆盖已有有效值)；使用 object.__getattribute__ 避免 __getattr__ 递归。
+        """
+        try:
+            _real_sid = getattr(real, 'strategy_id', None)
+            _my_sid = object.__getattribute__(self, 'strategy_id')
+            if _real_sid is not None and _real_sid != _my_sid:
+                self.strategy_id = _real_sid
+                logging.info("[FIX-F5-EXT] %s: strategy_id 防御性同步 real→bootstrap (值=%s)", method_name, _real_sid)
+        except Exception as _sid_sync_err:
+            logging.debug("[FIX-F5-EXT] %s: strategy_id 同步失败(非阻断): %s", method_name, _sid_sync_err)
+
     def pause(self):
         import threading
         import traceback
@@ -298,13 +335,15 @@ class t_type_bootstrap(BaseStrategy):
         except Exception as _fs_err:
             _caller = ""
             logging.debug("[pause] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical("[DIAG-LIFECYCLE] pause() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
+        logging.info("[DIAG-LIFECYCLE] pause() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
         self._probe('pause', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] pause(): _real_strategy为None，操作被跳过")
             return False
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): 统一调用辅助方法 (替代原 inline 同步块)
+        self._sync_strategy_id_from_real(real, 'pause')
         result = real.pause()
         # FIX-20260714-R14: pause()同步trading=False到引导层
         # 根因R14: pause()未同步self.trading=False，C++读取trading仍为True→UI显示"运行中"
@@ -315,12 +354,26 @@ class t_type_bootstrap(BaseStrategy):
         return result
 
     def on_pause(self):
-        logging.critical("[FIX-20260713-LIFECYCLE] on_pause() CALLED from platform")
+        import threading
+        import traceback
+        try:
+            _caller = ''.join(traceback.format_stack()[-4:-1])
+        except Exception as _fs_err:
+            _caller = ""
+            logging.debug("[on_pause] format_stack失败(非阻断): %s", _fs_err)
+        # FIX-V2-03: 增强探针(与on_stop/on_destroy对齐，记录caller_stack+trading状态)
+        # 根因: on_pause原仅记录"CALLED from platform"无caller_stack，无法定位C++调用链路
+        # 修复: 补全thread/trading/caller_stack，与on_stop(L235)/on_destroy(L437)格式统一
+        logging.info("[DIAG-LIFECYCLE] on_pause() CALLED thread=%s trading=%s caller_stack:\n%s",
+                         threading.current_thread().name, self.trading, _caller)
         self._probe('on_pause', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] on_pause(): _real_strategy为None，操作被跳过")
             return False
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): on_pause 入口防御性同步 strategy_id (修复半拉子)
+        # 根因: 平台 CamelCase 路径 onPause→on_pause 走此方法，若漂移未同步则 C++ 无法匹配实例。
+        self._sync_strategy_id_from_real(real, 'on_pause')
         result = real.on_pause()
         self._probe('on_pause', 'RETURNED', extra={'result': result})
         return result
@@ -333,13 +386,16 @@ class t_type_bootstrap(BaseStrategy):
         except Exception as _fs_err:
             _caller = ""
             logging.debug("[on_destroy] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical("[DIAG-LIFECYCLE] on_destroy() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
+        logging.info("[DIAG-LIFECYCLE] on_destroy() CALLED thread=%s trading=%s inited=%s caller_stack:\n%s",
                          threading.current_thread().name, self.trading, self.inited, _caller)
         self._probe('on_destroy', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] on_destroy(): _real_strategy为None，操作被跳过")
             return False
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): on_destroy 入口防御性同步 strategy_id (修复半拉子)
+        # 根因: 平台 CamelCase 路径 onDestroy→on_destroy 走此方法，若漂移未同步则 C++ 无法匹配实例。
+        self._sync_strategy_id_from_real(real, 'on_destroy')
         result = real.on_destroy()
         # FIX-20260713-PLATFORM-STATE: on_destroy后重置平台状态属性
         self.inited = False
@@ -361,12 +417,14 @@ class t_type_bootstrap(BaseStrategy):
         return real.internal_resume_strategy()
 
     def resume(self):
-        logging.critical("[FIX-20260713-LIFECYCLE] resume() CALLED from platform")
+        logging.info("[FIX-20260713-LIFECYCLE] resume() CALLED from platform")
         self._probe('resume', 'CALLED')
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] resume(): _real_strategy为None，操作被跳过")
             return False
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): 统一调用辅助方法 (替代原 inline 同步块)
+        self._sync_strategy_id_from_real(real, 'resume')
         result = real.resume()
         # FIX-20260714-R15: resume()同步trading=True到引导层
         # 根因R15: resume()未同步self.trading=True，C++读取trading仍为False→UI显示"暂停"
@@ -377,30 +435,48 @@ class t_type_bootstrap(BaseStrategy):
         return result
 
     def on_resume(self):
-        logging.critical("[FIX-20260713-LIFECYCLE] on_resume() CALLED from platform")
+        import threading
+        import traceback
+        try:
+            _caller = ''.join(traceback.format_stack()[-4:-1])
+        except Exception as _fs_err:
+            _caller = ""
+            logging.debug("[on_resume] format_stack失败(非阻断): %s", _fs_err)
+        # FIX-V2-03: 增强探针(与on_stop/on_destroy/on_pause对齐，记录caller_stack+trading状态)
+        logging.info("[DIAG-LIFECYCLE] on_resume() CALLED thread=%s trading=%s caller_stack:\n%s",
+                         threading.current_thread().name, self.trading, _caller)
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] on_resume(): _real_strategy为None，操作被跳过")
             return False
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): on_resume 入口防御性同步 strategy_id (修复半拉子)
+        # 根因: 平台 CamelCase 路径 onResume→on_resume 走此方法，若漂移未同步则 C++ 无法匹配实例。
+        self._sync_strategy_id_from_real(real, 'on_resume')
         return real.on_resume()
 
     def stop(self):
-        logging.critical("[FIX-20260713-LIFECYCLE] stop() CALLED from platform")
+        logging.info("[FIX-20260713-LIFECYCLE] stop() CALLED from platform")
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] stop(): _real_strategy为None，操作被跳过")
             return False
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): stop 入口防御性同步 strategy_id (修复半拉子)
+        # 根因: stop 是平台蛇形回调路径，与 on_stop 别名关系但若漂移未同步则 C++ 无法匹配实例。
+        self._sync_strategy_id_from_real(real, 'stop')
         result = real.on_stop()
         self.trading = False
         logging.info("[t_type_bootstrap] stop完成, trading=False")
         return result
 
     def destroy(self):
-        logging.critical("[FIX-20260713-LIFECYCLE] destroy() CALLED from platform")
+        logging.info("[FIX-20260713-LIFECYCLE] destroy() CALLED from platform")
         real = self._ensure_real_strategy()
         if real is None:
             logging.error("[t_type_bootstrap] destroy(): _real_strategy为None，操作被跳过")
             return False
+        # FIX-F5-EXT (NEW-R7 衍生, 2026-07-19): destroy 入口防御性同步 strategy_id (修复半拉子)
+        # 根因: destroy 是平台蛇形回调路径，与 on_destroy 别名关系但若漂移未同步则 C++ 无法匹配实例。
+        self._sync_strategy_id_from_real(real, 'destroy')
         result = real.onDestroy()
         self.inited = False
         self.trading = False
@@ -426,6 +502,16 @@ class t_type_bootstrap(BaseStrategy):
     onResume = on_resume
     onDestroy = on_destroy  # FIX-20260713-DELETE: 缺失onDestroy别名导致平台CamelCase调用绕过flag重置
     onStopAlias = on_stop  # 平台可能使用不同大小写
+
+    # FIX-20260720-4 (RC-20260720-4): 补全首字母大写别名（无 on 前缀）
+    # 根因: C++ 平台可能通过 PyObject_GetAttrString(obj, "Pause"/"Stop"/"Destroy"/"Resume")
+    #       查找回调方法，若未定义则属性查找失败 → C++ 不调用 Python → 暂停/删除无效
+    # 证据: lifecycle_probe.jsonl 2026-07-20 ZERO pause/on_stop/on_destroy 事件
+    #       UserLog.txt 10:18:40-54 用户点击4次Pause但Python未收到任何回调
+    Pause = pause
+    Resume = resume
+    Stop = stop
+    Destroy = destroy
 
 
 Strategy2026 = t_type_bootstrap

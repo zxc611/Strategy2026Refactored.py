@@ -52,7 +52,7 @@ def safe_getattr_int(obj: Any, attr: str, default: int = 0, min_val: int = 0) ->
 
         return max(int(val), min_val)
 
-    except (ValueError, TypeError) as e:
+    except Exception as e:
 
         return default
 
@@ -94,13 +94,102 @@ class UILogicService:
 
     def __init__(self, params=None):
 
-        self.params = params
+        # FIX-20260719-UI-1[V1]: params 改为 property 动态委托到 _host_ref.params
+        # 根因: UIMixin.__init__ 中 _params = self.__dict__.get('params') 在 super().__init__() 之前调用，
+        #       此时 Strategy2026.__init__ 尚未设置 self.params（在L87才设置），所以 _params=None。
+        # 修复: 通过 property 动态委托到 _host_ref.params，始终返回最新值。
+        #       这里使用 _local_params 存储本地副本，避免与 property 冲突。
+        self._local_params = params
 
         import threading
 
         if self.__class__._ui_lock is None:
 
             self.__class__._ui_lock = threading.Lock()
+
+
+    # FIX-20260719-UI-1[V1]: params property 动态委托
+    @property
+    def params(self):
+        """动态获取params：优先从 _host_ref (Strategy2026) 获取最新params，
+        其次回退到本地存储的 _local_params。
+
+        FIX-20260719-UI-1[V1]: 修复 params 初始化时序问题。
+        根因: UIMixin.__init__ 中 _params = self.__dict__.get('params') 在 super().__init__() 之前调用，
+              此时 Strategy2026.__init__ 尚未设置 self.params（在L87才设置），所以 _params=None。
+              后续 Strategy2026.__init__ 设置 self.params 不会同步更新 UILogicService.params。
+              → 所有按钮回调中 set_output_mode/set_auto_trading_mode/setattr(self.params,...) 操作的
+                UILogicService.params 永远是 None，导致 set_output_mode 触发 AttributeError
+                被窄异常元组捕获后静默返回。
+        修复: 通过 property 动态委托到 _host_ref.params，始终返回 Strategy2026 实例的最新 params。
+        """
+        _host = getattr(self, '_host_ref', None)
+        if _host is not None:
+            _host_params = getattr(_host, 'params', None)
+            if _host_params is not None:
+                return _host_params
+        return self._local_params
+
+    @params.setter
+    def params(self, value):
+        """Setter: 写入本地存储 _local_params（保持向后兼容）。
+        注意: 不会同步写入 _host_ref.params，因为 _host_ref.params 由 Strategy2026.__init__ 管理。
+        """
+        self._local_params = value
+
+    # FIX-20260719-UI-2[V6/V15/V16]: _ui_root property 动态委托
+    @property
+    def _ui_root(self):
+        """动态获取 _ui_root：从 _host_ref._ui_creation_service 实例字典中获取。
+
+        FIX-20260719-UI-2[V6/V15/V16]: 修复 _ui_root 类属性 None 导致短路。
+        根因: UILogicService._ui_root 原本是类属性 None。UICreationService.__getattr__ 中
+              '_ui_root' 在 delegated 列表，委托到 self._logic._ui_root 返回类属性 None。
+              → _on_param_modify_click/_on_backtest_click 中 getattr(self, '_ui_root', None)
+                返回 None → 方法直接 return，对话框永远不打开。
+              → _refresh_output_mode_ui_styles 中 not getattr(self, '_ui_root') 永远 True
+                → 样式永远不刷新，按钮高亮状态不更新。
+        修复: 通过 property 动态委托到 _host_ref._ui_creation_service._ui_root（实例属性），
+              该属性在 UICreationService._create_ui_in_main_thread L563 中设置。
+        """
+        _host = getattr(self, '_host_ref', None)
+        if _host is not None:
+            _creation = getattr(_host, '_ui_creation_service', None)
+            if _creation is not None:
+                # 直接访问实例字典，避免触发 __getattr__ 递归
+                return _creation.__dict__.get('_ui_root')
+        return None
+
+    @_ui_root.setter
+    def _ui_root(self, value):
+        """Setter: 写入 _host_ref._ui_creation_service 实例字典。
+        如果 _host_ref 尚未注入（__init__ 阶段），存到本地实例字典。
+        """
+        _host = getattr(self, '_host_ref', None)
+        if _host is not None:
+            _creation = getattr(_host, '_ui_creation_service', None)
+            if _creation is not None:
+                _creation.__dict__['_ui_root'] = value
+                return
+        # _host_ref 尚未注入时，存到本地实例字典
+        self.__dict__['_ui_root'] = value
+
+    # FIX-20260719-UI-7[V11]: current_strategy_id property 动态委托
+    @property
+    def current_strategy_id(self):
+        """动态获取 strategy_id：从 _host_ref (Strategy2026) 获取。
+
+        FIX-20260719-UI-7[V11]: 修复 current_strategy_id 永远是 'unknown'。
+        根因: UICreationService/UILogicService 均未定义 current_strategy_id 属性，
+              delegated 列表也未包含，getattr(self, 'current_strategy_id', 'unknown')
+              永远返回 'unknown'。
+              → ControlActionLogger 记录的 strategy_id 永远是 'unknown'，无法追溯实际策略实例。
+        修复: 通过 property 动态委托到 _host_ref.strategy_id（int类型）。
+        """
+        _host = getattr(self, '_host_ref', None)
+        if _host is not None:
+            return getattr(_host, 'strategy_id', 'unknown')
+        return 'unknown'
 
 
     @classmethod
@@ -121,8 +210,8 @@ class UILogicService:
     # UI状态（_M21 Bug #3修复：添加锁保护）
     _ui_lock: Any = None  # threading.Lock
 
-    _ui_root: Any = None
-
+    # FIX-20260719-UI-2[V6/V15/V16]: _ui_root 改为 property，不再使用类属性
+    # _ui_lbl 等其他UI组件引用仍保留为类属性（仅在 _create_ui_in_main_thread 中设置实例属性）
     _ui_lbl: Any = None
 
     _ui_btn_debug: Any = None
@@ -177,7 +266,7 @@ class UILogicService:
 
                     self._ui_lbl.config(text=f"当前模式: {cur}")
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"更新标签失败: {e}")
 
@@ -221,11 +310,11 @@ class UILogicService:
 
                 _set_style("_ui_btn_manual", not is_auto, color="#546e7a")
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"设置按钮样式失败: {e}")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"刷新UI样式失败: {e}")
 
@@ -240,7 +329,7 @@ class UILogicService:
 
                 self._ui_queue.put({"action": "refresh_style"})
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"调度UI刷新失败: {e}")
 
@@ -287,13 +376,13 @@ class UILogicService:
 
                 self._schedule_output_mode_ui_refresh()
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"调度UI刷新失败: {e}")
 
             self._log_info(f"输出模式切换换 {m}")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"切换输出模式失败: {e}")
 
@@ -323,13 +412,13 @@ class UILogicService:
 
                 self._schedule_output_mode_ui_refresh()
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"调度UI刷新失败: {e}")
 
             self._refresh_output_mode_ui_styles()
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"切换自动/手动交易模式失败: {e}")
 
@@ -384,27 +473,70 @@ class UILogicService:
 
             params_dict = {}
 
+            # FIX-UI-LOCK-20260720: 改用白名单方式 + 最终序列化兜底try-except
+            # 根因: FIX-UI-12的"单值预检"过滤存在3处缺陷:
+            #   1. 第514行最终json_dumps(params_dict)缺少try-except保护
+            #   2. race condition: json_default_serializer返回obj.__dict__引用,
+            #      并发线程在预检和最终序列化间向__dict__写入Lock → TOCTOU竞态
+            #   3. dir()与__getattr__动态属性不匹配, 可能漏过滤
+            # 证据: 2026-07-20 13:03:49.713 "打开参数编辑器失败 Object of type lock is not JSON serializable"
+            # 修复(与_on_backtest_click一致的白名单方式):
+            #   1. 显式白名单仅取标量参数, 从根上消除遍历到不可序列化复杂对象的可能
+            #   2. 最终序列化加try-except+降级, 防止race condition导致UI打不开
+            #   3. 白名单与_save()的ALLOWED_PARAMS对齐(L527-535), 保证编辑后可保存
+            ALLOWED_DISPLAY_PARAMS = {
+                'tick_size', 'multiplier', 'commission_rate', 'slippage',
+                'max_position', 'stop_loss_pct', 'take_profit_pct',
+                'enable_auto_trade', 'debug_mode',
+                # 扩展白名单: 包含用户可查看的额外参数(只读展示)
+                'option_buy_lots_min', 'option_buy_lots_max', 'close_take_profit_ratio',
+            }
+
             if hasattr(self, "params"):
 
-                for attr in dir(self.params):
+                for attr in ALLOWED_DISPLAY_PARAMS:
 
-                    if not attr.startswith('_'):
+                    if hasattr(self.params, attr):
 
                         try:
 
                             val = getattr(self.params, attr)
 
-                            if not callable(val):
+                            if not callable(val) and isinstance(val, (int, float, str, bool, type(None), list, dict)):
 
                                 params_dict[attr] = val
 
-                        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                        except Exception as e:
 
                             self._log_error(f"读取参数{attr}失败: {e}")
 
 
 
-            text_area.insert("1.0", json_dumps(params_dict, indent=2))
+            # 最终序列化加try-except兜底, 防止race condition导致UI打不开
+            try:
+
+                _params_json = json_dumps(params_dict, indent=2)
+
+            # FIX-UI-13 (2026-07-20): 窄异常元组扩展为 Exception
+            # 根因: json_dumps 可能抛 OverflowError/RecursionError 等不在 (TypeError, ValueError) 中的异常，
+            #       导致降级路径被跳过，穿透到外层 except Exception → 对话框打不开。
+            # 修复: 扩展为 except Exception，与实时回调路径硬约束 (NEW-1) 一致。
+            except Exception as _serialize_err:
+
+                # 降级: 仅保留标量类型, 剔除任何残留的复杂对象
+                _safe_params = {
+
+                    k: v for k, v in params_dict.items()
+
+                    if isinstance(v, (int, float, str, bool, type(None)))
+
+                }
+
+                _params_json = json_dumps(_safe_params, indent=2)
+
+                self._log_error(f"参数序列化降级(剔除复杂对象): {_serialize_err}")
+
+            text_area.insert("1.0", _params_json)
 
 
 
@@ -416,7 +548,12 @@ class UILogicService:
 
                     data = json_loads(content)
 
-                    # _M21 Bug #2修复：白名单验证 + 类型检查
+                    # _M21 Bug #2修复 + FIX-UI-14 (2026-07-20): 白名单验证 + 类型检查
+                    # FIX-UI-14 根因: ALLOWED_DISPLAY_PARAMS 含只读展示参数(option_buy_lots_min等)
+                    #       不在 ALLOWED_PARAMS 中，原逻辑遍历 data.items() 遇非 ALLOWED 键直接
+                    #       raise ValueError → 用户不编辑任何内容点"保存"也会失败。
+                    #       半拉子教训: 方法可调用+JSON可序列化，但保存不成功 = 消费最后环节失败。
+                    # 修复: 对非 ALLOWED_PARAMS 的键跳过(continue)而非报错，仅保存白名单内参数。
                     ALLOWED_PARAMS = {
 
                         'tick_size', 'multiplier', 'commission_rate', 'slippage',
@@ -431,7 +568,7 @@ class UILogicService:
 
                         if k not in ALLOWED_PARAMS:
 
-                            raise ValueError(f"不允许修改参数 {k}")
+                            continue  # FIX-UI-14: 跳过只读展示参数，不报错
 
                         if hasattr(self.params, k):
 
@@ -451,7 +588,7 @@ class UILogicService:
 
                     editor.destroy()
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     messagebox.showerror("错误", f"保存失败: {e}")
 
@@ -467,7 +604,7 @@ class UILogicService:
 
 
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"打开参数编辑器失败 {e}")
 
@@ -527,7 +664,18 @@ class UILogicService:
 
             txt.pack(fill="both", expand=True, padx=5, pady=5)
 
-            txt.insert("1.0", json_dumps(backtest_params, indent=2))
+            # FIX-UI-15 (2026-07-20): json_dumps 补 try-except 降级
+            # 根因: 若 backtest_params 中属性值为非标量类型，json_dumps 抛 TypeError
+            #       被外层 except Exception 捕获 → "打开回测参数编辑器失败" → 对话框打不开。
+            # 修复: 与 _on_param_modify_click 一致，加 try-except 降级兜底。
+            try:
+                _backtest_json = json_dumps(backtest_params, indent=2)
+            except Exception as _bt_ser_err:
+                _safe_bt = {k: v for k, v in backtest_params.items()
+                            if isinstance(v, (int, float, str, bool, type(None)))}
+                _backtest_json = json_dumps(_safe_bt, indent=2)
+                self._log_error(f"回测参数序列化降级: {_bt_ser_err}")
+            txt.insert("1.0", _backtest_json)
 
 
 
@@ -539,7 +687,17 @@ class UILogicService:
 
                     data = json_loads(content)
 
+                    # FIX-UI-15 (2026-07-20): 回测参数白名单验证
+                    # 根因: 原 _save 遍历 data.items() 直接 setattr 任意属性到 self.params，
+                    #       用户可在 JSON 中设置 'strategy'/'market_center' 等危险键。
+                    # 修复: 与 _on_param_modify_click 的 _save 一致，加白名单验证。
+                    ALLOWED_BACKTEST_PARAMS = {
+                        'option_buy_lots_min', 'option_buy_lots_max', 'close_take_profit_ratio',
+                    }
                     for k, v in data.items():
+
+                        if k not in ALLOWED_BACKTEST_PARAMS:
+                            continue  # 跳过非白名单键
 
                         if hasattr(self.params, k):
 
@@ -555,7 +713,7 @@ class UILogicService:
 
                     top.destroy()
 
-                except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                except Exception as e:
 
                     messagebox.showerror("错误", f"保存失败: {e}")
 
@@ -571,7 +729,7 @@ class UILogicService:
 
 
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             self._log_error(f"打开回测参数编辑器失败 {e}")
 
@@ -654,7 +812,7 @@ class UILogicService:
 
                 return
 
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+            except Exception as e:
 
                 self._log_error(f"UI输出失败: {e}")
 
@@ -696,7 +854,7 @@ class UILogicService:
 
             self._ui_running = False
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.debug(f"[UIMixin._destroy_output_mode_ui] {e}")
 
@@ -719,7 +877,7 @@ class UILogicService:
 
             logger.debug("[UIMixin._release_runtime_caches] caches released")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.debug(f"[UIMixin._release_runtime_caches] {e}")
 
@@ -742,7 +900,7 @@ class UILogicService:
 
                 logger.debug(f"[TickSummary] received {self._tick_summary_count} ticks, last={instrument_id}")
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+        except Exception as e:
 
             logger.debug(f"[TickSummary] 记录失败: {e}")
 

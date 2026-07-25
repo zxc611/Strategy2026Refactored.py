@@ -85,6 +85,16 @@ class Strategy2026(BaseStrategy, UIMixin):
         self.config = bootstrap_config
         from strategy.strategy_core_service import StrategyParams, StrategyCoreService
         self.params = StrategyParams(bootstrap_config)
+        # FIX-UI-1 (V1根因, 2026-07-19): 同步 UILogicService.params
+        # 根因: UIMixin.__init__ (L58) 早于 self.params 赋值 (L87)，导致 UILogicService.params 永久为 None。
+        #       后续 set_output_mode/setattr(self.params,...) 操作的是 None，抛 AttributeError 被吞，按钮失效。
+        # 修复: 在 self.params 赋值后立即同步到 _ui_logic_service.params，确保按钮回调读到真实 params。
+        try:
+            if getattr(self, '_ui_logic_service', None) is not None:
+                self._ui_logic_service.params = self.params
+                logging.info("[FIX-UI-1] UILogicService.params 已同步 (id=%s)", id(self.params))
+        except Exception as _ui_params_sync_err:
+            logging.warning("[FIX-UI-1] UILogicService.params 同步失败(非致命): %s", _ui_params_sync_err)
         _sid = kwargs.get('strategy_id')
         logging.info("[Strategy2026.__init__] strategy_id from kwargs: %s (type=%s)", _sid, type(_sid).__name__)
         # FIX-20260706-STRATEGY-ID-TYPE: strategy_id必须为int
@@ -352,7 +362,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         # 根因: lifecycle_probe.jsonl显示on_start返回None，但代码L341有return True
         # 验证: 如果此日志打印但返回None，说明C++平台拦截了返回值
         #       如果此日志不打印，说明在L337和L341之间被中断
-        logging.critical("[FIX-C-VERIFY] _onStart_finalize已完成(run_id=%s)，即将执行return True", self._lifecycle_run_id)
+        logging.info("[FIX-C-VERIFY] _onStart_finalize已完成(run_id=%s)，即将执行return True", self._lifecycle_run_id)
         return True
 
     def _onStart_step_config_load(self):
@@ -707,7 +717,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         try:
             from infra.health_monitor import DiagnosisProbeManager as _DPM
             _DPM.on_lifecycle_call('Strategy2026.on_stop', 'CALLED', strategy_id=getattr(self,'strategy_id',None))
-        except Exception: pass
+        except Exception as _dpm_stop_err: logging.debug("[on_stop] DPM探针失败(非阻断): %s", _dpm_stop_err)  # FIX-20260720-12 (维度15)
         with self._lifecycle_lock:
             if self._stop_executed:
                 logging.warning(
@@ -804,7 +814,7 @@ class Strategy2026(BaseStrategy, UIMixin):
     def internal_pause_strategy(self) -> bool:
         # FIX-20260709-PAUSE-ROOT-V3: 添加诊断日志
         # 这是UI暂停按钮实际调用的方法（通过_call_method_by_priority）
-        logging.critical(
+        logging.info(
             "[FIX-20260709-PAUSE-DIAG] internal_pause_strategy ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s",
             getattr(self, 'strategy_id', 'N/A'),
             getattr(getattr(self, 'strategy_core', None), '_state', 'N/A'),
@@ -819,7 +829,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.error("[Strategy2026.internal_pause_strategy] 错误：%s", e)
             logging.exception("[Strategy2026.internal_pause_strategy] 堆栈:")
             result = False
-        logging.critical(
+        logging.info(
             "[FIX-20260709-PAUSE-DIAG] internal_pause_strategy EXIT: result=%s state=%s _is_paused=%s",
             result,
             getattr(getattr(self, 'strategy_core', None), '_state', 'N/A'),
@@ -838,7 +848,10 @@ class Strategy2026(BaseStrategy, UIMixin):
         except Exception as _fs_err:
             _caller_stack_pause = ""
             logging.debug("[pause] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical(
+        # FIX-3-COMPLETE-20260724: pause()方法CRITICAL降级为INFO(与internal_pause/resume一致)
+        # 根因: 前序修复仅降级了internal_pause_strategy/internal_resume_strategy(L817/L832/L918/L947),
+        #       遗漏了pause()方法本身的L851/L862, 导致CRITICAL仍然出现
+        logging.info(
             "[FIX-20260709-PAUSE-DIAG] pause ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
             "caller_stack:\n%s",
             getattr(self, 'strategy_id', 'N/A'),
@@ -849,7 +862,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             _caller_stack_pause,
         )
         result = self.internal_pause_strategy()
-        logging.critical(
+        logging.info(
             "[FIX-20260709-PAUSE-DIAG] pause EXIT: result=%s state=%s _is_paused=%s",
             result,
             getattr(getattr(self, 'strategy_core', None), '_state', 'N/A'),
@@ -873,7 +886,8 @@ class Strategy2026(BaseStrategy, UIMixin):
         except Exception as _fs_err:
             _caller_stack_resume = ""
             logging.debug("[resume] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical(
+        # FIX-3-COMPLETE-20260724: resume()方法CRITICAL降级为INFO(与internal_resume/pause一致)
+        logging.info(
             "[FIX-20260710-RESUME-DIAG] resume ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s _is_trading=%s\n"
             "caller_stack:\n%s",
             getattr(self, 'strategy_id', 'N/A'),
@@ -884,7 +898,7 @@ class Strategy2026(BaseStrategy, UIMixin):
             _caller_stack_resume,
         )
         result = self.internal_resume_strategy()
-        logging.critical(
+        logging.info(
             "[FIX-20260710-RESUME-DIAG] resume EXIT: result=%s state=%s _is_running=%s _is_paused=%s",
             result,
             getattr(getattr(self, 'strategy_core', None), '_state', 'N/A'),
@@ -905,7 +919,7 @@ class Strategy2026(BaseStrategy, UIMixin):
 
     def internal_resume_strategy(self) -> bool:
         # FIX-20260709-PAUSE-ROOT-V3: 添加诊断日志
-        logging.critical(
+        logging.info(
             "[FIX-20260709-PAUSE-DIAG] internal_resume_strategy ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s",
             getattr(self, 'strategy_id', 'N/A'),
             getattr(getattr(self, 'strategy_core', None), '_state', 'N/A'),
@@ -925,12 +939,16 @@ class Strategy2026(BaseStrategy, UIMixin):
                 self.on_start()
                 result = bool(_state_is(getattr(self.strategy_core, '_state', None), StrategyState.RUNNING))
             else:
-                logging.warning("[Strategy2026.internal_resume_strategy] Cannot resume in state: %s", current_state)
+                # FIX-20260720-3: RUNNING 状态 resume 是正常场景（_to_close_debug 按钮触发），降为 DEBUG
+                if _state_is(current_state, StrategyState.RUNNING):
+                    logging.debug("[Strategy2026.internal_resume_strategy] Already RUNNING, resume no-op")
+                else:
+                    logging.warning("[Strategy2026.internal_resume_strategy] Cannot resume in state: %s", current_state)
         except Exception as e:  # FIX-40: 扩展异常类型，防止resume静默失败
             logging.error("[Strategy2026.internal_resume_strategy] 错误：%s", e)
             logging.exception("[Strategy2026.internal_resume_strategy] 堆栈:")
             result = False
-        logging.critical(
+        logging.info(
             "[FIX-20260709-PAUSE-DIAG] internal_resume_strategy EXIT: result=%s state=%s _is_paused=%s",
             result,
             getattr(getattr(self, 'strategy_core', None), '_state', 'N/A'),
@@ -949,7 +967,7 @@ class Strategy2026(BaseStrategy, UIMixin):
         try:
             from infra.health_monitor import DiagnosisProbeManager as _DPM
             _DPM.on_lifecycle_call('Strategy2026.onDestroy', 'CALLED', strategy_id=getattr(self,'strategy_id',None))
-        except Exception: pass
+        except Exception as _dpm_destroy_err: logging.debug("[onDestroy] DPM探针失败(非阻断): %s", _dpm_destroy_err)  # FIX-20260720-12 (维度15)
         # FIX-20260709-PAUSE-ROOT-V3: 暂停/删除彻底修复
         # 根因: onDestroy不调用strategy_core.on_destroy()，导致LifecycleCallbacks.on_destroy()从未被调用
         #       四元状态从未同步到STOPPED/destroyed，平台UI显示"删除"但策略实际仍在运行
@@ -959,7 +977,8 @@ class Strategy2026(BaseStrategy, UIMixin):
         except Exception as _fs_err:
             _caller_stack_destroy = ""
             logging.debug("[onDestroy] format_stack失败(非阻断): %s", _fs_err)
-        logging.critical(
+        # FIX-3-COMPLETE-20260724: onDestroy CRITICAL降级为INFO(生命周期诊断非业务异常)
+        logging.info(
             "[FIX-20260709-PAUSE-DIAG] onDestroy ENTER: strategy_id=%s state=%s _is_running=%s _is_paused=%s\n"
             "caller_stack:\n%s",
             getattr(self, 'strategy_id', 'N/A'),
@@ -1040,12 +1059,17 @@ class Strategy2026(BaseStrategy, UIMixin):
         try:
             from infra.health_monitor import record_option_entry_probe
             record_option_entry_probe(getattr(tick, 'instrument_id', ''), getattr(tick, 'last_price', 0.0))
-        except Exception:
-            pass
+        except Exception as _optcov_err:  # FIX-20260720-12 (维度15): 异常不静默
+            logging.debug("[onTick] 期权coverage探针失败(非阻断): %s", _optcov_err)
 
         # 数据保存必须无条件执行——DEGRADED状态只跳过策略决策，不跳过数据落库
+        # FIX-F2 (NEW-R2, 2026-07-18): 统一 None 安全保护风格
+        # 根因: 原 L1048 直接访问 self.strategy_core（无 hasattr(self, 'strategy_core') 保护），
+        #       与同方法 L1063 的 hasattr(self, 'strategy_core') 保护不一致。
+        #       若 __init__ 失败导致 strategy_core 未设置，L1048 AttributeError 被 except 吞掉 → 数据保存被跳过。
+        # 修复: 统一为 hasattr(self, 'strategy_core') + hasattr(self.strategy_core, 'on_tick') 双重保护。
         try:
-            if hasattr(self.strategy_core, 'on_tick'):
+            if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'on_tick'):
                 self.strategy_core.on_tick(tick)
         except Exception as e:
             _tick_err_count = getattr(self, '_tick_err_count', 0) + 1
@@ -1056,16 +1080,33 @@ class Strategy2026(BaseStrategy, UIMixin):
         if not getattr(self, '_callbacks_enabled', True):
             return None
 
-        # FIX-20260711-PAUSE-ACTION: 暂停状态下跳过策略决策（数据保存已在上方无条件执行）
+        # FIX-20260711-PAUSE-ACTION: 暂停/停止状态下跳过策略决策（数据保存已在上方无条件执行）
         # 根因: onTick不检查_is_paused，暂停后PQS/信号生成等策略决策仍继续执行
-        _is_paused = False
+        # FIX-PAUSE-STOP-ROOT-20260721: 增加 _is_running 检查
+        # 根因: on_stop()设置 _is_paused=False（STOPPED状态不是PAUSED）+ _is_running=False，
+        #       但onTick只检查 _is_paused，导致 on_stop() 后策略决策仍继续执行。
+        #       用户反馈："策略接收信息自己停止全部工作就实现了暂停功能"
+        #       C++平台通过 safe_call 调用 on_stop()（13:11:02证据），
+        #       策略必须在 on_stop() 后停止全部策略决策工作。
+        # 修复: 同时检查 _is_paused 和 _is_running，任一为True即跳过策略决策。
+        _should_skip_decision = False
+        _skip_reason = ''
         try:
-            _is_paused = getattr(self.strategy_core, '_is_paused', False) if hasattr(self, 'strategy_core') else False
-            if _is_paused:
-                _paused_tick_count = getattr(self, '_paused_tick_count', 0) + 1
-                self._paused_tick_count = _paused_tick_count
-                if _paused_tick_count <= 3 or _paused_tick_count % 1000 == 1:
-                    logging.info("[Strategy2026.onTick] PAUSED状态：策略决策已跳过，数据保存继续。累计跳过%d个tick的决策", _paused_tick_count)
+            if hasattr(self, 'strategy_core'):
+                _is_paused = getattr(self.strategy_core, '_is_paused', False)
+                _is_running = getattr(self.strategy_core, '_is_running', True)
+                if _is_paused:
+                    _should_skip_decision = True
+                    _skip_reason = 'PAUSED'
+                elif not _is_running:
+                    _should_skip_decision = True
+                    _skip_reason = 'STOPPED(_is_running=False)'
+            if _should_skip_decision:
+                _skipped_tick_count = getattr(self, '_skipped_tick_count', 0) + 1
+                self._skipped_tick_count = _skipped_tick_count
+                if _skipped_tick_count <= 3 or _skipped_tick_count % 1000 == 1:
+                    logging.info("[Strategy2026.onTick] %s状态：策略决策已跳过，数据保存继续。累计跳过%d个tick的决策",
+                                 _skip_reason, _skipped_tick_count)
                 return None
         # NEW-1 (2026-07-18): 实时回调路径窄异常扩展为Exception
         # 根因: onTick是C++平台每行情回调入口，窄异常列表(ValueError/KeyError/...)
@@ -1074,8 +1115,33 @@ class Strategy2026(BaseStrategy, UIMixin):
         #       被视为fatal error导致策略实例崩溃。
         # 修复: 扩展为except Exception，符合project_memory约束:
         #       "实时回调路径(onTick/onOrder/onTrade)必须用except Exception"
-        except Exception:
-            pass
+        except Exception as _tick_main_err:  # FIX-20260720-12 (维度15): 异常不静默
+            logging.debug("[onTick] 策略决策异常(非阻断): %s", _tick_main_err)
+
+        # FIX-MARKET-CLOSE-20260720: onTick入口增加市场时间门控
+        # 根因: onTick入口没有市场时间门控，15:00收市后PQS更新/信号生成/诊断日志仍持续运行4分钟以上。
+        #       证据: [PQS-VERIFY] call_count 23100→23700（15:00-15:02），[OPTCOV_PROBE] total_option_ticks 180948→185384。
+        # 用户要求: "只在固定时间（开盘/收市）收市门控判断"
+        # 修复: 使用 MarketOpenCache 缓存（常规30秒刷新，固定时间点±5分钟内5秒刷新）
+        #       onTick 只读缓存变量，零开销。
+        # 约束:
+        #   1. 数据保存（L1066-1074 strategy_core.on_tick）已在上方执行，保留落库
+        #   2. 暂停/停止状态检查（L1078-1114）已在上方执行
+        #   3. 此处仅跳过策略决策（PQS更新、信号生成、下单等）
+        try:
+            from infra.market_time_service import get_market_open_cache
+            if not get_market_open_cache().is_open():
+                _closed_count = getattr(self, '_market_closed_skip_count', 0) + 1
+                self._market_closed_skip_count = _closed_count
+                if _closed_count <= 3 or _closed_count % 1000 == 1:
+                    logging.info(
+                        "[FIX-MARKET-CLOSE-20260720] onTick策略决策跳过: 市场已收盘(累计跳过%d个tick的决策，数据保存继续)",
+                        _closed_count,
+                    )
+                return None
+        except Exception as _mkt_err:  # NEW-1: 实时回调路径必须用except Exception
+            # 门控异常不应阻断策略决策（降级为允许执行）
+            logging.debug("[onTick] 市场时间门控异常(非阻断,降级允许执行): %s", _mkt_err)
 
         _first_tick = not getattr(self, '_tick_received', False)
         if _first_tick:
@@ -1186,8 +1252,11 @@ class Strategy2026(BaseStrategy, UIMixin):
                     _crm_mod = _imp_fb.import_module('param_pool.optimization.cycle_sharpe')
                     _crm_inst = _crm_mod.get_cycle_resonance_module()
                     if getattr(_crm_inst, '_last_output', None) is None:
+                        # V4-FIX-C13: CRM降级时不伪造正常状态, 使用DEGRADED+保守max_hold
+                        # 原则: 数据不可用=不开仓(保守), 不再用 hmm_state=NORMAL 伪造正常状态
+                        _safe_max_hold = max(getattr(self, '_safe_max_hold_seconds', 60), getattr(self, '_default_max_hold_seconds', 60))
                         _crm_inst.update(
-                            hmm_state='NORMAL',
+                            hmm_state='DEGRADED',
                             hmm_posterior=(0.33, 0.34, 0.33),
                             trend_scores=(0.0, 0.0, 0.0),
                             trend_directions=(0.0, 0.0, 0.0),
@@ -1198,8 +1267,8 @@ class Strategy2026(BaseStrategy, UIMixin):
                         self._crm_fallback_count = _fb_count
                         if _fb_count <= 3 or _fb_count % 100 == 0:
                             logging.warning(
-                                "[FIX-20260712-P0] CRM降级更新(PQS失败fallback): count=%d, "
-                                "crm._last_output已设置为NORMAL默认值", _fb_count,
+                                "[V4-FIX-C13] CRM降级更新(PQS失败fallback): count=%d, "
+                                "hmm_state=DEGRADED (不伪造NORMAL), 保守max_hold=%s", _fb_count, _safe_max_hold,
                             )
                 except Exception as _crm_fb_err:  # NEW-1: 实时回调路径必须用except Exception
                     _crm_fb_count = getattr(self, '_crm_fb_err_count', 0) + 1
@@ -1230,23 +1299,59 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.error("[Strategy2026.onOrder] super().on_order() 错误：%s", e)
 
         try:
-            if hasattr(self.strategy_core, 'on_order'):
+            # FIX-F2-EXT (NEW-R2 衍生, 2026-07-19): onOrder 统一 None 安全保护风格 (修复半拉子)
+            # 根因: FIX-F2 仅修复 onTick L1053 添加双重 hasattr 保护，但 onOrder L1238 仍为
+            #       单层 hasattr(self.strategy_core, 'on_order')。若 __init__ 失败导致
+            #       strategy_core 属性未设置，单层 hasattr 评估实参即抛 AttributeError 被外层
+            #       except 吞掉 → 数据同步被跳过，与 onTick 数据保存对齐目标不一致。
+            # 修复: 统一为 hasattr(self, 'strategy_core') + hasattr(self.strategy_core, 'on_order') 双重保护。
+            if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'on_order'):
                 self.strategy_core.on_order(order)
         except Exception as e:  # NEW-1: 实时回调路径必须用except Exception
             logging.error("[Strategy2026.onOrder] strategy_core.on_order() 错误：%s", e)
 
-        # FIX-A (BP-02, 2026-07-18): 暂停期间跳过策略决策（数据同步已在上方完成）
+        # FIX-A (BP-02, 2026-07-18): 暂停/停止期间跳过策略决策（数据同步已在上方完成）
         # 根因: onOrder 未检查 _is_paused，暂停期间订单回调仍触发持仓更新和风控检查
         # 修复: 数据同步无条件执行，策略决策（如下单/撤单动作）在暂停期间跳过
-        # 设计: 与 onTick L1059-1078 模式对齐（数据保存 + 策略决策分离）
-        _is_paused = False
+        # 设计: 与 onTick 模式对齐（数据保存 + 策略决策分离）
+        # FIX-PAUSE-STOP-ROOT-20260721: 增加 _is_running 检查
+        # 根因: on_stop()设置 _is_paused=False+_is_running=False，onOrder只检查 _is_paused
+        #       → on_stop后策略决策仍继续执行。
+        _should_skip = False
+        _skip_reason = ''
         try:
-            _is_paused = getattr(self.strategy_core, '_is_paused', False) if hasattr(self, 'strategy_core') else False
-            if _is_paused:
-                _paused_order_count = getattr(self, '_paused_order_count', 0) + 1
-                self._paused_order_count = _paused_order_count
-                if _paused_order_count <= 3 or _paused_order_count % 100 == 1:
-                    logging.info("[Strategy2026.onOrder] PAUSED状态：策略决策已跳过，数据同步继续。累计跳过%d个order的决策", _paused_order_count)
+            if hasattr(self, 'strategy_core'):
+                _is_paused = getattr(self.strategy_core, '_is_paused', False)
+                _is_running = getattr(self.strategy_core, '_is_running', True)
+                if _is_paused:
+                    _should_skip = True
+                    _skip_reason = 'PAUSED'
+                elif not _is_running:
+                    _should_skip = True
+                    _skip_reason = 'STOPPED(_is_running=False)'
+            if _should_skip:
+                _skipped_order_count = getattr(self, '_skipped_order_count', 0) + 1
+                self._skipped_order_count = _skipped_order_count
+                if _skipped_order_count <= 3 or _skipped_order_count % 100 == 1:
+                    logging.info("[Strategy2026.onOrder] %s状态：策略决策已跳过，数据同步继续。累计跳过%d个order的决策",
+                                 _skip_reason, _skipped_order_count)
+                return None
+        except Exception:  # NEW-1: 实时回调路径必须用except Exception
+            pass
+
+        # FIX-MARKET-CLOSE-20260720: onOrder市场时间门控（与onTick对齐）
+        # 根因: 收市后onOrder仍可能触发策略决策（如撤单/补单动作）。
+        # 修复: 数据同步（上方）保留执行，策略决策收市后跳过。
+        try:
+            from infra.market_time_service import get_market_open_cache
+            if not get_market_open_cache().is_open():
+                _closed_count = getattr(self, '_market_closed_order_skip_count', 0) + 1
+                self._market_closed_order_skip_count = _closed_count
+                if _closed_count <= 3 or _closed_count % 100 == 1:
+                    logging.info(
+                        "[FIX-MARKET-CLOSE-20260720] onOrder策略决策跳过: 市场已收盘(累计跳过%d个order的决策，数据同步继续)",
+                        _closed_count,
+                    )
                 return None
         except Exception:  # NEW-1: 实时回调路径必须用except Exception
             pass
@@ -1265,23 +1370,57 @@ class Strategy2026(BaseStrategy, UIMixin):
             logging.error("[Strategy2026.onTrade] super().on_trade() 错误：%s", e)
 
         try:
-            if hasattr(self.strategy_core, 'on_trade'):
+            # FIX-F2-EXT (NEW-R2 衍生, 2026-07-19): onTrade 统一 None 安全保护风格 (修复半拉子)
+            # 根因: 与 onOrder 同理，FIX-F2 仅修复 onTick，onTrade L1273 仍为单层 hasattr。
+            #       若 strategy_core 未设置，单层 hasattr 评估实参抛 AttributeError → 数据同步被跳过。
+            # 修复: 统一为 hasattr(self, 'strategy_core') + hasattr(self.strategy_core, 'on_trade') 双重保护。
+            if hasattr(self, 'strategy_core') and hasattr(self.strategy_core, 'on_trade'):
                 self.strategy_core.on_trade(trade)
         except Exception as e:  # NEW-1: 实时回调路径必须用except Exception
             logging.error("[Strategy2026.onTrade] strategy_core.on_trade() 错误：%s", e)
 
-        # FIX-B (BP-03, 2026-07-18): 暂停期间跳过策略决策（数据同步已在上方完成）
+        # FIX-B (BP-03, 2026-07-18): 暂停/停止期间跳过策略决策（数据同步已在上方完成）
         # 根因: onTrade 未检查 _is_paused，暂停期间成交回调仍触发持仓更新和风控检查
         # 修复: 数据同步无条件执行，策略决策（如风控动作/平仓决策）在暂停期间跳过
-        # 设计: 与 onTick L1059-1078 模式对齐 + 与 FIX-A onOrder 模式对称
-        _is_paused = False
+        # 设计: 与 onTick 模式对齐 + 与 FIX-A onOrder 模式对称
+        # FIX-PAUSE-STOP-ROOT-20260721: 增加 _is_running 检查
+        # 根因: on_stop()设置 _is_paused=False+_is_running=False，onTrade只检查 _is_paused
+        #       → on_stop后策略决策仍继续执行。
+        _should_skip = False
+        _skip_reason = ''
         try:
-            _is_paused = getattr(self.strategy_core, '_is_paused', False) if hasattr(self, 'strategy_core') else False
-            if _is_paused:
-                _paused_trade_count = getattr(self, '_paused_trade_count', 0) + 1
-                self._paused_trade_count = _paused_trade_count
-                if _paused_trade_count <= 3 or _paused_trade_count % 100 == 1:
-                    logging.info("[Strategy2026.onTrade] PAUSED状态：策略决策已跳过，数据同步继续。累计跳过%d个trade的决策", _paused_trade_count)
+            if hasattr(self, 'strategy_core'):
+                _is_paused = getattr(self.strategy_core, '_is_paused', False)
+                _is_running = getattr(self.strategy_core, '_is_running', True)
+                if _is_paused:
+                    _should_skip = True
+                    _skip_reason = 'PAUSED'
+                elif not _is_running:
+                    _should_skip = True
+                    _skip_reason = 'STOPPED(_is_running=False)'
+            if _should_skip:
+                _skipped_trade_count = getattr(self, '_skipped_trade_count', 0) + 1
+                self._skipped_trade_count = _skipped_trade_count
+                if _skipped_trade_count <= 3 or _skipped_trade_count % 100 == 1:
+                    logging.info("[Strategy2026.onTrade] %s状态：策略决策已跳过，数据同步继续。累计跳过%d个trade的决策",
+                                 _skip_reason, _skipped_trade_count)
+                return None
+        except Exception:  # NEW-1: 实时回调路径必须用except Exception
+            pass
+
+        # FIX-MARKET-CLOSE-20260720: onTrade市场时间门控（与onTick对齐）
+        # 根因: 收市后onTrade仍可能触发策略决策（如风控动作/平仓决策）。
+        # 修复: 数据同步（上方）保留执行，策略决策收市后跳过。
+        try:
+            from infra.market_time_service import get_market_open_cache
+            if not get_market_open_cache().is_open():
+                _closed_count = getattr(self, '_market_closed_trade_skip_count', 0) + 1
+                self._market_closed_trade_skip_count = _closed_count
+                if _closed_count <= 3 or _closed_count % 100 == 1:
+                    logging.info(
+                        "[FIX-MARKET-CLOSE-20260720] onTrade策略决策跳过: 市场已收盘(累计跳过%d个trade的决策，数据同步继续)",
+                        _closed_count,
+                    )
                 return None
         except Exception:  # NEW-1: 实时回调路径必须用except Exception
             pass
@@ -1299,10 +1438,17 @@ class Strategy2026(BaseStrategy, UIMixin):
     onPause = on_pause
     onResume = on_resume
     on_destroy = onDestroy
-    onDestroy = onDestroy
+    # FIX-20260720-5: 删除原 onDestroy = onDestroy 自赋值（NO-OP冗余）
+    # on_destroy = onDestroy 已在上方正确定义（snake→Camel），onDestroy 本身就是 CamelCase 实现
     on_tick = onTick
     on_order = onOrder
     on_trade = onTrade
+
+    # FIX-20260720-4b: 补全首字母大写别名（与 t_type_bootstrap 对齐）
+    Pause = pause
+    Resume = resume
+    Stop = on_stop
+    Destroy = onDestroy
 
     @property
     def my_is_running(self) -> bool:
