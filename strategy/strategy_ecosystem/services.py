@@ -514,14 +514,18 @@ class TradingEVService:
         if self._other.paused:
             return {'action': 'skip', 'reason': 'other策略已暂停'}
 
-        # K线箱体前置条件 — S3/S4策略箱体标准化
-        # 日内交易(dte≤5): 必须有日K小箱体确认(INTRADAY_SMALL)
-        # 隔夜交易(dte>5): 必须有周K中箱体确认(OVERNIGHT_MEDIUM)
+        # K线箱体前置条件 — S3策略箱体标准化
+        # FIX-S3-BOXTYPE-20260730: S3日内策略必须传box_type=INTRADAY_SMALL(日K箱体)
+        # 根因: 不传box_type时进入else分支优先检查日K, 虽然S3恰好看的是日K,
+        #   但逻辑语义应明确: S3=日内策略永远用日K箱体
+        from strategy.box_detector import BoxType  # FIX-S3-BOXTYPE-20260730
         kline_passed, kline_box = self._box_detector.check_kline_box_precondition(
-            instrument_id=instrument_id, days_to_expiry=days_to_expiry)
+            instrument_id=instrument_id, days_to_expiry=days_to_expiry,
+            box_type=BoxType.INTRADAY_SMALL)
         if not kline_passed:
-            _kb_type = 'INTRADAY_SMALL' if days_to_expiry <= 5 else 'OVERNIGHT_MEDIUM'
-            logging.info(
+            # FIX-S3-BOXTYPE-20260730: box_type已固定为INTRADAY_SMALL, 日志直接使用
+            _kb_type = kline_box.box_type.name if kline_box and kline_box.box_type else 'INTRADAY_SMALL'
+            logging.debug(
                 "[S3-KLINE-BOX] REJECT: K线箱体未确认 inst=%s dte=%d box_type=%s",
                 instrument_id, days_to_expiry, _kb_type,
             )

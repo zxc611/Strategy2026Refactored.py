@@ -334,6 +334,11 @@ class Strategy2026(BaseStrategy, UIMixin):
 
         super().on_start()
 
+        # FIX-ECO-IV-WARMUP-20260728: 记录策略启动时间, 供ecosystem IV warmup期计算
+        self._strategy_start_time = time.time()
+
+        # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃), 无需重置收盘标志
+
         logging.info("[Strategy2026.onStart] New run_id=%s", self._lifecycle_run_id)
         self._callbacks_enabled = True
         self._stop_requested = False
@@ -1196,8 +1201,8 @@ class Strategy2026(BaseStrategy, UIMixin):
                     # FIX-20260709-PQS-VERIFY: 全链条验证 — 增加调用入口日志
                     _pqs_call_count = getattr(self, '_pqs_call_count', 0) + 1
                     self._pqs_call_count = _pqs_call_count
-                    if _pqs_call_count <= 2 or _pqs_call_count % 100 == 0:
-                        logging.info(
+                    if _pqs_call_count <= 2 or _pqs_call_count % 1000 == 0:
+                        logging.debug(
                             "[PQS-VERIFY] tick节流触发PQS更新: call_count=%d initialized=%s sym=%s close=%s",
                             _pqs_call_count, _pqs._initialized if _pqs else None,
                             getattr(tick, 'instrument_id', ''), getattr(tick, 'last_price', 0),
@@ -1214,8 +1219,8 @@ class Strategy2026(BaseStrategy, UIMixin):
                             # FIX-20260709-PQS-VERIFY: 全链条验证 — 验证crm._last_output已更新
                             _crm = getattr(_pqs, '_crm', None)
                             _crm_last = getattr(_crm, '_last_output', None)
-                            if _pqs_call_count <= 2 or _pqs_call_count % 100 == 0:
-                                logging.info(
+                            if _pqs_call_count <= 2 or _pqs_call_count % 1000 == 0:
+                                logging.debug(
                                     "[PQS-VERIFY] update_tick完成: crm._last_output=%s type=%s",
                                     'None' if _crm_last is None else 'SET',
                                     type(_crm_last).__name__ if _crm_last is not None else 'N/A',

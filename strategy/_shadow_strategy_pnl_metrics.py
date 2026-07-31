@@ -150,10 +150,10 @@ class ShadowStrategyPnLMetricsService:
             s2_ms, s2_sa, s2_sb = group_sharpes['s2_resonance']['master'], group_sharpes['s2_resonance']['shadow_a'], group_sharpes['s2_resonance']['shadow_b']
             s3_ms, s3_sa, s3_sb = group_sharpes['s3_box']['master'], group_sharpes['s3_box']['shadow_a'], group_sharpes['s3_box']['shadow_b']
             s4_ms, s4_sa, s4_sb = group_sharpes['s4_spring']['master'], group_sharpes['s4_spring']['shadow_a'], group_sharpes['s4_spring']['shadow_b']
-            s5_ms, s5_sa, s5_sb = group_sharpes['s5_arbitrage']['master'], group_sharpes['s5_arbitrage']['shadow_a'], group_sharpes['s5_arbitrage']['shadow_b']
+            s5_ms = s5_sa = s5_sb = 0.0  # DEL-S5-20260729: S5已删除, 占位0.0保持AlphaMetrics兼容
             s6_ms, s6_sa, s6_sb = group_sharpes['s6_market_making']['master'], group_sharpes['s6_market_making']['shadow_a'], group_sharpes['s6_market_making']['shadow_b']
-            logger.debug("[ShadowStrategyEngine] Per-group sharpes: S1=%.3f S2=%.3f S3=%.3f S4=%.3f S5=%.3f S6=%.3f",
-                         s1_ms, s2_ms, s3_ms, s4_ms, s5_ms, s6_ms)
+            logger.debug("[ShadowStrategyEngine] Per-group sharpes: S1=%.3f S2=%.3f S3=%.3f S4=%.3f S6=%.3f",
+                         s1_ms, s2_ms, s3_ms, s4_ms, s6_ms)
 
             # P1-R8-19修复: 各策略组(S1-S6)独立Alpha计算
             # 手册9.3节: Alpha_i = 主策略Sharpe_i - max(影子A_Sharpe_i, 影子B_Sharpe_i)
@@ -166,7 +166,7 @@ class ShadowStrategyPnLMetricsService:
             s2_alpha = group_alphas['s2_resonance']
             s3_alpha = group_alphas['s3_box']
             s4_alpha = group_alphas['s4_spring']
-            s5_alpha = group_alphas['s5_arbitrage']
+            s5_alpha = 0.0  # DEL-S5-20260729: S5已删除, 占位0.0
             s6_alpha = group_alphas['s6_market_making']
 
             # P1-2修复：主策略Sharpe<=0时触发ELIMINATE标记

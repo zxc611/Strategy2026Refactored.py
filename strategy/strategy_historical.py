@@ -18,6 +18,7 @@
 import logging
 import os
 import re
+import sys  # [FIX-HKL-RECURSION-20260728] 修复D: 递归深度安全网
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -64,6 +65,35 @@ def load_historical_klines_with_stop(
 
     end_time = datetime.now(CHINA_TZ)
     start_time = end_time - timedelta(minutes=history_minutes)
+
+    # FIX-HKL-WEEKEND-20260727: 历史K线查询窗口跨周末/节假日回溯
+    # 根因: history_minutes=1440(24小时)的查询窗口在周一开盘前/节假日后首次重启时会跨越
+    #   非交易时段(周末/节假日), 导致平台API返回空数据, 所有合约klines_raw=0,
+    #   S3/S4箱体检测因K线不足而永远0下单(条件不成就).
+    # 修复: 当start_time落在非交易日时, 自动向前回溯到最近的交易日,
+    #   确保查询窗口至少包含1个完整交易日的历史数据.
+    # 原则: 仅修复数据查询窗口(数据准备), 不修改策略逻辑(S3/S4仍需≥3周K线).
+    # 实盘零影响: 交易日正常时段start_time本就在交易日内, 回溯逻辑不触发.
+    try:
+        from infra.market_time_service import get_market_time_service
+        _mts = get_market_time_service()
+        _start_date = start_time.date()
+        # 向前回溯最多7天, 确保找到最近的交易日
+        _backtrack_days = 0
+        while not _mts.is_trading_day(_start_date) and _backtrack_days < 7:
+            _start_date = _start_date - timedelta(days=1)
+            _backtrack_days += 1
+        if _backtrack_days > 0:
+            # 仅当回溯后的交易日早于原start_time时才扩展窗口
+            _new_start = datetime.combine(_start_date, datetime.min.time(), tzinfo=CHINA_TZ)
+            if _new_start < start_time:
+                logging.info(
+                    "[FIX-HKL-WEEKEND] 历史K线查询窗口回溯: 原 start_time=%s (非交易日) -> 新 start_time=%s (最近交易日, 回溯%d天)",
+                    start_time, _new_start, _backtrack_days,
+                )
+                start_time = _new_start
+    except (ImportError, AttributeError, RuntimeError) as _hkl_err:
+        logging.debug("[FIX-HKL-WEEKEND] 交易日历回溯失败(非致命, 使用原始窗口): %s", _hkl_err)
 
     logging.info(
         "[Storage] 开始为 %d 个合约加载历史K线: %s -> %s, 周期=%s, provider=%s",
@@ -142,11 +172,17 @@ def load_historical_klines_with_stop(
                 if kline_data and len(kline_data) > 0:
                     normalized_klines = []
                     _kline_ts_warn_count = 0
+                    # FIX-HKL-PROVIDER-20260729: 支持dict和object两种K线格式
+                    def _kval(obj, key, default=None):
+                        if isinstance(obj, dict):
+                            return obj.get(key, default)
+                        return getattr(obj, key, default)
+
                     for kline in kline_data:
                         try:
-                            raw_dt = getattr(kline, 'datetime', None)
+                            raw_dt = _kval(kline, 'datetime')
                             if raw_dt is None:
-                                raw_dt = getattr(kline, 'date', None) or getattr(kline, 'time', None)
+                                raw_dt = _kval(kline, 'date') or _kval(kline, 'time')
                             ts = storage._to_timestamp(raw_dt)
                             if ts is None:
                                 _kline_ts_warn_count += 1
@@ -160,12 +196,12 @@ def load_historical_klines_with_stop(
                                 'ts': ts,
                                 'instrument_id': instrument_id,
                                 'exchange': exchange,
-                                'open': getattr(kline, 'open', 0.0),
-                                'high': getattr(kline, 'high', 0.0),
-                                'low': getattr(kline, 'low', 0.0),
-                                'close': getattr(kline, 'close', 0.0),
-                                'volume': getattr(kline, 'volume', 0),
-                                'open_interest': getattr(kline, 'open_interest', 0),
+                                'open': _kval(kline, 'open', 0.0),
+                                'high': _kval(kline, 'high', 0.0),
+                                'low': _kval(kline, 'low', 0.0),
+                                'close': _kval(kline, 'close', 0.0),
+                                'volume': _kval(kline, 'volume', 0),
+                                'open_interest': _kval(kline, 'open_interest', 0),
                                 'period': normalized_period,
                             })
                         except Exception as exc:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
@@ -287,6 +323,35 @@ def load_historical_klines_with_stop(
             "[Storage] 历史K线批次 %d/%d 完成: success=%d, failed=%d, fetched_klines=%d, enqueued_klines=%d",
             batch_index, total_batches, success_count, failed_count, fetched_klines, batch_enqueued_klines,
         )
+
+        # FIX-KLINE-SUB-STAT-20260729: 逐批次更新K线订阅统计，避免全部295批次完成后才更新
+        # 根因: record_kline_received仅在全部295批次完成后的最终回调中调用(line 381返回kline_instruments,
+        #   回调在line 668才遍历调用sm.record_kline_received)。295批次×~6.5分钟/批≈32小时，
+        #   在此期间订阅统计永远显示K_=0/14725=0.0%，即使K线数据已成功入库。
+        # 修复: 每批次完成后立即调用record_kline_received，使订阅统计实时反映加载进度。
+        # 安全性: record_kline_received内部有去重(instrument_id not in set才计数)，重复调用无副作用。
+        _batch_new_instruments = kline_success_instruments[success_before_batch:]
+        if _batch_new_instruments:
+            _sm = getattr(storage, 'subscription_manager', None)
+            if _sm is None:
+                try:
+                    from data.data_service import get_data_service
+                    _ds = get_data_service()
+                    if _ds is not None:
+                        _sm = getattr(_ds, 'subscription_manager', None)
+                except Exception:
+                    _sm = None
+            if _sm and hasattr(_sm, 'record_kline_received'):
+                for _inst_id in _batch_new_instruments:
+                    try:
+                        _sm.record_kline_received(_inst_id)
+                    except Exception:
+                        pass
+                logging.debug(
+                    "[FIX-KLINE-SUB-STAT] 批次 %d/%d: 已更新 %d 个合约的K线订阅统计 (累计=%d)",
+                    batch_index, total_batches, len(_batch_new_instruments), success_count,
+                )
+
         batch_success_count = success_count - success_before_batch
         batch_fetched_klines = fetched_klines - fetched_before_batch
         # FIX-31 RC-39: 仅当批次无成功且有API异常时才计入连续空批次
@@ -387,6 +452,9 @@ class HistoricalKlineMixin:
         
         # 诊断标志
         self._hkl_diag_emitted = False
+
+        # [FIX-HKL-RECURSION-20260728] 修复C: Tick触发时间冷却
+        self._last_tick_triggered_historical_load_time = 0.0
     
     # ========== 合约过滤 ==========
     
@@ -498,8 +566,15 @@ class HistoricalKlineMixin:
                 return runtime_strategy, 'strategy'
         
         # Level 3: 使用运行时缓存的市场中心
-        if hasattr(self, '_runtime_market_center') and self._runtime_market_center is not None:
-            return self._runtime_market_center, 'runtime'
+        # FIX-HKL-PROVIDER-20260729: 同时检查_runtime_market_center和_fallback_market_center
+        # 根因: bind_platform_apis设置_runtime_market_center后,部分场景下该属性可能丢失
+        #   (如StrategyCoreService被重建或__getattr__未透传),导致Level 3失败→Level 6重建MarketCenter
+        # 修复: Level 3增加_fallback_market_center作为备选检查
+        _mc = getattr(self, '_runtime_market_center', None)
+        if _mc is None:
+            _mc = getattr(self, '_fallback_market_center', None)
+        if _mc is not None:
+            return _mc, 'runtime'
         
         # Level 4: 尝试从runtime_host提取（宿主策略）
         if hasattr(self, '_runtime_strategy_host'):
@@ -710,13 +785,49 @@ class HistoricalKlineMixin:
                         f"in {delay:.0f}s (remaining={retry_remaining})"
                     )
                     def _retry_after_delay():
+                        # [FIX-HKL-RECURSION-20260728] 修复D: 递归深度安全网
+                        # 根因: _retry_after_delay→_start_historical_kline_load→_retry_after_delay
+                        #   递归链在provider持续不可用时累积，最终触发RecursionError崩溃
+                        _depth = sys.getrecursiondepth()
+                        if _depth > 50:
+                            logging.error(
+                                "[HKL][strategy_id=%s] Recursion depth %d exceeds safety limit 50, aborting retry to prevent stack overflow",
+                                self.strategy_id, _depth,
+                            )
+                            return
+
                         time.sleep(delay)  # R23-P2-22标记: P2级阻塞重试
                         # FIX-20260711-PAUSE-ACTION: sleep后检查暂停/销毁状态，避免覆盖暂停
                         if getattr(self, '_is_paused', False) or getattr(self, '_destroyed', False):
                             logging.info("[HKL] retry cancelled: strategy paused or destroyed")
                             return
                         try:
-                            self._start_historical_kline_load()
+                            # [FIX-HKL-RECURSION-20260728] 修复B: _retry_after_delay改为非递归
+                            # 根因: 原实现调用 self._start_historical_kline_load() 形成递归链
+                            #   _start_historical_kline_load→provider=None→_retry_after_delay→_start_historical_kline_load
+                            #   在provider持续不可用时递归深度持续增长→RecursionError
+                            # 修复: 不再递归调用 _start_historical_kline_load，改为直接尝试解析provider:
+                            #   - provider可用: 直接调用 _load_historical_klines_once (无递归风险)
+                            #   - provider不可用: 仅记录日志，让tick路径下次触发
+                            _provider, _provider_source = self._resolve_historical_provider()
+                            if _provider is not None:
+                                logging.info(
+                                    "[HKL][strategy_id=%s] Provider now available (%s) after delay, loading directly",
+                                    self.strategy_id, _provider_source,
+                                )
+                                _instruments = self._build_historical_instruments()
+                                if _instruments:
+                                    self._load_historical_klines_once(_instruments, _provider, _provider_source)
+                                else:
+                                    logging.info(
+                                        "[HKL][strategy_id=%s] No instruments after delay, skip direct load",
+                                        self.strategy_id,
+                                    )
+                            else:
+                                logging.info(
+                                    "[HKL][strategy_id=%s] Provider still unavailable after delay, will rely on tick path to retry",
+                                    self.strategy_id,
+                                )
                         except Exception as e:  # FIX-HKL-EXCEPT-20260722: 扩宽异常元组，防止未列举异常穿透崩溃HKL实时线程
                             logging.error(f"[HKL] Provider retry failed: {e}", exc_info=True)
                     t = threading.Thread(target=_retry_after_delay, name=f"hkl-retry-{self.strategy_id}", daemon=True)
@@ -766,6 +877,10 @@ class HistoricalKlineMixin:
                 )
                 with self._historical_loader_lock:
                     if self._historical_load_retry_count < self._historical_load_max_retries:
+                        # [FIX-HKL-RECURSION-20260728] 修复A: Load失败路径递增retry_count
+                        # 根因: _runner异常时仅设置 _historical_load_started=False 允许重试，
+                        #   但未消耗retry_count配额，导致tick路径无限重试→递归调用链累积→栈溢出
+                        self._historical_load_retry_count += 1
                         self._historical_load_started = False
                         logging.info(
                             "[HKL][strategy_id=%s] Load failed, will allow retry (%d/%d)",
@@ -925,6 +1040,15 @@ class HistoricalKlineMixin:
 
         所有状态读取都在锁内完成，避免数据可见性问题
         """
+        # [FIX-HKL-RECURSION-20260728] 修复C: Tick触发增加时间冷却
+        # 根因: 收盘密集tick(每秒数十个)持续触发 _check_and_start_historical_load_on_tick，
+        #   每次都启动新线程调用 _start_historical_kline_load→_retry_after_delay→递归链累积
+        # 修复: 最小间隔60秒，防止收盘密集tick过度触发
+        _now = time.time()
+        _min_interval = 60.0
+        if _now - self._last_tick_triggered_historical_load_time < _min_interval:
+            return
+
         # FIX-20260716-THREAD-V1: 暂停/销毁状态下不创建新线程
         # 根因: V2报告绕过路径B1——tick触发的历史K线加载不检查_is_paused/_destroyed，
         #       pause()调用_shutdown_historical_services()清理W7/W8/W9后，
@@ -958,8 +1082,8 @@ class HistoricalKlineMixin:
                 )
                 self._historical_load_started = False
             self._historical_load_started = True
-
-        # 异步启动，不在tick回调线程中同步执行
+            # [FIX-HKL-RECURSION-20260728] 修复C: 更新tick触发时间戳
+            self._last_tick_triggered_historical_load_time = time.time()
         import threading
         def _async_kline_load():
             try:

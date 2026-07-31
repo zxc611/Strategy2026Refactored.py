@@ -171,6 +171,18 @@ class PositionPnlService:
             self._ps._startup_close_grace_until = _now_ts + 30.0
         if _now_ts < self._ps._startup_close_grace_until:
             return
+        # FIX-HARDSTOP-MARKET-CLOSED-20260728: 收盘后跳过止损检查
+        # 根因: 15:00收盘后, 硬止损检查仍每30s触发, _trigger_close_position因交易所收盘延后平仓,
+        # 但硬止损反复触发57次浪费CPU/IO(15:00:07-15:29:16 si2609-C-8500案例, GFEX收盘)
+        # 修复: 收盘后跳过止损检查, 次日开盘恢复(类似S5 gate, 与FIX-S5-POST-CLOSE-GATE-V2一致)
+        # 不改变策略逻辑: 硬止损触发条件(_unrealized_pts <= -2.0)不变, 仅收盘后停止无效检查(无法平仓)
+        # fail-OPEN: MarketOpenCache不可用时不跳过(继续检查, 保持原行为, 避免遗漏止损)
+        try:
+            from infra.market_time_service import get_market_open_cache
+            if not get_market_open_cache().is_open():
+                return
+        except Exception:
+            pass  # MarketOpenCache不可用, 不跳过止损检查(fail-OPEN, 保持原行为)
         if record.volume == 0:
             return
         # FIX-20260709-P0: 增加-2点绝对硬止损 (不依赖stop_loss_price设置)
@@ -286,6 +298,13 @@ class PositionPnlService:
             self._ps._startup_close_grace_until = _now_ts + 30.0
         if _now_ts < self._ps._startup_close_grace_until:
             return
+        # FIX-R37-TIMESTOP-VOLCHECK-20260728: volume=0时跳过时间止损
+        # 根因: _check_stop_profit和_check_stop_loss都有if record.volume == 0: return,
+        #   但_check_time_stop缺少此检查→已平仓持仓(volume=0)仍触发时间止损→
+        #   _reduce_position发现closeable=0→R37-POS-INSUFFICIENT警告(36次)
+        # 修复: 与stop_profit/stop_loss一致, volume=0时直接return
+        if record.volume == 0:
+            return
         now = now or datetime.now(_CHINA_TZ)
         open_reason = getattr(record, 'open_reason', '')
         _sg = getattr(record, 'strategy_group', '')
@@ -400,6 +419,15 @@ class PositionPnlService:
                             current_profit_pct = (current_price - record.open_price) / record.open_price
                         else:
                             current_profit_pct = (record.open_price - current_price) / record.open_price
+                    # FIX-HARDSTOP-EFFECTIVE-TIME-20260728: 硬时间止损使用有效交易时间，与时间止损一致
+                    # 根因: check_position_hard_time_stop内部用 elapsed_min=(now-open_time)/60.0 计算原始时间差,
+                    #   但_check_time_stop自身已用_calc_effective_trading_minutes计算有效交易时间(排除隔夜)。
+                    #   跨会话持仓的open_time来自前一交易日,原始时间差含隔夜(如684min=11.4h),
+                    #   但有效交易时间可能仅294min(夜盘4h+日盘35min)。
+                    #   原代码传bar_time=now.timestamp()→硬止损用原始时间差→新持仓立即触发"已持684min"。
+                    # 修复: 传bar_time=open_ts+elapsed*60,使硬止损的elapsed_min=有效交易时间elapsed。
+                    #   不改变策略逻辑: 仍fail-closed(有效时间达标仍触发止损),仅修正时间口径一致。
+                    _effective_bar_time = (open_ts + elapsed * 60.0) if open_ts > 0 and elapsed >= 0 else (now.timestamp() if now else None)
                     hard_stop_reason = safety.check_position_hard_time_stop(
                         position_id=str(record.position_id) if hasattr(record, 'position_id') else record.instrument_id,
                         open_time=open_ts,
@@ -407,7 +435,7 @@ class PositionPnlService:
                         profit_slope=profit_slope,
                         peak_profit_pct=peak_profit_pct,
                         current_profit_pct=current_profit_pct,
-                        bar_time=now.timestamp() if now else None,
+                        bar_time=_effective_bar_time,
                         strategy_group=getattr(record, 'strategy_group', ''),
                     )
                     if hard_stop_reason:

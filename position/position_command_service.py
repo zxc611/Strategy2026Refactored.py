@@ -455,46 +455,77 @@ class PositionCommandService:
         if price <= 0:
             logging.error("[R26-P0-FI-09] _add_position拒绝price<=0: inst=%s price=%s", instrument_id, price)
             return
+        # FIX-DRY-RUN-MARGIN-SKIP-20260727: dry_run模式跳过实盘保证金检查
+        # 根因: dry_run模式下 equity 被错误地等同于"持仓总市值"(position_check_service.py L208-227),
+        #   持仓变化时equity剧烈波动. 当equity<new_margin时, R13-V4-001保证金不足阻断,
+        #   _add_position静默return不添加持仓. 但dry_run虚拟平仓订单的回调仍执行,
+        #   _reduce_position找不到持仓→R37-POS-INSUFFICIENT(72条)+R37-POS-NOT-FOUND(124条).
+        # 修复: dry_run模式跳过保证金检查(无真实资金风险, equity口径不正确).
+        # 原则: 仅dry_run跳过, 实盘仍严格执行保证金检查(实盘零影响).
+        # 证据: 2026-07-27 09:07:15.095 CRITICAL R13-V4-001 equity=52.80 new_margin=52.82,
+        #       09:07:15.097 虚拟开仓回调注入成功(无Added日志), 09:07:15.121 R37-POS-INSUFFICIENT.
+        # FIX-DRY-RUN-MARGIN-SKIP-V2-20260727: 修复_dry_run_active传播时机问题
+        #   根因: lifecycle_callbacks.py L133-144的on_start回调在09:25:49才传播_dry_run_active,
+        #   但OptionTrading在09:00开盘后立即开始下单, 09:00-09:25之间的保证金检查
+        #   仍使用旧的_dry_run_active=False→84次阻断.
+        #   修复: 优先从params.yaml读取dry_run_mode(配置层,启动时即生效),
+        #   其次才检查_dry_run_active属性(运行时传播,可能延迟).
+        _dry_run_active = False
+        # 优先级1: 从params配置直接读取(启动时即生效,无延迟)
         try:
-            from risk.risk_service import get_risk_service
-            rs = get_risk_service()
-            if rs:
-                existing_margin = 0.0
-                # FIX-OPEN-UNIQUE(P6): 保证金检查读取 positions 必须在 global_lock 内，
-                # 否则并发开仓时可能读到不一致的持仓状态(如正在被 _reduce_position 修改的持仓)
-                # 使用快照方式避免长时间持锁
-                try:
-                    with self._ps.global_lock:
-                        _pos_snapshot = [(iid, dict(pdict)) for iid, pdict in self._ps.positions.items()]
-                    for _inst_id, pos_dict in _pos_snapshot:
-                        for _pid, rec in pos_dict.items():
-                            if rec.volume != 0 and rec.open_price > 0:
-                                _m_ratio = rs._get_margin_ratio(_inst_id) if hasattr(rs, '_get_margin_ratio') else 0.1
-                                existing_margin += abs(rec.volume) * rec.open_price * _m_ratio
-                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
-                    pass
-                    pass
-                _new_m_ratio = rs._get_margin_ratio(instrument_id) if hasattr(rs, '_get_margin_ratio') else 0.1  # R27-P0-FIX: symbol→instrument_id
-                new_margin = abs(volume) * price * _new_m_ratio
-                equity = 0.0
-                try:
-                    from risk.risk_service import get_safety_meta_layer
-                    _sid = str(getattr(self._ps, 'strategy_id', '') or 'global')
-                    safety = get_safety_meta_layer(params=self._ps._params if hasattr(self._ps, '_params') else None, strategy_id=_sid)
-                    if safety and safety._equity_series:
-                        equity = safety._equity_series[-1]
-                except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-                    logging.debug("[R3-L2] suppressed exception", exc_info=True)
-                    pass
-                    pass
-                if equity > 0:
-                    result = rs.check_capital_sufficiency(equity=equity, required_margin=new_margin, existing_margin_used=existing_margin)
-                    if not result.get('sufficient', True):
-                        logging.critical("[PositionService] R13-V4-001: 保证金不足防御性阻断! equity=%.2f existing_margin=%.2f new_margin=%.2f", equity, existing_margin, new_margin)
-                        return
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-            logging.debug("[PositionService] R13-V4-001 margin check failed: %s", e)
+            from config.config_service import get_cached_params
+            _dry_run_active = bool((get_cached_params() or {}).get('dry_run_mode', False))
+        except (ImportError, AttributeError, TypeError):
+            pass
+        # 优先级2: 从PositionService实例属性读取(lifecycle传播)
+        if not _dry_run_active:
+            _dry_run_active = bool(getattr(self._ps, '_dry_run_active', False) or
+                                   getattr(self._ps, '_dry_run_mode', False))
+        if not _dry_run_active:
+            try:
+                from risk.risk_service import get_risk_service
+                rs = get_risk_service()
+                if rs:
+                    existing_margin = 0.0
+                    # FIX-OPEN-UNIQUE(P6): 保证金检查读取 positions 必须在 global_lock 内，
+                    # 否则并发开仓时可能读到不一致的持仓状态(如正在被 _reduce_position 修改的持仓)
+                    # 使用快照方式避免长时间持锁
+                    try:
+                        with self._ps.global_lock:
+                            _pos_snapshot = [(iid, dict(pdict)) for iid, pdict in self._ps.positions.items()]
+                        for _inst_id, pos_dict in _pos_snapshot:
+                            for _pid, rec in pos_dict.items():
+                                if rec.volume != 0 and rec.open_price > 0:
+                                    _m_ratio = rs._get_margin_ratio(_inst_id) if hasattr(rs, '_get_margin_ratio') else 0.1
+                                    existing_margin += abs(rec.volume) * rec.open_price * _m_ratio
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                        logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                        pass
+                        pass
+                    _new_m_ratio = rs._get_margin_ratio(instrument_id) if hasattr(rs, '_get_margin_ratio') else 0.1  # R27-P0-FIX: symbol→instrument_id
+                    new_margin = abs(volume) * price * _new_m_ratio
+                    equity = 0.0
+                    try:
+                        from risk.risk_service import get_safety_meta_layer
+                        _sid = str(getattr(self._ps, 'strategy_id', '') or 'global')
+                        safety = get_safety_meta_layer(params=self._ps._params if hasattr(self._ps, '_params') else None, strategy_id=_sid)
+                        if safety and safety._equity_series:
+                            equity = safety._equity_series[-1]
+                    except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+                        logging.debug("[R3-L2] suppressed exception", exc_info=True)
+                        pass
+                        pass
+                    if equity > 0:
+                        result = rs.check_capital_sufficiency(equity=equity, required_margin=new_margin, existing_margin_used=existing_margin)
+                        if not result.get('sufficient', True):
+                            logging.critical("[PositionService] R13-V4-001: 保证金不足防御性阻断! equity=%.2f existing_margin=%.2f new_margin=%.2f", equity, existing_margin, new_margin)
+                            return
+            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
+                logging.debug("[PositionService] R13-V4-001 margin check failed: %s", e)
+        else:
+            # dry_run模式: 跳过保证金检查, 仅记录DEBUG日志便于排查
+            logging.debug("[FIX-DRY-RUN-MARGIN-SKIP] dry_run模式跳过保证金检查: inst=%s vol=%d price=%.4f",
+                          instrument_id, volume, price)
 
         # FIX-OPEN-UNIQUE-06: self_trade_detector.add_order必须在instrument_lock内执行，
         # 否则并发开仓时两个线程可能同时通过自成交检测但都未及时add_order，导致后续订单漏检
@@ -836,14 +867,15 @@ class PositionCommandService:
                 _greeks_snapshot = {}
                 if rec is not None:
                     try:
-                        from risk.risk_service import get_risk_service
-                        _rs = get_risk_service()
-                        if _rs and hasattr(_rs, '_get_greeks_calculator'):
-                            _gc = _rs._get_greeks_calculator()
-                            if _gc and hasattr(_gc, 'get_greeks'):
-                                _greeks = _gc.get_greeks(rec.instrument_id)
-                                if _greeks:
-                                    _greeks_snapshot = {k: _greeks.get(k, 0.0) for k in ('delta', 'gamma', 'vega', 'theta')}
+                        # FIX-GREEKS-UNIFIED-SINGLETON-20260729: 直接使用统一单例
+                        # 原代码 _rs._get_greeks_calculator() 因 RiskService.__getattr__
+                        # 拒绝 _ 开头属性委托而永远返回 None。
+                        from infra.service_contracts import get_unified_greeks_calculator
+                        _gc = get_unified_greeks_calculator()
+                        if _gc and hasattr(_gc, 'get_greeks'):
+                            _greeks = _gc.get_greeks(rec.instrument_id)
+                            if _greeks:
+                                _greeks_snapshot = {k: _greeks.get(k, 0.0) for k in ('delta', 'gamma', 'vega', 'theta')}
                     except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
                         logging.debug("[R3-L2] suppressed exception", exc_info=True)
                         pass
@@ -1112,7 +1144,52 @@ class PositionCommandService:
                             # FIX-20260723-C12-ROOT: 移除open_price回退(fail-closed)
                             # 根因: open_price偏离市场价→胖手指防护触发→平仓失败→重试耗尽→1483次ERROR
                             # 修复: current_price不可用时不操作(数据不可用=不操作)，等下次周期用最新价重试
-                            logging.info("[V4-FIX-C12] current_price不可用, 跳过本次平仓(fail-closed): %s", record.instrument_id)
+                            # FIX-CLOSE-DRY-RUN-20260727-V2: dry_run模式下使用open_price回退(无真实资金风险)
+                            # 根因: dry_run模式current_price=0(虚拟持仓无tick)→fail-closed→平仓重试耗尽→
+                            #   CANNOT_CLOSE循环(50条CRITICAL/4分钟)→系统噪音
+                            # 修复: dry_run模式用open_price回退,与FIX-DRY-RUN-MARGIN-SKIP同一原则
+                            # 实盘零影响: dry_run_active默认False,实盘仍严格执行fail-closed
+                            #
+                            # FIX-CLOSE-DRY-RUN-V2 (20260727晚): 修复V1检测路径永远返回False的bug
+                            #   V1根因: 仅依赖 params_service.get_bool + 不存在的 get_order_base
+                            #     1) params_service._params字典未从yaml加载该键(get_bool返回False)
+                            #     2) order_base模块无 get_order_base() 函数(只有 get_order_service())
+                            #   V1实证: 14:25重启后14:30-14:33仍出现23条CANNOT_CLOSE(ru2609C17000 TimeStop@32-34min)
+                            # V2修复: 三层fallback对齐 lifecycle_callbacks.py L133/L144/L159 设置的属性:
+                            #   layer1: params_service.get_bool('dry_run_mode')  (主路径, 保留)
+                            #   layer2: order_service._dry_run_mode             (lifecycle L159设置)
+                            #   layer3: position_service._dry_run_active        (lifecycle L144设置)
+                            _close_dry_run = False
+                            try:
+                                from config.params_service import get_params_service
+                                _close_dry_run = bool(get_params_service().get_bool('dry_run_mode', False))
+                            except Exception:
+                                pass
+                            if not _close_dry_run:
+                                try:
+                                    from order.order_base import get_order_service
+                                    _osvc = get_order_service()
+                                    if _osvc is not None:
+                                        _close_dry_run = bool(getattr(_osvc, '_dry_run_mode', False))
+                                except Exception:
+                                    pass
+                            if not _close_dry_run:
+                                try:
+                                    from position.position_service import get_position_service
+                                    _psvc = get_position_service()
+                                    if _psvc is not None:
+                                        _close_dry_run = bool(getattr(_psvc, '_dry_run_active', False))
+                                except Exception:
+                                    pass
+                            if _close_dry_run:
+                                _open_p = float(getattr(record, 'open_price', 0.0) or 0.0)
+                                if _open_p > 0:
+                                    base = _open_p
+                                    logging.info("[V4-FIX-C12] dry_run模式使用open_price回退: %s open_price=%.4f", record.instrument_id, base)
+                                else:
+                                    logging.info("[V4-FIX-C12] current_price不可用, 跳过本次平仓(fail-closed): %s", record.instrument_id)
+                            else:
+                                logging.info("[V4-FIX-C12] current_price不可用, 跳过本次平仓(fail-closed): %s", record.instrument_id)
                     if base > 0:
                         try:
                             from config.params_service import get_params_service

@@ -1,14 +1,13 @@
 """
-HFT增强引擎 - 七大竞争优势统一入口(薄门面)
+HFT增强引擎 - 六大竞争优势统一入口(薄门面)
 
 实际实现已分散到架构归属模块:
 1. 信号时序滤波 → signal_service.py (KalmanFilter1D, EMASignalFilter, SignalTimingFilter)
 2. 智能订单拆分 → order_service.py (SmartOrderSplitter, OrderSplitStrategy, SplitOrderResult)
 3. 动态追击算法 → strategy_tick_handler.py (DynamicPursuitEngine, PursuitPosition)
-4. 微观结构套利 → order_flow_bridge.py (MicrostructureArbitrageDetector, ArbitrageOpportunity)
-5. 成交量加权订单流 → order_flow_analyzer.py (VolumeWeightedOrderFlow)
-6. 状态转换捕捉 → state_param_manager.py (StateTransitionCapture, StateTransitionEvent, TransitionPoint)
-7. 做市商防御 → order_flow_bridge.py (MarketMakerDefenseEngine, OrderDefenseType, DefensiveOrder)
+4. 成交量加权订单流 → order_flow_analyzer.py (VolumeWeightedOrderFlow)
+5. 状态转换捕捉 → state_param_manager.py (StateTransitionCapture, StateTransitionEvent, TransitionPoint)
+6. 做市商防御 → order_flow_bridge.py (MarketMakerDefenseEngine, OrderDefenseType, DefensiveOrder)
 
 本模块仅提供 HFTEnhancementEngine 统一编排入口。
 """
@@ -41,8 +40,6 @@ from strategy.tick_hft import (
     PursuitPosition,
 )
 from order.order_flow_bridge import (
-    MicrostructureArbitrageDetector,
-    ArbitrageOpportunity,
     MarketMakerDefenseEngine,
     OrderDefenseType,
     DefensiveOrder,
@@ -58,14 +55,16 @@ from config.state_param import (
 
 
 _MODULE_KEYS = [
-    'signal_filter', 'pursuit_engine', 'arbitrage_detector',
+    'signal_filter', 'pursuit_engine',
+    # DEL-S1-ARB-20260729: 'arbitrage_detector' 已从活跃模块列表移除(用户决策: 风险太大)
+    # S1-HFT仅保留 tick级期权排序 + tick级订单流 开仓
     'volume_weighted_flow', 'transition_capture', 'defense_engine',
 ]
 
 _DEFAULT_SAMPLE_RATES = {
     'signal_filter': 1,
     'pursuit_engine': 1,
-    'arbitrage_detector': 5,
+    # 'arbitrage_detector': 5,  # DEL-S1-ARB-20260729: 已移除
     'volume_weighted_flow': 1,
     'transition_capture': 1,
     'defense_engine': 10,
@@ -74,7 +73,7 @@ _DEFAULT_SAMPLE_RATES = {
 _DEFAULT_MIN_INTERVALS = {
     'signal_filter': 0.0,
     'pursuit_engine': 0.0,
-    'arbitrage_detector': 0.05,
+    # 'arbitrage_detector': 0.05,  # DEL-S1-ARB-20260729: 已移除
     'volume_weighted_flow': 0.0,
     'transition_capture': 0.0,
     'defense_engine': 0.1,
@@ -82,14 +81,15 @@ _DEFAULT_MIN_INTERVALS = {
 
 
 class HFTEnhancementEngine:
-    """HFT增强引擎 - 七大竞争优势统一入口
+    """HFT增强引擎 - 六大竞争优势统一入口
 
-    将7个增强模块统一管理, 提供一站式API。
+    将6个增强模块统一管理, 提供一站式API。
     各模块实现分散在其架构归属模块中, 本类仅做编排调度。
+    注意: 微观结构套利(MicrostructureArbitrageDetector)已删除(用户决策: 风险太大)
     
     性能优化:
     - 模块开关: 每个模块可独立启用/禁用
-    - 采样频率: 低优先级模块按采样率执行(如套利每5tick执行1次)
+    - 采样频率: 低优先级模块按采样率执行
     - 最小间隔: 模块执行的最小时间间隔(秒)
     - 条件前置: 不满足前置条件直接跳过
     """
@@ -117,9 +117,8 @@ class HFTEnhancementEngine:
             max_add_positions=cfg.get('max_add_positions', 3),
         )
 
-        self.arbitrage_detector = MicrostructureArbitrageDetector(
-            deviation_threshold_bps=cfg.get('arbitrage_deviation_bps', 50.0),
-        )
+        # DEL-S1-ARB-20260729: 套利检测器已彻底删除(用户决策: 风险太大)
+        # S1-HFT仅保留 tick级期权排序 + tick级订单流 开仓
 
         self.volume_weighted_flow = VolumeWeightedOrderFlow(
             large_order_threshold=cfg.get('large_order_threshold', 50),
@@ -153,7 +152,7 @@ class HFTEnhancementEngine:
         self._min_plr_for_signal: float = cfg.get('min_plr_for_signal', 0.0)
         self._plr_filter_enabled: bool = cfg.get('plr_filter_enabled', False)
 
-        logging.info("[HFTEnhancementEngine] 七大竞争优势引擎初始化完成(分散架构)")
+        logging.info("[HFTEnhancementEngine] 六大竞争优势引擎初始化完成(分散架构, 套利已删除)")
 
     def enable_module(self, module_name: str, enabled: bool = True) -> None:
         if module_name in self._module_enabled:
@@ -199,7 +198,7 @@ class HFTEnhancementEngine:
             if estimated_plr > 0 and estimated_plr < self._min_plr_for_signal:
                 return {
                     'signal_filter': None, 'pursuit_signal': None,
-                    'pursuit_exit': None, 'arbitrage_signal': None,
+                    'pursuit_exit': None,
                     'transition_signal': None, 'smart_money_signal': None,
                     'plr_filtered': True,
                 }
@@ -209,7 +208,6 @@ class HFTEnhancementEngine:
             'signal_filter': None,
             'pursuit_signal': None,
             'pursuit_exit': None,
-            'arbitrage_signal': None,
             'transition_signal': None,
             'smart_money_signal': None,
             'defense_signal': None,
@@ -252,7 +250,7 @@ class HFTEnhancementEngine:
                 if direction_upper in ('BUY', 'SELL'):
                     pursuit = self.pursuit_engine.evaluate_surge(
                         instrument_id, resonance_strength, prev_resonance_strength,
-                        price, direction_upper
+                        price, direction_upper, product=product
                     )
                     if pursuit:
                         result['pursuit_signal'] = pursuit
@@ -274,28 +272,7 @@ class HFTEnhancementEngine:
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logging.warning("[HFT] pursuit_engine trailing/exit error: %s", e)
 
-        if self._should_execute('arbitrage_detector'):
-            try:
-                if price > 0:
-                    self.arbitrage_detector.update_price(instrument_id, price, product)
-                    if resonance_strength != 0:
-                        self.arbitrage_detector.update_resonance_state(product, resonance_strength)
-
-                    arb = self.arbitrage_detector.detect_arbitrage(instrument_id, price, product)
-                    if arb:
-                        result['arbitrage_signal'] = {
-                            'opportunity_id': arb.opportunity_id,
-                            'direction': arb.direction,
-                            'deviation_bps': arb.deviation_bps,
-                            'confidence': arb.confidence,
-                            'entry_price': arb.entry_price,
-                            'fair_value': arb.fair_value,
-                        }
-                self._mark_executed('arbitrage_detector')
-            except (AttributeError, TypeError, ValueError, KeyError) as e:
-                logging.error("[HFT] arbitrage_detector critical error: %s", e, exc_info=True)
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
-                logging.warning("[HFT] arbitrage_detector error: %s", e)
+        # DEL-S1-ARB-20260729: 套利检测器已彻底删除(用户决策: 风险太大)
 
         if self._should_execute('volume_weighted_flow'):
             try:
@@ -356,7 +333,7 @@ class HFTEnhancementEngine:
             'signal_filter': self.signal_filter.get_stats(),
             'order_splitter': self.order_splitter.get_stats(),
             'pursuit_engine': self.pursuit_engine.get_stats(),
-            'arbitrage_detector': self.arbitrage_detector.get_stats(),
+            # 'arbitrage_detector': 已彻底删除(DEL-S1-ARB-20260729)
             'volume_weighted_flow': self.volume_weighted_flow.get_stats(),
             'transition_capture': self.transition_capture.get_stats(),
             'defense_engine': self.defense_engine.get_stats(),
@@ -388,8 +365,8 @@ __all__ = [
     'SplitOrderResult',
     'DynamicPursuitEngine',
     'PursuitPosition',
-    'MicrostructureArbitrageDetector',
-    'ArbitrageOpportunity',
+    # 'MicrostructureArbitrageDetector',  # DEL-S1-ARB-20260729: 已彻底删除
+    # 'ArbitrageOpportunity',             # DEL-S1-ARB-20260729: 已彻底删除
     'VolumeWeightedOrderFlow',
     'StateTransitionCapture',
     'StateTransitionEvent',

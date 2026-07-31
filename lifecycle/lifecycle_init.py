@@ -116,16 +116,7 @@ class LifecycleInit:
                     total_f, total_o, total_all, _deferred_count,
                 )
                 p._init_scheduler()
-                # Step2b: 初始化S5套利配对（品种代码->合约ID动态解析+批量注册）
-                # FIX-S5-PAIR-SEMANTIC-20260722: 替代原strategy_business_layer.py中"前两个feed target"的伪配对注册
-                # 根因: 伪配对(如OI609P9500:bu2609P3500)Z-score=0 → CLOSE信号被action='OPEN'误作开仓
-                # 修复: 使用7组真实中国期货统计套利对(跨品种5组+跨期2组)，初始化阶段批量注册
-                try:
-                    from strategy.monitor.arbitrage_monitor import _init_s5_arbitrage_pairs
-                    _s5_pair_count = _init_s5_arbitrage_pairs(p)
-                    logging.info("[Init-Step2b] S5套利配对初始化完成: %d组", _s5_pair_count)
-                except Exception as _s5_init_err:
-                    logging.warning("[Init-Step2b] S5套利配对初始化失败(降级运行): %s", _s5_init_err)
+                # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃), 不再初始化S5配对
                 p._analytics_warmup_done = False
                 p._analytics_warmup_thread = None
                 p._start_analytics_warmup_async(p.params)

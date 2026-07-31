@@ -31,6 +31,11 @@ class WidthCacheStateService:
         
         # 产品 -> 月份 -> 期货最新价 (P1 修复：实现分月精准定价)
         self._future_prices_by_month: Dict[str, Dict[str, float]] = defaultdict(dict)
+        # FIX-S4-SORTBUCKET-20260729: future_internal_id -> 期货最新价（直接映射，绕过product+month查找）
+        # 根因: _do_update_sort_bucket中_get_future_price_by_id_and_month因product/month键不匹配返回0
+        #   → 排序桶永远为空 → select_otm_targets_signal_sources返回空 → S4 targets=0
+        # 修复: on_future_tick同时更新此字典，_do_update_sort_bucket在标准查找失败时用此fallback
+        self._future_current_price: Dict[int, float] = {}
         # future_internal_id -> 期货前一个价格（用于方向判断）'
         self._future_prev_price: Dict[int, float] = {}
         # future_internal_id -> 期货是否上涨（最新方向）
@@ -204,6 +209,13 @@ class WidthCacheStateService:
                 self._sort_buckets.pop(_fid, None)
                 self._months.pop(_fid, None)
                 self._options_by_future_type.pop(_fid, None)
+                # FIX-FUTURE-CURRENT-PRICE-CLEANUP-20260730: 清理_future_current_price(半拉子工程补齐)
+                # 根因: FIX-S4-SORTBUCKET-20260729新增_future_current_price字典,但期货缓存淘汰逻辑
+                #   (L194-220)清理了_future_prev_price/_future_rising/_future_initialized等8个字典,
+                #   唯独遗漏_future_current_price,导致品种换月后旧品种future_internal_id→price残留。
+                #   违反项目硬约束FIX-STALE-DATA-CLEANUP-20260729"元数据表清空后必须同步清理旧品种残留数据"。
+                # 修复: 与其他8个字典清理对齐,pop掉淘汰期货的_future_current_price条目。
+                self._future_current_price.pop(_fid, None)
                 _fp_info = self._get_params().get_instrument_meta(_fid) if _fid else None
                 if _fp_info:
                     _fp_product = str(_fp_info.get('product', '')).upper()
@@ -773,6 +785,10 @@ class WidthCacheStateService:
                     self._future_rising[future_internal_id] = None
                     self._classify_pending_options(future_internal_id)
                     logging.info("[FutureZeroPrice] fid=%s price<=0但仍标记initialized=True(rising=None)", future_internal_id)
+                # FIX-S4-FIRSTTICK-20260729: 在price<=0路径也存储prev_price=0
+                # 原代码不存储_future_prev_price，导致后续price>0的tick中prev=price(default)，
+                # price!=prev为False，_future_rising不更新，direction_changed=False，need_recalc=False
+                self._future_prev_price[future_internal_id] = 0
                 # FIX-D (2026-07-23): 在price<=0早退路径也检查pending超时
                 # 原代码在L776 return，导致_check_pending_timeout(L791)不可达
                 # 当多个期货都price<=0时，pending期权永远无法被超时检查
@@ -800,11 +816,30 @@ class WidthCacheStateService:
                 new_rising = price > prev
                 old_rising = self._future_rising.get(future_internal_id)
                 self._future_rising[future_internal_id] = new_rising
-                direction_changed = old_rising is not None and old_rising != new_rising
+                # FIX-S4-FIRSTTICK-20260729: old_rising is None表示从price<=0或未设置状态过渡到有效价格
+                # 此时必须触发recalc，否则排序桶永远不会被填充（_classify_status在rising=None时返回'other'）
+                direction_changed = old_rising is None or (old_rising is not None and old_rising != new_rising)
+            else:
+                # FIX-S4-FIRSTTICK-20260729-V2: price==prev且rising=None时保持None(fail-closed)
+                # 根因: FIX-S4-FIRSTTICK-20260729在此处强制设置rising=True,导致首tick永远判上涨,
+                #   _compute_sync_flag中CALL期权option_direction=True(与future_rising同向)→被判correct_rise
+                #   →进入排序桶。但首tick没有方向信息,应判'other'不进入排序桶(fail-closed)。
+                #   此隐患导致排序桶被错误填充(基于伪方向),select_otm_targets_signal_sources选出伪正确方向期权。
+                # 修复: 保持rising=None,等待真正价格变化时再判定方向。下游_classify_status在rising=None时
+                #   返回'other'(不进入排序桶),符合fail-closed设计。
+                # 注意: 不修改L808-814的price!=prev分支(那里old_rising is None触发direction_changed=True
+                #   是正确的,因为价格确实变化了,有方向信息)。
+                pass  # 保持rising=None,不触发recalc
             self._future_initialized[future_internal_id] = True
             
             self._future_prices_by_month[product][contract_month] = price
-            
+
+            # FIX-S4-SORTBUCKET-20260729: 同步更新_future_current_price直接映射
+            # 根因: _do_update_sort_bucket中_get_future_price_by_id_and_month因product/month键不匹配返回0
+            #   → 排序桶永远为空 → select_otm_targets_signal_sources返回空 → S4 targets=0
+            # 修复: on_future_tick同时更新此字典，_do_update_sort_bucket在标准查找失败时用此fallback
+            self._future_current_price[future_internal_id] = price
+
             need_recalc = direction_changed or (not was_initialized and self._future_initialized[future_internal_id])
             if need_recalc:
                 self._recalc_all_state_for_underlying(future_internal_id)
@@ -932,6 +967,15 @@ class WidthCacheStateService:
                 if _fut_init:
                     initial_status = self._classify_status(future_id, month, opt_type, price, price, option_direction=None)
                     self._set_current_status(internal_id, info, initial_status)
+                    # FIX-SYNC-OTM-20260730: 首个tick也必须更新_sync_flag和_sync_otm_count
+                    # 根因: 首个tick只更新了_status_counts和排序桶，但未更新_sync_otm_count
+                    #   → get_width_strength始终返回0 → width_resonance=0 → S1共振强度=0
+                    #   → S1只能走降级路径，信号远少于S2(通过_status_counts获取状态)
+                    # 修复: 首个tick也调用_compute_sync_flag，并增量更新_sync_otm_count
+                    _first_is_sync = self._compute_sync_flag(info, price, None)
+                    if _first_is_sync:
+                        self._sync_otm_count[future_id][month][opt_type] += 1
+                    self._sync_flag[internal_id] = _first_is_sync
                     self._update_sort_bucket(internal_id, info, future_id, month, opt_type)
                 else:
                     self._pending_classify_options[future_id].append({
@@ -943,6 +987,9 @@ class WidthCacheStateService:
                         'pending_since': time.time(),  # FIX-P1-2-RC5 (2026-07-23): 记录pending时间戳，用于超时强制分类
                     })
                     self._set_current_status(internal_id, info, 'other')
+                    # FIX-SYNC-OTM-20260730: pending路径也显式设置_sync_flag=False
+                    # 虽然注册时已设为False，但显式设置确保状态一致
+                    self._sync_flag[internal_id] = False
                     if not hasattr(self, '_future_init_pending_count'):
                         self._future_init_pending_count = defaultdict(int)
                     self._future_init_pending_count[future_id] += 1
@@ -1011,6 +1058,15 @@ class WidthCacheStateService:
             status = self._classify_status(future_internal_id, month, opt_type, price, price, option_direction=None)
 
             self._set_current_status(internal_id, info, status)
+            # FIX-SYNC-OTM-20260730: _classify_pending_options也必须更新_sync_flag和_sync_otm_count
+            # 根因同上: 只更新_status_counts不更新_sync_otm_count → S1 width_resonance=0
+            old_was_sync = self._sync_flag.get(internal_id, False)
+            new_is_sync = self._compute_sync_flag(info, price, None)
+            if new_is_sync and not old_was_sync:
+                self._sync_otm_count[future_internal_id][month][opt_type] += 1
+            elif not new_is_sync and old_was_sync:
+                self._sync_otm_count[future_internal_id][month][opt_type] = max(0, self._sync_otm_count[future_internal_id][month][opt_type] - 1)
+            self._sync_flag[internal_id] = new_is_sync
             self._update_sort_bucket(internal_id, info, future_internal_id, month, opt_type)
 
     # FIX-P1-2-RC5 (2026-07-23): 定期检查pending超时期权
@@ -1053,6 +1109,14 @@ class WidthCacheStateService:
                     try:
                         status = self._classify_status(future_id, month, opt_type, price, price, option_direction=None)
                         self._set_current_status(internal_id, info, status)
+                        # FIX-SYNC-OTM-20260730: pending超时强制分类也必须更新_sync_flag和_sync_otm_count
+                        old_was_sync = self._sync_flag.get(internal_id, False)
+                        new_is_sync = self._compute_sync_flag(info, price, None)
+                        if new_is_sync and not old_was_sync:
+                            self._sync_otm_count[future_id][month][opt_type] += 1
+                        elif not new_is_sync and old_was_sync:
+                            self._sync_otm_count[future_id][month][opt_type] = max(0, self._sync_otm_count[future_id][month][opt_type] - 1)
+                        self._sync_flag[internal_id] = new_is_sync
                         self._update_sort_bucket(internal_id, info, future_id, month, opt_type)
                     except Exception as _to_err:
                         logging.debug("[PendingTimeout] force-classify failed: %s", _to_err)
@@ -1069,6 +1133,116 @@ class WidthCacheStateService:
                 "[FIX-P1-2-RC5] PendingTimeout: %d个期权pending超时(>%ds)，已强制分类",
                 _total_timed_out, self._PENDING_TIMEOUT_SEC,
             )
+
+        # FIX-FUTURE-INIT-FORCE-20260730: 远月期货未收到tick时强制初始化
+        # 根因: IH2609/IF2609/IM2609等远月期货在订阅列表中但平台不发送tick(非活跃合约)
+        #   → _future_initialized永远为False
+        #   → select_otm_targets_by_volume/signal_sources跳过该期货下所有期权
+        #   → 172个远月期权虽被PendingTimeout强制分类为'other'，但永不被选为target
+        #   → 用户明确要求"策略使用全量订阅，应当包括所有实盘品种"
+        # 修复: PendingTimeout强制分类后，若对应期货仍未初始化，则强制初始化
+        #   _future_rising设为None(无方向信息)→_classify_status返回'other'(fail-closed)
+        #   但_future_initialized=True允许select_otm_targets不再跳过
+        #   _future_current_price从K线收盘价或期权数据推断
+        for fid in _futures_to_clear:
+            if not self._future_initialized.get(fid, False):
+                # 尝试从K线数据获取期货价格
+                _future_price = self._infer_future_price_from_options(fid)
+                if _future_price is None:
+                    _future_price = 0.0
+                self._future_initialized[fid] = True
+                self._future_rising[fid] = None  # 无方向信息，fail-closed
+                self._future_prev_price[fid] = _future_price
+                self._future_current_price[fid] = _future_price
+                # 更新_future_prices_by_month
+                _info = self._get_params().get_instrument_meta(fid)
+                if _info:
+                    _product = str(_info.get('product', '')).upper()
+                    _month = _info.get('year_month', '')
+                    if _product and _month:
+                        self._future_prices_by_month[_product][_month] = _future_price
+                logging.info(
+                    "[FIX-FUTURE-INIT-FORCE] 远月期货强制初始化: fid=%s price=%.4f rising=None "
+                    "(远月期货未收到tick，从期权数据推断价格，方向为None→期权分类为other/fail-closed)",
+                    fid, _future_price
+                )
+
+    def _infer_future_price_from_options(self, future_internal_id: int) -> Optional[float]:
+        """FIX-FUTURE-INIT-FORCE-20260730: 从该期货对应的期权数据推断期货价格
+        
+        当远月期货未收到tick时，使用其已知的期权价格和行权价来推断期货价格。
+        策略: 取ATM附近的CALL和PUT期权价格，用put-call parity推断:
+          F ≈ K + (C - P)  其中K为行权价，C为call价格，P为put价格
+        简化: 如果没有配对数据，取所有期权中volume最大的一个的行权价作为近似
+        """
+        _options_by_type = self._options_by_future_type.get(future_internal_id, {})
+        if not _options_by_type:
+            return None
+        
+        # 收集所有有价格的期权
+        _call_prices = []
+        _put_prices = []
+        for opt_type, opt_ids in _options_by_type.items():
+            for oid in opt_ids:
+                opt_info = self._option_info.get(oid)
+                if not opt_info:
+                    continue
+                opt_price = self._option_price.get(oid, 0.0)
+                if opt_price <= 0:
+                    continue
+                strike = opt_info.get('strike_price', 0.0)
+                if strike <= 0:
+                    continue
+                if opt_type == 'CALL' or opt_type == 'C':
+                    _call_prices.append((strike, opt_price, oid))
+                elif opt_type == 'PUT' or opt_type == 'P':
+                    _put_prices.append((strike, opt_price, oid))
+        
+        # 方法1: put-call parity — 找到相同行权价的CALL和PUT
+        if _call_prices and _put_prices:
+            _call_strikes = {s for s, _, _ in _call_prices}
+            _put_strikes = {s for s, _, _ in _put_prices}
+            _common_strikes = _call_strikes & _put_strikes
+            if _common_strikes:
+                # 取最ATM的行权价(中间值)
+                _mid_strike = sorted(_common_strikes)[len(_common_strikes) // 2]
+                _c_price = next((p for s, p, _ in _call_prices if s == _mid_strike), 0.0)
+                _p_price = next((p for s, p, _ in _put_prices if s == _mid_strike), 0.0)
+                if _c_price > 0 and _p_price > 0:
+                    _inferred = _mid_strike + (_c_price - _p_price)
+                    return _inferred
+        
+        # 方法2: 取所有期权中volume最大的ATM行权价作为近似
+        _all_strikes = []
+        for opt_type, opt_ids in _options_by_type.items():
+            for oid in opt_ids:
+                opt_info = self._option_info.get(oid)
+                if not opt_info:
+                    continue
+                strike = opt_info.get('strike_price', 0.0)
+                vol = self._option_volume.get(oid, 0)
+                if strike > 0 and vol > 0:
+                    _all_strikes.append((strike, vol))
+        
+        if _all_strikes:
+            # 按volume排序取最活跃的
+            _all_strikes.sort(key=lambda x: -x[1])
+            return _all_strikes[0][0]
+        
+        # 方法3: 取所有行权价的中位数作为近似
+        _strikes = []
+        for opt_type, opt_ids in _options_by_type.items():
+            for oid in opt_ids:
+                opt_info = self._option_info.get(oid)
+                if opt_info:
+                    strike = opt_info.get('strike_price', 0.0)
+                    if strike > 0:
+                        _strikes.append(strike)
+        if _strikes:
+            _strikes.sort()
+            return _strikes[len(_strikes) // 2]
+        
+        return None
 
     def _recalc_all_state_for_underlying(self, future_internal_id: int):
         """期货方向变化时，重新计算该标的下所有期权的当前状态和同步计数，并同步更新排序桶。
@@ -1169,6 +1343,19 @@ class WidthCacheStateService:
             
             # ✅ 获取期货最新价 - 使用 future_internal_id
             m_price = self._get_future_price_by_id_and_month(future_internal_id, month)
+            # FIX-S4-SORTBUCKET-20260729: 使用_future_current_price作为fallback
+            # 根因: _get_future_price_by_id_and_month通过product+month查找，但option的month与future的month
+            #   可能不一致(期权月份vs期货月份)，导致查找返回0 → 排序桶永远为空 → S4 targets=0
+            # 修复: 当标准查找返回<=0时，使用_future_current_price直接映射(on_future_tick同步更新)
+            if m_price <= 0:
+                m_price = self._future_current_price.get(future_internal_id, 0.0)
+                if m_price > 0:
+                    if not hasattr(self, '_sortbucket_fallback_count'):
+                        self._sortbucket_fallback_count = 0
+                    self._sortbucket_fallback_count += 1
+                    if self._sortbucket_fallback_count <= 10:
+                        logging.info("[FIX-S4-SORTBUCKET] 使用_future_current_price fallback: fid=%s month=%s m_price=%s",
+                                    future_internal_id, month, m_price)
             if m_price <= 0:
                 return  # 期货价格未就绪，跳过
             

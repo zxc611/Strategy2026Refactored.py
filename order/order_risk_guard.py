@@ -244,23 +244,25 @@ class OrderRiskGuard:
 
     def get_last_market_price(self, instrument_id: str, orders_by_id: Dict = None) -> Optional[float]:
 
+        # FIX-MEMORY-DICT-20260729: 从内存字典(realtime_cache)读取, 不查数据库
+        # 违背原则2修复: 原代码用query_service.get_last_tick查数据库 → 应从内存字典读取
+        # 根因: 用户设计原则"所有计算是在内存字典中完成后只读取结果"
+        #   realtime_cache._latest_ticks是tick到达时实时更新的内存字典, 零延迟
         try:
 
-            from data.query_service import get_query_service
+            from data.ds_realtime_cache import get_realtime_cache
 
-            qs = get_query_service()
+            _rc = get_realtime_cache()
 
-            tick = qs.get_last_tick(instrument_id)
+            _price = _rc.get_latest_price(instrument_id)
 
-            if tick and isinstance(tick, dict):
+            if _price is not None and _price > 0:
 
-                return tick.get('last_price')
+                return _price
 
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
 
             logging.debug("[R3-L2] suppressed exception", exc_info=True)
-
-            pass
 
             pass
 

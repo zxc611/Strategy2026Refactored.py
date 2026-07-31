@@ -89,7 +89,6 @@ class HardTimeStopAndComplianceService:
     _STRATEGY_HARD_STOP_OVERRIDES = {
         's4_spring': {'stage1_minutes': 5.0, 'stage2_minutes': 15.0, 'stage1_profit_threshold': 0.001},  # [FIX-20260712-S4] 180→5min/480→15min(匹配弹簧短持仓特性)
         's3_box': {'stage1_minutes': 120.0, 'stage2_minutes': 360.0, 'stage1_profit_threshold': 0.001},
-        's5_arbitrage': {'stage1_minutes': 60.0, 'stage2_minutes': 180.0, 'stage1_profit_threshold': 0.005},
         's6_market_making': {'stage1_minutes': 30.0, 'stage2_minutes': 120.0, 'stage1_profit_threshold': 0.01},
         's1_hft': {'stage1_minutes': 1.0, 'stage2_minutes': 1.0, 'stage1_profit_threshold': 0.001},  # [FIX-20260712-S1] 60秒硬止损(原20-45分钟)
         's2_resonance': {'stage1_minutes': 3.0, 'stage2_minutes': 5.0, 'stage1_profit_threshold': 0.005},

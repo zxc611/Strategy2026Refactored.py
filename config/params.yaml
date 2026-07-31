@@ -1891,6 +1891,17 @@ parameter_attributes:
     evidence: "60%置信度=2sigma信号"
     last_validated: "2026-05-20"
 
+  hft_dead_zone_ratio:
+    default: 0.40
+    type: float
+    range: [0.10, 0.50]
+    layer: subsystem_hft
+    editable: runtime
+    description: "HFT方向推断dead-zone边界比例。last_price距bid/ask超过spread*ratio则推断方向，否则fail-closed。0.40=60%区间可推断(原0.10仅20%区间可推断，期货大部分tick落在dead-zone导致0下单)"
+    source: operational_tuning
+    evidence: "2026-07-27实盘: 0.10→S1/S7全天0下单(期货tick落在中间80%dead-zone); 0.40→60%区间可推断方向"
+    last_validated: "2026-07-27"
+
   arb_max_hold_minutes:
     default: 15.0
     type: float

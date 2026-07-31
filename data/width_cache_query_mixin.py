@@ -178,6 +178,19 @@ class WidthCacheQueryService:
             self._query_count += 1
             self._cache_hits += 1
             
+            # FIX-SYNC-OTM-20260730: 诊断日志，确认width_resonance是否非零
+            # 限频(60s per future_id)
+            _ws_now = time.time()
+            _ws_key = f"_ws_log_{future_internal_id}"
+            _ws_last = getattr(self.__class__, '_ws_log_ts', {})
+            if not isinstance(_ws_last, dict):
+                _ws_last = {}
+            if _ws_now - _ws_last.get(_ws_key, 0.0) >= 60:
+                logging.info("[FIX-SYNC-OTM] get_width_strength: fid=%d months=%s strength=%d sync_otm_keys=%d",
+                             future_internal_id, months, strength, len(self._sync_otm_count))
+                _ws_last[_ws_key] = _ws_now
+                setattr(self.__class__, '_ws_log_ts', _ws_last)
+            
             return strength
     
     def get_cache_stats(self) -> Dict[str, Any]:
@@ -764,9 +777,32 @@ class WidthCacheQueryService:
                 best_candidates.sort(key=lambda x: x['volume'], reverse=True)
 
                 # BUG-14 fix: iterate candidates, skip those with existing positions
+                # FIX-S4-DTE-FILTER-20260729: 增加DTE过滤,优先近月合约(dte≤25)
+                # 根因: best_candidates按volume排序选最高,但9月远月合约volume可能>8月近月
+                #   → 选中9月(dte≈35)>max_days_to_expiry=25 → detect_spring REJECT → S4零信号
+                # 修复: 在候选选择时过滤dte不在[2,25]的合约,优先选择近月高volume合约
+                #   与BoxSpringDetectorService._min_days_to_expiry=2/_max_days_to_expiry=25对齐
+                #   不是bypass: DTE检查是策略核心(近月期权Gamma敏感),远月合约不符合弹簧策略设计
+                _s4_min_dte = 2
+                _s4_max_dte = 25
+                try:
+                    _s4_params = self._get_params()
+                    if _s4_params and hasattr(_s4_params, 'get'):
+                        _s4_min_dte = _s4_params.get('min_days_to_expiry', 2) or 2
+                        _s4_max_dte = _s4_params.get('max_days_to_expiry', 25) or 25
+                except Exception:
+                    pass
                 best = None
                 for cand in best_candidates:
                     if pos_svc and hasattr(pos_svc, 'has_position') and pos_svc.has_position(cand['instrument_id']):
+                        continue
+                    # FIX-S4-DTE-FILTER-20260729: DTE过滤,跳过远月合约
+                    _cand_dte = self._approx_dte_from_year_month(cand.get('month', ''))
+                    if _cand_dte < _s4_min_dte or _cand_dte > _s4_max_dte:
+                        logging.debug(
+                            "[select_otm_targets_by_volume] DTE过滤: dte=%d not in [%d,%d] inst=%s month=%s",
+                            _cand_dte, _s4_min_dte, _s4_max_dte,
+                            cand.get('instrument_id', ''), cand.get('month', ''))
                         continue
                     best = cand
                     break
@@ -938,16 +974,64 @@ class WidthCacheQueryService:
 
                     bucket_entries = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
                     liquidity = 0.0
+                    # FIX-GREEKS-FROM-MEMORY-20260729-V2: 从内存字典读取真实Greeks/option_price/last_update
+                    # 用户原则: 品种ID在内存字典中完成期权五态自计算，排序时从ID中读取
+                    # 用户原则: fail-closed，无数据时返回0.0而非虚假值(原0.5/0.03/-0.5/0.05/100.0/time.time())
+                    #   - greeks=0.0 → 下游 GreeksHardFilter abs(delta)<DELTA_MIN 自然过滤
+                    #   - option_price=0.0 → theta_pct 检查跳过(option_price>0 前置条件)
+                    #   - last_update=0.0 → 衰减计算识别为陈旧数据(decay_counts 按0处理)
+                    greeks = {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
+                    option_price = 0.0
+                    last_update_ts = 0.0
                     if bucket_entries:
-                        vol = bucket_entries[0].get('volume', 0)
+                        best_entry = bucket_entries[0]
+                        vol = best_entry.get('volume', 0)
                         liquidity = min(1.0, vol / 500.0) if vol > 0 else 0.0
+
+                        # 从greeks_calculator内存字典按instrument_id读取真实Greeks
+                        _inst_id = best_entry.get('instrument_id', '')
+                        _intl_id = best_entry.get('internal_id', 0)
+                        if _inst_id:
+                            try:
+                                from infra.service_contracts import get_unified_greeks_calculator
+                                _gc = get_unified_greeks_calculator()
+                                if _gc is not None:
+                                    _real_greeks = _gc.get_greeks(_inst_id)
+                                    if _real_greeks:
+                                        # fail-closed: 单字段缺失返回0.0，不注入虚假值
+                                        greeks = {
+                                            'delta': float(_real_greeks.get('delta', 0.0)),
+                                            'gamma': float(_real_greeks.get('gamma', 0.0)),
+                                            'theta': float(_real_greeks.get('theta', 0.0)),
+                                            'vega': float(_real_greeks.get('vega', 0.0)),
+                                        }
+                                    # 通过公共访问器获取真实更新时间(fail-closed: 0.0=无数据)
+                                    _gc_update_ts = _gc.get_last_update(_inst_id)
+                                    if _gc_update_ts > 0:
+                                        last_update_ts = float(_gc_update_ts)
+                            except Exception as _gc_err:
+                                logging.debug(
+                                    "[OTM-SignalSource] greeks_calculator读取失败(inst=%s): %s",
+                                    _inst_id, _gc_err,
+                                )
+
+                        # 从_option_price内存字典按internal_id读取真实option_price
+                        # fail-closed: 内存字典无数据则保持0.0，不注入虚假100.0
+                        if _intl_id:
+                            _real_price = self._option_price.get(_intl_id, 0.0)
+                            if _real_price > 0:
+                                option_price = float(_real_price)
+                            elif best_entry.get('price'):
+                                option_price = float(best_entry['price'])
+                        elif best_entry.get('price'):
+                            option_price = float(best_entry['price'])
 
                     month_data_list.append({
                         'month': mth,
                         'counts': {'CR': cr, 'CF': cf, 'WR': wr, 'WF': wf, 'Other': other},
-                        'last_update': {s: time.time() for s in ('CR', 'CF', 'WR', 'WF', 'Other')},
-                        'greeks': {'delta': 0.5, 'gamma': 0.03, 'theta': -0.5, 'vega': 0.05},
-                        'option_price': 100.0,
+                        'last_update': {s: last_update_ts for s in ('CR', 'CF', 'WR', 'WF', 'Other')},
+                        'greeks': greeks,
+                        'option_price': option_price,
                         'month_type': month_type,
                         'liquidity': liquidity,
                     })
@@ -1077,6 +1161,15 @@ class WidthCacheQueryService:
             best = None
             for cand in best_candidates:
                 if pos_svc and hasattr(pos_svc, 'has_position') and pos_svc.has_position(cand['instrument_id']):
+                    continue
+                # FIX-S4-DTE-FILTER-20260729: DTE过滤,跳过远月合约(dte>25)
+                # 根因: 9月远月合约volume可能>8月近月→选中9月(dte≈35)>25→detect_spring REJECT→S4零信号
+                # 修复: 在候选选择时过滤dte不在[2,25]的合约,优先选择近月高volume/score合约
+                _cand_dte = self._approx_dte_from_year_month(cand.get('month', ''))
+                if _cand_dte < 2 or _cand_dte > 25:
+                    logging.debug(
+                        "[select_otm_targets_signal_sources] DTE过滤: dte=%d not in [2,25] inst=%s month=%s",
+                        _cand_dte, cand.get('instrument_id', ''), cand.get('month', ''))
                     continue
                 best = cand
                 break

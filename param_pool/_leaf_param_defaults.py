@@ -117,11 +117,19 @@ HFT_TIME_PARAMS = {
     "hft_hard_time_stop_ms": (100, 5000),       # 100ms ~ 5s，防止微观结构突变后持仓过久
     "hft_signal_confirm_ticks": (3, 15),         # tick数确认
     "hft_cooldown_ms": (10, 500),                # 10ms ~ 500ms 信号冷却
+    # FIX-S1-DYNAMIC-COOLDOWN-20260730
+    "hft_dynamic_cooldown_sec": (1, 300),        # 1s ~ 5min
+    "hft_cooldown_trade_threshold": (1, 100),    # 1 ~ 100笔
+    "hft_cooldown_stop_loss_threshold": (1, 10), # 1 ~ 10笔
 }
 HFT_TIME_PARAM_GRID = {
     "hft_hard_time_stop_ms": [100, 200, 500, 1000, 2000, 5000],
     "hft_signal_confirm_ticks": [3, 5, 8, 10, 13, 15],
     "hft_cooldown_ms": [10, 30, 50, 100, 200, 500],
+    # FIX-S1-DYNAMIC-COOLDOWN-20260730
+    "hft_dynamic_cooldown_sec": [5, 10, 20, 30, 60],
+    "hft_cooldown_trade_threshold": [5, 10, 15, 20],
+    "hft_cooldown_stop_loss_threshold": [1, 2, 3],
 }
 HFT_TIME_DEFAULTS = {
     "hft_hard_time_stop_ms": 1000,               # 默认1秒
@@ -130,6 +138,10 @@ HFT_TIME_DEFAULTS = {
     # P1-R11-14修复: HFT策略时间基准确认(秒)，替代Bar计数确认
     # 当bar_period<=0.1(亚秒Bar)时，使用此参数计算confirm_bars
     "hft_state_confirm_seconds": 5.0,
+    # FIX-S1-DYNAMIC-COOLDOWN-20260730: HFT基于交易表现的动态冷却参数
+    "hft_dynamic_cooldown_sec": 10.0,            # 触发后冷却时长(秒)
+    "hft_cooldown_trade_threshold": 10,          # 连续交易笔数阈值(含加仓)
+    "hft_cooldown_stop_loss_threshold": 2,       # 止损笔数阈值
 }
 
 # S4 弹簧专用（秒级）— Gamma峰值持续时间约10-60s
@@ -320,7 +332,7 @@ PARAM_GRID_BOX_EXTREME = {
 }
 
 PARAM_DEFAULTS_BOX_EXTREME = {
-    "box_detection_threshold": 0.03,
+    "box_detection_threshold": 0.01,  # FIX-BOX-DUAL-WIDTH-20260730: 3%→1%统一
     "box_min_bars": 20,
     "extreme_entry_ratio": 0.5,
     "close_take_profit_ratio": 2.0,

@@ -62,7 +62,10 @@ class RiskComputeService:
                 for inst_id, size in positions_dict.items():
                     if size == 0:
                         continue
-                    greeks = calc._option_greeks.get(inst_id)
+                    # FIX-GREEKS-RISK-MEMORY-20260729: 使用公共访问器 get_greeks() 替代
+                    # 直接 calc._option_greeks.get() 私有访问,与 FIX-GREEKS-FROM-MEMORY
+                    # 一致(经 TTL 缓存检查,fail-closed 返回空字典)。
+                    greeks = calc.get_greeks(inst_id)
                     if not greeks:
                         continue
                     info = calc._option_info_cache.get(inst_id, {})
@@ -70,9 +73,12 @@ class RiskComputeService:
                     multiplier = calc._contract_multiplier.get(future_product, 1)
 
                     underlying_price = 0.0
-                    iv = calc._option_iv.get(inst_id, 0.2)
-                    if iv <= 0:
-                        iv = 0.2
+                    # FIX-GREEKS-RISK-IV-FAKE-20260729: 消除硬编码 0.2 假IV fallback。
+                    # 用户原则: 严禁硬编码虚假值作为fallback,fail-closed统一返回0.0。
+                    # 原 calc._option_iv.get(inst_id, 0.2) + if iv<=0: iv=0.2 是假数据注入:
+                    #   无IV数据时强制使用0.2(20%波动率)计算sigma,导致压力测试虚高。
+                    # 修复: 使用公共访问器 get_iv()(返回0.0),IV=0时sigma=0,贡献=0(fail-closed)。
+                    iv = calc.get_iv(inst_id)
                     try:
                         from data.data_service import get_data_service
                         ds = get_data_service()
@@ -124,16 +130,17 @@ class RiskComputeService:
                 for inst_id, size in positions_dict.items():
                     if size == 0:
                         continue
-                    greeks = calc._option_greeks.get(inst_id)
+                    # FIX-GREEKS-RISK-MEMORY-20260729: 使用公共访问器 get_greeks()
+                    greeks = calc.get_greeks(inst_id)
                     if not greeks:
                         continue
                     info = calc._option_info_cache.get(inst_id, {})
                     future_product = info.get('future_product', '')
                     multiplier = calc._contract_multiplier.get(future_product, 1)
 
-                    iv = calc._option_iv.get(inst_id, 0.2)
-                    if iv <= 0:
-                        iv = 0.2
+                    # FIX-GREEKS-RISK-IV-FAKE-20260729: 消除硬编码 0.2 假IV fallback
+                    # 使用公共访问器 get_iv()(返回0.0),IV=0时vega_contrib=0(fail-closed)
+                    iv = calc.get_iv(inst_id)
 
                     info = calc._option_info_cache.get(inst_id, {})
                     underlying_price = info.get('underlying_price', 0.0)

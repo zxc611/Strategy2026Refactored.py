@@ -397,9 +397,12 @@ class LifecycleCallbacks:
                             # FIX-20260707-WATCHDOG-RESUB: tick watchdog 重订阅
                             # 根因: C++ sub_market_data 返回 None 无法检测失败,
                             # 约36%期权在订阅后仍无tick, 需要通过tick到达情况反向检测并重订阅
+                            # FIX-WATCHDOG-V2-20260729: max_rounds 3→5, delay_sec 120→180
+                            # 根因: 3轮重订阅后仍有21.5%合约无tick(3161/14725),
+                            #   每轮成功率约20-24%, 增加2轮可再恢复~1500合约
                             try:
                                 _wd_result = _sm_ref.resubscribe_no_tick_instruments(
-                                    delay_sec=120.0, max_rounds=3,
+                                    delay_sec=180.0, max_rounds=5,
                                     batch_size=500, batch_pause_sec=0.3,
                                 )
                                 logging.info(

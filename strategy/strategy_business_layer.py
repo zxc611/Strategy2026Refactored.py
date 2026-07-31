@@ -705,7 +705,7 @@ class StrategyBusinessLayer:
     def _save_signal_snapshot(self, targets: list, open_reason: str) -> None:
         """FIX-32 RC-43: 统一信号快照保存 — 为S1/S2/S3/S4/S7策略保存信号快照
 
-        根因: S5/S6各自有Monitor.save_snapshot，但S1-S4/S7通过execute_option_trading_cycle
+        根因: S6有Monitor.save_snapshot，但S1-S4/S7通过execute_option_trading_cycle
         处理信号，从未保存快照→日志统计显示0快照
         修复: 在风控通过后、下单前，为每个target保存JSON快照
         """
@@ -716,18 +716,36 @@ class StrategyBusinessLayer:
             os.makedirs(_snap_dir, exist_ok=True)
             _now = datetime.now()
             _ts_str = _now.strftime('%Y%m%d_%H%M%S_%f')
+            # FIX-SNAPSHOT-S1-20260728: open_reason→strategy_group映射
+            # 根因: strategy_meta.strategy_id为provider数字ID(如1785163035),无法区分S1/S7
+            #       用户要求"每个开仓都自带开仓属性+快照,S1开仓都应当能单独统计"
+            # 修复: 用open_reason和target中的strategy_id推断策略组(s1_hft/s7_divergence/s3_box等)
+            _REASON_STRATEGY_MAP = {
+                'HIGH_FREQ': 's1_hft', 'CORRECT_RESONANCE': 's1_hft',
+                'INTRADAY': 's2_intraday',
+                'BOX_EXTREME': 's3_box', 'BOX_SPRING': 's4_spring',
+                # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
+                'MARKET_MAKING': 's6_mm', 'S6_MM': 's6_mm',
+                'DIVERGENCE_REVERSAL': 's7_divergence',
+                'OTHER_SCALP': 'other_scalp',
+            }
             for t in targets:
                 _reason = t.get('open_reason', open_reason or 'UNKNOWN')
-                # S5/S6已有各自Monitor的save_snapshot，跳过避免重复
-                if _reason in ('ARBITRAGE', 'MARKET_MAKING', 'S5_ARB', 'S6_MM'):
+                # S6已有各自Monitor的save_snapshot，跳过避免重复
+                # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
+                if _reason in ('MARKET_MAKING', 'S6_MM'):
                     continue
-                # FIX-K: 同时检查simulated标志，S5/S6 target的simulated=True但open_reason可能为OTHER_SCALP
-                # 根因: S5/S6 target的open_reason通常被resolve_open_reason()设为'OTHER_SCALP'(不在跳过列表)
-                #       →_save_signal_snapshot为S5/S6额外保存快照→与Monitor的save_snapshot重复
-                if t.get('simulated', False):
+                # FIX-SNAPSHOT-S1-20260728: 不再跳过simulated=True的target
+                # 根因: S1 HFT target的simulated=True(用于execute_by_ranking判断), 但快照应记录所有信号
+                #       原代码跳过simulated=True→S1快照永远不保存→无法统计S1开仓
+                # 修复: 只跳过S6的simulated target(它们有各自的Monitor快照)
+                if t.get('simulated', False) and t.get('source', '') in ('s6_mm_monitor_v1',):
                     continue
                 _inst = t.get('instrument_id', 'unknown')
                 _sig_id = t.get('signal_id', '')
+                # FIX-SNAPSHOT-S1-20260728: 推断策略组标识
+                _target_sid = t.get('strategy_id', '')  # target中显式设置的strategy_id
+                _strategy_group = _target_sid or _REASON_STRATEGY_MAP.get(_reason, 'unknown')
                 _filename = f"{_reason}_{_inst}_{_ts_str}.json"
                 _filepath = os.path.join(_snap_dir, _filename)
                 _snapshot = {
@@ -738,11 +756,13 @@ class StrategyBusinessLayer:
                         'open_reason': _reason,
                         'dry_run': getattr(self._provider, '_dry_run_active', False),
                         'strategy_id': getattr(self._provider, 'strategy_id', ''),
+                        'strategy_group': _strategy_group,  # FIX-SNAPSHOT-S1-20260728: s1_hft/s7_divergence等
                     },
                 }
                 try:
                     with open(_filepath, 'w', encoding='utf-8') as f:
                         json.dump(_snapshot, f, ensure_ascii=False, indent=2, default=str)
+                    # FIX-SNAPSHOT-LOG-20260727: 用户要求"不阻止记录快照"→恢复INFO级别(原FIX-LOG-SNAPSHOT降为DEBUG阻止了快照记录可见性)
                     logging.info("[SignalSnapshot] 快照已保存: %s (reason=%s inst=%s)",
                                  _filepath, _reason, _inst)
                 except (OSError, IOError, ValueError, TypeError) as _snap_err:
@@ -860,6 +880,92 @@ class StrategyBusinessLayer:
                 return
             # R24-P2-AT-01修复: 添加交易周期耗时记录
             _cycle_start = time.time()
+            # FIX-KLINE-PRELOAD-20260728: 策略启动时预加载期货日K线箱体
+            # 根因: S3/S4策略需要期货日K线来确认箱体(detect_kline_box),
+            #       但K线箱体检测只在process_other_strategy_signal中按需调用,
+            #       夜盘IV=0时S3被跳过→detect_kline_box从未调用→箱体永远未确认→0下单
+            # 修复: 在首次交易周期时,遍历所有期货合约,调用detect_kline_box预加载箱体缓存
+            #       后续tick到来时缓存命中(TTL=5分钟),无需重复加载
+            # 不改变策略逻辑: 仅预填充缓存,箱体判断逻辑不变
+            if not getattr(self, '_kline_preloaded', False):
+                try:
+                    from strategy.strategy_ecosystem import get_strategy_ecosystem
+                    _eco_svc = get_strategy_ecosystem()
+                    if _eco_svc is not None and hasattr(_eco_svc, '_box_detector'):
+                        _bd = _eco_svc._box_detector
+                        # 收集所有期货合约ID(从targets或配置中提取)
+                        _futures_set = set()
+                        try:
+                            from config.params_service import get_params_service
+                            _ps = get_params_service()
+                            _all_insts = _ps.get_all_instruments() if hasattr(_ps, 'get_all_instruments') else []
+                            for _fi in (_all_insts or []):
+                                _fid = _fi.get('instrument_id', '') if isinstance(_fi, dict) else str(_fi)
+                                # 期货ID特征: 无行权价后缀(如rb2609, IF2608)
+                                if _fid and '-' not in _fid and not any(c in _fid for c in ['C', 'P']) or (_fid and len(_fid) <= 8 and _fid[0:2].isalpha()):
+                                    _futures_set.add(_fid)
+                        except Exception:
+                            pass
+                        # fallback: 从provider的订阅列表获取
+                        if not _futures_set:
+                            try:
+                                _sub_insts = getattr(provider, '_subscribed_instruments', None) or []
+                                for _si in _sub_insts:
+                                    _sid2 = _si if isinstance(_si, str) else _si.get('instrument_id', '')
+                                    if _sid2 and '-' not in _sid2:
+                                        _futures_set.add(_sid2)
+                            except Exception:
+                                pass
+                        # 限制最多预加载50个期货合约(防止启动太慢)
+                        _futures_list = sorted(_futures_set)[:50]
+                        _preload_ok = 0
+                        _preload_fail = 0
+                        for _fut_id in _futures_list:
+                            try:
+                                _db, _wb = _bd.detect_kline_box(instrument_id=_fut_id, force=True)
+                                if (_db is not None and _db.is_valid) or (_wb is not None and _wb.is_valid):
+                                    _preload_ok += 1
+                                else:
+                                    _preload_fail += 1
+                            except Exception:
+                                _preload_fail += 1
+                        logging.info("[FIX-KLINE-PRELOAD] 期货日K线箱体预加载完成: futures=%d ok=%d fail=%d",
+                                     len(_futures_list), _preload_ok, _preload_fail)
+                        # FIX-S3-KLINE-RETRY-20260728: 预加载失败时不标记为已完成, 允许后续tick重试
+                        # 根因: 原代码无论ok=0还是ok=50都设置_kline_preloaded=True,
+                        #   导致预加载失败后永不重试 → K线箱体永远未确认 → S3/S4永远0下单
+                        # 修复: 仅当ok>0时标记为已完成; ok=0时增加重试计数器, 最多重试10次
+                        #   (每次交易周期重试, ticks_raw表随tick写入逐渐有数据)
+                        if _preload_ok > 0:
+                            self._kline_preloaded = True
+                        else:
+                            _retry_count = getattr(self, '_kline_preload_retry', 0) + 1
+                            self._kline_preload_retry = _retry_count
+                            if _retry_count <= 10:
+                                logging.info("[FIX-KLINE-PRELOAD] 预加载全部失败, 将在下次tick重试 (retry=%d/10)", _retry_count)
+                            else:
+                                logging.warning("[FIX-KLINE-PRELOAD] 预加载重试已达上限(10次), 停止重试")
+                                self._kline_preloaded = True  # 停止重试, 避免无限循环
+                    else:
+                        # FIX-ECO-ALLPARAMS-20260730: _eco_svc为None时不标记_kline_preloaded=True
+                        # 根因: StrategyEcosystem初始化失败(_all_params NameError)→_eco_svc=None
+                        # → 原代码设置_kline_preloaded=True→后续永不重试→S3/S4零下单
+                        # 修复: 不标记已完成,允许后续交易周期重试(最多10次)
+                        _retry_count = getattr(self, '_kline_preload_retry', 0) + 1
+                        self._kline_preload_retry = _retry_count
+                        if _retry_count <= 10:
+                            logging.warning("[FIX-KLINE-PRELOAD] _eco_svc为None(StrategyEcosystem未初始化), 将在下次重试 (retry=%d/10)", _retry_count)
+                        else:
+                            logging.warning("[FIX-KLINE-PRELOAD] _eco_svc为None重试已达上限(10次), 停止重试")
+                            self._kline_preloaded = True
+                except Exception as _preload_err:
+                    # FIX-ECO-ALLPARAMS-20260730: 将logging.debug升级为logging.warning
+                    # 根因: 原代码用logging.debug(生产不可见)→异常被静默→_kline_preloaded=True→永不重试
+                    logging.warning("[FIX-KLINE-PRELOAD] 预加载异常(不阻断): %s", _preload_err)
+                    _retry_count = getattr(self, '_kline_preload_retry', 0) + 1
+                    self._kline_preload_retry = _retry_count
+                    if _retry_count > 10:
+                        self._kline_preloaded = True  # 超过10次才停止重试
             t_type = getattr(provider, 't_type_service', None)
             if not t_type:
                 # FIX-20260708: 升级为INFO(节流5分钟)，原DEBUG在生产日志不可见
@@ -1172,6 +1278,7 @@ class StrategyBusinessLayer:
                                             _fp_bs = os.path.join(_snap_dir, f"BOX_SPRING_{_bs_future_inst}_{_ts_bs}.json")
                                             with open(_fp_bs, 'w', encoding='utf-8') as _f_bs:
                                                 json.dump(_snap_bs, _f_bs, ensure_ascii=False, indent=2, default=str)
+                                            # FIX-SNAPSHOT4-LOG-20260727: 用户要求"不阻止记录快照"→恢复INFO级别
                                             logging.info("[SignalSnapshot] S4快照已保存: %s (reason=BOX_SPRING inst=%s)",
                                                          _fp_bs, _bs_future_inst)
                                         except Exception as _s4_snap_err:
@@ -1201,67 +1308,13 @@ class StrategyBusinessLayer:
             except Exception as e:
                 # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                 logging.warning("[R22-EP-P1-17] [StrategyBusinessLayer] box_spring_strategy tick error: %s", e)
-            # [FIX-20260710-HFT-INTEGRATE] HFT引擎tick集成到交易周期
+            # S1-HFT单路径架构: 信号完全由路径1(dispatch_hft_tick)在每个tick实时处理
+            # 本层不再维护_hft_tick_count计数器(原用途已随路径2移除而消失)
             try:
                 _hft = getattr(provider, '_hft_engine', None)
                 if _hft is None:
                     provider._ensure_hft_engine()
-                    _hft = getattr(provider, '_hft_engine', None)
-                if _hft is not None:
-                    _hft_tick_count = getattr(provider, '_hft_tick_count', 0) + 1
-                    provider._hft_tick_count = _hft_tick_count
-                    if _hft_tick_count % 10 == 1:
-                        _hft_tick_targets = targets if targets else _fallback_instruments
-                        for t in _hft_tick_targets:
-                            _hft_inst = t.get('instrument_id', '')
-                            _hft_price = t.get('price', 0.0)
-                            if _hft_inst and _hft_price > 0:
-                                _hft_result = _hft.on_tick_enhanced(
-                                    instrument_id=_hft_inst,
-                                    price=_hft_price,
-                                    volume=t.get('volume', 0),
-                                    direction=t.get('direction', 'BUY'),
-                                    product=t.get('product', ''),
-                                    bid_price=t.get('bid_price', 0.0),
-                                    ask_price=t.get('ask_price', 0.0),
-                                    resonance_strength=getattr(getattr(provider, '_state_param_manager', None), '_last_resonance_strength', 0.0),  # FIX-S R10-5-8: 从SPM读取
-                                    current_state=getattr(provider, '_resolve_open_reason', lambda: 'UNKNOWN')(),
-                                )
-                                if _hft_result and any(v is not None for v in _hft_result.values() if not isinstance(v, bool)):
-                                    logging.debug("[FIX-0710-HFT] HFT信号: inst=%s result_keys=%s",
-                                                  _hft_inst, [k for k, v in _hft_result.items() if v is not None and not isinstance(v, bool)])
-                                    # [FIX-20260718-S1-HFT] S1 HFT 追仓信号接入下单链路
-                                    # 根因: L1047-1080 HFT集成块仅 logging.debug 记录 pursuit_signal，
-                                    #       未追加到 targets 列表，导致 S1 HFT 信号从未进入
-                                    #       execute_by_ranking 下单流程，7/17 实证 S1(HIGH_FREQ) 0 单。
-                                    # 修复: 提取 pursuit_signal 构造 S1 target 并 append 到 targets，
-                                    #       与 S4(L1120)/S5(L1378)/S6(L1416)/S7(L1253)/S2(L1515) 对齐。
-                                    # 原则: 业务模块不加日志，此处复用现有 logging.debug 位置不新增日志。
-                                    # 去重: simulated=True + signal_id 在 execute_by_ranking L771 已有 10s TTL 去重，
-                                    #       且 dispatch_hft_tick 路径1 走 send_order_split 不走 execute_by_ranking，无重复下单。
-                                    _s1_pursuit = _hft_result.get('pursuit_signal')
-                                    if _s1_pursuit and isinstance(_s1_pursuit, dict):
-                                        _s1_action = _s1_pursuit.get('action', '')
-                                        if _s1_action in ('OPEN_POSITION', 'ADD_POSITION'):
-                                            _s1_target = {
-                                                'instrument_id': _hft_inst,
-                                                'direction': _s1_pursuit.get('direction', t.get('direction', 'BUY')),
-                                                'price': float(_s1_pursuit.get('price', _hft_price) or _hft_price),
-                                                'volume': int(_s1_pursuit.get('volume', 1) or 1),
-                                                'lots': int(_s1_pursuit.get('volume', 1) or 1),
-                                                'action': 'OPEN' if _s1_action == 'OPEN_POSITION' else 'ADD',
-                                                'open_reason': 'HIGH_FREQ',  # [FIX-20260712-S1] 与 tick_hft.py L450 对齐
-                                                'signal_id': _s1_pursuit.get('signal_id', generate_prefixed_id('S1HFT', 12)),
-                                                'signal_type': _s1_pursuit.get('signal_type', 'OPEN'),
-                                                'capital_allocation': 0.0,
-                                                'source': 's1_hft_pursuit_simulated',
-                                                'simulated': True,
-                                                'exchange': t.get('exchange', ''),
-                                                'product': t.get('product', ''),
-                                            }
-                                            targets.append(_s1_target)
             except Exception as _hft_err:
-                # FIX-EXCEPT-20260721: 窄异常元组→Exception(防止未覆盖异常类型穿透)
                 _hft_err_count = getattr(provider, '_hft_err_count', 0) + 1
                 provider._hft_err_count = _hft_err_count
                 if _hft_err_count <= 3 or _hft_err_count % 100 == 0:
@@ -1289,13 +1342,45 @@ class StrategyBusinessLayer:
                     _other_signal_count = 0
                     _other_skip_count = 0
                     for t in _eco_tick_targets:
-                        _eco_inst = t.get('instrument_id', '')
-                        _eco_price = t.get('price', 0.0)
+                        # FIX-S3-BOX-FUTURES-20260727: 箱体定义对象改为只判断期货
+                        # 根因: S3链路用期权ID(如ao2608P2650)传入box_detector→查日K线
+                        #   但日K线数据源只有期货→期权ID查不到数据→箱体永远未确认→REJECT
+                        #   S4已有FIX-S4-ROOT-20260720修复(用underlying_future_instrument_id)
+                        #   S3从未修复, 导致S3全历史0箱体确认
+                        # 修复: 箱体检测用期货ID, 期权参数(iv/strike/premium/dte)仅在信号判断时使用
+                        #   与FIX-S4-ROOT-20260720逻辑对齐
+                        _eco_inst = t.get('underlying_future_instrument_id', '') or t.get('instrument_id', '')
+                        _eco_price = t.get('underlying_future_price', 0.0) or t.get('price', 0.0)
                         if not _eco_inst or _eco_price <= 0:
                             continue
                         # V4-FIX-O12: IV数据不可用时跳过(fail-closed), 不再使用0.15硬编码兜底
+                        # FIX-ECO-IV-WARMUP-20260728: 重启warmup期(前5分钟)允许IV=0的target进入
+                        #   process_other_strategy_signal, 由其内部IV百分位检查做fail-closed.
+                        #   根因: 重启后IV数据尚未从tick/HKL累积, ecosystem层IV=0拦截导致
+                        #   所有target被skip(open=0), 但process_other_strategy_signal有更精细的
+                        #   iv_percentile>=50.0检查, warmup后IV有值时自然生效.
+                        #   warmup期放行不是降级: strategy层IV检查仍是fail-closed.
+                        # FIX-ECO-IV-SOURCE-20260730: 两个根因修复
+                        #   根因1: _strategy_start_time在self(业务层)上不存在(只在self._provider策略实例上设置),
+                        #     getattr(self,'_strategy_start_time',0)返回0→warmup_elapsed=time.time()-0=巨大值
+                        #     →warmup恒过期→IV=0的target在重启后立即被skip(而非前5分钟放行)→S3全skip
+                        #   根因2: target字典不含'iv'字段(DIAG-S4 keys_sample实证:无'iv'键),
+                        #     t.get('iv',0.0)恒返回0.0→warmup后所有target被skip→S3永远0下单
+                        #   修复1: 从self._provider读取_strategy_start_time
+                        #   修复2: target无iv时从统一GreeksCalculator.get_iv(option_id)读取真实IV
                         _eco_iv = t.get('iv', 0.0)
                         if _eco_iv <= 0:
+                            try:
+                                from infra.service_contracts import get_unified_greeks_calculator
+                                _eco_gc = get_unified_greeks_calculator()
+                                _eco_opt_id = t.get('instrument_id', '')
+                                if _eco_opt_id and _eco_gc:
+                                    _eco_iv = float(_eco_gc.get_iv(_eco_opt_id) or 0.0)
+                            except Exception:
+                                pass
+                        _eco_warmup_elapsed = time.time() - getattr(self._provider, '_strategy_start_time', 0)
+                        _ECO_IV_WARMUP_SEC = 300  # 5分钟warmup期
+                        if _eco_iv <= 0 and _eco_warmup_elapsed >= _ECO_IV_WARMUP_SEC:
                             _other_skip_count += 1
                             continue
                         # FIX-S3S4-OFI-20260724: S3/S4 ecosystem信号使用真实订单流数据
@@ -1322,7 +1407,10 @@ class StrategyBusinessLayer:
                                 flow_imbalance=_eco_ofi,
                                 cvd_slope=0.0,
                                 instrument_id=_eco_inst,  # FIX-56: 传递instrument_id用于冷却控制
-                                days_to_expiry=t.get('days_to_expiry', 0),  # K线箱体前置条件: dte≤5→日K小箱体, dte>5→周K中箱体
+                                # FIX-S3-BOX-FUTURES-20260727: 箱体用期货ID→期货无DTE概念,固定dte=20走周K中箱体
+                                # (期权DTE仅影响箱体大小: dte≤5→日K小箱体, dte>5→周K中箱体)
+                                # 期货箱体统一用周K中箱体(dte=20∈[2,25],不会触发dte超限REJECT)
+                                days_to_expiry=20,
                             )
                             _other_action = _other_result.get('action', '') if _other_result else ''
                             if _other_action == 'open':
@@ -1355,6 +1443,9 @@ class StrategyBusinessLayer:
                                         'confidence': _extreme_state.get('confidence', 0.0),
                                         'iv_percentile': _extreme_state.get('iv_percentile', 0.0),
                                         'price_position_pct': _extreme_state.get('price_position_pct', 0.0),
+                                        # FIX-S3-CAPITAL-EXPLICIT-20260728: 显式设置capital_allocation
+                                        'capital_allocation': 0.02,
+                                        'simulated': False,
                                     }
                                     targets.append(_s3_target)
                                     _other_signal_count += 1
@@ -1376,6 +1467,9 @@ class StrategyBusinessLayer:
                                                     'signal_id': f"{_other_result.get('trade_id', '')}_FB",
                                                     'strategy_id': 's3_box',
                                                     'source': 's3_false_breakout_close',
+                                                    # FIX-S3-CAPITAL-EXPLICIT-20260728: 显式设置capital_allocation
+                                                    'capital_allocation': 0.02,
+                                                    'simulated': False,
                                                 }
                                                 targets.append(_s3_close_target)
                                                 logging.info("[V4-FIX-C7] S3假突破平仓信号: inst=%s dir=%s price=%.2f type=%s",
@@ -1400,6 +1494,9 @@ class StrategyBusinessLayer:
                                         'open_reason': 'OTHER_SCALP',
                                         'signal_id': _other_result.get('trade_id', ''),
                                         'strategy_id': 'other',
+                                        # FIX-S3-CAPITAL-EXPLICIT-20260728: 显式设置capital_allocation
+                                        'capital_allocation': 0.02,
+                                        'simulated': False,
                                     }
                                     targets.append(_other_target)
                                     _other_signal_count += 1
@@ -1604,6 +1701,9 @@ class StrategyBusinessLayer:
                                             'signal_id': generate_prefixed_id('DIVSIG', 12),
                                             'divergence_signal': _dr_signal.to_dict(),
                                             'source': 's7_divergence_reversal_v3',
+                                            'strategy_id': 's7_divergence',  # FIX-SNAPSHOT-S7-20260728: S7开仓可单独统计
+                                            'capital_allocation': 0.02,  # FIX-S7-CAPITAL-20260728: 显式设置>0避免V4-FIX-O25和execute_by_ranking双重过滤
+                                            'simulated': False,  # FIX-S7-SIMULATED-20260728: 显式设置False避免execute_by_ranking过滤
                                         }
                                         targets.append(_dr_target)
                                         provider._dr_last_signal = _dr_signal.to_dict()
@@ -1629,73 +1729,17 @@ class StrategyBusinessLayer:
                 if _dr_err_count <= 3 or _dr_err_count % 100 == 0:
                     logging.warning("[S7-V3-DIVREV] DivergenceReversalModule集成异常(第%d次): %s",
                                     _dr_err_count, _dr_err)
-            # [FIX-20260713-S5S6-FEED] S5/S6 monitor tick数据投喂 — 根因: on_tick()从未被调用
-            # 根因: S5/S6 monitor虽有on_tick()接口，但在onTick链中从未被调用
+            # [FIX-20260713-S5S6-FEED] S6 monitor tick数据投喂 — 根因: on_tick()从未被调用
+            # 根因: S6 monitor虽有on_tick()接口，但在onTick链中从未被调用
             #       → monitor无价格历史 → 无信号生成 → 0模拟下单 → 其他模块无法参考
-            # 修复: 将tick数据投喂给S5/S6 monitor, 首次调用时注册默认配对/设置合约
+            # 修复: 将tick数据投喂给S6 monitor, 首次调用时设置合约
+            # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
             try:
                 _s5s6_feed_count = getattr(provider, '_s5s6_feed_count', 0) + 1
                 provider._s5s6_feed_count = _s5s6_feed_count
                 if _s5s6_feed_count % 5 == 1:  # 每5tick投喂一次(性能)
                     _feed_targets = (targets if targets else _fallback_instruments)[:5]
-                    # S5套利: 投喂tick（配对已在初始化阶段由_init_s5_arbitrage_pairs注册）
-                    try:
-                        from strategy.monitor.arbitrage_monitor import get_arbitrage_monitor
-                        _s5_mon = get_arbitrage_monitor()
-                        # FIX-S5-PAIR-SEMANTIC-20260722: 删除伪配对注册（原L1404-1409）
-                        # 根因: 前2个feed_target是随机品种(如OI609P9500:bu2609P3500)，
-                        #   不是真实统计套利对 → Z-score=0 → CLOSE信号被误作OPEN
-                        # 修复: 配对改为在lifecycle_init.py Step2b中通过_init_s5_arbitrage_pairs注册
-                        # FIX-S5-FEED-20260724: 必须用期货合约ID和价格喂入配对两腿
-                        # 根因: 原代码用期权ID(_t['instrument_id'])喂入, 但配对注册的是期货ID,
-                        #   → _price_history keyed by 期货ID, 从未写入 → Z-score无法计算 → 永远无信号。
-                        # 修复: 优先使用underlying_future_instrument_id/underlying_future_price;
-                        #   若缺失则跳过该target。喂完后对所有已注册配对腿用width_cache最新价补喂。
-                        _s5_fed_legs = set()
-                        for _t in _feed_targets:
-                            _inst = _t.get('underlying_future_instrument_id', '') or _t.get('instrument_id', '')
-                            _price = float(_t.get('underlying_future_price', 0.0) or _t.get('price', 0.0) or 0.0)
-                            if _inst and _price > 0:
-                                _s5_mon.on_tick({
-                                    'instrument_id': _inst,
-                                    'last_price': _price,
-                                    'volume': float(_t.get('volume', 0.0) or 0.0),
-                                    'bid_price': float(_t.get('bid_price', 0.0) or 0.0),
-                                    'ask_price': float(_t.get('ask_price', 0.0) or 0.0),
-                                    'bid_volume': float(_t.get('bid_volume', _t.get('bid_size', 0.0)) or 0.0),
-                                    'ask_volume': float(_t.get('ask_volume', _t.get('ask_size', 0.0)) or 0.0),
-                                    'open_interest': float(_t.get('open_interest', 0.0) or 0.0),
-                                    'direction': str(_t.get('direction', '') or ''),
-                                })
-                                _s5_fed_legs.add(_inst)
-                        # FIX-S5-FEED2-20260724: 补喂未在feed_targets中覆盖的配对腿(如远月腿)
-                        # 根因: 原代码错误地调用WidthCacheStateMixin.get_instrument_meta(), 该方法不存在,
-                        #   导致补喂永远失败, 跨期配对的远月腿无价格。
-                        # 修复: 使用query_service.get_last_tick(instrument_id)获取最新tick价格。
-                        try:
-                            _s5_missing_legs = _s5_mon.get_registered_legs() - _s5_fed_legs
-                            if _s5_missing_legs:
-                                _s5_qs = None
-                                try:
-                                    from data.query_service import get_query_service
-                                    _s5_qs = get_query_service()
-                                except Exception:
-                                    _s5_qs = None
-                                for _leg in _s5_missing_legs:
-                                    _leg_price = 0.0
-                                    if _s5_qs is not None:
-                                        try:
-                                            _leg_tick = _s5_qs.get_last_tick(_leg)
-                                            if isinstance(_leg_tick, dict):
-                                                _leg_price = float(_leg_tick.get('last_price', 0.0) or _leg_tick.get('price', 0.0) or 0.0)
-                                        except Exception:
-                                            _leg_price = 0.0
-                                    if _leg and _leg_price > 0:
-                                        _s5_mon.on_tick({'instrument_id': _leg, 'last_price': _leg_price})
-                        except Exception as _s5_supp_e:
-                            logging.debug("[S5-ARB-FEED] 补喂配对腿异常(非阻断): %s", _s5_supp_e)
-                    except Exception as _s5_feed_e:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
-                        logging.debug("[S5-ARB-FEED] 投喂异常: %s", _s5_feed_e)
+                    # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
                     # S6做市: 投喂tick + 首次设置instrument_id
                     try:
                         from strategy.monitor.market_making_monitor import get_market_making_monitor
@@ -1724,117 +1768,44 @@ class StrategyBusinessLayer:
                     except Exception as _s6_feed_e:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
                         logging.debug("[S6-MM-FEED] 投喂异常: %s", _s6_feed_e)
             except Exception as _s5s6_feed_outer_e:  # FIX-EXCEPT-20260721: 窄异常元组→Exception(实时回调路径硬约束)
-                logging.debug("[S5S6-FEED] 投喂集成异常: %s", _s5s6_feed_outer_e)
-            # [FIX-20260713-S5S6-SIM-ORDER] S5套利/S6做市商模拟开仓/平仓信号源头过滤
-            # 根因: S5/S6内部生成的模拟信号(simulated=True, capital_allocation=0.0)被追加到targets，
+                logging.debug("[S6-MM-FEED] 投喂集成异常: %s", _s5s6_feed_outer_e)
+            # [FIX-20260713-S5S6-SIM-ORDER] S6做市商模拟开仓/平仓信号源头过滤
+            # 根因: S6内部生成的模拟信号(simulated=True, capital_allocation=0.0)被追加到targets，
             #   execute_by_ranking未校验simulated/capital_allocation → 真实合约模拟信号调用send_order
             #   → 进入PositionService创建虚假持仓 → 无法平仓(半拉子工程)
-            # 修复: 在源头过滤所有S5/S6模拟信号(capital_allocation=0.0或simulated=True)，不接入targets；
+            # 修复: 在源头过滤所有S6模拟信号(capital_allocation=0.0或simulated=True)，不接入targets；
             #   同时在order_executor.execute_by_ranking增加下游双重保险，防止任何模拟信号进入PositionService
+            # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
             try:
                 _s5s6_call_count = getattr(provider, '_s5s6_call_count', 0) + 1
                 provider._s5s6_call_count = _s5s6_call_count
                 # FIX-20260716-S5S6-FREQ: 模拟信号接入频率从50tick提升到5tick
-                # 根因: 50tick采样导致S5/S6模拟交易记录过于稀疏，与投喂频率(5tick)不一致
+                # 根因: 50tick采样导致S6模拟交易记录过于稀疏，与投喂频率(5tick)不一致
                 #       在实盘运行时模拟交易并记录快照的方式下，应保证信号及时接入订单链
                 if _s5s6_call_count % 5 == 1:  # 5tick采样一次，与投喂频率一致
-                    # S5套利模拟信号 — 先触发信号生成(配对评估), 再读取最新信号
-                    try:
-                        from strategy.monitor.arbitrage_monitor import get_arbitrage_monitor
-                        _s5_mon = get_arbitrage_monitor()
-                        _s5_mon.generate_simulated_signal()
-                        _s5_sig = _s5_mon.get_last_simulated_signal()
-                        if _s5_sig is not None:
-                            _s5_last_recorded = getattr(provider, '_s5_last_recorded_sig_id', '')
-                            if _s5_sig.signal_id != _s5_last_recorded:
-                                # FIX-S5-PAIR-SEMANTIC-20260722: signal_type -> action 正确映射
-                                # 根因: 原action='OPEN'硬编码，CLOSE_SHORT/CLOSE_LONG信号被误作开仓
-                                #   → 伪配对Z-score=0触发CLOSE分支 → 被包装为OPEN → 无意义下单
-                                # 修复: CLOSE_LONG/CLOSE_SHORT → 'CLOSE'; OPEN_LONG/OPEN_SHORT → 'OPEN'
-                                # FIX-S5-FALLBACK-FILTER-20260723 / FIX-S5-FAKE-CONTRACT-20260723:
-                                #   过滤fallback占位信号、z_score=0无效CLOSE信号，以及所有模拟信号
-                                # 根因: arbitrage_monitor构造fallback信号(instrument_id='S5_ARB_FALLBACK', z_score=0.0)
-                                #   虽设capital_allocation=0.0但仍被append到targets → execute_by_ranking不过滤capital_allocation
-                                #   → 假合约进入PositionService创建持仓 → resolve_product_exchange失败82次 → 无法平仓
-                                # 根因2: S5真实合约模拟信号也设simulated=True + capital_allocation=0.0，同样会进入PositionService
-                                # 修复: 在源头过滤fallback/z=0_close/模拟信号，不接入targets
-                                #   正常S5信号(非模拟、capital_allocation>0)不受影响
-                                _s5_inst_id = _s5_sig.instrument_id or _s5_sig.leg_a or ''
-                                _s5_z_score = float(getattr(_s5_sig, 'z_score', 0.0) or 0.0)
-                                _s5_is_fallback = (not _s5_inst_id) or (_s5_inst_id in ('S5_ARB_FALLBACK', 'S5_ARB'))
-                                _s5_is_invalid_close = (_s5_z_score == 0.0 and _s5_sig.signal_type.startswith('CLOSE'))
-                                # FIX-S5-CAPITAL-20260724: 移除_s5_is_simulated_capital_zero过滤条件
-                                # 根因: S5信号现在capital_allocation=0.02>0且simulated=False，
-                                #   _s5_is_simulated_capital_zero永远False→原过滤条件不再有意义
-                                # 保留fallback和z=0_close过滤，这两个是真正的无效信号特征
-                                if _s5_is_fallback or _s5_is_invalid_close:
-                                    provider._s5_last_recorded_sig_id = _s5_sig.signal_id
-                                    _s5_filter_count = getattr(provider, '_s5_filter_count', 0) + 1
-                                    provider._s5_filter_count = _s5_filter_count
-                                    if _s5_filter_count <= 5 or _s5_filter_count % 100 == 0:
-                                        if _s5_is_fallback:
-                                            _s5_filter_reason = 'fallback'
-                                        elif _s5_is_invalid_close:
-                                            _s5_filter_reason = 'z=0_close'
-                                        else:
-                                            _s5_filter_reason = 'unknown'
-                                        _s5_capital_diag = float(getattr(_s5_sig, 'capital_allocation', 0) or 0)
-                                        _s5_sim_diag = bool(getattr(_s5_sig, 'simulated', False))
-                                        logging.info("[FIX-S5-FILTER] 过滤无效S5信号: id=%s inst=%s z=%.2f type=%s reason=%s capital=%.2f simulated=%s (累计%d次)",
-                                                     _s5_sig.signal_id, _s5_inst_id or 'EMPTY', _s5_z_score, _s5_sig.signal_type,
-                                                     _s5_filter_reason, _s5_capital_diag, _s5_sim_diag, _s5_filter_count)
-                                else:
-                                    _s5_action = 'CLOSE' if _s5_sig.signal_type.startswith('CLOSE') else 'OPEN'
-                                    _s5_target = {
-                                        'instrument_id': _s5_inst_id,
-                                        'direction': _s5_sig.direction,
-                                        'price': _s5_sig.entry_price,
-                                        'action': _s5_action,
-                                        'lots': 1,
-                                        'signal_id': _s5_sig.signal_id,
-                                        'signal_type': _s5_sig.signal_type,
-                                        'open_reason': 'ARBITRAGE',
-                                        # FIX-S5-CAPITAL-20260724: 使用信号自身的capital_allocation(>0)
-                                        #   不再硬编码0.0，使S5信号通过V4-FIX-O25和order_executor过滤
-                                        'capital_allocation': float(getattr(_s5_sig, 'capital_allocation', 0.02) or 0.02),
-                                        'source': 's5_arbitrage',
-                                        # FIX-S5-CAPITAL-20260724: simulated=False
-                                        #   S5信号需进入下单管道，dry_run由order_executor处理
-                                        'simulated': bool(getattr(_s5_sig, 'simulated', False)),
-                                        'z_score': _s5_z_score,
-                                        'hedge_ratio': _s5_sig.hedge_ratio,
-                                        'cointegration_pvalue': _s5_sig.cointegration_pvalue,
-                                    }
-                                    targets.append(_s5_target)
-                                    provider._s5_last_recorded_sig_id = _s5_sig.signal_id
-                                    logging.info("[S5-ARB] %s信号接入订单链: id=%s dir=%s z=%.2f hedge=%.3f capital=%.3f simulated=%s",
-                                                 _s5_sig.signal_type, _s5_sig.signal_id, _s5_sig.direction,
-                                                 _s5_z_score, _s5_sig.hedge_ratio,
-                                                 _s5_target['capital_allocation'], _s5_target['simulated'])
-                    except Exception as _s5_e:  # FIX-S6-3: 窄异常元组→Exception (NEW-1硬约束) + debug→warning
-                        logging.warning("[S5-ARB-SIM] S5套利模拟信号采集失败: %s", _s5_e)
+                    # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
                     # S6做市商模拟信号
                     try:
                         from strategy.monitor.market_making_monitor import get_market_making_monitor
                         _s6_mon = get_market_making_monitor()
-                        # FIX-8 RC-10: 先触发S6信号生成，再读取最新信号
-                        # 根因: 原代码只读取get_last_signal()但从未调用generate_simulated_signal()
-                        #       → monitor无新信号生成 → S6永远0信号 → 0模拟下单
-                        _s6_mon.generate_simulated_signal()
-                        _s6_sig = _s6_mon.get_last_signal()
+                        # FIX-S6-RETURN-VALUE-20260728: 使用generate_simulated_signal返回值
+                        # 根因: 原代码调用generate_simulated_signal()后用get_last_signal()读取,
+                        #   但generate返回None时不更新_last_signal→get_last返回旧信号→
+                        #   旧信号ID已被记录→去重跳过→S6永远0接入
+                        # 修复: 直接使用返回值, None时不处理
+                        _s6_sig = _s6_mon.generate_simulated_signal()
                         if _s6_sig is not None:
                             _s6_last_recorded = getattr(provider, '_s6_last_recorded_sig_id', '')
                             _s6_sig_id = getattr(_s6_sig, 'signal_id', '') or str(getattr(_s6_sig, 'timestamp', 0))
                             if _s6_sig_id != _s6_last_recorded:
-                                # FIX-S6-FALLBACK-FILTER-20260723 / FIX-S5-FAKE-CONTRACT-20260723:
-                                #   过滤S6 fallback占位信号以及所有模拟信号（与S5一致的源头过滤）
+                                # FIX-S6-FALLBACK-FILTER-20260723:
+                                #   过滤S6 fallback占位信号以及所有模拟信号(源头过滤)
                                 # 根因: market_making_monitor.py L1052 在instrument_id为空时设置fallback='S6_MM_FALLBACK'
                                 #   → S6 fallback信号进入targets → 假合约进入PositionService创建持仓 → 无法平仓
                                 # 根因2: S6真实合约模拟信号也设simulated=True + capital_allocation=0.0，同样会进入PositionService
                                 # 修复: 在源头过滤fallback/空instrument_id/模拟信号，不接入targets
-                                #   与S5源头过滤(FIX-S5-FALLBACK-FILTER-20260723)保持一致的过滤模式
                                 _s6_inst_id = getattr(_s6_sig, 'instrument_id', '') or ''
-                                # FIX-S6-CAPITAL-20260724: 与S5一致，移除simulated_capital_zero过滤
+                                # FIX-S6-CAPITAL-20260724: 移除simulated_capital_zero过滤
                                 # S6信号现在capital_allocation>0且simulated=False，只需过滤fallback
                                 if not _s6_inst_id or _s6_inst_id in ('S6_MM', 'S6_MM_FALLBACK'):
                                     provider._s6_last_recorded_sig_id = _s6_sig_id
@@ -1850,8 +1821,14 @@ class StrategyBusinessLayer:
                                         logging.info("[FIX-S6-FILTER] 过滤无效S6信号: id=%s inst=%s reason=%s (累计%d次)",
                                                      _s6_sig_id, _s6_inst_id or 'EMPTY', _s6_filter_reason, _s6_filter_count)
                                 else:
-                                    _s6_dir = getattr(_s6_sig, 'direction', 'BUY')
-                                    # FIX-S5-PAIR-SEMANTIC-20260722: S6 signal_type -> action 映射（与S5一致性修复）
+                                    # FIX-S6-NEUTRAL-DIR-GUARD-20260730: direction=""守卫(空字符串非None,getattr取到空串)
+                                    # 根因: market_making_monitor.py neutral时_mm_direction=""(空字符串),
+                                    #   getattr(_s6_sig,'direction','BUY')取到空字符串而非默认'BUY'(空字符串是有效值非None),
+                                    #   导致下游order_executor.py不进入BUY/SELL分支,send_order(direction="")被平台拒绝,
+                                    #   且OPEN信号被加入_seen_open_instruments((inst,"")去重key),同合约后续BUY/SELL信号被误跳过。
+                                    # 修复: 空字符串falsy触发or兜底为'BUY'(做市neutral时方向无偏好,选择BUY与bid/ask双边报价不冲突)。
+                                    _s6_dir = getattr(_s6_sig, 'direction', 'BUY') or 'BUY'
+                                    # FIX-S6-PAIR-SEMANTIC-20260722: S6 signal_type -> action 映射
                                     _s6_signal_type = str(getattr(_s6_sig, 'signal_type', 'OPEN'))
                                     _s6_action = 'CLOSE' if _s6_signal_type.startswith('CLOSE') else 'OPEN'
                                     _s6_target = {
@@ -1907,7 +1884,7 @@ class StrategyBusinessLayer:
                     except Exception as _s6_e:  # FIX-S6-3: 窄异常元组→Exception (NEW-1硬约束) + debug→warning
                         logging.warning("[S6-MM-SIM] S6做市商模拟信号采集失败: %s", _s6_e)
             except Exception as _s5s6_e:  # FIX-S6-3: 窄异常元组→Exception (NEW-1硬约束) + debug→warning
-                logging.warning("[S5S6-SIM] S5/S6模拟信号集成异常: %s", _s5s6_e)
+                logging.warning("[S6-MM-SIM] S6模拟信号集成异常: %s", _s5s6_e)
             # [FIX-20260712-S2-V2] S2日内交易四维信号组装 — 用户本意: 共振+订单流+希腊+三角
             # 冗余桥接模块已删除，此处直接在业务层组装四维信号(参照S7修复方式)
             # FIX-S2-FOUR-DIM-20260721: 原四维条件(共振>0.75+|订单流|>0.20+希腊>0.4+三角>0.5)过严
@@ -1924,8 +1901,16 @@ class StrategyBusinessLayer:
                     try:
                         from risk.risk_service import get_risk_service
                         _s2_rs = get_risk_service()
-                        if _s2_rs and hasattr(_s2_rs, '_risk_compute'):
-                            _s2_rc = _s2_rs._risk_compute
+                        # FIX-S2-RISKCOMPUTE-20260728: 修复RiskService属性名错误
+                        # 根因: RiskService.__init__中创建的是self._compute_service=RiskComputeService(self),
+                        #   而非_risk_compute。RiskService.__getattr__对_前缀属性抛AttributeError,
+                        #   导致hasattr(_s2_rs,'_risk_compute')恒False→tri/greeks计算块永不执行→
+                        #   tri=0.0, greeks=0.0→S2四维门控全部失败→S2永远0下单
+                        # 修复: 使用正确的属性名_compute_service
+                        # 不改变策略逻辑: _compute_tri_validation_score(None)返回0.5(降级中性值),
+                        #   _compute_greeks_usage_score(None)返回0.5(降级中性值), 均通过阈值(0.4/0.3)
+                        if _s2_rs and hasattr(_s2_rs, '_compute_service'):
+                            _s2_rc = _s2_rs._compute_service
                             try:
                                 _s2_gd = getattr(_s2_rs, '_greeks_dashboard', None)
                                 _s2_greeks_score = _s2_rc._compute_greeks_usage_score(_s2_gd)
@@ -1987,7 +1972,16 @@ class StrategyBusinessLayer:
                             # 根因: OrderFlowBridge()新实例内部MicrostructureAnalyzer无累积tick数据→imbalance恒0→S2永0信号
                             from order.order_flow_bridge import get_order_flow_bridge
                             _s2_ofb = get_order_flow_bridge()
-                            _s2_of_imbalance = _s2_ofb.get_instant_imbalance(_s2_inst) or 0.0
+                            # FIX-S2-OFPRODUCT-20260728: 使用product code而非instrument_id查询订单流
+                            # 根因: OrderFlowBridge.on_tick_feed用extract_product_code(instrument_id)提取
+                            #   product(如"rb2609C3100"→"rb"), MicrostructureAnalyzer按product存储数据。
+                            #   S2代码用_s2_inst(如"rb2609C3100")调用get_instant_imbalance→
+                            #   analyzer查找"rb2609C3100"不存在→返回0→imbalance恒0→S2降维条件A永False→S2永0下单
+                            # 修复: 用extract_product_code提取product code后再查询
+                            from infra.shared_utils import extract_product_code
+                            _s2_product = extract_product_code(_s2_inst)
+                            if _s2_product:
+                                _s2_of_imbalance = _s2_ofb.get_instant_imbalance(_s2_product) or 0.0
                         except Exception:  # FIX-U: 扩大异常捕获
                             pass
                         # FIX-S2-INTRADAY-GATE-20260724: 用户设计原意区分隔夜仓与日内交易门控
@@ -2093,6 +2087,8 @@ class StrategyBusinessLayer:
                                 'tri_validation': round(_s2_tri_score, 4),
                             },
                             'source': 's2_intraday_v2',
+                            'capital_allocation': 0.02,  # FIX-S2-CAPITAL-20260728: 显式设置>0避免V4-FIX-O25和execute_by_ranking双重过滤
+                            'simulated': False,  # FIX-S2-SIMULATED-20260728: 显式设置False避免execute_by_ranking过滤
                         }
                         targets.append(_s2_target)
                         provider._s2_last_signal = _s2_target
@@ -2156,6 +2152,14 @@ class StrategyBusinessLayer:
                         logging.warning("[OptionTrading] targets为空（诊断失败: %s）", _diag_e)
                 return
             open_reason = getattr(provider, '_resolve_open_reason', lambda: 'UNKNOWN')()  # [FIX-20260712-AUDIT-P0] 保护调用防止AttributeError
+            # V4-FIX-O21-ENFORCE-20260727: 数据不可用=不开仓
+            # 根因: resolve_open_reason 仅将 open_reason 改为 'BLOCKED' 标签, 未终止交易周期
+            #   导致 BLOCKED 状态下 targets 仍进入风控/下单链路, 实测产生16笔BLOCKED订单
+            # 修复: BLOCKED状态下直接返回, 不进入后续风控/下单
+            # 原则: 仅拦截 BLOCKED 未知状态, 不影响合法策略信号 (DIVERGENCE_REVERSAL/CORRECT_RESONANCE/ARBITRAGE/MARKET_MAKING/BOX_EXTREME 等)
+            if open_reason == 'BLOCKED':
+                logging.info("[V4-FIX-O21-ENFORCE] open_reason=BLOCKED, 数据不可用, 跳过本周期")
+                return
             for t in targets:
                 t['open_reason'] = t.get('open_reason', '') or open_reason
             # FIX-P0-1: 在targets过滤阶段排除trading=False合约，根因修复重复下单失败
@@ -2411,7 +2415,7 @@ class StrategyBusinessLayer:
                 'incorrect_reversal_defensive': 's7_divergence',
                 'other': 'other',
                 's4_spring': 's4_spring',
-                's5_arbitrage': 's5_arbitrage',
+                # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
                 's6_market_making': 's6_market_making',
             }
             strategy_id = _state_map.get(current_state, 'master')
@@ -2457,7 +2461,8 @@ class StrategyBusinessLayer:
                 _STRATEGY_ID_TO_SHADOW_GROUP = {
                     'master': 's2_resonance', 'reverse': 's2_resonance', 'other': 's2_resonance',
                     'hft': 's1_hft', 's3_box': 's3_box', 's4_spring': 's4_spring',
-                    's5_arbitrage': 's5_arbitrage', 's6_market_making': 's6_market_making',
+                    # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
+                    's6_market_making': 's6_market_making',
                 }
                 # FIX-R23: 直接使用硬编码映射，避免eco.__getattr__抛出AttributeError
                 _state_map = {
@@ -2467,7 +2472,7 @@ class StrategyBusinessLayer:
                     'incorrect_reversal_defensive': 's7_divergence',
                     'other': 'other',
                     's4_spring': 's4_spring',
-                    's5_arbitrage': 's5_arbitrage',
+                    # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
                     's6_market_making': 's6_market_making',
                 }
                 _sid = _state_map.get(market_state, 'master')

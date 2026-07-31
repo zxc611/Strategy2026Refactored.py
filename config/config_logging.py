@@ -91,25 +91,38 @@ class FlushHandler(logging.Handler):
 
             for handler in logging.getLogger().handlers:
 
-                if isinstance(handler, RotatingFileHandler) and hasattr(handler, 'stream'):
+                # FIX-LOGGING-NONE-GUARD-20260728: handler.stream 可能在 RotatingFileHandler
+                # 日志轮转期间被并发置为 None, 导致 handler.stream.flush() 抛 AttributeError,
+                # 而原 except 仅捕获 ValueError → 日志系统自身无限递归(284次Traceback循环, 6263行垃圾).
+                # 根因修复: 1) 显式 handler.stream is not None 守卫; 2) except 增加 AttributeError.
+                # 不改变策略逻辑: 仅日志系统空指针守卫, 不影响日志输出内容.
+                if isinstance(handler, RotatingFileHandler) and hasattr(handler, 'stream') and handler.stream is not None:
 
-                    handler.stream.flush()
+                    try:
+                        handler.stream.flush()
+                    except (ValueError, AttributeError) as _stream_err:
+                        pass
 
                     if do_fsync:
-
-                        os.fsync(handler.stream.fileno())
+                        try:
+                            os.fsync(handler.stream.fileno())
+                        except (ValueError, AttributeError, OSError) as _fsync_err:
+                            pass
 
             if do_fsync:
 
                 FlushHandler._last_fsync_time = now
 
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError) as _flush_err:
-
-            logging.warning("[R32-P2-11] FlushHandler flush/fsync失败: %s", _flush_err)
-
-            if is_disk_full_error(_flush_err):
-
-                logging.critical("[R33-P1-16] 日志flush失败: 磁盘满ENOSPC)! 日志可能丢失")
+        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, IOError, OSError) as _flush_err:
+            if not getattr(self, '_in_flush_error', False):
+                self._in_flush_error = True
+                try:
+                    logging.warning("[R32-P2-11] FlushHandler flush/fsync失败: %s", _flush_err)
+                    if is_disk_full_error(_flush_err):
+                        logging.critical("[R33-P1-16] 日志flush失败: 磁盘满ENOSPC)! 日志可能丢失")
+                except Exception:
+                    pass
+                self._in_flush_error = False
 
 
 

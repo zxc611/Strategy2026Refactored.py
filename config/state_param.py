@@ -1173,6 +1173,16 @@ class StateParamManager:
 
                 self._last_resonance_strength = resonance_strength
 
+            else:
+                # FIX-S1-RESONANCE-DECAY-20260730: 共振衰减时必须更新last/prev
+                # 根因: 原代码只在resonance>0时更新, resonance=0时不更新
+                #   → 共振消失后_last_resonance_strength仍保持旧值(如0.8)
+                #   → S1读到过时数据(strength_delta=0, 但level=0.8仍触发level路径)
+                #   → 或共振稳定时delta=0而level也不更新
+                # 修复: resonance=0时将prev=last, last=0, 确保衰减传播
+                self._prev_resonance_strength = self._last_resonance_strength
+                self._last_resonance_strength = 0.0
+
             if current_price > 0:
 
                 self._last_known_price = current_price

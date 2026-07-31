@@ -235,9 +235,16 @@ def process_tick_unified_path(svc, tick: Any) -> None:
         _norm_tick = svc._normalize_tick(tick)
         _inst_id = _norm_tick.get('instrument_id', '')
         if _inst_id and is_option_instrument(_inst_id):
-            from risk.risk_service import get_risk_service
-            _rs = get_risk_service()
-            _gc = _rs._get_greeks_calculator() if hasattr(_rs, '_get_greeks_calculator') else None
+            # FIX-GREEKS-UNIFIED-SINGLETON-20260729: 写入端直接使用统一单例
+            # 原代码 _rs._get_greeks_calculator() 因 RiskService.__getattr__ 拒绝
+            # _ 开头属性委托(见 risk_service.py L258-259)而永远返回 None，
+            # 且 risk_config_provider 访问 __class__._greeks_calc(类属性)与
+            # risk_service.__init__ 设置的 self._greeks_calc(实例属性)不一致，
+            # 双重 bug 导致 update_greeks_from_tick 从未被调用，_option_greeks
+            # 内存字典从未被实盘 tick 数据填充——这是原代码硬编码 Greeks 的根因。
+            # 修复: 写入端直接 get_unified_greeks_calculator()，与读取端共用同一实例。
+            from infra.service_contracts import get_unified_greeks_calculator
+            _gc = get_unified_greeks_calculator()
             if _gc is not None:
                 _tick_price = float(_norm_tick.get('last_price', 0))
                 _underlying_price = float(_norm_tick.get('underlying_price', 0))
@@ -350,14 +357,24 @@ def process_tick_core(svc, tick: Any) -> None:
                 if svc._state_store is not None:
                     svc._state_store.set('_tick_timestamp_violation_count', svc._tick_timestamp_violation_count)
                 _replay_skew_sec = float(os.environ.get('ALI2026_REPLAY_CLOCK_SKEW_SEC', '300'))
-                _is_replay_clock = time.time() - max(_ts_float, _last_ts) > _replay_skew_sec
+                _now_epoch = time.time()
+                # FIX-IV09-FUTURE-TS-20260727: 修复last_ts在未来时间时replay_clock误判
+                # 根因: 原逻辑 _is_replay_clock = _now_epoch - max(_ts_float, _last_ts) > _replay_skew_sec
+                #   当last_ts在未来(last_ts > _now_epoch)时, 差值为负数, 永远 <= _replay_skew_sec,
+                #   导致_is_replay_clock=False, 然后执行 max(_ts_float, _last_ts) 保留未来时间戳,
+                #   后续所有正常tick都会触发非单调警告(replay_clock=False持续误报).
+                # 修复: 增加未来时间戳检测, last_ts在未来时视为异常时钟(replay_clock=True),
+                #   重置_last_tick_timestamp为当前ts, 避免未来时间戳持续污染单调性检查.
+                _last_ts_in_future = _last_ts > _now_epoch + _replay_skew_sec
+                _is_replay_clock = _last_ts_in_future or (_now_epoch - max(_ts_float, _last_ts) > _replay_skew_sec)
                 _log_every = 100000 if _is_replay_clock else 10000
                 if svc._tick_timestamp_violation_count <= 10 or svc._tick_timestamp_violation_count % _log_every == 0:
                     logging.warning(
-                        "[R24-P1-IV-09] Tick时间戳非单调: instrument=%s current_ts=%.6f < last_ts=%.6f, 累计%d次 (replay_clock=%s, 警告，继续处理)",
-                        instrument_id, _ts_float, _last_ts, svc._tick_timestamp_violation_count, _is_replay_clock,
+                        "[R24-P1-IV-09] Tick时间戳非单调: instrument=%s current_ts=%.6f < last_ts=%.6f, 累计%d次 (replay_clock=%s, future_ts=%s, 警告，继续处理)",
+                        instrument_id, _ts_float, _last_ts, svc._tick_timestamp_violation_count, _is_replay_clock, _last_ts_in_future,
                     )
                 if _is_replay_clock:
+                    # 重置为当前ts: 回放/未来时间戳场景下, 当前ts才是新的基准
                     svc._last_tick_timestamp[instrument_id] = _ts_float
                 else:
                     svc._last_tick_timestamp[instrument_id] = max(_ts_float, _last_ts)
@@ -761,6 +778,7 @@ def tick_dispatch_layer(svc, tick: Any, instrument_id_raw: str) -> None:
             from infra.market_time_service import get_market_open_cache
             if not get_market_open_cache().is_open():
                 _market_closed = True
+                # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃), 无需设置收盘标志
         except Exception:  # NEW-1: 实时回调路径必须用except Exception
             pass
         if _degraded:

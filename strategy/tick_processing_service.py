@@ -43,7 +43,8 @@ from config import config_params
 from strategy.tick_hft import (
     dispatch_hft_tick, execute_pursuit_exit,
     execute_pursuit_entry, execute_pursuit_add,
-    handle_arbitrage_signal, handle_transition_signal,
+    # DEL-S1-ARB-20260729: handle_arbitrage_signal 已删除(用户决策: 风险太大)
+    handle_transition_signal,
     handle_smart_money_signal, handle_filtered_signal,
 )
 from strategy.tick_dispatch import (
@@ -64,7 +65,8 @@ __all__ = [
     'is_option_instrument', 'check_hard_time_stop_live',
     'dispatch_hft_tick', 'execute_pursuit_exit',
     'execute_pursuit_entry', 'execute_pursuit_add',
-    'handle_arbitrage_signal', 'handle_transition_signal',
+    # DEL-S1-ARB-20260729: 'handle_arbitrage_signal' 已删除
+    'handle_transition_signal',
     'handle_smart_money_signal', 'handle_filtered_signal',
     'tick_dispatch_layer', 'dispatch_tick', 'dispatch_tick_degraded',
     'output_periodic_summary', 'flush_tick_buffer', 'atexit_flush',
@@ -716,8 +718,7 @@ class TickProcessingService:
                               instrument_id: str, last_price: float, volume: int, exchange: str) -> None:
         execute_pursuit_add(self, hft, pursuit_signal, tick, instrument_id, last_price, volume, exchange)
 
-    def _handle_arbitrage_signal(self, arbitrage_signal: Dict[str, Any], instrument_id: str) -> None:
-        handle_arbitrage_signal(self, arbitrage_signal, instrument_id)
+    # DEL-S1-ARB-20260729: _handle_arbitrage_signal 已删除(用户决策: 风险太大)
 
     def _handle_transition_signal(self, transition_signal: Dict[str, Any],
                                    instrument_id: str, last_price: float,

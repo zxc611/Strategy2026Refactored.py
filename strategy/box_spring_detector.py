@@ -190,7 +190,7 @@ class BoxSpringDetectorService:
         self._iv_history: Dict[str, deque] = {}
         self._iv_window = _p.get('iv_lookback_bars', 120)
         self._min_box_touches = _p.get('min_box_touches', 3)
-        self._max_box_width_pct = _p.get('max_box_width_pct', 0.04)
+        self._max_box_width_pct = _p.get('max_box_width_pct', 0.01)  # FIX-BOX-DUAL-WIDTH-20260730: 4%→1%统一
         self._box_breakout_tolerance = _p.get('box_breakout_tolerance', 0.005)
         # FIX-OO5 (S4-Spring-ROOT): 放宽IV百分位阈值
         # V4-FIX-P2-12: 恢复原始阈值5.0 (原FIX-OO5放宽为20.0是bypass)
@@ -348,15 +348,22 @@ class BoxSpringDetectorService:
                              _diag_call_count, days_to_expiry, self._min_days_to_expiry, self._max_days_to_expiry, instrument_id)
             return None
 
-        # ── K线箱体检查 — S3/S4唯一箱体来源（tick级箱体已废弃）──
-        # 日内交易(dte≤5): 必须有日K小箱体确认(INTRADAY_SMALL)
-        # 隔夜交易(dte>5): 必须有周K中箱体确认(OVERNIGHT_MEDIUM)
+        # ── K线箱体检查 — S3/S4唯一箱体来源（tick级箱体已删除）──
+        # FIX-DEL-DTE-SWITCH-20260729: 删除 dte≤5/dte>5 条件切换(用户明确要求)
+        # S3=日内策略永远用日K箱体, S4=隔夜策略永远用周K箱体, 不用 days_to_expiry 切换
         # K线箱体确认后同时更新BoxDetector._current_box和本服务的_boxes
+        # FIX-S4-BOXTYPE-20260730: S4隔夜策略必须传box_type=OVERNIGHT_MEDIUM(周K箱体)
+        # 根因: 不传box_type时进入else分支优先检查日K(INTRADAY_SMALL),
+        #   但股指期货3根日K三高点差异>10*tick_size → daily_box.is_valid=False
+        #   → 再查周K但bars<15日K无法聚合3根周K → weekly_box.is_valid=False
+        #   → 永远REJECT。S4应直接查周K箱体, 跳过日K检查
+        from strategy.box_detector import BoxType  # FIX-S4-BOXTYPE-20260730
         kline_passed, kline_box = self._box_detector.check_kline_box_precondition(
-            instrument_id=instrument_id, days_to_expiry=days_to_expiry)
+            instrument_id=instrument_id, days_to_expiry=days_to_expiry,
+            box_type=BoxType.OVERNIGHT_MEDIUM)
         if not kline_passed:
             if _diag_call_count <= 20:
-                _kb_type = 'INTRADAY_SMALL' if days_to_expiry <= 5 else 'OVERNIGHT_MEDIUM'
+                _kb_type = kline_box.box_type.name if kline_box and kline_box.box_type else 'UNKNOWN'
                 logging.info(
                     "[S4-KLINE-BOX] REJECT: K线箱体未确认 inst=%s dte=%d box_type=%s "
                     "upper=%.2f lower=%.2f bars=%d valid=%s",
@@ -369,7 +376,8 @@ class BoxSpringDetectorService:
             return None
 
         # K线箱体确认 → 创建/更新BoxRange（替代tick级BoxRange）
-        _kb_type_str = 'INTRADAY_SMALL' if days_to_expiry <= 5 else 'OVERNIGHT_MEDIUM'
+        # FIX-DEL-DTE-SWITCH-20260729: box_type从kline_box读取, 不再用dte判断
+        _kb_type_str = kline_box.box_type.name if kline_box and kline_box.box_type else 'INTRADAY_SMALL'
         # KLineBoxProfile.width_pct是百分比格式(如1.0=1%)
         # BoxRange.box_width_pct是小数格式(如0.01=1%)，与self._max_box_width_pct=0.04对齐
         _kb_width_pct = kline_box.width_pct / 100.0

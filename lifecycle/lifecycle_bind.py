@@ -194,6 +194,10 @@ class LifecycleBind:
     def _extract_runtime_market_center(strategy_obj: Any) -> Any:
         if not strategy_obj:
             return None
+        # FIX-HKL-PROVIDER-20260729: 诊断strategy对象的方法列表
+        _diag_attrs = [a for a in dir(strategy_obj) if not a.startswith('_') and ('kline' in a.lower() or 'market' in a.lower() or 'get_k' in a.lower())]
+        if _diag_attrs:
+            logging.info("[HKL-DIAG] strategy_obj has kline/market attrs: %s", _diag_attrs)
         mc = getattr(strategy_obj, 'market_center', None)
         if mc:
             return mc
@@ -257,6 +261,28 @@ class LifecycleBind:
             mc = MarketCenter()
             p._fallback_market_center = mc
             logging.info("[Fallback] MarketCenter created successfully")
+            # FIX-HKL-PROVIDER-20260729: 诊断MarketCenter方法列表和get_kline_data测试
+            _mc_attrs = [a for a in dir(mc) if not a.startswith('_')]
+            logging.info("[HKL-DIAG] MarketCenter methods: %s", _mc_attrs)
+            # 尝试调用get_kline_data测试
+            try:
+                _test_result = mc.get_kline_data(exchange='SHFE', instrument_id='rb2609', style='M1')
+                _test_len = len(_test_result) if _test_result is not None else 'None'
+                _test_type = type(_test_result).__name__ if _test_result is not None else 'None'
+                logging.info("[HKL-DIAG] MarketCenter.get_kline_data(SHFE,rb2609,M1) result: type=%s len=%s", _test_type, _test_len)
+                if _test_result and len(_test_result) > 0:
+                    _first = _test_result[0]
+                    # FIX-HKL-DIAG-20260730: K线对象可能不支持datetime/open等属性名
+                    # 先尝试dict格式，再尝试属性格式，最后尝试所有非下划线属性
+                    _first_dict = {}
+                    if isinstance(_first, dict):
+                        _first_dict = {k: _first.get(k) for k in ['datetime','open','high','low','close','volume'] if k in _first}
+                    else:
+                        _attrs = [a for a in dir(_first) if not a.startswith('_') and not callable(getattr(_first, a, None))]
+                        _first_dict = {a: getattr(_first, a) for a in _attrs[:8]}
+                    logging.info("[HKL-DIAG] First kline: %s", _first_dict)
+            except Exception as _test_e:
+                logging.warning("[HKL-DIAG] MarketCenter.get_kline_data test failed: %s: %s", type(_test_e).__name__, _test_e)
             return mc
         except Exception as e:
             logging.warning(f"[Fallback] MarketCenter creation failed: {e}, using None fallback")

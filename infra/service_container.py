@@ -249,9 +249,11 @@ class ServiceContainer:
                     logging.warning("[ServiceContainer] market_data服务不可用: %s", _e2)
 
             # CORE-DEPENDENCY: GreeksCalculator是核心服务
+            # FIX-GREEKS-UNIFIED-SINGLETON-20260729: 使用统一单例，避免独立实例导致
+            # 写入端(tick_dispatch)与读取端(width_cache)实例分离、内存字典数据无法共享。
             try:
-                from governance.greeks_calculator import GreeksCalculator
-                analytics = GreeksCalculator()
+                from infra.service_contracts import get_unified_greeks_calculator
+                analytics = get_unified_greeks_calculator()
                 self.register('analytics', analytics)
             except ImportError as _e:
                 logging.error("[ServiceContainer] 核心服务GreeksCalculator加载失败: %s", _e)

@@ -298,6 +298,38 @@ class DrawdownMonitorService:
 
                                 stats: Dict[str, Any]) -> None:
 
+        # FIX-DRY-RUN-DRAWDOWN-SKIP-20260727: dry_run模式跳过日回撤计算
+        # 根因: dry_run模式下 equity 被错误地等同于"持仓总市值"(position_check_service.py L208-227),
+        #   equity_with_unrealized = equity + unrealized_pnl = 2×持仓总市值 - 持仓总成本(双重计算!).
+        #   持仓平掉时equity=0, 日回撤=(peak-0)/start=100%;
+        #   开反向持仓时, equity_with_unrealized可能为负, 日回撤>100%(实测142.05%).
+        #   虽dry_run跳过硬止(L600-609), 但WARNING噪音严重(12条), 并触发INV-P1-10熔断后强制减仓.
+        # 修复: dry_run模式跳过日回撤计算(equity口径不正确, 计算结果无意义).
+        # 原则: 仅dry_run跳过, 实盘仍严格执行日回撤监控(实盘零影响).
+        # 证据: 2026-07-27 09:14:24 dry_run模式日回撤142.05%超阈值但跳过硬止,
+        #       09:25:49 SafetyMetaLayer阶段1硬止损触发(衍生自日回撤异常).
+        _dry_run_active = False
+        try:
+            from config.params_service import get_params_service
+            _dry_run_active = bool(get_params_service().get_bool('dry_run_mode', False))
+        except Exception:
+            pass
+        if not _dry_run_active:
+            try:
+                from order.order_base import get_order_service
+                _osvc = get_order_service()
+                if _osvc is not None:
+                    _dry_run_active = bool(getattr(_osvc, '_dry_run_mode', False))
+            except Exception:
+                pass
+        if _dry_run_active:
+            # dry_run模式: 仅更新equity_series, 不计算日回撤(口径不正确)
+            # 保留equity_series记录(供其他模块读取), 但_daily_drawdown保持0(不触发硬止也不输出警告)
+            self._equity_series.append(equity)
+            self._equity_timestamps.append(now)
+            self._daily_drawdown = 0.0
+            return
+
         if self._current_date != today:
 
             self._current_date = today

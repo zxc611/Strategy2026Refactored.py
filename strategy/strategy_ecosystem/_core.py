@@ -127,7 +127,6 @@ class CapitalRoutingService:
                 's2_resonance': params.get('capital_route_s2_resonance', 0.15),
                 's3_box': params.get('capital_route_s3_box', 0.12),
                 's4_spring': params.get('capital_route_s4_spring', 0.12),
-                's5_arbitrage': params.get('capital_route_s5_arbitrage', 0.08),
                 's6_market_making': params.get('capital_route_s6_market_making', 0.08),
                 's7_divergence': params.get('capital_route_s7_divergence', 0.20),
             }
@@ -358,8 +357,8 @@ class CapitalRoutingService:
             except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
                 logger.debug("[StrategyEcosystem] CRM route_capital integration: %s", e)
 
-            # R3-P-01修复: s5_arbitrage/s6_market_making路由
-            # FIX-20260711-S5S6: S5套利/S6做市改为实盘模拟监控模式，不参与资金分配
+            # R3-P-01修复: s6_market_making路由
+            # DEL-S5-20260729: S5套利已删除, arbitrage slot强制0分配(不再有S5信号源)
             allocations['arbitrage'] = 0.0
             allocations['market_making'] = 0.0
             allocations['divergence'] = _route_params.get('s7_divergence', cr.divergence_base)
@@ -413,13 +412,13 @@ class CapitalRoutingService:
                 try:
                     from config.params_service import get_params_service
                     _ps = get_params_service()
-                    _s5_s6_mutex_mode = _ps.get_str('capital_route_s5_s6_mutex', 'arbitrage_priority')
-                    if _s5_s6_mutex_mode == 'arbitrage_priority':
+                    _s5_s6_mutex_mode = _ps.get_str('capital_route_s5_s6_mutex', 'market_making_priority')
+                    # DEL-S5-20260729: S5已删除, S5/S6互斥逻辑简化为S6做市优先
+                    if _s5_s6_mutex_mode == 'market_making_priority':
+                        pass  # S6做市优先, 不限制
+                    else:
                         allocations['market_making'] = min(s6_alloc, 0.05)
-                        logger.debug("[P2-CA-003] S5/S6互斥: 套利优先, 做市限制为%.3f", allocations['market_making'])
-                    elif _s5_s6_mutex_mode == 'market_making_priority':
-                        allocations['arbitrage'] = min(s5_alloc, 0.05)
-                        logger.debug("[P2-CA-003] S5/S6互斥: 做市优先, 套利限制为%.3f", allocations['arbitrage'])
+                        logger.debug("[P2-CA-003] S6做市限制为%.3f", allocations['market_making'])
                 except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _e:
                     logger.debug("[P2-CA-003] S5/S6互斥检查跳过: %s", _e)
 
@@ -611,17 +610,17 @@ class StrategyEcosystem:
     STATE_STRATEGY_MULTIPLIERS = {
         STRATEGY_MODE_CORRECT_TRENDING: {
             's1_hft': 1.5, 's2_resonance': 1.5, 's3_box': 0.8,
-            's4_spring': 0.8, 's5_arbitrage': 1.0, 's6_market_making': 1.0,
+            's4_spring': 0.8, 's6_market_making': 1.0,
             's7_divergence': 0.8,
         },
         STRATEGY_MODE_INCORRECT_REVERSAL: {
             's1_hft': 1.2, 's2_resonance': 1.2, 's3_box': 0.5,
-            's4_spring': 0.5, 's5_arbitrage': 1.0, 's6_market_making': 1.0,
+            's4_spring': 0.5, 's6_market_making': 1.0,
             's7_divergence': 1.5,
         },
         'other': {
             's1_hft': 0.6, 's2_resonance': 0.6, 's3_box': 1.5,
-            's4_spring': 1.5, 's5_arbitrage': 1.0, 's6_market_making': 1.0,
+            's4_spring': 1.5, 's6_market_making': 1.0,
             's7_divergence': 0.6,
         },
     }
@@ -664,17 +663,12 @@ class StrategyEcosystem:
         self._strategy_circuit_breaker_at: Dict[str, float] = {}
         self._strategy_circuit_breaker_auto_recovery_sec: float = 300.0
 
-        _box_detector_kwargs = {}
-        try:
-            from config.config_service import get_cached_params
-            _all_params = get_cached_params()
-            for _dk in ('box_gain_ratio', 'plr_normalization_base'):
-                if _dk in _all_params:
-                    _box_detector_kwargs[_dk] = _all_params[_dk]
-        except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _cfg_err:
-            logging.debug("[StrategyEcosystem] BoxDetector config params load skipped: %s", _cfg_err)
-            _all_params = {}
-        self._box_detector = BoxDetector(params=box_params, **_box_detector_kwargs)
+        # FIX-DEL-TICKBOX-V2-CLEANUP-V4-20260729: 不再从 config 加载已删除的 tick 级参数
+        # 旧代码: 从 get_cached_params() 加载 'box_gain_ratio', 'plr_normalization_base' 并作为
+        #         **_box_detector_kwargs 传给 BoxDetector — 这两个参数已在 FIX-DEL-TICKBOX-V2-20260729
+        #         中从 BoxDetector.__init__ 删除, 若配置存在这些 key 会触发 TypeError
+        # 新代码: 直接以 params 构造(tick级箱体已删除)
+        self._box_detector = BoxDetector(params=box_params)
         self._last_bar_data: Dict[str, float] = {}
 
         # P1-32修复: 从ConfigService覆盖资金分配权重
@@ -796,9 +790,13 @@ class StrategyEcosystem:
         self._last_route_time: float = 0.0
         self._ev_cache: Optional[Dict[str, Any]] = None
         self._ev_cache_ts: float = 0.0
-        _strategy_type = str(_all_params.get('strategy_type', 'default')).lower() if _all_params else 'default'
-        _ev_ttl_default = EV_CACHE_TTL_DEFAULTS.get(_strategy_type, EV_CACHE_TTL_DEFAULTS['default'])
-        self._ev_cache_ttl: float = float(_all_params.get('ev_cache_ttl', _ev_ttl_default)) if _all_params else _ev_ttl_default
+        # FIX-ECO-ALLPARAMS-V2-20260730: 删除_all_params bypass,直接使用默认值
+        # 根因(V1): L793-795使用_all_params但__init__签名无此参数→NameError→Ecosystem绑定失败
+        # V1修复(_all_params=None)是bypass: 保留了从不读取的死代码(_ev_cache_ttl全项目无读取位置)
+        # V2修复(根因): __init__不接受params参数,get_strategy_ecosystem()调用也不传kwargs,
+        #   EV_CACHE_TTL_DEFAULTS按策略类型自适应的设计从未被使用→直接用default值5.0s
+        #   若未来需要按策略类型自适应,应通过__init__参数或配置服务传入,而非未定义的_all_params
+        self._ev_cache_ttl: float = EV_CACHE_TTL_DEFAULTS['default']
         self._mode_engine = None
         self._snapshot_collector = None
         self._bar_counter: int = 0

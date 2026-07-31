@@ -1488,7 +1488,7 @@ ANNUALIZE_FACTOR_DAILY = 252.0
 ANNUALIZE_FACTOR_MINUTE = 252.0 * 240
 DAYS_PER_YEAR_CALENDAR: float = 365.0
 
-_DAILY_STRATEGY_TYPES = frozenset({'box_extreme', 'box_spring', 's5_arbitrage', 's6_market_making'})
+_DAILY_STRATEGY_TYPES = frozenset({'box_extreme', 'box_spring', 's6_market_making'})
 
 
 def get_annualize_factor(strategy_type: str, ticks_per_bar: int = 0) -> float:

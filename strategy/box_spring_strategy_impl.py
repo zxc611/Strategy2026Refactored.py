@@ -48,7 +48,12 @@ class BoxSpringStrategy:
     OPEN_REASON = 'BOX_SPRING'
 
     def __init__(self, params: Dict[str, Any]):
-        self._detector_service = BoxSpringDetectorService()
+        # FIX-S4-PARAMS-PASS-20260728: 传入params使DetectorService使用策略层配置
+        # 根因: BoxSpringDetectorService()未传params → 全部使用默认值
+        #   → 配置层的iv_low_percentile/spring_threshold等参数无法传递给检测器
+        #   → __getattr__委托detect_spring给_detector_service, 策略层自身属性成死代码
+        # 修复: 传入params, 与BoxSpringExecutorService(_exec_params)保持一致
+        self._detector_service = BoxSpringDetectorService(params)
         # [FIX-20260712-S4-P0] 将策略层参数透传给executor，否则executor使用自身默认值
         # (stop_profit_ratio=1.8/max_loss_pct=0.5/max_risk_ratio=0.02/max_spring_hold_minutes=120)
         # 与策略设计(stop_profit_ratio=5.0/max_loss_pct=0.95/max_spring_hold_minutes=5)严重不符。
@@ -92,7 +97,7 @@ class BoxSpringStrategy:
         self._positions: Dict[str, SpringPosition] = {}
 
         self._min_box_touches = params.get('min_box_touches', 3)
-        self._max_box_width_pct = params.get('max_box_width_pct', 0.04)
+        self._max_box_width_pct = params.get('max_box_width_pct', 0.01)  # FIX-BOX-DUAL-WIDTH-20260730: 4%→1%统一
         self._iv_low_percentile = params.get('iv_low_percentile', 5.0)
         self._iv_very_low_percentile = params.get('iv_very_low_percentile', 2.0)
         self._min_days_to_expiry = params.get('min_days_to_expiry', 2)

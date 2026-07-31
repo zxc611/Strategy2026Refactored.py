@@ -104,7 +104,10 @@ class RiskConfigProvider:
 
         try:
 
-            calc = self._rs._get_greeks_calculator()
+            # FIX-GREEKS-UNIFIED-SINGLETON-20260729: 调用自身方法(self._get_greeks_calculator)
+            # 原代码 self._rs._get_greeks_calculator() 经 RiskService.__getattr__
+            # 委托会被拒绝(_ 开头属性)，永远抛 AttributeError 命中 except，multiplier 恒为 1.0。
+            calc = self._get_greeks_calculator()
 
             if calc is not None and hasattr(calc, '_contract_multiplier'):
 
@@ -333,17 +336,27 @@ class RiskConfigProvider:
         # 已知限制: Greeks数据缺失时风险判断依赖其他维度补偿，但组合风险盲区增大。'
         # 建议在系统启动时预检GreeksCalculator可用性并输出WARNING级别告警警
 
-        if self._rs.__class__._greeks_calc is None:
+        # FIX-GREEKS-UNIFIED-SINGLETON-20260729: 统一使用 get_unified_greeks_calculator 单例
+        # 原代码 self._rs.__class__._greeks_calc = GreeksCalculator() 创建独立实例，
+        # 且访问 __class__._greeks_calc(类属性)与 risk_service.__init__ 设置的
+        # self._greeks_calc(实例属性)不一致，双重 bug 导致：
+        # 1. 写入端(tick_dispatch)与读取端(width_cache_query_mixin)使用不同实例
+        # 2. risk_config_provider 抛 AttributeError: type object has no attribute '_greeks_calc'
+        # 修复: 直接返回统一单例，消除类属性/实例属性混淆。
+        # 注: tick_dispatch.py 已改为直接调用 get_unified_greeks_calculator()，本方法
+        # 仅供 position_greeks/box_spring 等其他消费端经 risk_service 委托访问时使用。
 
-            with self._rs.__class__._greeks_calc_lock:
+        if self._rs._greeks_calc is None:
 
-                if self._rs.__class__._greeks_calc is None:
+            with self._rs._greeks_calc_lock:
+
+                if self._rs._greeks_calc is None:
 
                     try:
 
-                        from governance.greeks_calculator import GreeksCalculator
+                        from infra.service_contracts import get_unified_greeks_calculator
 
-                        self._rs.__class__._greeks_calc = GreeksCalculator()
+                        self._rs._greeks_calc = get_unified_greeks_calculator()
 
                     except (ImportError, RuntimeError) as e:
 
@@ -351,7 +364,7 @@ class RiskConfigProvider:
 
                         return None
 
-        return self._rs.__class__._greeks_calc
+        return self._rs._greeks_calc
 
 
 

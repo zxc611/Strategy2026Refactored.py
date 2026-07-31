@@ -578,6 +578,316 @@ def ensure_products_with_retry(data_service, max_retries: int = 5) -> Dict[str, 
             if registry_result['registry_null_internal'] or registry_result['registry_null_underlying']:
                 raise RuntimeError(f"registry完整性违约：{registry_result}")
 
+            # FIX-STALE-DATA-CLEANUP-20260729-V3: 清理换月后旧品种在ticks_raw/klines_raw中的残留数据
+            # 根因: _reset_config_instrument_catalog清空元数据表但不清行情表，导致旧品种tick残留
+            #       统计COUNT(DISTINCT)时包含旧品种→counts>expected→覆盖率检查失败→初始化阻断
+            # 设计原则: 数据进入是全量申请全量接收，14725品种必须100%落库
+            # 修复V1: 先DROP INDEX再DELETE再重建索引，规避DuckDB批量DELETE触发ART索引错误
+            # 修复V2: 若表/索引已物理损坏(DROP INDEX/DELETE仍报Failed to delete all rows from index)，
+            #         则删除损坏表并重建空表，彻底避开损坏索引路径
+            # 修复V3: V2的DROP TABLE在同一invalidated连接上执行也失败("database has been invalidated
+            #         because of a previous fatal error")。根因: DuckDB FATAL error标记连接为invalidated后，
+            #         同连接上任何操作都会失败。必须关闭所有连接(包括_SINGLE_CONN和线程局部连接)，
+            #         获取全新连接，在新连接上执行DROP TABLE + CREATE TABLE。
+            #         若新连接上DROP TABLE也失败(文件级损坏)，则删除整个.duckdb文件重建。
+            def _is_duckdb_corruption_error(e: Exception) -> bool:
+                msg = str(e).lower()
+                return (
+                    'failed to delete all rows from index' in msg
+                    or 'database has been invalidated' in msg
+                    or ('index' in msg and 'corrupt' in msg)
+                    or 'constraint violation' in msg
+                )
+
+            def _create_ticks_raw_table(conn):
+                conn.execute("""
+                    CREATE TABLE ticks_raw (
+                        timestamp TIMESTAMP,
+                        instrument_id VARCHAR,
+                        exchange VARCHAR,
+                        last_price DOUBLE,
+                        volume BIGINT,
+                        open_interest DOUBLE,
+                        turnover DOUBLE,
+                        bid_price DOUBLE,
+                        ask_price DOUBLE,
+                        bid_volume BIGINT,
+                        ask_volume BIGINT,
+                        bid_price2 DOUBLE,
+                        ask_price2 DOUBLE,
+                        bid_volume2 BIGINT,
+                        ask_volume2 BIGINT,
+                        bid_price3 DOUBLE,
+                        ask_price3 DOUBLE,
+                        bid_volume3 BIGINT,
+                        ask_volume3 BIGINT,
+                        bid_price4 DOUBLE,
+                        ask_price4 DOUBLE,
+                        bid_volume4 BIGINT,
+                        ask_volume4 BIGINT,
+                        bid_price5 DOUBLE,
+                        ask_price5 DOUBLE,
+                        bid_volume5 BIGINT,
+                        ask_volume5 BIGINT,
+                        date DATE,
+                        option_type VARCHAR,
+                        strike_price DOUBLE,
+                        is_otm BOOLEAN,
+                        sync_status VARCHAR,
+                        future_sync_status VARCHAR,
+                        is_same_rise BOOLEAN,
+                        is_same_fall BOOLEAN,
+                        is_diff_sync BOOLEAN,
+                        spread_quality INTEGER,
+                        days_to_expiry INTEGER,
+                        implied_volatility DOUBLE
+                    )
+                """)
+                conn.execute("""
+                    CREATE UNIQUE INDEX idx_ticks_raw_inst_ts
+                    ON ticks_raw(instrument_id, timestamp)
+                """)
+
+            def _create_klines_raw_table(conn):
+                conn.execute("""
+                    CREATE TABLE klines_raw (
+                        internal_id BIGINT,
+                        instrument_type VARCHAR,
+                        timestamp TIMESTAMP,
+                        open DOUBLE,
+                        high DOUBLE,
+                        low DOUBLE,
+                        close DOUBLE,
+                        volume BIGINT,
+                        open_interest DOUBLE,
+                        trade_date DATE,
+                        period VARCHAR DEFAULT 'M1'
+                    )
+                """)
+                conn.execute("""
+                    CREATE UNIQUE INDEX idx_klines_raw_inst_ts_period
+                    ON klines_raw(internal_id, timestamp, period)
+                """)
+
+            class _DuckDBCorruptionDetected(Exception):
+                """DuckDB表/索引损坏信号，触发外层获取新连接重建表。"""
+                pass
+
+            def _close_all_duckdb_connections(ds):
+                """关闭所有DuckDB连接(包括单连接模式和线程局部连接)，确保DuckDB文件可被重新打开。"""
+                from data.ds_db_connection import DBConnectionMixin
+                import threading as _threading
+                # 1. 关闭连接池中的所有连接
+                try:
+                    ds.close_all()
+                except Exception as _ca_err:
+                    logging.warning("[ensure_products] close_all异常(非阻断): %s", _ca_err)
+                # 2. 关闭单连接模式下的_SINGLE_CONN
+                with DBConnectionMixin._SINGLE_CONN_LOCK:
+                    _single = DBConnectionMixin._SINGLE_CONN
+                    if _single is not None:
+                        try:
+                            _single.close()
+                        except Exception:
+                            pass
+                        DBConnectionMixin._SINGLE_CONN = None
+                # 3. 关闭所有线程局部连接
+                with DBConnectionMixin._THREAD_LOCAL_CONNS_LOCK:
+                    _tl_conns = dict(DBConnectionMixin._THREAD_LOCAL_CONNS)
+                    DBConnectionMixin._THREAD_LOCAL_CONNS.clear()
+                for _tid, _tl_conn in _tl_conns.items():
+                    try:
+                        _tl_conn.close()
+                    except Exception:
+                        pass
+                logging.info("[ensure_products] 已关闭所有DuckDB连接(含_SINGLE_CONN和线程局部连接)")
+
+            def _rebuild_corrupted_tables_on_fresh_conn(ds):
+                """在全新DuckDB连接上重建损坏的ticks_raw/klines_raw表。"""
+                _fresh_conn = ds.get_connection()
+                try:
+                    # 在新连接上尝试DROP TABLE + CREATE TABLE
+                    for _tbl, _create_fn in [
+                        ('ticks_raw', _create_ticks_raw_table),
+                        ('klines_raw', _create_klines_raw_table),
+                    ]:
+                        try:
+                            _fresh_conn.execute(f"DROP TABLE IF EXISTS {_tbl}")
+                            logging.info("[ensure_products] 新连接上DROP TABLE %s 成功", _tbl)
+                        except Exception as _drop_err:
+                            if _is_duckdb_corruption_error(_drop_err):
+                                logging.warning(
+                                    "[ensure_products] 新连接上DROP TABLE %s 仍失败(文件级损坏): %s",
+                                    _tbl, _drop_err,
+                                )
+                                # 文件级损坏：删除整个.duckdb文件
+                                _db_file = getattr(ds, 'DB_FILE', None)
+                                if _db_file and _db_file != ':memory:' and os.path.exists(_db_file):
+                                    logging.warning(
+                                        "[ensure_products] 删除损坏的DuckDB文件: %s", _db_file
+                                    )
+                                    # 先关闭新连接
+                                    try:
+                                        _fresh_conn._unhealthy = True
+                                    except Exception:
+                                        pass
+                                    ds._return_connection(_fresh_conn)
+                                    _fresh_conn = None  # 避免finally重复归还
+                                    _close_all_duckdb_connections(ds)
+                                    # 删除.duckdb文件和相关的.wal文件
+                                    for _suffix in ['', '.wal', '.tmp']:
+                                        _fpath = _db_file + _suffix
+                                        if os.path.exists(_fpath):
+                                            try:
+                                                os.remove(_fpath)
+                                            except Exception as _rm_err:
+                                                logging.warning(
+                                                    "[ensure_products] 删除%s失败: %s",
+                                                    _fpath, _rm_err,
+                                                )
+                                    logging.info("[ensure_products] DuckDB文件已删除，触发重试以全新初始化")
+                                    # FIX-V3-FILELEVEL-20260729: 文件级损坏恢复不应在此处部分重建表
+                                    # 根因: 删除.duckdb文件后，futures_instruments/option_instruments等表数据
+                                    #       全部丢失，_rebuild_instruments_registry从空表SELECT导致
+                                    #       instruments_registry为空，覆盖率检查(expected=14725, actual=0)必然失败
+                                    # 修复: 直接raise RuntimeError触发ensure_products_with_retry的重试循环，
+                                    #       重试时_rebuild_config_instruments会用CREATE TABLE IF NOT EXISTS
+                                    #       重建全部表+数据(期货415+期权14310)，cleanup在新表上无损坏
+                                    raise RuntimeError(
+                                        "DuckDB文件级损坏已处理(文件已删除)，"
+                                        "需要重新执行全量品种初始化"
+                                    )
+                                else:
+                                    raise RuntimeError(
+                                        f"无法删除DuckDB文件(路径={_db_file})，"
+                                        f"DROP TABLE {_tbl} 失败: {_drop_err}"
+                                    ) from _drop_err
+                            raise
+                        # DROP成功后重建空表
+                        _create_fn(_fresh_conn)
+                        logging.info("[ensure_products] %s 表已在新连接上重建为空表", _tbl)
+                    try:
+                        _fresh_conn.execute("CHECKPOINT")
+                    except Exception as _cp_err:
+                        logging.warning("[ensure_products] 重建后CHECKPOINT失败(非致命): %s", _cp_err)
+                finally:
+                    if _fresh_conn is not None:
+                        ds._return_connection(_fresh_conn)
+
+            def _cleanup_one_raw_table(conn, table_name, id_column, idx_name, idx_sql, create_table_fn):
+                """清理单张行情表；若表/索引已损坏则标记连接unhealthy并抛出信号异常。"""
+                try:
+                    conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                    stale = conn.execute(f"""
+                        SELECT COUNT(*) FROM {table_name}
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM instruments_registry r
+                            WHERE r.{id_column} = {table_name}.{id_column}
+                        )
+                    """).fetchone()[0]
+                    if stale > 0:
+                        conn.execute(f"""
+                            DELETE FROM {table_name}
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM instruments_registry r
+                                WHERE r.{id_column} = {table_name}.{id_column}
+                            )
+                        """)
+                        logging.info(
+                            "[ensure_products] 旧品种%s残留已清理: %d 行",
+                            table_name, stale,
+                        )
+                    conn.execute(idx_sql)
+                    return True
+                except Exception as e:
+                    if _is_duckdb_corruption_error(e):
+                        # FIX-V3: 不在同一invalidated连接上尝试DROP TABLE
+                        # 标记连接为unhealthy，由外层关闭所有连接后获取新连接重建
+                        logging.warning(
+                            "[ensure_products] %s 表/索引损坏(连接将失效): %s",
+                            table_name, e,
+                        )
+                        try:
+                            conn._unhealthy = True
+                        except Exception:
+                            pass
+                        raise _DuckDBCorruptionDetected(
+                            f"{table_name} 损坏，需要新连接重建"
+                        ) from e
+                    raise
+
+            try:
+                cleanup_conn = data_service.get_connection()
+                _corruption_detected = False
+                try:
+                    # 检查表是否存在
+                    _cleanup_tables = [r[0] for r in cleanup_conn.execute(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
+                    ).fetchall()]
+                    _has_ticks_tbl = 'ticks_raw' in _cleanup_tables
+                    _has_klines_tbl = 'klines_raw' in _cleanup_tables
+
+                    if _has_ticks_tbl:
+                        _cleanup_one_raw_table(
+                            cleanup_conn,
+                            'ticks_raw',
+                            'instrument_id',
+                            'idx_ticks_raw_inst_ts',
+                            """
+                                CREATE UNIQUE INDEX IF NOT EXISTS idx_ticks_raw_inst_ts
+                                ON ticks_raw(instrument_id, timestamp)
+                            """,
+                            _create_ticks_raw_table,
+                        )
+
+                    if _has_klines_tbl:
+                        _cleanup_one_raw_table(
+                            cleanup_conn,
+                            'klines_raw',
+                            'internal_id',
+                            'idx_klines_raw_inst_ts_period',
+                            """
+                                CREATE UNIQUE INDEX IF NOT EXISTS idx_klines_raw_inst_ts_period
+                                ON klines_raw(internal_id, timestamp, period)
+                            """,
+                            _create_klines_raw_table,
+                        )
+
+                    # 强制落盘，释放WAL并恢复数据库文件一致性
+                    try:
+                        cleanup_conn.execute("CHECKPOINT")
+                    except Exception as _cp_err:
+                        logging.warning("[ensure_products] 旧品种清理后CHECKPOINT失败(非致命): %s", _cp_err)
+                except _DuckDBCorruptionDetected as _corr:
+                    # FIX-V3: 检测到DuckDB损坏，关闭所有连接，获取全新连接重建表
+                    _corruption_detected = True
+                    logging.warning(
+                        "[ensure_products] DuckDB损坏检测到，开始全连接关闭+新连接重建: %s",
+                        _corr,
+                    )
+                    # 先归还当前(已标记unhealthy)的连接
+                    try:
+                        data_service._return_connection(cleanup_conn)
+                    except Exception:
+                        pass
+                    cleanup_conn = None  # 避免finally中重复归还
+                    # 关闭所有DuckDB连接(包括_SINGLE_CONN和线程局部连接)
+                    _close_all_duckdb_connections(data_service)
+                    # 在全新连接上重建损坏的表
+                    _rebuild_corrupted_tables_on_fresh_conn(data_service)
+                    logging.info("[ensure_products] DuckDB损坏表已在全新连接上重建完成")
+                except Exception as cleanup_err:
+                    logging.error("[ensure_products] 旧品种行情清理失败: %s", cleanup_err)
+                    raise RuntimeError(
+                        f"旧品种行情清理失败，DuckDB可能已失效: {cleanup_err}"
+                    ) from cleanup_err
+                finally:
+                    if cleanup_conn is not None:
+                        data_service._return_connection(cleanup_conn)
+            except Exception as e:
+                logging.error("[ensure_products] 清理连接获取失败: %s", e)
+                raise RuntimeError(f"清理连接获取失败: {e}") from e
+
             coverage_result = data_service.ensure_config_coverage_for_today()
             expected_total = futures_loaded + options_loaded
             if coverage_result['ticks_raw_count'] != expected_total or coverage_result['klines_raw_count'] != expected_total:

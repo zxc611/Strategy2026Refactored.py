@@ -1,6 +1,7 @@
 # MODULE_ID: M1-029
 import logging
 import re
+import sys  # [FIX-HKL-RECURSION-20260728] 修复D: 递归深度安全网
 import threading
 import time
 from datetime import datetime
@@ -31,6 +32,8 @@ class HistoricalDataManager:
         self._historical_provider_retry_delays = list(self.DEFAULT_RETRY_DELAYS)
         self._hkl_diag_emitted = False
         self._historical_stop_flag = False
+        # [FIX-HKL-RECURSION-20260728] 修复C: Tick触发时间冷却
+        self._last_tick_triggered_historical_load_time = 0.0
 
     def _invoke_callback(self, name: str, *args, **kwargs):
         if self._callback_group is not None:
@@ -53,6 +56,8 @@ class HistoricalDataManager:
         self._historical_provider_retry_delays = list(self.DEFAULT_RETRY_DELAYS)
         self._hkl_diag_emitted = False
         self._historical_stop_flag = False
+        # [FIX-HKL-RECURSION-20260728] 修复C: Tick触发时间冷却
+        self._last_tick_triggered_historical_load_time = 0.0
 
     def filter_historical_month_scope(self, instrument_ids: List[str]) -> Tuple[List[str], int, str]:
         params = self._state_store.get('params')
@@ -327,6 +332,17 @@ class HistoricalDataManager:
                     mgr_self = self
 
                     def _retry_after_delay():
+                        # [FIX-HKL-RECURSION-20260728] 修复D: 递归深度安全网
+                        # 根因: _retry_after_delay→start_historical_kline_load→_retry_after_delay
+                        #   递归链在provider持续不可用时累积，最终触发RecursionError崩溃
+                        _depth = sys.getrecursiondepth()
+                        if _depth > 50:
+                            logging.error(
+                                "[HKL][strategy_id=%s] Recursion depth %d exceeds safety limit 50, aborting retry to prevent stack overflow",
+                                strategy_id, _depth,
+                            )
+                            return
+
                         time.sleep(delay)
                         # FIX-20260711-PAUSE-ACTION: sleep后检查暂停/销毁状态，避免覆盖暂停
                         # FIX-20260711-BUG: mgr_self无_provider属性，改用_state_store.get()（与L219-224一致）
@@ -334,7 +350,32 @@ class HistoricalDataManager:
                             logging.info("[HKL] retry cancelled: strategy paused or destroyed")
                             return
                         try:
-                            mgr_self.start_historical_kline_load()
+                            # [FIX-HKL-RECURSION-20260728] 修复B: _retry_after_delay改为非递归
+                            # 根因: 原实现调用 mgr_self.start_historical_kline_load() 形成递归链
+                            #   start_historical_kline_load→provider=None→_retry_after_delay→start_historical_kline_load
+                            #   在provider持续不可用时递归深度持续增长→RecursionError
+                            # 修复: 不再递归调用 start_historical_kline_load，改为直接尝试解析provider:
+                            #   - provider可用: 直接调用 load_historical_klines_once (无递归风险)
+                            #   - provider不可用: 仅记录日志，让tick路径下次触发
+                            _provider, _provider_source = mgr_self.resolve_historical_provider()
+                            if _provider is not None:
+                                logging.info(
+                                    "[HKL][strategy_id=%s] Provider now available (%s) after delay, loading directly",
+                                    strategy_id, _provider_source,
+                                )
+                                _instruments = mgr_self.build_historical_instruments()
+                                if _instruments:
+                                    mgr_self.load_historical_klines_once(_instruments, _provider, _provider_source)
+                                else:
+                                    logging.info(
+                                        "[HKL][strategy_id=%s] No instruments after delay, skip direct load",
+                                        strategy_id,
+                                    )
+                            else:
+                                logging.info(
+                                    "[HKL][strategy_id=%s] Provider still unavailable after delay, will rely on tick path to retry",
+                                    strategy_id,
+                                )
                         except Exception as e:
                             logging.error(f"[HKL] Provider retry failed: {e}", exc_info=True)
                     t = threading.Thread(target=_retry_after_delay, name=f"hkl-retry-{strategy_id}", daemon=True)
@@ -380,6 +421,10 @@ class HistoricalDataManager:
                 )
                 with mgr_self._historical_loader_lock:
                     if mgr_self._historical_load_retry_count < mgr_self._historical_load_max_retries:
+                        # [FIX-HKL-RECURSION-20260728] 修复A: Load失败路径递增retry_count
+                        # 根因: _runner异常时仅设置 _historical_load_started=False 允许重试，
+                        #   但未消耗retry_count配额，导致tick路径无限重试→递归调用链累积→栈溢出
+                        mgr_self._historical_load_retry_count += 1
                         mgr_self._historical_load_started = False
                         logging.info(
                             "[HKL][strategy_id=%s] Load failed, will allow retry (%d/%d)",
@@ -538,6 +583,16 @@ class HistoricalDataManager:
 
     def check_and_start_historical_load_on_tick(self) -> None:
         strategy_id = self._state_store.get('strategy_id')
+
+        # [FIX-HKL-RECURSION-20260728] 修复C: Tick触发增加时间冷却
+        # 根因: 收盘密集tick(每秒数十个)持续触发 check_and_start_historical_load_on_tick，
+        #   每次都启动新线程调用 start_historical_kline_load→_retry_after_delay→递归链累积
+        # 修复: 最小间隔60秒，防止收盘密集tick过度触发
+        _now = time.time()
+        _min_interval = 60.0
+        if _now - self._last_tick_triggered_historical_load_time < _min_interval:
+            return
+
         with self._historical_loader_lock:
             if self._historical_load_started and self._historical_kline_result is not None:
                 return
@@ -559,6 +614,8 @@ class HistoricalDataManager:
                 )
                 self._historical_load_started = False
             self._historical_load_started = True
+            # [FIX-HKL-RECURSION-20260728] 修复C: 更新tick触发时间戳
+            self._last_tick_triggered_historical_load_time = time.time()
 
         mgr_self = self
 

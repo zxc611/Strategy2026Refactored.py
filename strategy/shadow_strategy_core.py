@@ -161,7 +161,7 @@ class ConfigError(RuntimeError):
 
 class ShadowStrategyCoreService:
     """Core lifecycle and param management service (from ShadowStrategyCoreMixin)"""
-    STRATEGY_GROUPS = ['s1_hft', 's2_resonance', 's3_box', 's4_spring', 's5_arbitrage', 's6_market_making', 's7_divergence']
+    STRATEGY_GROUPS = ['s1_hft', 's2_resonance', 's3_box', 's4_spring', 's6_market_making', 's7_divergence']
     ALPHA_DECLINE_THRESHOLD_PCT = 20.0
     CONSECUTIVE_DECLINE_LIMIT = 2
     MIN_TRADES_FOR_METRICS = 5
@@ -618,7 +618,7 @@ class ShadowStrategyCoreService:
     def _enqueue_trade_log(self, record: ShadowTradeRecord) -> None:
         # P1-R9-20修复: 同时写入统一日志系统
         try:
-            logger.info("[SHADOW_TRADE] %s", json.dumps(
+            logger.debug("[SHADOW_TRADE] %s", json.dumps(
                 {**record.to_dict(), 'format_version': self.JSONL_FORMAT_VERSION},
                 ensure_ascii=False,
             ))

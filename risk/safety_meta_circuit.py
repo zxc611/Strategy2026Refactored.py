@@ -152,6 +152,48 @@ class CircuitBreakerService:
 
             return
 
+        # FIX-CB-DRY-RUN-20260727-V2: dry_run模式下跳过速率断路器评估
+        # 根因: dry_run模式下equity口径不正确(持仓总市值而非真实equity),
+        #   1分钟回撤计算得到73-82%虚假读数→误触发熔断→强制减仓INV-P1-10
+        # 上午FIX-DRY-RUN-DRAWDOWN-SKIP只跳过日回撤计算,未覆盖速率断路器分支
+        # 修复: dry_run模式直接return,与FIX-DRY-RUN-DRAWDOWN-SKIP同一原则
+        # 实盘零影响: dry_run_active默认False,实盘仍严格执行速率断路器监控
+        #
+        # FIX-CB-DRY-RUN-V2 (20260727晚): 修复V1检测路径永远返回False的bug
+        #   V1根因: 仅依赖 params_service.get_bool('dry_run_mode') + 不存在的 get_order_base()
+        #     1) params_service._params字典未从yaml加载该键(get_bool返回False)
+        #     2) order_base模块无 get_order_base() 函数(只有 get_order_service())
+        #   V1实证: 14:25重启后14:40仍触发熔断(1min_drawdown=82.87%)→INV-P1-10强制减仓
+        # V2修复: 三层fallback对齐 lifecycle_callbacks.py L133/L144/L159 设置的属性:
+        #   layer1: params_service.get_bool('dry_run_mode')  (主路径, 保留)
+        #   layer2: order_service._dry_run_mode             (lifecycle L159设置)
+        #   layer3: position_service._dry_run_active        (lifecycle L144设置)
+        _dry_run_active = False
+        try:
+            from config.params_service import get_params_service
+            _dry_run_active = bool(get_params_service().get_bool('dry_run_mode', False))
+        except Exception:
+            pass
+        if not _dry_run_active:
+            try:
+                from order.order_base import get_order_service
+                _osvc = get_order_service()
+                if _osvc is not None:
+                    _dry_run_active = bool(getattr(_osvc, '_dry_run_mode', False))
+            except Exception:
+                pass
+        if not _dry_run_active:
+            try:
+                from position.position_service import get_position_service
+                _psvc = get_position_service()
+                if _psvc is not None:
+                    _dry_run_active = bool(getattr(_psvc, '_dry_run_active', False))
+            except Exception:
+                pass
+        if _dry_run_active:
+            logging.info("[FIX-CB-DRY-RUN-V2] dry_run模式跳过速率断路器评估(避免虚假回撤触发熔断)")
+            return
+
         result = self._evaluate_circuit_conditions(now, equity_series, drop_pct_history, stats)
 
         if result is None:
@@ -527,13 +569,32 @@ class CircuitBreakerService:
             # 根因: dry_run模式下持仓为虚拟持仓，强制减仓会触发虚拟平仓→equity下降→日回撤硬止触发→新开仓被阻断
             # 实证: 7/16日志显示熔断后强制减仓139仓→日回撤8.66%>5%硬止→禁止新开仓
             # 修复: dry_run模式下仅记录警告日志，不执行实际减仓操作
-            from config.params_service import get_params_service
+            # FIX-CB-DRY-RUN-20260727-V2: 升级为三层fallback检查(与入口防护一致),
+            #   兜底防护: 即使check_circuit_breaker入口防护被绕过,强制减仓仍会跳过
+            # V2修复: V1仅依赖 params_service.get_bool + 不存在的 get_order_base, 永远返回False
+            #   V2三层fallback对齐 lifecycle_callbacks.py L133/L144/L159 设置的属性
             _dry_run = False
             try:
-                _ps_cfg = get_params_service()
-                _dry_run = bool(_ps_cfg.get_bool('dry_run_mode', False))
-            except Exception:  # FIX-Y R8-6-4: 扩大异常捕获，与FIX-F一致
+                from config.params_service import get_params_service
+                _dry_run = bool(get_params_service().get_bool('dry_run_mode', False))
+            except Exception:  # FIX-Y R8-6-4: 扩大异常捕获
                 pass
+            if not _dry_run:
+                try:
+                    from order.order_base import get_order_service
+                    _osvc = get_order_service()
+                    if _osvc is not None:
+                        _dry_run = bool(getattr(_osvc, '_dry_run_mode', False))
+                except Exception:
+                    pass
+            if not _dry_run:
+                try:
+                    from position.position_service import get_position_service
+                    _psvc = get_position_service()
+                    if _psvc is not None:
+                        _dry_run = bool(getattr(_psvc, '_dry_run_active', False))
+                except Exception:
+                    pass
             if _dry_run:
                 logging.warning("[SafetyMetaLayer] INV-P1-10: dry_run模式跳过强制减仓(虚拟持仓无需减仓)")
                 return

@@ -1,4 +1,4 @@
-﻿# MODULE_ID: M1-204
+# MODULE_ID: M1-204
 """Position Greeks - 跨策略Greeks敞口聚合+跨策略风控守卫
 
 从position_service.py拆分(CC-09 Step3):
@@ -48,6 +48,17 @@ _REASON_STRATEGY_MAP = {
     'ARBITRAGE': 'arbitrage', 'MARKET_MAKING': 'market_making',
     'INTRADAY': 'intraday',
     'MANUAL': 'manual',
+    # FIX-SG-MAP-BLOCKED-20260727: V4-FIX-O21合法reason注册到映射表
+    # 根因: V4-FIX-O21(strategy_config_layer.py L317-321)设计的'BLOCKED'是合法reason
+    #   (无策略信号匹配→BLOCKED, 数据不可用=不开仓, fail-closed设计),
+    #   但未注册到_REASON_STRATEGY_MAP, 导致_resolve_strategy_group查表失败
+    #   →FIX-SG-MAP-FAIL-LOUD触发CRITICAL告警(23条).
+    # 修复: 注册'BLOCKED'映射到'unknown'策略组.
+    # 原则: 'unknown'策略组使用默认RiskSurfaceAdjustment(保守参数), 不使用high_freq激进风控,
+    #   与FIX-SG-MAP-FAIL-LOUD的fallback行为一致(返回'unknown'), 不增加隐患.
+    # 证据: 2026-07-27 09:26:16 CRITICAL [FIX-SG-MAP-FAIL-LOUD] open_reason='dry_run:BLOCKED'
+    #       未注册到_REASON_STRATEGY_MAP, 返回'unknown'策略组.
+    'BLOCKED': 'unknown',
 }
 
 
@@ -66,14 +77,15 @@ def _is_option_instrument(instrument_id: str) -> bool:
 def _try_greeks_calculator(instrument_id: str, greek_name: str) -> Optional[float]:
     """P1-03修复: 统一委托GreeksCalculator获取精确Greeks值。返回None表示不可用需fallback。"""
     try:
-        from risk.risk_service import get_risk_service
-        _rs = get_risk_service()
-        if _rs:
-            _gc = _rs._get_greeks_calculator() if hasattr(_rs, '_get_greeks_calculator') else None
-            if _gc:
-                _greeks = _gc.get_greeks(instrument_id)
-                if _greeks and greek_name in _greeks:
-                    return _greeks[greek_name]
+        # FIX-GREEKS-UNIFIED-SINGLETON-20260729: 直接使用统一单例
+        # 原代码 _rs._get_greeks_calculator() 因 RiskService.__getattr__ 拒绝
+        # _ 开头属性委托而永远返回 None，导致仓位级 Greeks 永远降级到常量。
+        from infra.service_contracts import get_unified_greeks_calculator
+        _gc = get_unified_greeks_calculator()
+        if _gc:
+            _greeks = _gc.get_greeks(instrument_id)
+            if _greeks and greek_name in _greeks:
+                return _greeks[greek_name]
     except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as e:
         logging.debug("[P1-03] GreeksCalculator委托失败(将降级到常量): %s", e)
     return None

@@ -1207,14 +1207,18 @@ class SubscriptionCoreService:
         # FIX-20260704-CAPACITY-WARN: 分级别提示，避免5000建议上限在16287大规模配置下误报
         # 根因: 策略设计就是全量订阅16288个合约(期货390+期权15898)，5000上限会固定触发WARNING污染日志；
         # 超过5000属已知设计(用INFO)，超过DLL硬上限16287才需要WARNING。
+        # FIX-RES-P2-09-WARN-20260727: 修正误导性警告文本
+        # 原文本"已触发分区逻辑，仅注册前%d个合约"与实际行为不符——代码继续全量订阅所有合约,
+        # 并未执行任何分区/截断逻辑。误导性文本会让运维误以为有合约被静默丢弃。
+        # 修正: 准确描述行为——超限告警+继续全量订阅+关注DLL层是否拒绝部分合约。
         from config.config_params import CAPACITY_LIMITS
         _max_instruments = CAPACITY_LIMITS.get('max_instruments', 5000)
         _total_instruments = len(futures_list) + sum(len(opts) for opts in options_dict.values())
         _DLL_HARD_LIMIT = 16287
         if _total_instruments > _DLL_HARD_LIMIT:
             logging.warning(
-                "[RES-P2-09] 合约订阅超过DLL硬上限: %d/%d，已触发分区逻辑，仅注册前%d个合约",
-                _total_instruments, _DLL_HARD_LIMIT, _DLL_HARD_LIMIT)
+                "[RES-P2-09] 合约订阅超过DLL硬上限: %d/%d，继续全量订阅(不分区不截断)，需关注DLL层是否拒绝超限合约",
+                _total_instruments, _DLL_HARD_LIMIT)
         elif _total_instruments >= _max_instruments:
             logging.info(
                 "[RES-P2-09] 合约订阅达到大批量配置: %d/%d(建议上限)，未超过DLL硬上限%d，继续全量订阅",

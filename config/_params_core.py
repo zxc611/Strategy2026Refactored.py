@@ -1991,7 +1991,7 @@ def get_params_by_strategy_type(strategy_type: str = "all") -> Dict[str, Any]:
 
     Args:
 
-        strategy_type: 策略类型，支持'box_extreme'/'s4_spring'/'trend'/'s5_arbitrage'/'s6_market_making'/'all'
+        strategy_type: 策略类型，支持'box_extreme'/'s4_spring'/'trend'/'s6_market_making'/'all'
 
 
 
@@ -2015,8 +2015,6 @@ def get_params_by_strategy_type(strategy_type: str = "all") -> Dict[str, Any]:
         "s4_spring": ["spring_", "bounce_"],
 
         "trend": ["trend_", "ma_", "ema_", "macd_"],
-
-        "s5_arbitrage": ["arb_", "spread_"],
 
         "s6_market_making": ["mm_", "quote_"],
 

@@ -377,7 +377,7 @@ def run_backtest_box_extreme(
 
     _check_bar_data_monotonic(bar_data)  # NP-P2-15
     bt = _BacktestState()
-    box_threshold = params.get("box_detection_threshold", 0.03)
+    box_threshold = params.get("box_detection_threshold", 0.01)  # FIX-BOX-DUAL-WIDTH-20260730: 3%→1%统一
     box_min_bars = int(params.get("box_min_bars", 20))
     extreme_ratio = params.get("extreme_entry_ratio", 0.5)
     _sync_random_seed(42 if train else 24)
@@ -387,12 +387,12 @@ def run_backtest_box_extreme(
         box_width_max_pct=box_threshold * 100.0,
         min_bounce_count=int(params.get("box_min_bounce_count", 2)),
     )
+    # FIX-DEL-TICKBOX-V2-CLEANUP-V4-20260729: 删除 min_box_bars/adx_threshold/bounce_tolerance_pct 参数
+    # 这些参数已在 FIX-DEL-TICKBOX-V2-20260729 中从 BoxDetector.__init__ 删除(tick级箱体已彻底删除)
+    # 旧代码若传入会触发 TypeError: unexpected keyword argument
     _detector = BoxDetector(
         params=_box_params,
         lookback_bars=box_min_bars * 3,
-        min_box_bars=box_min_bars,
-        adx_threshold=params.get("box_adx_threshold", 25.0),
-        bounce_tolerance_pct=params.get("box_bounce_tolerance_pct", 0.1),
     )
 
     for idx in range(len(bar_data)):
@@ -530,14 +530,15 @@ def run_backtest_box_spring(
 
     from strategy.box_detector import BoxDetector, BoxStrategyParams
     _spring_box_params = BoxStrategyParams(
-        box_width_max_pct=params.get("spring_box_width_max_pct", 5.0),
+        box_width_max_pct=params.get("spring_box_width_max_pct", 1.0),  # FIX-BOX-DUAL-WIDTH-20260730: 5%→1%统一
         min_bounce_count=int(params.get("spring_min_bounce_count", 2)),
     )
+    # FIX-DEL-TICKBOX-V2-CLEANUP-V4-20260729: 删除 min_box_bars/adx_threshold 参数
+    # 这些参数已在 FIX-DEL-TICKBOX-V2-20260729 中从 BoxDetector.__init__ 删除(tick级箱体已彻底删除)
+    # 旧代码若传入会触发 TypeError: unexpected keyword argument
     _spring_detector = BoxDetector(
         params=_spring_box_params,
         lookback_bars=int(params.get("spring_lookback_bars", 60)),
-        min_box_bars=int(params.get("spring_min_box_bars", 20)),
-        adx_threshold=params.get("spring_adx_threshold", 25.0),
     )
 
     for idx in range(len(bar_data)):

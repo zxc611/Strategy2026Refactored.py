@@ -1152,7 +1152,13 @@ class DataWriterMixin:
                                 period VARCHAR DEFAULT 'M1'
                             )
                         """)
-                        logger.info("[AUTO-REPAIR] klines_raw表已重建，下次写入将成功")
+                        # FIX-KLINE-TS-TYPECAST-20260729: 重建表后必须创建UNIQUE INDEX
+                        # 否则ON CONFLICT (internal_id, timestamp, period) DO NOTHING会触发Binder Error
+                        conn.execute("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_klines_raw_inst_ts_period
+                            ON klines_raw(internal_id, timestamp, period)
+                        """)
+                        logger.info("[AUTO-REPAIR] klines_raw表已重建(含UNIQUE INDEX), 下次写入将成功")
                     except Exception as _repair_err:
                         logger.error("[AUTO-REPAIR] klines_raw表重建失败: %s", _repair_err)
                 if self._is_fatal_database_error(e):
@@ -1449,39 +1455,100 @@ class DataWriterMixin:
 
     def _fetch_historical_kline_data(self, provider, exchange, instrument_id,
                                       kline_style, history_minutes, start_time, end_time):
-        """通过平台MarketCenter获取历史K线数据"""
+        """通过平台MarketCenter获取历史K线数据
+
+        FIX-HKL-PROVIDER-V2-20260729: 修复DataWriterMixin版本API签名不匹配导致K线订阅0%
+        根因: 原实现仅尝试2种签名(start_time/end_time字符串 + instrument/count),
+              均不匹配PythonGO MarketCenter.get_kline_data()标准签名。
+              FIX-HKL-PROVIDER-20260729的修复被错误地应用到了StorageHistoryService
+              (storage_query_history.py), 但实际运行时DataService使用DataWriterMixin版本,
+              导致修复未生效, 所有合约历史K线加载失败, K线订阅成功率=0%。
+        修复: 移植完整的多签名匹配逻辑, 优先尝试PythonGO标准签名(无额外参数)。
+        """
         if provider is None:
             return []
+
+        provider_type = self._resolve_kline_provider(provider)[1]
+        if provider_type not in ('get_kline_data', 'get_kline'):
+            return []
+
         start_time_dt = start_time.replace(tzinfo=None) if hasattr(start_time, 'tzinfo') and start_time.tzinfo else start_time
         end_time_dt = end_time.replace(tzinfo=None) if hasattr(end_time, 'tzinfo') and end_time.tzinfo else end_time
         start_time_str = start_time_dt.strftime('%Y-%m-%d %H:%M:%S')
         end_time_str = end_time_dt.strftime('%Y-%m-%d %H:%M:%S')
-        try:
-            provider_type = self._resolve_kline_provider(provider)[1]
-            if provider_type == 'get_kline_data':
-                kline_data = provider.get_kline_data(
-                    exchange=exchange, instrument_id=instrument_id,
-                    style=kline_style, start_time=start_time_str, end_time=end_time_str,
-                )
-                return list(kline_data) if kline_data else []
-            elif provider_type == 'get_kline':
-                kline_data = provider.get_kline(
-                    exchange=exchange, instrument_id=instrument_id,
-                    style=kline_style, start_time=start_time_str, end_time=end_time_str,
-                )
-                return list(kline_data) if kline_data else []
-        except (TypeError, AttributeError):
+        count = -max(1, int(history_minutes))
+
+        get_kline_data_fn = getattr(provider, 'get_kline_data', None) if provider_type == 'get_kline_data' else None
+        get_kline_fn = getattr(provider, 'get_kline', None) if provider_type == 'get_kline' else None
+
+        # FIX-HKL-PROVIDER-V2-20260729: 多签名匹配, 优先PythonGO标准签名
+        # kw_style_only(无额外参数)是PythonGO MarketCenter.get_kline_data()的标准调用方式
+        call_specs = []
+        if get_kline_data_fn is not None:
+            call_specs = [
+                # PythonGO MarketCenter标准签名(无额外参数) — 最高优先级
+                ('kw_style_only', False, lambda: get_kline_data_fn(exchange=exchange, instrument_id=instrument_id, style=kline_style)),
+                # 带datetime时间窗口
+                ('kw_style_datetime', True, lambda: get_kline_data_fn(exchange=exchange, instrument_id=instrument_id, style=kline_style, start_time=start_time_dt, end_time=end_time_dt)),
+                # 带字符串时间窗口
+                ('kw_style_tstr', True, lambda: get_kline_data_fn(exchange=exchange, instrument_id=instrument_id, style=kline_style, start_time=start_time_str, end_time=end_time_str)),
+                # 带count参数(PythonGO要求count<0表示从最新往回取)
+                ('kw_style_count', False, lambda: get_kline_data_fn(exchange=exchange, instrument_id=instrument_id, style=kline_style, count=count)),
+                # instrument而非instrument_id(兼容旧版)
+                ('kw_instrument_count', False, lambda: get_kline_data_fn(exchange=exchange, instrument=instrument_id, style=kline_style, count=count)),
+                # 位置参数
+                ('pos_style_count', False, lambda: get_kline_data_fn(exchange, instrument_id, kline_style, count)),
+                # period而非style
+                ('kw_period_count', False, lambda: get_kline_data_fn(exchange=exchange, instrument_id=instrument_id, period=kline_style, count=count)),
+                # period + 字符串时间
+                ('kw_period_tstr', True, lambda: get_kline_data_fn(exchange=exchange, instrument_id=instrument_id, period=kline_style, start_time=start_time_str, end_time=end_time_str)),
+            ]
+        elif get_kline_fn is not None:
+            call_specs = [
+                ('kw_style_only', False, lambda: get_kline_fn(exchange=exchange, instrument_id=instrument_id, style=kline_style)),
+                ('kw_style_count', False, lambda: get_kline_fn(exchange=exchange, instrument_id=instrument_id, style=kline_style, count=count)),
+                ('pos_style_count', False, lambda: get_kline_fn(exchange, instrument_id, kline_style, count)),
+            ]
+
+        # 签名匹配缓存(类级别): 避免每个合约都遍历所有签名
+        if not hasattr(self.__class__, '_dw_kline_sig_cache'):
+            self.__class__._dw_kline_sig_cache = {}
+        cached_sig = self.__class__._dw_kline_sig_cache.get(provider_type)
+
+        # 优先使用缓存的签名
+        if cached_sig:
+            for name, allow_date_error, call_fn in call_specs:
+                if name == cached_sig:
+                    try:
+                        result = call_fn()
+                        if result is not None and (not isinstance(result, (list, tuple)) or len(result) > 0):
+                            return result
+                    except Exception:
+                        pass
+                    # 缓存签名失效, 清除缓存继续遍历
+                    self.__class__._dw_kline_sig_cache.pop(provider_type, None)
+                    break
+
+        # 遍历所有签名
+        for name, allow_date_error, call_fn in call_specs:
             try:
-                if provider_type == 'get_kline_data':
-                    kline_data = provider.get_kline_data(
-                        exchange=exchange, instrument=instrument_id,
-                        style=kline_style, count=-1440,
-                    )
-                    return list(kline_data) if kline_data else []
-            except Exception as e:
-                logger.debug(f"[_fetch_historical_kline_data] {instrument_id}: {e}")
-        except Exception as e:
-            logger.debug(f"[_fetch_historical_kline_data] {instrument_id}: {e}")
+                result = call_fn()
+                if isinstance(result, (list, tuple)) and len(result) == 0:
+                    continue
+                if result is None:
+                    continue
+                # 匹配成功, 缓存签名
+                self.__class__._dw_kline_sig_cache[provider_type] = name
+                logger.debug("[Storage] _fetch_historical_kline_data matched signature: %s for %s", name, instrument_id)
+                return result
+            except (TypeError, AttributeError):
+                continue
+            except Exception as exc:
+                if allow_date_error and ('Parsing Date Err' in str(exc) or 'Date Err' in str(exc)):
+                    continue
+                continue
+
+        logger.debug("[Storage] _fetch_historical_kline_data: no compatible signature for %s", instrument_id)
         return []
 
     @staticmethod
@@ -1672,21 +1739,45 @@ class DataWriterMixin:
             return False
 
     def _save_kline_impl(self, internal_id: int, instrument_type: str, klines: list, period: str) -> bool:
-        """保存K线数据到klines_raw表"""
+        """保存K线数据到klines_raw表
+
+        FIX-KLINE-TS-TYPECAST-20260729: 修复_to_timestamp()返回float导致DuckDB写入失败
+        根因: strategy_historical.py中ts = storage._to_timestamp(raw_dt)将K线时间转换为
+              Unix时间戳float, 但klines_raw.timestamp列是TIMESTAMP类型,
+              DuckDB无法cast DOUBLE->TIMESTAMP, 导致所有K线写入失败(1083个错误),
+              K线订阅成功率=0%, 级联导致S4-Spring箱体无法计算(upper=0/lower=0/bars=1)。
+        修复: 在写入前将float/int时间戳转换为datetime对象, 同时正确提取trade_date。
+        """
         if not klines:
             return True
         try:
+            from datetime import datetime as _dt
             kline_dicts = []
             for k in klines:
                 ts = k.get('ts')
                 trade_date = None
                 if ts is not None:
                     try:
-                        if hasattr(ts, 'date'):
-                            trade_date = ts.date()
+                        if isinstance(ts, (int, float)):
+                            # FIX-KLINE-TS-TYPECAST-20260729:
+                            # _to_timestamp()返回Unix时间戳float → datetime
+                            ts = _dt.fromtimestamp(ts)
                         elif isinstance(ts, str):
-                            from datetime import datetime as _dt
-                            trade_date = _dt.strptime(ts[:10], '%Y-%m-%d').date()
+                            # 字符串时间戳 → datetime
+                            s = ts.replace('T', ' ')
+                            _parsed = False
+                            for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d'):
+                                try:
+                                    ts = _dt.strptime(s, fmt)
+                                    _parsed = True
+                                    break
+                                except ValueError:
+                                    continue
+                            if not _parsed:
+                                ts = None
+                        # 从datetime提取trade_date
+                        if ts is not None and hasattr(ts, 'date'):
+                            trade_date = ts.date()
                     except Exception:
                         pass
                 kline_dicts.append({

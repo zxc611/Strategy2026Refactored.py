@@ -10,6 +10,7 @@ storage_query_history.py — StorageHistoryService
 
 import logging
 import math
+import threading
 import time
 from typing import List, Dict, Optional, Any, Tuple, Callable
 from datetime import datetime, timedelta
@@ -67,6 +68,26 @@ class StorageHistoryService:
         provider_class = type(resolved_provider).__name__
         provider_module = getattr(type(resolved_provider), '__module__', '')
 
+        # FIX-HKL-PROVIDER-20260729: 入口强制诊断(仅前3个合约)
+        if not hasattr(self.__class__, '_hkl_fetch_diag_count'):
+            self.__class__._hkl_fetch_diag_count = 0
+        if self.__class__._hkl_fetch_diag_count < 3:
+            self.__class__._hkl_fetch_diag_count += 1
+            # 直接测试get_kline_data
+            if provider_type in ('get_kline_data', 'market_center.get_kline_data'):
+                _gkd = getattr(resolved_provider, 'get_kline_data', None)
+                if _gkd:
+                    try:
+                        _test_r = _gkd(exchange=exchange, instrument_id=instrument_id, style=kline_style)
+                        _test_len = len(_test_r) if _test_r is not None else 'None'
+                        _test_type = type(_test_r[0]).__name__ if _test_r and len(_test_r) > 0 else 'N/A'
+                        _test_keys = list(_test_r[0].keys()) if _test_r and len(_test_r) > 0 and isinstance(_test_r[0], dict) else 'N/A'
+                        logging.info("[HKL-DIAG-FETCH] #%d inst=%s provider_type=%s direct_call: len=%s, first_type=%s, first_keys=%s",
+                                    self.__class__._hkl_fetch_diag_count, instrument_id, provider_type, _test_len, _test_type, _test_keys)
+                    except Exception as _e:
+                        logging.info("[HKL-DIAG-FETCH] #%d inst=%s direct_call EXCEPTION: %s: %s",
+                                    self.__class__._hkl_fetch_diag_count, instrument_id, type(_e).__name__, _e)
+
         if provider_type in ('get_kline_data', 'market_center.get_kline_data'):
             get_kline_data = getattr(resolved_provider, 'get_kline_data')
             count = self._estimate_kline_count(history_minutes, kline_style)  # 负值: PythonGO要求count<0表示从最新往回取
@@ -113,19 +134,40 @@ class StorageHistoryService:
                         count,
                     )
 
+            # FIX-HKL-PROVIDER-20260729: 强制诊断日志 - 仅前3个合约输出
+            _hkl_diag_counter = [0]
+            _hkl_diag_lock = threading.Lock()
+
             def _try_calls(call_specs: List[Tuple[str, Callable[[], Any]]], allow_date_error: bool = False) -> Any:
                 last_exc = None
                 for call_name, call in call_specs:
                     _log_probe_once('before', call_name)
                     try:
                         result = call()
+                        # FIX-HKL-PROVIDER-20260729: 强制诊断 - 对前3个合约记录实际返回值
+                        with _hkl_diag_lock:
+                            _diag_idx = _hkl_diag_counter[0]
+                        if _diag_idx < 3:
+                            _result_type = type(result).__name__ if result is not None else 'None'
+                            _result_len = len(result) if result is not None and hasattr(result, '__len__') else 'N/A'
+                            logging.info(
+                                "[HKL-DIAG] #%d instrument=%s call=%s result_type=%s result_len=%s",
+                                _diag_idx, instrument_id, call_name, _result_type, _result_len,
+                            )
                         if isinstance(result, (list, tuple)) and len(result) == 0:
                             logging.debug("[Storage] get_kline_data %s 返回空列表，跳过", call_name)
                             continue
                         _log_probe_once('after', call_name)
+                        with _hkl_diag_lock:
+                            _hkl_diag_counter[0] += 1
                         return result
                     except (TypeError, AttributeError) as exc:
                         last_exc = exc
+                        # FIX-HKL-PROVIDER-20260729: 对前3个合约记录异常
+                        with _hkl_diag_lock:
+                            _diag_idx2 = _hkl_diag_counter[0]
+                        if _diag_idx2 < 3:
+                            logging.info("[HKL-DIAG] #%d instrument=%s call=%s EXCEPTION: %s: %s", _diag_idx2, instrument_id, call_name, type(exc).__name__, exc)
                         continue
                     except Exception as exc:
                         last_exc = exc
@@ -134,6 +176,9 @@ class StorageHistoryService:
                             continue
                         logging.debug("[Storage] get_kline_data 调用失败，跳过 %s: %s", call_name, exc)
                         continue
+                # FIX-HKL-PROVIDER-20260729: 所有签名都失败后递增诊断计数
+                with _hkl_diag_lock:
+                    _hkl_diag_counter[0] += 1
                 if last_exc is not None:
                     logging.debug(
                         "[Storage] provider=%s instrument=%s 未匹配到可用历史K线调用签名，最后错误：%s",
@@ -144,6 +189,16 @@ class StorageHistoryService:
                 return None
 
             kline_call_specs = [
+                # FIX-HKL-PROVIDER-20260729: 添加PythonGO MarketCenter标准签名
+                # 根因: 原kline_call_specs全部带count=-1440或start_time(str)/end_time(str)参数,
+                #   但PythonGO MarketCenter.get_kline_data()的标准调用是:
+                #   (1) get_kline_data(exchange=..., instrument_id=..., style=...) — 无额外参数
+                #   (2) get_kline_data(exchange=..., instrument_id=..., style=..., start_time=datetime, end_time=datetime)
+                #   原签名全部不匹配→所有合约返回空→success=0, failed=14725
+                # 修复: 在最前面添加PythonGO标准签名(优先匹配)
+                ('kw_style_only', False, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, style=kline_style)),
+                ('kw_style_datetime', True, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, style=kline_style, start_time=start_time_naive, end_time=end_time_naive)),
+                # 以下为原有签名(保留兼容性)
                 ('kw_style_count', False, lambda: get_kline_data(exchange=exchange, instrument_id=instrument_id, style=kline_style, count=count)),
                 ('kw_instrument_count', False, lambda: get_kline_data(exchange=exchange, instrument=instrument_id, style=kline_style, count=count)),
                 ('pos_style_count', False, lambda: get_kline_data(exchange, instrument_id, kline_style, count)),
@@ -292,8 +347,18 @@ class StorageHistoryService:
                         normalized_klines = []
                         for kline in kline_data:
                             try:
+                                # FIX-HKL-PROVIDER-20260729: 支持dict和object两种K线格式
+                                # 根因: MarketCenter.get_kline_data()返回dict列表{k:'v'},
+                                #   但原代码用getattr(kline,'datetime',None)访问→dict无属性→None→异常
+                                #   →所有K线归一化失败→normalized_klines=[]→failed=14725
+                                # 修复: 优先尝试dict下标访问,回退到getattr
+                                def _kval(obj, key, default=None):
+                                    if isinstance(obj, dict):
+                                        return obj.get(key, default)
+                                    return getattr(obj, key, default)
+
                                 ts = self._to_timestamp(
-                                    getattr(kline, 'datetime', None)
+                                    _kval(kline, 'datetime')
                                 )
                                 if ts is None:
                                     raise ValueError('invalid historical kline timestamp')
@@ -302,12 +367,12 @@ class StorageHistoryService:
                                     'ts': ts,
                                     'instrument_id': instrument_id,
                                     'exchange': exchange,
-                                    'open': getattr(kline, 'open', 0.0),
-                                    'high': getattr(kline, 'high', 0.0),
-                                    'low': getattr(kline, 'low', 0.0),
-                                    'close': getattr(kline, 'close', 0.0),
-                                    'volume': getattr(kline, 'volume', 0),
-                                    'open_interest': getattr(kline, 'open_interest', 0),
+                                    'open': _kval(kline, 'open', 0.0),
+                                    'high': _kval(kline, 'high', 0.0),
+                                    'low': _kval(kline, 'low', 0.0),
+                                    'close': _kval(kline, 'close', 0.0),
+                                    'volume': _kval(kline, 'volume', 0),
+                                    'open_interest': _kval(kline, 'open_interest', 0),
                                     'period': normalized_period,
                                 })
                             except Exception as e:

@@ -20,7 +20,7 @@ from strategy.strategy_config_layer import (
     STRATEGY_MODE_HFT,
     STRATEGY_MODE_BOX_EXTREME,
     STRATEGY_MODE_BOX_SPRING,
-    STRATEGY_MODE_ARBITRAGE,
+    # DEL-S5-20260729: STRATEGY_MODE_ARBITRAGE已删除(S5套利策略用户决策放弃)
     STRATEGY_MODE_MARKET_MAKING,
     STRATEGY_MODE_HIGH_FREQ,
     ALL_STRATEGY_MODES,
@@ -319,7 +319,7 @@ DEFAULT_PARAM_TABLE = {  # R21-MEM-P2-05修复: 模块级大字典
     "phase_scan_gate_threshold": 25, "phase_scan_score_weights": [0.4, 0.3, 0.3],
     "capital_route_s1_hft": 0.25, "capital_route_s2_resonance": 0.15,
     "capital_route_s3_box": 0.12, "capital_route_s4_spring": 0.12,
-    "capital_route_s5_arbitrage": 0.08, "capital_route_s6_market_making": 0.08,
+    "capital_route_s6_market_making": 0.08,
     "capital_route_s7_divergence": 0.20,
     "var_confidence_level": 0.95, "var_upgrade_threshold": 0.02,
     "atr_upgrade_threshold": 0.015, "option_buyer_discount": 0.6,

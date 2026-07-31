@@ -263,23 +263,8 @@ class StrategyConfigLayer:
                         logging.info("[FIX-S3S5S6] BoxDetector极值信号触发: extreme_type=%s → BOX_EXTREME",
                                     getattr(extreme, 'extreme_type', 'unknown'))
 
-                # S5-ARBITRAGE: 检查套利信号(高置信度)
-                # 注意: HFT通道已在handle_arbitrage_signal()中直接下单(reason='hft_arbitrage')
-                #       为避免双重下单，仅当HFT通道未处理该信号时才走主交易周期
-                if reason == 'OTHER_SCALP':
-                    try:
-                        from strategy.tick_hft import get_last_arbitrage_signal
-                        arb_sig = get_last_arbitrage_signal()
-                        if arb_sig is not None:
-                            arb_conf = arb_sig.get('confidence', 0.0)
-                            arb_dev = abs(arb_sig.get('deviation_bps', 0.0))
-                            arb_consumed = arb_sig.get('hft_consumed', False)
-                            if arb_conf >= 0.8 and arb_dev > 100 and not arb_consumed:
-                                reason = 'ARBITRAGE'
-                                logging.info("[FIX-S3S5S6] 套利信号触发: dev=%.1fbps conf=%.2f → ARBITRAGE",
-                                            arb_dev, arb_conf)
-                    except (ValueError, KeyError, TypeError, AttributeError, ImportError):
-                        pass
+                # DEL-S5-20260729: S5套利策略已彻底删除, 套利信号路由已移除
+                # (HFT引擎的arbitrage信号检测仍在tick_hft.py中, 属S1-HFT范畴)
 
                 # S6-MARKET_MAKING: 检查做市条件(窄价差+低持仓)
                 if reason == 'OTHER_SCALP':
@@ -625,7 +610,7 @@ STRATEGY_MODE_BOX = "s3_box"
 STRATEGY_MODE_HFT = "hft"
 STRATEGY_MODE_BOX_EXTREME = "box_extreme"
 STRATEGY_MODE_BOX_SPRING = "box_spring"
-STRATEGY_MODE_ARBITRAGE = "s5_arbitrage"
+# DEL-S5-20260729: STRATEGY_MODE_ARBITRAGE已删除(S5套利策略用户决策放弃)
 STRATEGY_MODE_MARKET_MAKING = "s6_market_making"
 STRATEGY_MODE_HIGH_FREQ = "s1_hft"
 STRATEGY_MODE_DIVERGENCE_REVERSAL = "divergence_reversal"
@@ -681,7 +666,7 @@ _STATE_REASON_MAP = {
     'hft': 'HIGH_FREQ',
     's1_hft': 'HIGH_FREQ',
     'intraday': 'INTRADAY',  # [FIX-20260712-S2] S2日内交易策略
-    's5_arbitrage': 'ARBITRAGE',
+    # DEL-S5-20260729: 's5_arbitrage': 'ARBITRAGE' 已删除(S5套利策略用户决策放弃)
     's6_market_making': 'MARKET_MAKING',
     'divergence_reversal': 'DIVERGENCE_REVERSAL',
     'box_extreme': 'BOX_EXTREME',

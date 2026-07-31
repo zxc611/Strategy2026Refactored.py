@@ -7,7 +7,7 @@ import time
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from infra._helpers import get_logger  # R9-5
@@ -38,11 +38,13 @@ __all__ = [
     'execute_pursuit_exit',
     'execute_pursuit_entry',
     'execute_pursuit_add',
-    'handle_arbitrage_signal',
+    # DEL-S1-ARB-20260729: 套利交易已删除(用户决策: 风险太大)
+    # S1-HFT仅保留 tick级期权排序 + tick级订单流 开仓
+    # 'handle_arbitrage_signal',  -- 已删除
+    # 'get_last_arbitrage_signal',  -- 已删除
     'handle_transition_signal',
     'handle_smart_money_signal',
     'handle_filtered_signal',
-    'get_last_arbitrage_signal',
     # from strategy_tick_handler
     'TickHandlerMixin',
     'DynamicPursuitEngine',
@@ -81,6 +83,9 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
         # 应独立执行，确保宽度强度计算和状态参数更新不受HFT可用性影响
         bid_price = svc._get_tick_field(tick, 'bid_price1', 0.0)
         ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
+
+        # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃), tick投喂块已移除
+
         direction_raw = ''
         # FIX-HFT-DIR-20260724: direction获取根因修复(S1-HFT全天0下单根因)
         # 根因: rc.get_tick()方法不存在(RealTimeCache无此方法,仅有get_authoritative_state/
@@ -105,26 +110,133 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
             pass  # direction_raw保持'', 后续条件推断或fail-closed
         # direction推断: 仅当bid/ask都有效且last_price明确偏向一侧时才推断
         # 删除增强B: dead-zone(last_price在spread中位)时不再用volume推断, 直接fail-closed
+        # FIX-S1S7-FUTURES-DIR-20260727: 期货direction推断根因修复
+        # 根因1: 期货spread极小(1-2tick), dead_zone_ratio按比例计算→dead-zone绝对宽度<1点
+        #        last_price在spread中间→落在dead-zone→direction为空→0下单
+        #        例: rb2612 bid=3760 ask=3761 spread=1, ratio=0.40
+        #            buy阈值=3761-0.40=3760.60, sell阈值=3760+0.40=3760.40
+        #            last_price=3760.5在(3760.40,3760.60)→dead-zone→0下单
+        # 根因2: 期货tick的bid/ask有时=0(非连续竞价/集合竞价/C++推送异常)
+        #        →L161条件不满足→dead-zone推断不执行→direction永远空
+        # 修复策略(三层, 从严到宽, 均保持fail-closed):
+        #   1. 期权: direction_raw='buy'(不变, 期权有隐含方向)
+        #   2. 期货bid/ask有效: 按绝对tick偏移推断(last_price距bid/ask≤1tick即推断)
+        #      期货spread小, 1tick偏移覆盖大部分情况; 期权spread大走比例推断
+        #   3. 期货bid/ask无效(=0): 缓存上一次有效bid/ask用于推断; 无缓存则fail-closed
+        # 不改变策略逻辑: 仍然是fail-closed(数据不可用=不开仓), 仅修正推断算法适配期货特性
+        _dead_zone_ratio = 0.40  # 默认值(期权用)
+        try:
+            from config.config_service import get_cached_params
+            _cached = get_cached_params()
+            if _cached and 'hft_dead_zone_ratio' in _cached:
+                _dead_zone_ratio = float(_cached['hft_dead_zone_ratio'])
+        except (ImportError, AttributeError, TypeError, ValueError):
+            pass
+
+        # FIX-S1S7-FUTURES-DIR-20260727: 期货direction推断
+        # 判断是否为期货合约
+        _is_future_inst = False
+        try:
+            from infra.subscription_service import SubscriptionManager
+            _is_future_inst = not SubscriptionManager.is_option(instrument_id)
+        except Exception:
+            pass  # 无法判断时保守处理
+
         if not direction_raw and bid_price > 0 and ask_price > 0:
-            mid = (bid_price + ask_price) / 2.0
-            if mid > 0:
+            if _is_future_inst:
+                # 期货: 按绝对tick偏移推断
+                # 期货spread通常1-2tick, last_price距bid/ask≤1tick即推断方向
+                # 这比比例推断更适配期货特性(比例推断在spread=1时dead-zone绝对宽度<1点)
                 spread = ask_price - bid_price
-                if last_price >= ask_price - spread * 0.1:
-                    direction_raw = 'buy'
-                elif last_price <= bid_price + spread * 0.1:
-                    direction_raw = 'sell'
-                # else: dead-zone, direction_raw保持'' → V4-FIX-O1 fail-closed (条件不成就=不开仓)
+                if spread > 0:
+                    _fut_tick_size = 1.0  # 最小变动价位(大部分期货1, 股指0.2等)
+                    # 根据合约类型调整tick_size
+                    _inst_upper = instrument_id.upper()
+                    if _inst_upper[:2] in ('IF', 'IC', 'IH', 'IM'):
+                        _fut_tick_size = 0.2  # 股指期货最小变动0.2点
+                    elif _inst_upper[:2] in ('TF', 'TS', 'TL', 'T'):
+                        _fut_tick_size = 0.005  # 国债期货
+                    # 期货direction推断策略: 用mid分界(last_price>=mid→buy, <mid→sell)
+                    # 期货spread极小(1-5tick), mid是最自然的分界线, 无需dead-zone
+                    # 期权spread大, 需要ratio-based dead-zone(40%), 但期货不需要
+                    # 例: rb2612 spread=1 bid=3760 ask=3761 mid=3760.5
+                    #     last=3760.5→buy(>=mid), last=3760→sell(<mid)
+                    # 例: IF2502 spread=0.6 bid=3831.6 ask=3832.2 mid=3831.9
+                    #     last=3832.0→buy(>=mid), last=3831.6→sell(<mid)
+                    _fut_mid = (bid_price + ask_price) / 2.0
+                    if last_price >= _fut_mid:
+                        direction_raw = 'buy'
+                    else:
+                        direction_raw = 'sell'
+            else:
+                # 期权: 按比例推断(spread大, 比例推断更合适)
+                mid = (bid_price + ask_price) / 2.0
+                if mid > 0:
+                    spread = ask_price - bid_price
+                    if last_price >= ask_price - spread * _dead_zone_ratio:
+                        direction_raw = 'buy'
+                    elif last_price <= bid_price + spread * _dead_zone_ratio:
+                        direction_raw = 'sell'
+
+        # FIX-S1S7-CACHE-20260729: 缓存更新独立于direction推断执行
+        # 根因: 原cache更新代码在 `if not direction_raw` 块内的else分支(line 196-202),
+        #   当bid>0 AND ask>0时direction_raw已在line 143-168设置→not direction_raw=False
+        #   →跳过整个块→cache从不更新→后续tick bid/ask=0时cache为空→direction永远为空
+        # 修复: 将cache更新移到独立块,只要期货bid>0 AND ask>0就更新cache(无论direction是否已设置)
+        if _is_future_inst and bid_price > 0 and ask_price > 0:
+            _cache_map_upd = dispatch_hft_tick.__dict__.get('_last_valid_bid_ask', {})
+            if not isinstance(_cache_map_upd, dict):
+                _cache_map_upd = {}
+                dispatch_hft_tick._last_valid_bid_ask = _cache_map_upd
+            _cache_map_upd[instrument_id] = (bid_price, ask_price)
+
+        # FIX-S1S7-FUTURES-DIR-20260727: 期货bid/ask=0时，用缓存的上一次; last_price与缓存mid对比推断
+        if not direction_raw and _is_future_inst and last_price > 0:
+            if bid_price <= 0 or ask_price <= 0:
+                # bid/ask无效，尝试使用缓存的最后一次有效值
+                _cache_map = dispatch_hft_tick.__dict__.get('_last_valid_bid_ask', {})
+                if not isinstance(_cache_map, dict):
+                    _cache_map = {}
+                    dispatch_hft_tick._last_valid_bid_ask = _cache_map
+                _cached_ba = _cache_map.get(instrument_id)
+                if _cached_ba and len(_cached_ba) == 2:
+                    _cb, _ca = _cached_ba
+                    if _cb > 0 and _ca > 0:
+                        _cached_mid = (_cb + _ca) / 2.0
+                        if last_price >= _cached_mid:
+                            direction_raw = 'buy'
+                        else:
+                            direction_raw = 'sell'
         # V4-FIX-O1: direction为空=无方向=不开仓(fail-closed)
         # 原则: 数据不可用=不开仓，而非数据不可用=默认buy方向
         if not direction_raw and last_price > 0:
-            # FIX-20260723-O1-THROTTLE: 日志限频(60s冷却)，原每tick每合约打WARNING→784次/下午
+            # DIAG-S1S7-20260727: 期货direction为空时记录bid/ask/last_price/DeadZoneRatio，定位根因
+            # 仅对期货合约、仅INFO级别、节流60s
+            try:
+                from infra.subscription_service import SubscriptionManager
+                _is_opt_diag = SubscriptionManager.is_option(instrument_id)
+            except Exception:
+                _is_opt_diag = True  # 降级时不打诊断
+            if not _is_opt_diag:
+                _diag_cls = svc.__class__
+                _diag_ts_map = getattr(_diag_cls, '_s1s7_diag_ts', {})
+                if not isinstance(_diag_ts_map, dict):
+                    _diag_ts_map = {}
+                    setattr(_diag_cls, '_s1s7_diag_ts', _diag_ts_map)
+                _diag_now = time.time()
+                if _diag_now - _diag_ts_map.get(instrument_id, 0.0) >= 60:
+                    logging.info("[DIAG-S1S7] 期货direction为空 inst=%s bid=%.2f ask=%.2f last=%.2f ratio=%.2f spread=%.4f",
+                                instrument_id, bid_price, ask_price, last_price, _dead_zone_ratio,
+                                (ask_price - bid_price) if bid_price > 0 and ask_price > 0 else 0.0)
+                    _diag_ts_map[instrument_id] = _diag_now
+            # FIX-20260723-O1-THROTTLE: 日志限频(300s冷却)
             _o1_now = time.time()
             _o1_last = svc.__class__.__dict__.get('_o1_warn_ts', {})
             if not isinstance(_o1_last, dict):
                 _o1_last = {}
                 setattr(svc.__class__, '_o1_warn_ts', _o1_last)
-            if _o1_now - _o1_last.get(instrument_id, 0.0) >= 60:
-                logging.info("[V4-FIX-O1] direction为空, 返回None (数据不可用=不开仓) inst=%s", instrument_id)
+            if _o1_now - _o1_last.get(instrument_id, 0.0) >= 300:
+                logging.debug("[V4-FIX-O1] direction为空, 返回None (数据不可用=不开仓) inst=%s", instrument_id)
                 _o1_last[instrument_id] = _o1_now
             return None
 
@@ -172,6 +284,17 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
             logging.debug("[R3-L2] width_resonance computation failed: %s", _r3_err)
             pass
+
+        # FIX-SYNC-OTM-20260730: 诊断日志，确认width_resonance和resonance_strength是否非零
+        # 限频(60s per instrument_id)
+        _wr_now = time.time()
+        _wr_last = dispatch_hft_tick.__dict__.get('_wr_log_ts', {})
+        if not isinstance(_wr_last, dict):
+            _wr_last = {}
+            dispatch_hft_tick._wr_log_ts = _wr_last
+        if _wr_now - _wr_last.get(instrument_id, 0.0) >= 60:
+            logging.info("[FIX-SYNC-OTM] width_resonance: inst=%s wr=%.4f", instrument_id, width_resonance)
+            _wr_last[instrument_id] = _wr_now
 
         resonance_strength = 0.0
         prev_resonance_strength = 0.0
@@ -228,6 +351,7 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                             execute_pursuit_entry(svc, hft, pursuit_signal, tick, instrument_id, last_price, volume, exchange)
                         elif action == 'ADD_POSITION':
                             execute_pursuit_add(svc, hft, pursuit_signal, tick, instrument_id, last_price, volume, exchange)
+                        # S1-HFT单路径架构: 信号完全由路径1(dispatch_hft_tick)实时处理
 
                 pursuit_exit = hft_result.get('pursuit_exit')
                 if pursuit_exit:
@@ -254,19 +378,10 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
                         except (ValueError, KeyError, TypeError, RuntimeError, AttributeError) as ex_e:
                             logging.debug("[_dispatch_hft_tick] HFT pursuit exit execution error: %s", ex_e)
 
-                arbitrage_signal = hft_result.get('arbitrage_signal')
-                if arbitrage_signal:
-                    # FIX-MARKET-CLOSE: 收盘后交易所通道关闭，套利信号无法执行
-                    _arb_blocked = False
-                    try:
-                        from infra.market_time_service import get_market_open_cache as _gmo_cache_20260720
-                        if not _gmo_cache_20260720().is_open():
-                            _arb_blocked = True
-                    except Exception as _mkt_err3:  # V4-FIX-O3: fail-closed
-                        _arb_blocked = True  # 门控不可用=不交易
-                        logging.warning("[V4-FIX-O3] MarketTimeService异常(arb), 阻断 (fail-closed): %s", _mkt_err3)
-                    if not _arb_blocked:
-                        handle_arbitrage_signal(svc, arbitrage_signal, instrument_id)
+                # DEL-S1-ARB-20260729: 套利信号分发已删除(用户决策: 风险太大)
+                # S1-HFT不再执行微观结构套利交易，仅保留期权排序+订单流开仓
+                # arbitrage_signal = hft_result.get('arbitrage_signal')
+                # if arbitrage_signal: ... handle_arbitrage_signal(...)
 
                 transition_signal = hft_result.get('transition_signal')
                 if transition_signal:
@@ -326,6 +441,8 @@ def execute_pursuit_exit(svc, hft: Any, exit_signal: Dict[str, Any], instrument_
     if not instrument_id or volume <= 0:
         return
     pe = hft.pursuit_engine
+    # FIX-S1-DYNAMIC-COOLDOWN-20260730: 记录平仓;仅reason包含stop_loss时计入止损计数
+    pe.record_exit(instrument_id, reason)
     with pe._lock:
         pos = pe._positions.get(instrument_id)
         if pos and not pos.platform_confirmed and platform_order_ids:
@@ -466,7 +583,11 @@ def execute_pursuit_entry(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: A
         ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
         bids = [(bid_price, 100)] if bid_price > 0 else None
         asks = [(ask_price, 100)] if ask_price > 0 else None
-        signal_strength = min(abs(strength_delta) / 0.3, 1.0)
+        # FIX-S1-SUPerset-20260730: 按signal_source适配信号强度归一化分母
+        # surge(默认): delta/0.3; level_resonance: delta/0.45; degrade_order_flow: delta/0.08
+        _sig_src = pursuit_signal.get('signal_source', 'surge')
+        _strength_denom = {'surge': 0.3, 'level_resonance': 0.45, 'degrade_order_flow': 0.08}.get(_sig_src, 0.3)
+        signal_strength = min(abs(strength_delta) / _strength_denom, 1.0) if _strength_denom > 0 else 0.0
         order_ids = order_svc.send_order_split(
             instrument_id=instrument_id, volume=signal_volume, price=price,
             direction=direction, action='OPEN', exchange=exchange,
@@ -479,6 +600,8 @@ def execute_pursuit_entry(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: A
             confirmed = all(pe.confirm_position_on_platform(instrument_id, oid) for oid in order_ids)
             if not confirmed:
                 logging.warning("[HFT] pursuit entry: some confirm_position_on_platform failed for %s", instrument_id)
+            # FIX-S1-DYNAMIC-COOLDOWN-20260730: 记录成功开仓
+            pe.record_entry(instrument_id, is_add=False)
             logging.info("[HFT] pursuit entry order placed: %s %s vol=%d price=%.2f order_ids=%s",
                          instrument_id, direction, signal_volume, price, order_ids)
         else:
@@ -492,6 +615,11 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
     direction = pursuit_signal.get('direction', '')
     add_volume = pursuit_signal.get('volume', 1)
     price = pursuit_signal.get('price', last_price)
+    # FIX-S1-STRENGTH-DELTA-20260729: 补充strength_delta变量定义
+    # 根因: execute_pursuit_add第619行引用strength_delta但函数体未定义该变量
+    #   → NameError: name 'strength_delta' is not defined → 加仓永远失败
+    # 修复: 从pursuit_signal获取(与execute_pursuit_entry第538行一致)
+    strength_delta = pursuit_signal.get('strength_delta', 0.0)
     if not svc._check_hft_open_risk(instrument_id, direction, price, add_volume, pursuit_signal):
         return
     try:
@@ -509,9 +637,12 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
         ask_price = svc._get_tick_field(tick, 'ask_price1', 0.0)
         bids = [(bid_price, 100)] if bid_price > 0 else None
         asks = [(ask_price, 100)] if ask_price > 0 else None
-        # V4-FIX-O4: signal_strength使用实际评估强度(非硬编码0.9)
-        # 加仓信号强度=入场强度的80%(加仓应弱于首次入场)
-        _add_signal_strength = min(abs(strength_delta) / 0.3, 1.0) * 0.8 if strength_delta != 0.0 else 0.0
+        # FIX-S1-SUPerset-ADD-20260730: 加仓信号强度按signal_source归一化(与execute_pursuit_entry对齐)
+        # surge: delta/0.3; level_resonance: delta/0.45; degrade_order_flow: delta/0.08
+        _add_sig_src = pursuit_signal.get('signal_source', 'surge')
+        _add_strength_denom = {'surge': 0.3, 'level_resonance': 0.45, 'degrade_order_flow': 0.08}.get(_add_sig_src, 0.3)
+        _add_signal_strength = (min(abs(strength_delta) / _add_strength_denom, 1.0) * 0.8
+                                if strength_delta != 0.0 and _add_strength_denom > 0 else 0.0)
         order_ids = order_svc.send_order_split(
             instrument_id=instrument_id, volume=add_volume, price=price,
             direction=direction, action='OPEN', exchange=exchange,
@@ -524,6 +655,8 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
             confirmed = all(pe.add_platform_order_id(instrument_id, oid) for oid in order_ids)
             if not confirmed:
                 logging.warning("[HFT] pursuit add: some add_platform_order_id failed for %s", instrument_id)
+            # FIX-S1-DYNAMIC-COOLDOWN-20260730: 记录成功加仓(加仓也计入连续交易)
+            pe.record_entry(instrument_id, is_add=True)
             logging.info("[HFT] pursuit add order placed: %s %s vol=%d price=%.2f order_ids=%s",
                          instrument_id, direction, add_volume, price, order_ids)
         else:
@@ -532,76 +665,16 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
         logging.warning("[HFT] _execute_pursuit_add failed: %s", e)
 
 
-_last_arbitrage_signal: Optional[Dict[str, Any]] = None
-_last_arbitrage_signal_ts: float = 0.0
-_ARBITRAGE_SIGNAL_TTL_SEC: float = 60.0
-
-
-def get_last_arbitrage_signal() -> Optional[Dict[str, Any]]:
-    global _last_arbitrage_signal, _last_arbitrage_signal_ts
-    if _last_arbitrage_signal is None:
-        return None
-    if time.time() - _last_arbitrage_signal_ts > _ARBITRAGE_SIGNAL_TTL_SEC:
-        _last_arbitrage_signal = None
-        return None
-    return _last_arbitrage_signal
-
-
-def handle_arbitrage_signal(svc, arbitrage_signal: Dict[str, Any], instrument_id: str) -> None:
-    direction = arbitrage_signal.get('direction', '')
-    deviation = arbitrage_signal.get('deviation_bps', 0.0)
-    confidence = arbitrage_signal.get('confidence', 0.0)
-    if confidence < 0.6:
-        return
-    global _last_arbitrage_signal, _last_arbitrage_signal_ts
-    _last_arbitrage_signal = dict(arbitrage_signal)
-    _last_arbitrage_signal['instrument_id'] = instrument_id
-    _last_arbitrage_signal_ts = time.time()
-    logging.info("[HFT] microstructure arbitrage: %s dir=%s deviation=%.1fbps confidence=%.2f",
-                 instrument_id, direction, deviation, confidence)
-    try:
-        sig_svc = svc._state_store.get_ref('_signal_service') if svc._state_store else None
-        if sig_svc is None:
-            try:
-                from signal.signal_service import SignalService
-                sig_svc = SignalService()
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _arb_sig_err:
-                logging.debug("[R22-P1-NEW] 套利SignalService初始化失败(交易机会可能丢失): %s", _arb_sig_err)
-        if sig_svc and abs(deviation) > 10:
-            signal_type = 'OPEN_LONG' if direction == 'BUY' else 'OPEN_SHORT'
-            sig_svc.generate_signal(
-                instrument_id=instrument_id, signal_type=signal_type,
-                price=arbitrage_signal.get('entry_price', 0.0), volume=1,
-                reason='hft_arbitrage_deviation', priority=7, cooldown_seconds=5,
-                signal_strength=min(abs(deviation) / 100.0, 1.0),
-            )
-        # [FIX-20260711-S5S6] S5套利改为实盘模拟监控模式，不直接下单
-        # 原代码直接通过OrderService.send_order下单，现改为通过ArbitrageMonitor生成模拟信号+快照
-        if abs(deviation) > 10:
-            try:
-                from strategy.monitor.arbitrage_monitor import ArbitrageMonitor
-                _arb_monitor = ArbitrageMonitor.get_instance()
-                # FIX-4 RC-5: 补充instrument_id字段，确保on_arbitrage_signal能识别合约
-                # 根因: arbitrage_signal dict可能缺少instrument_id，导致monitor无法记录合约
-                if not arbitrage_signal.get('instrument_id'):
-                    arbitrage_signal['instrument_id'] = instrument_id
-                _arb_monitor.on_arbitrage_signal(arbitrage_signal)
-                # FIX-20260713-S5S6-V1: V1 save_snapshot 仅接受 SimulatedArbitrageSignal，
-                # 通过 generate_simulated_signal 生成标准化信号并自动落盘快照。
-                _sim_signal = _arb_monitor.generate_simulated_signal()
-                # FIX-J: 移除重复save_snapshot调用，generate_simulated_signal内部已调用save_snapshot
-                # 根因: generate_simulated_signal()内部L990/1084已调用save_snapshot，
-                #       此处再调用一次→同一信号保存两次→快照统计虚高
-                logging.info("[S5-MONITOR] 套利信号模拟保存: %s dir=%s deviation=%.1fbps (不下单，仅监控)",
-                             instrument_id, direction, deviation)
-                _last_arbitrage_signal['hft_consumed'] = True
-                _last_arbitrage_signal['monitor_saved'] = True
-            except (ValueError, KeyError, TypeError, RuntimeError, AttributeError, ImportError) as _mon_err:
-                logging.warning("[S5-MONITOR] 套利监控模块调用失败(降级为纯日志): %s", _mon_err)
-                _last_arbitrage_signal['hft_consumed'] = True
-    except Exception as e:
-        # FIX-60 D1: 扩展except为Exception并升级日志级别(debug→warning)，避免吞掉MemoryError/ConnectionError等
-        logging.warning("[HFT] _handle_arbitrage_signal error: %s", e)
+# DEL-S1-ARB-20260729: 套利交易全局状态和函数已删除(用户决策: 风险太大)
+# S1-HFT仅保留 tick级期权排序 + tick级订单流 开仓
+# _last_arbitrage_signal: Optional[Dict[str, Any]] = None
+# _last_arbitrage_signal_ts: float = 0.0
+# _ARBITRAGE_SIGNAL_TTL_SEC: float = 60.0
+#
+# def get_last_arbitrage_signal() -> Optional[Dict[str, Any]]: ... (已删除)
+# def handle_arbitrage_signal(svc, arbitrage_signal, instrument_id) -> None: ... (已删除)
+# 原handle_arbitrage_signal会将套利偏离信号通过SignalService.generate_signal(reason='hft_arbitrage_deviation')
+# 生成OPEN_LONG/OPEN_SHORT信号并下单，现已完全移除
 
 
 def handle_transition_signal(svc, transition_signal: Dict[str, Any],
@@ -697,6 +770,12 @@ class PursuitPosition:
     created_at: float = field(default_factory=time.time)
     platform_confirmed: bool = False
     platform_order_ids: List[str] = field(default_factory=list)
+    # FIX-S1-CONFIRM-TICKS-20260729: 确认tick计数器
+    # 根因: evaluate_surge创建position后返回OPEN_POSITION,但execute_pursuit_entry的
+    #   confirm_ticks门控(默认1<3)阻断入场。后续tick走ADD_POSITION路径无法重试入场
+    #   → platform_confirmed永远False → 30秒后timeout → 854次timeout零下单
+    # 修复: 追踪confirm_ticks,未确认时重试OPEN_POSITION(非ADD_POSITION)
+    confirm_ticks: int = 0
 
 
 # R27-P0-FC-01修复: 实盘硬时间止损检查入口函数
@@ -751,57 +830,249 @@ class DynamicPursuitEngine:
         self._stop_profit_trail_ratio = stop_profit_trail_ratio
         self._max_total_position_pct = max_total_position_pct
         self._tight_sl_pct = tight_stop_loss_pct
+        self._fut_momentum_threshold_bps: float = 15.0
         self._positions: Dict[str, PursuitPosition] = {}
+        self._fut_price_ref: Dict[str, Tuple[str, float]] = {}
         self._lock = threading.RLock()
+        self._of_bridge = None  # FIX-S1-DEGRADE-20260730: OrderFlowBridge延迟初始化
         self._stats = {
             'total_pursuit_entries': 0, 'surge_detected': 0,
+            'fut_momentum_entries': 0,
             'stop_profit_trails': 0, 'positions_closed': 0,
         }
+        # FIX-S1-DYNAMIC-COOLDOWN-20260730: 基于交易表现的动态冷却
+        self._instrument_stats: Dict[str, Dict[str, Any]] = {}
+        self._cooldown_config = self._load_cooldown_config()
+
+    def _get_of_bridge(self):
+        """FIX-S1-DEGRADE-20260730: 延迟获取OrderFlowBridge单例(避免热路径每次import)"""
+        if self._of_bridge is None:
+            try:
+                from order.order_flow_bridge import get_order_flow_bridge
+                self._of_bridge = get_order_flow_bridge()
+            except Exception:
+                pass
+        return self._of_bridge
+
+    def _load_cooldown_config(self) -> Dict[str, Any]:
+        """FIX-S1-DYNAMIC-COOLDOWN-20260730: 读取动态冷却参数,失败时使用默认值"""
+        defaults = {
+            'trade_threshold': 10,
+            'stop_loss_threshold': 2,
+            'cooldown_sec': 10.0,
+        }
+        try:
+            from config.config_params import get_param
+            defaults['trade_threshold'] = int(get_param('hft_cooldown_trade_threshold', 10))
+            defaults['stop_loss_threshold'] = int(get_param('hft_cooldown_stop_loss_threshold', 2))
+            defaults['cooldown_sec'] = float(get_param('hft_dynamic_cooldown_sec', 10.0))
+        except Exception as _cfg_err:
+            logging.debug("[HFT] 动态冷却参数读取失败,使用默认值: %s", _cfg_err)
+        return defaults
+
+    def _should_cooldown(self, instrument_id: str) -> bool:
+        """FIX-S1-DYNAMIC-COOLDOWN-20260730: 基于交易表现判断是否应冷却
+
+        规则:
+        - 已有未确认持仓的重试(confirm_ticks累积)跳过冷却
+        - 冷却期内直接返回True
+        - 连续交易>=trade_threshold 或 止损>=stop_loss_threshold 时触发新冷却
+        """
+        with self._lock:
+            now = time.time()
+            pos = self._positions.get(instrument_id)
+            if pos and pos.is_open and not pos.platform_confirmed:
+                return False
+            stats = self._instrument_stats.setdefault(instrument_id, {
+                'consecutive_trades': 0,
+                'stop_loss_count': 0,
+                'cooldown_until': 0.0,
+            })
+            if now < stats['cooldown_until']:
+                return True
+            if (stats['consecutive_trades'] >= self._cooldown_config['trade_threshold'] or
+                    stats['stop_loss_count'] >= self._cooldown_config['stop_loss_threshold']):
+                stats['cooldown_until'] = now + self._cooldown_config['cooldown_sec']
+                stats['consecutive_trades'] = 0
+                stats['stop_loss_count'] = 0
+                logging.info("[HFT] 触发动态冷却: %s (cooldown_until=%.0f)",
+                             instrument_id, stats['cooldown_until'])
+                return True
+            return False
+
+    def record_entry(self, instrument_id: str, is_add: bool = False) -> None:
+        """FIX-S1-DYNAMIC-COOLDOWN-20260730: 记录一次成功开仓/加仓"""
+        with self._lock:
+            stats = self._instrument_stats.setdefault(instrument_id, {
+                'consecutive_trades': 0,
+                'stop_loss_count': 0,
+                'cooldown_until': 0.0,
+            })
+            stats['consecutive_trades'] += 1
+
+    def record_exit(self, instrument_id: str, reason: str) -> None:
+        """FIX-S1-DYNAMIC-COOLDOWN-20260730: 记录平仓;仅stop_loss计入止损计数"""
+        with self._lock:
+            stats = self._instrument_stats.setdefault(instrument_id, {
+                'consecutive_trades': 0,
+                'stop_loss_count': 0,
+                'cooldown_until': 0.0,
+            })
+            if reason and 'stop_loss' in reason.lower():
+                stats['stop_loss_count'] += 1
 
     def evaluate_surge(self, instrument_id: str, current_strength: float,
                        prev_strength: float, current_price: float,
-                       direction: str, account_equity: float = 100000.0) -> Optional[Dict[str, Any]]:
+                       direction: str, account_equity: float = 100000.0,
+                       product: str = '') -> Optional[Dict[str, Any]]:
         if direction not in ('BUY', 'SELL'):
             logging.warning("[DynamicPursuitEngine] Invalid direction '%s', rejected", direction)
             return None
         if current_price <= 0:
             return None
         strength_delta = current_strength - prev_strength
-        # FIX-OO4b (S1-HFT-ROOT): 数据降级模式下放宽surge_threshold
-        # 根因: width_resonance=0(期权方向未建立)→resonance_strength=0,prev=0→
-        #       strength_delta=0<surge_threshold(0.3)→evaluate_surge永远return None→S1零信号
-        # 修复: 当current_strength=0且prev_strength=0时(数据降级模式)，
-        #       使用价格动量作为替代触发条件，不依赖width_resonance
         _effective_threshold = self._surge_threshold
-        if current_strength == 0 and prev_strength == 0:
-            # V4-FIX-O2: 数据降级模式=不追仓(fail-closed)
-            # 原则: 数据不可用=不开仓，而非数据不可用=用0.1%价格变动替代共振
-            # FIX-NOISE-O2-20260724: 日志限频(60s全局冷却+汇总计数), 原per-instrument限频不够
-            #   期权品种数>300，per-instrument=60s仍产生3.6万次/40min
-            #   改为全局60s冷却+汇总计数模式：60s内只输出1次+累计计数
-            _o2_now = time.time()
-            _o2_last = self.__class__.__dict__.get('_o2_warn_ts', {})
-            if not isinstance(_o2_last, dict):
-                _o2_last = {}
-            _o2_count = _o2_last.get('_count', 0) + 1
-            _o2_last['_count'] = _o2_count
-            if _o2_now - _o2_last.get('_last_log', 0.0) >= 60:
-                logging.info("[V4-FIX-O2] 数据降级模式, 不追仓 (strength=0) (数据不可用=不开仓) ×%d instruments", _o2_count)
-                _o2_last['_last_log'] = _o2_now
-                _o2_last['_count'] = 0
-            setattr(self.__class__, '_o2_warn_ts', _o2_last)
+        _is_futures = not ('-C-' in instrument_id or '-P-' in instrument_id or '-c-' in instrument_id or '-p-' in instrument_id)
+        _use_fut_momentum = False
+        _fut_momentum_delta_bps = 0.0
+        _signal_source = 'surge'  # FIX-S1-SUPerset: 信号来源标记(surge/level_resonance/degrade_order_flow)
+        # FIX-S1-DYNAMIC-COOLDOWN-20260730: 基于交易表现的动态冷却
+        # 未确认持仓重试(confirm_ticks累积)在_should_cooldown内部被放行
+        if self._should_cooldown(instrument_id):
             return None
-        if strength_delta < _effective_threshold:
+        if current_strength == 0 and prev_strength == 0:
+            if _is_futures:
+                # FIX-S1-FUT-MOMENTUM-20260728: 期货品种width_resonance不适用(T-type是期权指标)
+                # 根因: 期货没有期权链宽度数据→width_resonance=0→V4-FIX-O2 fail-closed永远阻断→S1期货0信号
+                # 修复: 对期货品种使用价格动量突破(纯客观数据,无增强推断):
+                #   - 追踪每个品种最近参考价
+                #   - 价格向direction方向移动>15bps(0.15%)视为动量突破
+                #   - 期权路径完全保持V4-FIX-O2 fail-closed不变
+                _key = f"{instrument_id}_{direction}"
+                with self._lock:
+                    _ref = self._fut_price_ref.get(_key)
+                    if _ref is None or _ref[0] != direction:
+                        self._fut_price_ref[_key] = (direction, current_price)
+                        return None
+                    _ref_dir, _ref_price = _ref
+                    if _ref_price <= 0:
+                        self._fut_price_ref[_key] = (direction, current_price)
+                        return None
+                    if direction == 'BUY':
+                        _fut_momentum_delta_bps = (current_price - _ref_price) / _ref_price * 10000.0
+                    else:
+                        _fut_momentum_delta_bps = (_ref_price - current_price) / _ref_price * 10000.0
+                    if _fut_momentum_delta_bps >= self._fut_momentum_threshold_bps:
+                        _use_fut_momentum = True
+                        strength_delta = _fut_momentum_delta_bps / 100.0
+                        _effective_threshold = self._fut_momentum_threshold_bps / 100.0
+                        self._fut_price_ref[_key] = (direction, current_price)
+                    else:
+                        return None
+            else:
+                # FIX-S1-DEGRADE-20260730: 期权降级路径(对齐S2降维条件A)
+                # 根因: V4-FIX-O2对期权resonance=0完全阻断(1,233次), 但S2降维路径允许
+                #   resonance=0时通过order_flow+rank_confidence触发(条件A)
+                #   → S2在resonance=0时仍能触发, S1却完全阻断 → S2信号反超S1
+                # 日志实证: [S2-INTRADAY] inst=... res=0.0000 of=-0.5152 → S2在resonance=0时仍触发
+                # 修复: 期权resonance=0时, 若order_flow有方向性(对齐S2的_S2_ORDER_FLOW_THRESH=0.08),
+                #   允许追仓(fail-closed: order_flow也无方向→不开仓)
+                _s1_of_imbalance = 0.0
+                try:
+                    _of_bridge = self._get_of_bridge()
+                    if _of_bridge and product:
+                        _s1_of_imbalance = _of_bridge.get_instant_imbalance(product) or 0.0
+                except Exception:
+                    pass
+                # FIX-S1-DEGRADE-DIR-20260730: 退化路径必须检查order_flow方向与S1 direction一致
+                # 根因: 仅abs(imbalance)>=0.08不足,若order_flow方向与S1 direction相反,
+                #   会逆着订单流方向开仓(如of<0但direction=BUY),与S2"条件A"的语义不符,
+                #   也违背用户"只做条件成就时的正确交易"原则
+                # 修复: 要求(_s1_of_imbalance>0 AND direction=BUY) OR (_s1_of_imbalance<0 AND direction=SELL)
+                _of_direction_ok = (
+                    (_s1_of_imbalance > 0 and direction == 'BUY') or
+                    (_s1_of_imbalance < 0 and direction == 'SELL')
+                )
+                if abs(_s1_of_imbalance) >= 0.08 and _of_direction_ok:  # 对齐S2的_S2_ORDER_FLOW_THRESH
+                    strength_delta = abs(_s1_of_imbalance)
+                    _effective_threshold = 0.08
+                    _signal_source = 'degrade_order_flow'
+                    # 限频日志(60s冷却)
+                    _degrade_now = time.time()
+                    _degrade_last = self.__class__.__dict__.get('_s1_degrade_ts', {})
+                    if not isinstance(_degrade_last, dict):
+                        _degrade_last = {}
+                    _degrade_count = _degrade_last.get('_count', 0) + 1
+                    _degrade_last['_count'] = _degrade_count
+                    if _degrade_now - _degrade_last.get('_last_log', 0.0) >= 60:
+                        logging.info("[FIX-S1-DEGRADE] 期权降级路径通过: inst=%s of=%.4f dir=%s ×%d",
+                                     instrument_id, _s1_of_imbalance, direction, _degrade_count)
+                        _degrade_last['_last_log'] = _degrade_now
+                        _degrade_last['_count'] = 0
+                    setattr(self.__class__, '_s1_degrade_ts', _degrade_last)
+                else:
+                    # order_flow也无方向 → fail-closed(与S2降维条件A一致)
+                    _o2_now = time.time()
+                    _o2_last = self.__class__.__dict__.get('_o2_warn_ts', {})
+                    if not isinstance(_o2_last, dict):
+                        _o2_last = {}
+                    _o2_count = _o2_last.get('_count', 0) + 1
+                    _o2_last['_count'] = _o2_count
+                    if _o2_now - _o2_last.get('_last_log', 0.0) >= 60:
+                        logging.info("[V4-FIX-O2] 数据降级模式, 不追仓 (strength=0, of=%.4f) ×%d instruments",
+                                     _s1_of_imbalance, _o2_count)
+                        _o2_last['_last_log'] = _o2_now
+                        _o2_last['_count'] = 0
+                    setattr(self.__class__, '_o2_warn_ts', _o2_last)
+                    return None
+
+        # FIX-S1-SUPerset-20260730: 绝对共振level路径(对齐S2)
+        # 根因: S1测DELTA(变化量>=0.3), S2测LEVEL(绝对水平>=0.45), 正交条件
+        #   当共振稳定在高位(如0.8): delta=0.0<0.3 → S1永不触发, 但S2持续触发
+        #   → S1只在共振跳变瞬间触发一次, 稳态完全失活; S2在稳态持续触发 → 反转
+        # 修复: 当current_strength>=0.45(对齐S2的_S2_RESONANCE_THRESH)时,
+        #   即使delta<0.3也允许pursuit信号(30s冷却防重复入场)
+        _level_threshold = 0.45  # 对齐S2的_S2_RESONANCE_THRESH
+        _level_ok = current_strength >= _level_threshold
+        if _level_ok and strength_delta < _effective_threshold and not _use_fut_momentum:
+            # FIX-S1-DYNAMIC-COOLDOWN-20260730: 稳态共振路径不再使用固定30秒冷却,
+            #   统一由evaluate_surge入口的_should_cooldown基于交易表现决策。
+            #   未确认持仓重试已在_should_cooldown内部放行。
+            strength_delta = current_strength  # 用绝对level替代delta作为信号强度
+            _signal_source = 'level_resonance'
+
+        if not _use_fut_momentum and strength_delta < _effective_threshold and not _level_ok:
             return None
         self._stats['surge_detected'] += 1
+        if _use_fut_momentum:
+            self._stats['fut_momentum_entries'] = self._stats.get('fut_momentum_entries', 0) + 1
         # FIX-20260712-S1-P0: 为每次追击信号生成唯一signal_id，防止HFT订单重复/追踪断裂
         from infra.shared_utils import generate_prefixed_id as _gen_id
         _signal_id = f"PURSUIT_SIG_{instrument_id}_{int(time.time()*1000)}_{_gen_id('', 8)}"
         with self._lock:
+            if _use_fut_momentum:
+                _fkey = f"{instrument_id}_{direction}"
+                self._fut_price_ref[_fkey] = (direction, current_price)
             pos = self._positions.get(instrument_id)
             if pos and pos.is_open:
                 if pos.direction != direction:
                     return None
+                # FIX-S1-CONFIRM-TICKS-20260729: 未确认持仓重试入场(非加仓)
+                # 根因: 首次evaluate_surge创建PursuitPosition(confirm_ticks=1)返回OPEN_POSITION,
+                #   但execute_pursuit_entry的confirm_ticks门控(1<hft_confirm_ticks=3)阻断入场。
+                #   后续tick走ADD_POSITION路径→execute_pursuit_add(有strength_delta bug)→
+                #   platform_confirmed永远False→30秒后check_exit触发timeout→854次timeout零下单
+                # 修复: 未确认持仓时递增confirm_ticks并返回OPEN_POSITION(非ADD_POSITION),
+                #   使execute_pursuit_entry能在confirm_ticks>=hft_confirm_ticks时通过门控下单
+                if not pos.platform_confirmed:
+                    pos.confirm_ticks += 1
+                    return {
+                        'action': 'OPEN_POSITION', 'instrument_id': instrument_id, 'direction': direction,
+                        'volume': 1, 'price': current_price, 'stop_profit': pos.current_stop_profit,
+                        'strength_delta': strength_delta, 'signal_id': _signal_id,
+                        'confirm_ticks': pos.confirm_ticks,
+                        'signal_source': _signal_source,  # FIX-S1-SUPerset: 信号来源标记
+                    }
                 add_count = len(pos.entries) - 1
                 if add_count >= self._max_add_positions:
                     return None
@@ -812,19 +1083,20 @@ class DynamicPursuitEngine:
                 add_volume = max(1, int(base_volume * self._add_volume_ratio))
                 new_stop_profit = self._calc_trailing_stop(pos.weighted_avg_price, current_price, pos.direction)
                 pos.entries.append({
-                    'price': current_price, 'volume': add_volume, 'strength': current_strength,
+                    'price': current_price, 'volume': add_volume, 'strength': current_strength if not _use_fut_momentum else max(current_strength, strength_delta),
                     'strength_delta': strength_delta, 'timestamp': time.time(), 'entry_type': 'pursuit_add',
                 })
                 pos.total_volume += add_volume
                 pos.weighted_avg_price = self._recalc_avg_price(pos.entries)
                 pos.current_stop_profit = new_stop_profit
-                pos.peak_strength = max(pos.peak_strength, current_strength)
+                pos.peak_strength = max(pos.peak_strength, current_strength, strength_delta)
                 self._stats['total_pursuit_entries'] += 1
                 return {
                     'action': 'ADD_POSITION', 'instrument_id': instrument_id, 'direction': direction,
                     'volume': add_volume, 'price': current_price, 'new_stop_profit': new_stop_profit,
                     'total_volume': pos.total_volume, 'avg_price': pos.weighted_avg_price,
                     'strength_delta': strength_delta, 'signal_id': _signal_id,
+                    'signal_source': _signal_source,  # FIX-S1-SUPerset: 信号来源标记
                 }
             else:
                 stop_profit = self._calc_initial_stop(current_price, direction)
@@ -832,12 +1104,13 @@ class DynamicPursuitEngine:
                 pos = PursuitPosition(
                     position_id=f"PURSUIT_{instrument_id}_{int(time.time()*1000)}_{_gen_id('', 8)}",
                     instrument_id=instrument_id, direction=direction,
-                    entries=[{'price': current_price, 'volume': 1, 'strength': current_strength,
+                    entries=[{'price': current_price, 'volume': 1, 'strength': current_strength if not _use_fut_momentum else max(current_strength, strength_delta),
                               'strength_delta': strength_delta, 'timestamp': time.time(), 'entry_type': 'initial'}],
                     total_volume=1, weighted_avg_price=current_price,
                     current_stop_profit=stop_profit,
                     current_stop_loss=self._calc_initial_stop_loss(current_price, direction),
-                    peak_strength=current_strength,
+                    peak_strength=max(current_strength, strength_delta),
+                    confirm_ticks=1,  # FIX-S1-CONFIRM-TICKS-20260729: 首次检测=1个确认tick
                 )
                 self._positions[instrument_id] = pos
                 self._stats['total_pursuit_entries'] += 1
@@ -845,6 +1118,8 @@ class DynamicPursuitEngine:
                     'action': 'OPEN_POSITION', 'instrument_id': instrument_id, 'direction': direction,
                     'volume': 1, 'price': current_price, 'stop_profit': stop_profit,
                     'strength_delta': strength_delta, 'signal_id': _signal_id,
+                    'confirm_ticks': 1,  # FIX-S1-CONFIRM-TICKS-20260729: 传递给execute_pursuit_entry门控
+                    'signal_source': _signal_source,  # FIX-S1-SUPerset: 信号来源标记
                 }
         return None
 
@@ -987,10 +1262,26 @@ class DynamicPursuitEngine:
     def get_stats(self) -> Dict[str, Any]:
         with self._lock:
             self._cleanup_closed_positions()
+            self._cleanup_stale_stats()
             return {
                 'service_name': 'DynamicPursuitEngine', **self._stats,
                 'active_positions': sum(1 for p in self._positions.values() if p.is_open),
             }
+
+    def _cleanup_stale_stats(self, max_entries: int = 200) -> None:
+        """FIX-S1-DYNAMIC-COOLDOWN-20260730: 清理过期的instrument_stats
+
+        防止长期运行时 _instrument_stats 无限增长。
+        冷却期已过且无持仓的品种可安全清理。
+        """
+        now = time.time()
+        # 清理 _instrument_stats: 冷却期已过且无持仓
+        if len(self._instrument_stats) > max_entries:
+            _active = {k for k, p in self._positions.items() if p.is_open}
+            _stale = [k for k, v in self._instrument_stats.items()
+                      if k not in _active and now >= v.get('cooldown_until', 0.0)]
+            for k in _stale[:len(self._instrument_stats) - max_entries]:
+                del self._instrument_stats[k]
 
 
 class PyramidAddPositionEngine:

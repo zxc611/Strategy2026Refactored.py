@@ -182,10 +182,10 @@ class IVCalculator:
             tol: Convergence tolerance
 
         Returns:
-            float: Implied volatility, returns 0.2 on failure
+            float: Implied volatility, returns 0.0 on failure (fail-closed)
         """
         if market_price <= 0 or S <= 0 or K <= 0 or T <= 0:
-            return 0.2
+            return 0.0
 
         sigma = initial_guess
         i = 0  # P2#121修复:初始化i,防止max_iter=0时i未定义
@@ -728,6 +728,46 @@ class GreeksCalculator:
             logger.debug(f"[ParseStrike] Failed to parse strike from {instrument_id}: {e}")
             return None
 
+    def _parse_option_info_from_id(self, instrument_id: str) -> Optional[Dict[str, Any]]:
+        """FIX-GREEKS-OPTTYPE-FALLBACK-20260729-V2: 从合约ID自解析期权基础信息。
+
+        由于 cache_option_info 在全代码库中未被外部调用,实盘运行时 _option_info_cache
+        为空,update_greeks_from_tick 接收到的 option_type/future_product/strike 均为
+        None。本方法从 instrument_id 解析并返回:
+            {'option_type': 'CALL'|'PUT', 'future_product': str, 'strike': float}
+        用于填充 _option_info_cache 内存字典,确保 Greeks 自计算使用正确参数。
+
+        用户原则: 品种ID在内存字典中完成期权五态自计算,排序时从ID中读取。
+
+        Returns:
+            Dict or None: 解析成功返回字段字典,失败返回 None(fail-closed)。
+        """
+        try:
+            from infra.subscription_service import SubscriptionManager
+            parsed = SubscriptionManager.parse_option(instrument_id)
+            _otype_raw = parsed.get('option_type', '')
+            # 标准化为 BS 公式使用的 'CALL'/'PUT'
+            if _otype_raw and len(_otype_raw) > 0:
+                _otype_upper = _otype_raw[0].upper()
+                option_type = 'CALL' if _otype_upper == 'C' else 'PUT' if _otype_upper == 'P' else None
+            else:
+                option_type = None
+            future_product = parsed.get('product') or None
+            strike = parsed.get('strike_price')
+            strike = float(strike) if strike is not None else None
+
+            _result = {}
+            if option_type is not None:
+                _result['option_type'] = option_type
+            if future_product is not None:
+                _result['future_product'] = future_product
+            if strike is not None:
+                _result['strike'] = strike
+            return _result if _result else None
+        except (ValueError, KeyError, TypeError) as e:
+            logger.debug(f"[ParseOptionInfo] Failed to parse info from {instrument_id}: {e}")
+            return None
+
     def _should_update(self, instrument_id: str, current_price: float, current_iv: Optional[float] = None,
                        last_time: float = 0.0, last_price: float = 0.0, last_iv: Optional[float] = None,
                        tick_count: int = 0) -> bool:
@@ -823,7 +863,8 @@ class GreeksCalculator:
                     if elapsed_ms > 1.0:
                         logger.warning(f"[IVCalc] Slow: {instrument_id} took {elapsed_ms:.2f}ms")
                 else:
-                    iv = self._option_iv.get(instrument_id, 0.2)
+                    # FIX-GREEKS-IV-FAILCLOSED-20260729: 消除 0.2 默认假 IV，统一 fail-closed 0.0
+                    iv = self._option_iv.get(instrument_id, 0.0)
                     logger.debug(f"[IVCalc] Using cached/default IV={iv:.4f} for {instrument_id}")
 
             # 4. 计算希腊字母
@@ -895,6 +936,54 @@ class GreeksCalculator:
             if strike is None:
                 logger.warning(f"[OnTick] Strike not found for {instrument_id}")
                 return None
+
+            # FIX-GREEKS-OPTTYPE-FALLBACK-20260729-V2: 与 strike 回退一致,从 _option_info_cache
+            # 内存字典补齐 option_type/future_product/expiry_date。tick_dispatch.py 调用时
+            # 这三个参数均为 None(见 tick_dispatch.py L261-263),原代码不回退导致:
+            #   - option_type=None → _bs_greeks 走 else(PUT)分支 → CALL delta 符号取反
+            #   - future_product=None → 股息率查询键缺失(退化为0.0,可接受但不规范)
+            #   - expiry_date=None → _time_to_expiry 退化为 30/365 默认值(非真实到期)
+            # 用户原则: 品种ID在内存字典中完成期权五态自计算,排序时从ID中读取。
+            # 关键补充: 全代码库仅 GreeksCalculator.cache_option_info 一处写入
+            # _option_info_cache,但该方法从未被外部调用,实盘运行时 _option_info_cache
+            # 为空。因此必须增加"从 instrument_id 自解析并缓存"兜底路径,否则本回退
+            # 修复是半拉子工程。
+            if option_type is None:
+                option_type = info.get('option_type')
+            if future_product is None:
+                future_product = info.get('future_product')
+            if expiry_date is None:
+                _raw_exp = info.get('expiry_date')
+                if _raw_exp is not None and not isinstance(_raw_exp, date):
+                    # _option_info_cache 中 expiry_date 可能是字符串(如 '2026-08-15'),
+                    # _time_to_expiry → TradingCalendar.time_to_expiry 需要 date 对象,
+                    # 否则 'str' <= 'datetime.date' 触发 TypeError。统一转换为 date。
+                    try:
+                        if isinstance(_raw_exp, str):
+                            expiry_date = date.fromisoformat(_raw_exp[:10])
+                        else:
+                            expiry_date = _raw_exp
+                    except (ValueError, TypeError):
+                        expiry_date = None
+                else:
+                    expiry_date = _raw_exp
+
+            # FIX-GREEKS-OPTTYPE-FALLBACK-20260729-V2: 若 _option_info_cache 为空或缺失
+            # 关键字段,从 instrument_id 自解析并缓存,确保实盘 Greeks 计算使用正确
+            # 的 option_type/strike/future_product,避免半拉子工程。
+            if option_type is None or future_product is None or strike is None:
+                _parsed = self._parse_option_info_from_id(instrument_id)
+                if _parsed:
+                    if option_type is None:
+                        option_type = _parsed.get('option_type')
+                    if future_product is None:
+                        future_product = _parsed.get('future_product')
+                    if strike is None:
+                        strike = _parsed.get('strike')
+                    # 一并缓存到 _option_info_cache,后续 tick 直接命中
+                    _cached = self._option_info_cache.get(instrument_id, {})
+                    _cached.update({k: v for k, v in _parsed.items() if v is not None})
+                    self._option_info_cache[instrument_id] = _cached
 
             cached_iv = self._option_iv.get(instrument_id)
             has_cached_iv = cached_iv is not None and cached_iv > 0
@@ -969,6 +1058,18 @@ class GreeksCalculator:
                     del self._option_greeks[instrument_id]
                     return {}
             return entry.copy() if entry else {}
+
+    def get_last_update(self, instrument_id: str) -> float:
+        """FIX-GREEKS-FROM-MEMORY-20260729: 公共访问器，读取期权Greeks最后更新时间戳。
+
+        用户原则: 品种ID在内存字典中完成期权五态自计算，排序时从ID中读取。
+        替代外部 getattr(_gc, '_option_last_update') 私有属性访问。
+
+        Returns:
+            float: 最后更新时间戳；0.0 表示无数据(fail-closed)。
+        """
+        with self._lock:
+            return float(self._option_last_update.get(instrument_id, 0.0))
 
     def get_iv(self, instrument_id: str) -> float:
         """Get implied volatility for a single contract."""

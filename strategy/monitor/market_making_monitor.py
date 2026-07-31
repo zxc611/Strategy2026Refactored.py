@@ -16,8 +16,9 @@ S6做市商策略实盘模拟监控模块 V1（顶级基金做市商标准）
 
 约束
 ----
-- 不参与资金分配，不调用 OrderService.send_order，不调用 route_capital。
-- 仅生成模拟信号 + JSON 快照，供其他策略参考方向。
+- FIX-S6-CAPITAL-20260724: 参与资金分配(PARTICIPATES_CAPITAL_ALLOCATION=True),信号进入target排名。
+- SENDS_REAL_ORDERS=False: 不发送实盘订单(监控模式),不调用 OrderService.send_order。
+- 真实生成开仓/平仓信号 + JSON 快照保存,供其他策略参考方向。
 """
 from __future__ import annotations
 
@@ -449,8 +450,8 @@ class MarketMakingMonitor:
     # FIX-S6-CAPITAL-20260724: CAPITAL_ALLOCATION从0.0→0.01，与S5对齐
     CAPITAL_ALLOCATION: float = 0.01
     SENDS_REAL_ORDERS: bool = False
-    # FIX-S6-SNAPSHOT-PATH-20260724: 快照子目录常量(与S5对齐,使用os.path.join跨平台拼接)
-    SNAPSHOT_SUBDIR = os.path.join('logs', 'market_making_monitor')
+    # FIX-S6-SNAPSHOT-PATH-20260724: 快照子目录通过模块级_DEFAULT_SNAPSHOT_DIR传入__init__,
+    # __init__内用isabs检测+_detect_base_dir()锚定相对路径。无类常量SNAPSHOT_SUBDIR(避免死代码)。
 
     @staticmethod
     def _detect_base_dir() -> str:
@@ -924,6 +925,24 @@ class MarketMakingMonitor:
                              ask_half, _max_half)
                 ask_half = _max_half
 
+        # FIX-S6-SPREAD-FINALCAP-20260729: V2累乘后最终百分比cap(根因修复)
+        # 根因: reservation*0.9 cap仅防bid为负,不防half_spread过大
+        #   实测: reservation=17.0→cap=15.3, bid_half=6.86<15.3通过→spread=8070bps(40% of mid)
+        #   V2多级累乘(gamma×1.5×toxic×2×pin×2×bounce×2=12x)使half_spread达mid*40%
+        #   各级独立cap不防乘积溢出,需最终总体cap
+        # 修复: half_spread不超过mid_price的8%(800bps半价差,1600bps全价差)
+        #   合理性: 期权做市半价差>8%已非合理报价;用户要求真实发出信号+快照发挥参考作用
+        _FINAL_HALF_SPREAD_PCT = 0.08
+        _final_cap = mid_price * _FINAL_HALF_SPREAD_PCT
+        if bid_half > _final_cap:
+            logger.info("[S6-MMM-V1] bid_half=%.4f final-capped at mid*%.0f%%=%.4f (V2累乘防溢出)",
+                         bid_half, _FINAL_HALF_SPREAD_PCT * 100, _final_cap)
+            bid_half = _final_cap
+        if ask_half > _final_cap:
+            logger.info("[S6-MMM-V1] ask_half=%.4f final-capped at mid*%.0f%%=%.4f (V2累乘防溢出)",
+                         ask_half, _FINAL_HALF_SPREAD_PCT * 100, _final_cap)
+            ask_half = _final_cap
+
         bid = self._align_to_tick(reservation - bid_half)
         ask = self._align_to_tick(reservation + ask_half)
 
@@ -1105,10 +1124,26 @@ class MarketMakingMonitor:
     # 5. 信号生成 + 快照
     # ========================================================================
 
+    def _is_market_open(self) -> bool:
+        """FIX-S6-POST-CLOSE-GATE-20260728: 检查市场是否开盘(内部门控, fail-closed)。
+
+        根因: 收盘后market_making_monitor仍在处理tick和生成信号,
+          浪费CPU且产生快照日志, 而收盘后不应有新做市信号。
+        修复: 使用MarketOpenCache.is_open()统一检查, 门控不可用时fail-open。
+        不影响策略逻辑: 收盘后市场已关闭, 不会有新做市报价。
+        """
+        try:
+            from infra.market_time_service import get_market_open_cache
+            return get_market_open_cache().is_open()
+        except Exception:
+            return True
+
     def generate_simulated_signal(
         self, *, tick_data: Optional[Dict[str, Any]] = None
     ) -> MarketMakingSignal:
         """生成模拟做市信号。"""
+        if not self._is_market_open():
+            return None
         with self._lock:
             if tick_data is not None:
                 self._ingest_tick(tick_data)
@@ -1167,14 +1202,35 @@ class MarketMakingMonitor:
             # 日亏损检查
             stop_quoting = self._daily_loss_bps >= self.max_daily_loss_bps
 
+            # FIX-S6-NEUTRAL-DIR-20260728: neutral不应映射为BUY(半拉子修复)
+            # 根因: FIX-S6-3将neutral映射为BUY,导致做市中性时产生单边BUY信号→无效单边开仓
+            # 修复: neutral时direction为空(无方向偏好,不产生单边开仓);
+            #       净价差<=0(做市无利可图)时quote_refresh_due=False(fail-closed)
+            _has_directional_signal = preferred_side in ("buy", "sell")
+            _has_unwind_action = bool(target_delta and target_delta != 0.0)
+            # FIX-S6-NEUTRAL-QUOTE-20260729-V2: 清理if/else死代码(原两个分支完全相同)
+            # 根因: FIX-S6-NEUTRAL-QUOTE-20260729把if分支从quote_refresh_due=False改为与else分支
+            #   相同表达式,但保留了if/else结构,造成死代码。语义上neutral和directional都应允许
+            #   报价(只要net_capture_bps>0且未stop_quoting),不需要分支区分。
+            # 修复: 统一为单行赋值,保留neutral允许报价的设计意图。
+            quote_refresh_due = not stop_quoting and net_capture_bps > 0
+
+            if not quote_refresh_due and not _has_unwind_action:
+                return None
+
+            _mm_direction = ""
+            if preferred_side == "buy":
+                _mm_direction = "BUY"
+            elif preferred_side == "sell":
+                _mm_direction = "SELL"
+
             signal = MarketMakingSignal(
                 instrument_id=self.instrument_id,
                 # FIX-S6-3: 补齐 signal_id 和 direction 字段
-                # 根因: 原构造未设置 signal_id/direction → signal_id="" → 下游 dedup 用 timestamp fallback；
-                #       direction="neutral" → execute_by_ranking 价格修正分支都不执行
-                # 修复: 生成唯一 signal_id；direction 基于 preferred_side 映射
+                # 根因: 原构造未设置 signal_id/direction → signal_id="" → 下游 dedup 用 timestamp fallback
+                # FIX-S6-NEUTRAL-DIR-20260728: neutral不映射为BUY,保持空字符串(无单边方向)
                 signal_id=f"S6MM_{int(time.time() * 1000)}",
-                direction="BUY" if preferred_side in ("buy", "neutral") else "SELL",
+                direction=_mm_direction,
                 signal_type="market_making",
                 bid_price=bid,
                 ask_price=ask,
@@ -1204,7 +1260,7 @@ class MarketMakingMonitor:
                 regime=self._regime,
                 expected_hit_prob=round(hit_prob, 6),
                 net_capture_bps=round(net_capture_bps, 6),
-                quote_refresh_due=not stop_quoting,
+                quote_refresh_due=quote_refresh_due,
                 # FIX-20260713-S6-MULTISRC: 多源数据采集字段
                 order_book_imbalance=round(self._order_book_imbalance, 6),
                 open_interest=self._last_open_interest,
@@ -1247,7 +1303,7 @@ class MarketMakingMonitor:
             logger.info(
                 "[S6-MMM-V1] 信号生成: inst=%s mid=%.6f r=%.6f bid=%.6f ask=%.6f "
                 "spread=%.2fbps net=%.2fbps inv=%.4f skew=%.4f adv=%s vpin=%.4f "
-                "side=%s regime=%s hit_prob=%.2f | ⚠不下单 不参与资金分配",
+                "side=%s regime=%s hit_prob=%.2f | 监控模式:信号已生成+快照已保存(参与资金分配,不发送实盘订单)",
                 self.instrument_id, mid_price, reservation, bid, ask,
                 spread_bps, net_capture_bps, self._inventory, skew,
                 adverse_flag, vpin, preferred_side, self._regime, hit_prob,
@@ -1301,6 +1357,8 @@ class MarketMakingMonitor:
     def on_tick(self, tick_data: Dict[str, Any]) -> None:
         """tick 回调：节流 + 命中模拟 + 快照。"""
         if not isinstance(tick_data, dict):
+            return
+        if not self._is_market_open():
             return
 
         with self._lock:

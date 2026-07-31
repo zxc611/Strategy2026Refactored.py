@@ -280,13 +280,19 @@ class GreeksHardFilter:
         return True
 
     def filter_batch(self, options: List[Dict]) -> List[Dict]:
+        # FIX-GREEKS-FROM-MEMORY-20260729-V2: 消费端从内存字典读取真实Greeks
+        # 用户原则: 品种ID在内存字典中完成期权五态自计算，排序时从ID中读取
+        # 修复1: 读取嵌套 greeks 路径(opt['greeks']['delta'])而非顶层(原opt.get('delta')永不命中)
+        # 修复2: fail-closed默认值0.0替代虚假值(原0.5/0.03/-0.5/100.0)
+        #   - delta=0.0 → abs(delta)<DELTA_MIN 自然过滤(fail-closed)
+        #   - option_price=0.0 → theta_pct 检查跳过(option_price>0 前置条件)
         return [
             opt for opt in (options or [])
             if self.filter(
-                opt.get('delta', 0.5),
-                opt.get('gamma', 0.03),
-                opt.get('theta', -0.5),
-                opt.get('option_price', 100.0),
+                opt.get('greeks', {}).get('delta', 0.0),
+                opt.get('greeks', {}).get('gamma', 0.0),
+                opt.get('greeks', {}).get('theta', 0.0),
+                opt.get('option_price', 0.0),
                 opt.get('month_type', 'quarter_month'),
             )
         ]

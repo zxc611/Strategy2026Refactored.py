@@ -38,6 +38,7 @@ import logging
 import math
 import threading
 import time
+import traceback
 from bisect import bisect_left, insort
 from collections import deque
 from dataclasses import dataclass, field, asdict
@@ -54,8 +55,8 @@ logger = get_logger(__name__)  # R9-5
 class BoxType(Enum):
     """箱体类型枚举 — S3/S4策略箱体标准化
     
-    日内交易(dte≤5): 至少3根日K线相近高低点结成的小箱形
-    隔夜交易(dte>5): 至少3根周K线相近高低点结成的中箱形
+    日内交易(S3策略): 至少3根日K线, 三高点/三低点差异<=10个最小变动单位 → 小箱形(INTRADAY_SMALL)
+    隔夜交易(S4策略): 至少3根周K线, 三高点/三低点差异<=10个最小变动单位 → 中箱形(OVERNIGHT_MEDIUM)
     
     注: tick级箱体已废弃(风险过大)，K线箱体为唯一箱体来源
     """
@@ -147,7 +148,7 @@ class BoxStrategyParams:
     option_buy_lots_max: int = 10
     min_extreme_confidence: float = 0.6
     min_bounce_count: int = 2
-    box_width_max_pct: float = 5.0
+    box_width_max_pct: float = 1.0  # FIX-BOX-DUAL-WIDTH-20260730: 5%→1%,三高点/三低点百分比宽度上限(期货)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -164,15 +165,15 @@ class BoxDetector:
     5. 生成箱体交易信号
     """
 
-    ADX_DEFAULT_VALUE = 50.0
-    ADX_MULTIPLIER = 100.0
+    # FIX-DEL-TICKBOX-V2-CLEANUP-V4-20260729: 删除已废弃tick级箱体相关常量
+    # 删除: ADX_DEFAULT_VALUE, ADX_MULTIPLIER (被删除的_compute_adx_simplified使用)
+    #       WIDTH_SCORE_WEIGHT, ADX_SCORE_WEIGHT, BOUNCE_SCORE_WEIGHT, PLR_SCORE_WEIGHT (旧tick级detect_box评分用)
+    # 保留: BOX_HISTORY_MAXLEN, FLOW_IMBALANCE_THRESHOLD, CVD_SLOPE_THRESHOLD,
+    #       PRICE_SCORE_WEIGHT, RESONANCE_SCORE_WEIGHT, IV_SCORE_WEIGHT, FLOW_SCORE_WEIGHT,
+    #       BOTTOM_THRESHOLD_RATIO, TOP_THRESHOLD_RATIO (classify_extreme_state仍在使用)
     BOX_HISTORY_MAXLEN = 100
     FLOW_IMBALANCE_THRESHOLD = 0.2
     CVD_SLOPE_THRESHOLD = 0.01
-    WIDTH_SCORE_WEIGHT = 0.25
-    ADX_SCORE_WEIGHT = 0.25
-    BOUNCE_SCORE_WEIGHT = 0.30
-    PLR_SCORE_WEIGHT = 0.20
     PRICE_SCORE_WEIGHT = 0.25
     RESONANCE_SCORE_WEIGHT = 0.30
     IV_SCORE_WEIGHT = 0.25
@@ -184,29 +185,18 @@ class BoxDetector:
         self,
         params: Optional[BoxStrategyParams] = None,
         lookback_bars: int = 60,
-        min_box_bars: int = 20,
-        adx_period: int = 14,
-        adx_threshold: float = 25.0,
-        bounce_tolerance_pct: float = 0.1,
+        # FIX-DEL-TICKBOX-V2-20260729: 彻底删除tick级箱体(用户明确要求"tick级箱体已经明确要求删除,不发保留")
+        # 删除参数: min_box_bars, adx_period, adx_threshold, bounce_tolerance_pct, box_gain_ratio, plr_normalization_base
+        # 删除状态: _min_box_bars, _price_highs, _price_lows, _price_closes, _volumes, _timestamps,
+        #          _bounce_at_upper, _bounce_at_lower, _box_gain_ratio, _plr_normalization_base,
+        #          _adx_period, _adx_threshold, _bounce_tolerance_pct
+        # 保留: _current_box(K线箱体填充), _iv_history(update_iv填充), _kline_box_cache(K线箱体缓存)
+        #       classify_extreme_state(消费K线箱体+IV), check_kline_box_precondition/detect_kline_box(K线箱体主链)
         iv_history_maxlen: int = 1000,
-        box_gain_ratio: float = 0.5,
-        plr_normalization_base: float = 3.0,
     ):
         self._lock = threading.RLock()
         self._params = params or BoxStrategyParams()
-        self._lookback_bars = lookback_bars
-        self._min_box_bars = min_box_bars
-        self._adx_period = adx_period
-        self._adx_threshold = adx_threshold
-        self._bounce_tolerance_pct = bounce_tolerance_pct
-        self._box_gain_ratio = box_gain_ratio
-        self._plr_normalization_base = plr_normalization_base
-
-        self._price_highs: deque = deque(maxlen=lookback_bars)
-        self._price_lows: deque = deque(maxlen=lookback_bars)
-        self._price_closes: deque = deque(maxlen=lookback_bars)
-        self._volumes: deque = deque(maxlen=lookback_bars)
-        self._timestamps: deque = deque(maxlen=lookback_bars)
+        self._lookback_bars = lookback_bars  # 保留用于兼容日志,不再用于tick级deque
 
         self._current_box: Optional[BoxProfile] = None
         self._box_history: deque = deque(maxlen=self.BOX_HISTORY_MAXLEN)
@@ -214,8 +204,6 @@ class BoxDetector:
 
         self._iv_history: deque = deque(maxlen=iv_history_maxlen)
         self._iv_sorted: List[float] = []
-        self._bounce_at_upper: int = 0
-        self._bounce_at_lower: int = 0
 
         self._stats = {
             'bars_processed': 0,
@@ -225,37 +213,39 @@ class BoxDetector:
             'iv_filtered': 0,
             'flow_exhaustion_confirmed': 0,
             'tradeable_signals': 0,
-            'false_breakout_filtered': 0,  # [FIX-20260712-S3] 假突破过滤统计
+            'false_breakout_filtered': 0,
         }
 
         # [FIX-20260712-S3] 假突破过滤模块 — 上策H-Rev: 假突破过滤
-        # 记录最近极值信号的价格和时间，用于检测假突破
-        self._breakout_tracker: deque = deque(maxlen=20)  # [(timestamp, price, extreme_type), ...]
-        self._false_breakout_lookback_sec = 120.0  # 回看窗口：2分钟内的突破
-        self._false_breakout_retrace_ratio = 0.50  # 价格回落超过50%视为假突破
+        self._breakout_tracker: deque = deque(maxlen=20)
+        self._false_breakout_lookback_sec = 120.0
+        self._false_breakout_retrace_ratio = 0.50
 
         self._box_id_counter: int = 0
 
-        # FIX-56: per-instrument信号冷却追踪，防止同一合约每tick重复触发信号
-        # 根因: classify_extreme_state的fallback箱体强制is_bottom=True/is_top=True，
-        #       且signal_cooldown_sec参数(60.0)从未被使用，导致每tick都返回tradeable=True
-        # 修复: 记录每个instrument最后一次信号时间，在signal_cooldown_sec内不再触发
+        # FIX-56: per-instrument信号冷却追踪
         self._last_signal_time: Dict[str, float] = {}
 
-        # K线箱体实例变量 — S3/S4策略箱体标准化
-        # 日内交易(dte≤5): 至少3根日K线相近高低点结成的小箱形(INTRADAY_SMALL)
-        # 隔夜交易(dte>5): 至少3根周K线相近高低点结成的中箱形(OVERNIGHT_MEDIUM)
-        self._kline_box_daily: Optional[KLineBoxProfile] = None    # 日K小箱形缓存
-        self._kline_box_weekly: Optional[KLineBoxProfile] = None  # 周K中箱形缓存
-        self._kline_box_instrument_id: str = ''       # 当前K线箱体对应的合约ID
-        self._kline_box_last_update: float = 0.0      # 上次K线箱体更新时间戳
+        # K线箱体实例变量 — S3/S4策略箱体标准化(K线箱体为唯一箱体来源)
+        # S3日内策略: 至少3根日K线, 三高点/三低点差异<=10*tick_size (INTRADAY_SMALL)
+        # S4隔夜策略: 至少3根周K线, 三高点/三低点差异<=10*tick_size (OVERNIGHT_MEDIUM)
+        # FIX-S3-CACHE-20260728: per-instrument字典缓存
+        self._kline_box_cache: Dict[str, Tuple[Optional[KLineBoxProfile], Optional[KLineBoxProfile], float]] = {}
         self._kline_box_cache_ttl_sec: float = 300.0  # K线箱体缓存TTL(5分钟)
-        self._kline_min_bars_daily: int = 3           # 日K箱体最低K线数
-        self._kline_min_bars_weekly: int = 3          # 周K箱体最低K线数
-        self._kline_box_width_max_pct: float = 5.0    # K线箱体最大宽度百分比
+        self._kline_min_bars_daily: int = 3           # S3日内: 日K箱体最低K线数
+        self._kline_min_bars_weekly: int = 3          # S4隔夜: 周K箱体最低K线数
+        # FIX-BOX-DUAL-WIDTH-20260730: 参数化百分比宽度上限,默认1%(用户要求:5%太大→1%)
+        # 从BoxStrategyParams.box_width_max_pct读取,支持YAML参数池配置
+        self._kline_box_width_max_pct: float = getattr(self._params, 'box_width_max_pct', 1.0) or 1.0
 
-        logger.info("[BoxDetector] 初始化完成, lookback=%d, min_bars=%d",
-                     lookback_bars, min_box_bars)
+        # FIX-DEL-TICKBOX-V2-20260729: _kline_box_daily/_weekly 实例属性初始化(供detect_box/classify_extreme_state读取)
+        # 旧bug: 第477/480/662/665行引用 self._kline_box_daily/weekly 但__init__未定义 → AttributeError
+        # 修复: 初始化为None, 由detect_kline_box/check_kline_box_precondition更新
+        self._kline_box_daily: Optional[KLineBoxProfile] = None
+        self._kline_box_weekly: Optional[KLineBoxProfile] = None
+
+        logger.info("[BoxDetector] 初始化完成(tick级箱体已删除), iv_history=%d, kline_min_daily=%d, kline_min_weekly=%d",
+                     iv_history_maxlen, self._kline_min_bars_daily, self._kline_min_bars_weekly)
 
     @property
     def params(self) -> BoxStrategyParams:
@@ -269,13 +259,12 @@ class BoxDetector:
         volume: float = 0.0,
         timestamp: Optional[str] = None,
     ) -> None:
-        with self._lock:
-            self._price_highs.append(high)
-            self._price_lows.append(low)
-            self._price_closes.append(close)
-            self._volumes.append(volume)
-            self._timestamps.append(timestamp or datetime.now(_CHINA_TZ).isoformat())
-            self._stats['bars_processed'] += 1
+        # FIX-DEL-TICKBOX-V2-20260729: tick级箱体已删除(用户明确要求)
+        # 旧实现: 追加到 _price_highs/_price_lows/_price_closes/_volumes/_timestamps
+        # 新实现: no-op(tick级状态已删除); K线箱体由detect_kline_box从DataService获取
+        # 保留接口兼容(box_spring_detector.update_box注释仍调用, 但实际已pass)
+        # 仍更新IV历史(classify_extreme_state消费IV百分位)
+        self._stats['bars_processed'] += 1
 
     def update_iv(self, iv: float) -> None:
         with self._lock:
@@ -293,182 +282,22 @@ class BoxDetector:
                 self._iv_history.append(iv)
                 insort(self._iv_sorted, iv)
 
-    @staticmethod
-    def _compute_adx_simplified(highs, lows, closes, period: int = 14) -> float:
-        if len(closes) < period + 1:
-            return BoxDetector.ADX_DEFAULT_VALUE
-        plus_dm_list = []
-        minus_dm_list = []
-        tr_list = []
-        for i in range(1, min(len(closes), period + 1)):
-            idx = len(closes) - 1 - i
-            if idx < 0:
-                break
-            h_curr = highs[-(i)]
-            l_curr = lows[-(i)]
-            h_prev = highs[-(i + 1)]
-            l_prev = lows[-(i + 1)]
-            c_prev = closes[-(i + 1)]
-
-            up_move = h_curr - h_prev
-            down_move = l_prev - l_curr
-
-            plus_dm = up_move if up_move > down_move and up_move > 0 else 0.0
-            minus_dm = down_move if down_move > up_move and down_move > 0 else 0.0
-
-            tr1 = h_curr - l_curr
-            tr2 = abs(h_curr - c_prev)
-            tr3 = abs(l_curr - c_prev)
-            tr = max(tr1, tr2, tr3)
-
-            plus_dm_list.append(plus_dm)
-            minus_dm_list.append(minus_dm)
-            tr_list.append(tr)
-
-        if not tr_list or sum(tr_list) < 1e-10:
-            return BoxDetector.ADX_DEFAULT_VALUE
-
-        avg_plus_dm = sum(plus_dm_list) / len(plus_dm_list)
-        avg_minus_dm = sum(minus_dm_list) / len(minus_dm_list)
-        avg_tr = sum(tr_list) / len(tr_list)
-
-        if avg_tr < 1e-10:
-            return BoxDetector.ADX_DEFAULT_VALUE
-
-        plus_di = BoxDetector.ADX_MULTIPLIER * avg_plus_dm / avg_tr
-        minus_di = BoxDetector.ADX_MULTIPLIER * avg_minus_dm / avg_tr
-
-        di_sum = plus_di + minus_di
-        if di_sum < 1e-10:
-            return 0.0
-
-        dx = BoxDetector.ADX_MULTIPLIER * abs(plus_di - minus_di) / di_sum
-        return dx
-
-    @staticmethod
-    def _find_support_resistance(
-        lows,
-        highs,
-        n_clusters: int = 2,
-        tolerance_pct: float = 0.3,
-    ) -> Tuple[List[float], List[float]]:
-        if len(lows) < 5 or len(highs) < 5:
-            return [], []
-
-        low_list = sorted(lows)
-        high_list = sorted(highs)
-
-        def cluster(prices: List[float]) -> List[Tuple[float, int]]:
-            if not prices:
-                return []
-            clusters = []
-            current_center = prices[0]
-            current_count = 1
-            current_sum = prices[0]
-            for p in prices[1:]:
-                if abs(p - current_center) / max(abs(current_center), 1e-10) < tolerance_pct / 100.0:
-                    current_count += 1
-                    current_sum += p
-                    current_center = current_sum / current_count
-                else:
-                    clusters.append((current_center, current_count))
-                    current_center = p
-                    current_count = 1
-                    current_sum = p
-            clusters.append((current_center, current_count))
-            return clusters
-
-        low_clusters = sorted(cluster(low_list), key=lambda x: x[1], reverse=True)
-        high_clusters = sorted(cluster(high_list), key=lambda x: x[1], reverse=True)
-
-        supports = [c[0] for c in low_clusters[:n_clusters]]
-        resistances = [c[0] for c in high_clusters[:n_clusters]]
-
-        return supports, resistances
+    # FIX-DEL-TICKBOX-V2-CLEANUP-V4-20260729: 删除死代码 _compute_adx_simplified 和 _find_support_resistance
+    # 这两个@staticmethod是旧tick级箱体detect_box()的辅助方法, tick级箱体已彻底删除后无任何调用方
+    # 保留为死代码违反"非半拉子工程"和"彻底清零"原则, 故删除
+    # 历史参考: docs/audit/模块功能详细报告.md L149-150 仍保留对这两个方法的描述
 
     def detect_box(self) -> BoxProfile:
+        # FIX-DEL-TICKBOX-V2-20260729: tick级箱体已删除(用户明确要求)
+        # 旧实现: 基于 _price_highs/_price_lows/_min_box_bars/adx/bounce 计算tick级箱体
+        # 新实现: 返回空BoxProfile(is_box=False); K线箱体由detect_kline_box/check_kline_box_precondition处理
+        # _current_box由_update_current_box_from_kline()独占更新(K线箱体边界)
+        # 保留接口兼容(无外部调用方, 但保留以防遗漏)
         with self._lock:
             now_str = datetime.now(_CHINA_TZ).isoformat()
             self._box_id_counter += 1
             box_id = f"BOX-{self._box_id_counter:06d}"
-
-            if len(self._price_closes) < self._min_box_bars:
-                return BoxProfile(box_id=box_id, timestamp=now_str)
-
-            closes = list(self._price_closes)
-            highs = list(self._price_highs)
-            lows = list(self._price_lows)
-
-            recent_high = max(highs[-self._min_box_bars:])
-            recent_low = min(lows[-self._min_box_bars:])
-            recent_close = closes[-1]
-
-            if recent_close < 1e-10:
-                return BoxProfile(box_id=box_id, timestamp=now_str)
-
-            width_pct = (recent_high - recent_low) / recent_close * 100.0
-
-            adx = self._compute_adx_simplified(highs, lows, closes, period=self._adx_period)
-
-            is_box = width_pct <= self._params.box_width_max_pct and adx < self._adx_threshold
-
-            supports, resistances = self._find_support_resistance(lows, highs)
-
-            if supports and resistances:
-                box_lower = supports[0]
-                box_upper = resistances[0]
-            else:
-                box_lower = recent_low
-                box_upper = recent_high
-
-            if box_upper <= box_lower:
-                box_upper = recent_high
-                box_lower = recent_low
-
-            median = (box_upper + box_lower) / 2.0
-            confidence = 0.0
-            bounce_count = 0
-
-            if is_box:
-                tolerance = (box_upper - box_lower) * self._bounce_tolerance_pct
-                for low in lows[-self._min_box_bars:]:
-                    if abs(low - box_lower) <= tolerance:
-                        bounce_count += 1
-                for high in highs[-self._min_box_bars:]:
-                    if abs(high - box_upper) <= tolerance:
-                        bounce_count += 1
-
-                width_score = max(0.0, 1.0 - width_pct / self._params.box_width_max_pct)
-                adx_score = max(0.0, 1.0 - adx / self._adx_threshold)
-                bounce_score = min(1.0, bounce_count / (self._params.min_bounce_count * 2))
-
-                plr_score = 0.0
-                box_height = box_upper - box_lower
-                if box_height > 1e-10:
-                    mid_price = (box_upper + box_lower) / 2.0
-                    potential_loss = abs(mid_price - box_lower) if abs(mid_price - box_lower) > 1e-10 else 1e-10
-                    potential_plr = BoxDetector.estimate_plr(box_height, potential_loss, self._box_gain_ratio)
-                    plr_score = min(1.0, potential_plr / self._plr_normalization_base)
-
-                confidence = self.WIDTH_SCORE_WEIGHT * width_score + self.ADX_SCORE_WEIGHT * adx_score + self.BOUNCE_SCORE_WEIGHT * bounce_score + self.PLR_SCORE_WEIGHT * plr_score
-
-                is_box = bounce_count >= self._params.min_bounce_count
-
-            profile = BoxProfile(
-                box_id=box_id,
-                timestamp=now_str,
-                is_box=is_box,
-                box_type='range' if is_box else '',
-                upper=box_upper,
-                lower=box_lower,
-                median=median,
-                width_pct=width_pct,
-                confidence=confidence,
-                duration_bars=len(closes),
-                bounce_count=bounce_count,
-                adx=adx,
-            )
-
+            profile = BoxProfile(box_id=box_id, timestamp=now_str)
             # K线箱体字段注入 — 使用缓存的K线箱体状态
             if self._kline_box_daily is not None and self._kline_box_daily.is_valid:
                 profile.kline_box_confirmed = True
@@ -476,14 +305,6 @@ class BoxDetector:
             elif self._kline_box_weekly is not None and self._kline_box_weekly.is_valid:
                 profile.kline_box_confirmed = True
                 profile.kline_box_type = 'OVERNIGHT_MEDIUM'
-
-            if is_box:
-                # K线箱体时代: detect_box()不再更新_current_box
-                # _current_box由_update_current_box_from_kline()独占更新
-                # 保留box_history记录用于历史分析
-                self._box_history.append(profile)
-                self._stats['boxes_detected'] += 1
-
             return profile
 
     def get_current_box(self) -> Optional[BoxProfile]:
@@ -717,8 +538,8 @@ class BoxDetector:
 
     # ========================================================================
     # K线箱体检测 — S3/S4策略箱体标准化前置条件
-    # 日内交易(dte≤5): 至少3根日K线相近高低点结成的小箱形(INTRADAY_SMALL)
-    # 隔夜交易(dte>5): 至少3根周K线相近高低点结成的中箱形(OVERNIGHT_MEDIUM)
+    # S3日内策略: 至少3根日K线, 三高点/三低点差异<=10个最小变动单位 → 小箱形(INTRADAY_SMALL)
+    # S4隔夜策略: 至少3根周K线, 三高点/三低点差异<=10个最小变动单位 → 中箱形(OVERNIGHT_MEDIUM)
     # ========================================================================
 
     @staticmethod
@@ -781,25 +602,45 @@ class BoxDetector:
     def _detect_kline_box_from_bars(
         bars: List[Dict[str, Any]],
         min_bars: int = 3,
-        width_max_pct: float = 5.0,
+        width_max_pct: float = 1.0,  # FIX-BOX-DUAL-WIDTH-20260730: 5%→1%,参数化
         box_type: BoxType = BoxType.INTRADAY_SMALL,
+        # FIX-S3S4-TICKS-TOLERANCE-V2-20260729: 重写为"三高点/三低点内部差异"判定
+        # 用户2026-07-29澄清(关键):
+        #   "高\低点差异在10个最小变动单位内"是指【三高点内部差异】和【三低点内部差异】,
+        #    不是指箱体宽度(箱顶-箱底)或单根K线的(high-low)。
+        # 即: 取最近 min_bars 根K线, 提取它们的high组成"高点集合", low组成"低点集合",
+        #     要求 max(高点集合)-min(高点集合) <= ticks_tolerance*tick_size (三高点内部差异)
+        #     且 max(低点集合)-min(低点集合) <= ticks_tolerance*tick_size (三低点内部差异)
+        # 箱体上沿 = 高点集合均值; 箱体下沿 = 低点集合均值
+        tick_size: float = 0.0,
+        ticks_tolerance: int = 10,
     ) -> KLineBoxProfile:
-        """从K线列表中检测箱体
+        """从K线列表中检测箱体 (FIX-S3S4-TICKS-TOLERANCE-V2-20260729 重写版)
 
         算法：
-        1. 取最近 min_bars 根K线
-        2. 高点聚类找上沿，低点聚类找下沿
-        3. 宽度 ≤ width_max_pct% 且 K线数 ≥ min_bars → 箱体确认
+        1. 取最近 min_bars 根K线作为箱体构成K线
+        2. 提取这min_bars根K线的high组成高点集合, low组成低点集合
+        3. 判定(用户明确要求"三高点/三低点差异在10个最小变动单位内"):
+           - 三高点内部差异 = max(highs) - min(highs) <= ticks_tolerance * tick_size
+           - 三低点内部差异 = max(lows) - min(lows)   <= ticks_tolerance * tick_size
+           - 两条件都满足 → is_valid=True (高低点占相近, 形成箱体)
+        4. 箱体上沿 = 高点集合均值; 箱体下沿 = 低点集合均值
+        5. tick_size>0时启用ticks判定(主判定); tick_size=0时退化为百分比宽度判定(向后兼容)
+        6. bars < min_bars 时 fail-closed 返回 is_valid=False, upper=0, lower=0
 
         Args:
             bars: K线列表，每项包含 high, low, close, timestamp
             min_bars: 最少K线数（日K=3，周K=3）
-            width_max_pct: 箱体最大宽度百分比
+            width_max_pct: 百分比宽度上限(tick_size=0时使用的兼容判定)
             box_type: 箱体类型(INTRADAY_SMALL/OVERNIGHT_MEDIUM)
+            tick_size: 品种最小变动价位(>0时启用三高点/三低点差异判定)
+            ticks_tolerance: tick容差倍数(默认10, 即"10个最小变动单位以内")
 
         Returns:
             KLineBoxProfile 箱体轮廓
         """
+        # FIX-S3S4-MINBARS-3-V2-20260729: bars<min_bars时fail-closed
+        # 用户要求: bars=1时返回 upper=0.00, lower=0.00, valid=False (数据不足不开仓)
         if len(bars) < min_bars:
             return KLineBoxProfile(
                 box_type=box_type,
@@ -807,17 +648,19 @@ class BoxDetector:
                 is_valid=False,
             )
 
-        # 取最近 min_bars * 2 根K线（扩大搜索范围），但不超过总数
-        recent = bars[-(min_bars * 2):] if len(bars) >= min_bars * 2 else bars
+        # FIX-S3S4-MINBARS-3-V2-20260729: 取最近 min_bars 根K线(严格取min_bars根, 非min_bars*2)
+        # 用户原意: S3日内3根日K, S4隔夜3根周K — 就是3根, 不是6根
+        recent = bars[-min_bars:]
 
+        # 提取三高点集合和三低点集合
         highs = [float(b.get('high', 0.0)) for b in recent if float(b.get('high', 0.0)) > 0]
         lows = [float(b.get('low', 0.0)) for b in recent if float(b.get('low', 0.0)) > 0]
         closes = [float(b.get('close', 0.0)) for b in recent if float(b.get('close', 0.0)) > 0]
 
-        if not highs or not lows or not closes:
+        if len(highs) < min_bars or len(lows) < min_bars or not closes:
             return KLineBoxProfile(
                 box_type=box_type,
-                bar_count=len(recent),
+                bar_count=min(len(highs), len(lows)),
                 is_valid=False,
             )
 
@@ -829,17 +672,15 @@ class BoxDetector:
                 is_valid=False,
             )
 
-        # 聚类法找高低点的聚类中心
-        supports, resistances = BoxDetector._find_support_resistance(
-            lows, highs, n_clusters=2, tolerance_pct=0.3,
-        )
+        # FIX-S3S4-TICKS-TOLERANCE-V2-20260729: 三高点/三低点内部差异
+        highs_max, highs_min = max(highs), min(highs)
+        lows_max, lows_min = max(lows), min(lows)
+        highs_spread = highs_max - highs_min   # 三高点内部差异
+        lows_spread = lows_max - lows_min       # 三低点内部差异
 
-        if supports and resistances:
-            box_lower = supports[0]
-            box_upper = resistances[0]
-        else:
-            box_upper = max(highs)
-            box_lower = min(lows)
+        # 箱体上沿 = 高点集合均值; 箱体下沿 = 低点集合均值
+        box_upper = sum(highs) / len(highs)
+        box_lower = sum(lows) / len(lows)
 
         if box_upper <= box_lower or box_lower <= 0:
             return KLineBoxProfile(
@@ -850,29 +691,58 @@ class BoxDetector:
 
         width_pct = (box_upper - box_lower) / recent_close * 100.0
 
-        # 检查有多少根K线的高低点落在箱体容差范围内
-        tolerance = (box_upper - box_lower) * 0.1  # 10%容差
+        # FIX-BOX-SPREAD-PCT-20260730: 1%阈值是三高点(三低点)差异百分比,不是箱体宽度百分比
+        # 用户明确纠正: "1%是三高点（三低点）之间的差异，不是三高点到三低点的宽度"
+        #   - 三高点差异百分比 = (max(highs)-min(highs)) / close * 100 → 通常0.1-0.5%
+        #   - 箱体宽度百分比 = (avg(highs)-avg(lows)) / close * 100 → 通常1-3%
+        # 旧BUG: width_pct_ok用箱体宽度百分比(~1.54%)与1%比较→永远REJECT
+        # 修复: 1%阈值应用于三高点差异百分比AND三低点差异百分比(两者都<=1%才通过)
+        #   IH2608实证: 三高点差异4点/2928=0.14% < 1% → PASS(旧代码错误REJECT)
+        highs_spread_pct = highs_spread / recent_close * 100.0  # 三高点差异百分比
+        lows_spread_pct = lows_spread / recent_close * 100.0    # 三低点差异百分比
+
+        # FIX-S3S4-TICKS-TOLERANCE-V2-20260729: 双判定
+        # 判定1(tick_size>0): 三高点差异<=10*tick_size 且 三低点差异<=10*tick_size (绝对值)
+        # 判定2: 三高点差异百分比<=width_max_pct 且 三低点差异百分比<=width_max_pct (百分比)
+        # OR逻辑: 任一判定通过即is_valid=True
+        if tick_size > 0.0:
+            ticks_threshold = ticks_tolerance * tick_size
+            highs_close = highs_spread <= ticks_threshold   # 三高点相近(绝对值)
+            lows_close = lows_spread <= ticks_threshold      # 三低点相近(绝对值)
+            ticks_ok = highs_close and lows_close
+            # FIX-BOX-SPREAD-PCT-20260730: 用三高点/三低点差异百分比,不是箱体宽度百分比
+            spread_pct_ok = highs_spread_pct <= width_max_pct and lows_spread_pct <= width_max_pct
+        else:
+            # tick_size=0(未读取到品种规格): 退化为三高点/三低点差异百分比判定
+            ticks_ok = False
+            spread_pct_ok = highs_spread_pct <= width_max_pct and lows_spread_pct <= width_max_pct
+
+        is_valid = ticks_ok or spread_pct_ok
+
+        # confirming_bars: 计算多少根K线的高低点贴近箱体上下沿(用于confidence)
+        tolerance = (box_upper - box_lower) * 0.1 if (box_upper - box_lower) > 0 else tick_size
         confirming_bars = 0
         for b in recent:
             h = float(b.get('high', 0.0))
             l = float(b.get('low', 0.0))
             if h <= 0 or l <= 0:
                 continue
-            # 高点接近上沿 或 低点接近下沿
-            near_upper = abs(h - box_upper) <= tolerance
-            near_lower = abs(l - box_lower) <= tolerance
-            if near_upper or near_lower:
+            if abs(h - box_upper) <= tolerance or abs(l - box_lower) <= tolerance:
                 confirming_bars += 1
-
-        is_valid = (
-            width_pct <= width_max_pct
-            and confirming_bars >= min_bars
-        )
+        # 至少min_bars根K线构成箱体(用户要求3根)
+        if confirming_bars < min_bars:
+            confirming_bars = len(recent)  # 三高点/三低点本身即构成箱体
 
         confidence = 0.0
         if is_valid:
-            # 置信度: 宽度得分 * 0.4 + K线确认数得分 * 0.6
-            width_score = max(0.0, 1.0 - width_pct / width_max_pct)
+            if tick_size > 0.0 and ticks_threshold > 0:
+                # ticks判定模式: 紧凑度得分 = 1 - max(高点差异, 低点差异) / threshold
+                compact_ratio = max(highs_spread, lows_spread) / ticks_threshold
+                width_score = max(0.0, 1.0 - compact_ratio)
+            else:
+                # FIX-BOX-SPREAD-PCT-20260730: confidence与is_valid一致,用spread_pct非width_pct
+                _max_spread_pct = max(highs_spread_pct, lows_spread_pct)
+                width_score = max(0.0, 1.0 - _max_spread_pct / width_max_pct) if width_max_pct > 0 else 0.0
             bar_score = min(1.0, confirming_bars / (min_bars * 2))
             confidence = 0.4 * width_score + 0.6 * bar_score
 
@@ -896,8 +766,9 @@ class BoxDetector:
 
         数据源优先级:
         1. 外部传入daily_bars参数
-        2. DataService.get_symbol_daily_ohlc查询
-        3. 内部tick缓存降采样(最后降级方案)
+        2. DataService.get_symbol_daily_ohlc查询(symbol_daily_aggregates)
+        3. ticks_raw表聚合(FIX-S3-KLINE-TICKSRAW-20260728: 第四层fallback)
+        4. 内部tick缓存降采样(最后降级方案)
 
         Args:
             instrument_id: 合约ID
@@ -909,51 +780,138 @@ class BoxDetector:
         """
         with self._lock:
             now = time.time()
-            # 缓存命中: 同一合约 + TTL未过期 + 非强制
-            if (not force
-                    and instrument_id == self._kline_box_instrument_id
-                    and (now - self._kline_box_last_update) < self._kline_box_cache_ttl_sec
-                    and self._kline_box_daily is not None):
-                return self._kline_box_daily, self._kline_box_weekly
+            # FIX-S3-CACHE-20260728: per-instrument缓存命中检查
+            if not force and instrument_id in self._kline_box_cache:
+                _cached_daily, _cached_weekly, _cached_ts = self._kline_box_cache[instrument_id]
+                if (now - _cached_ts) < self._kline_box_cache_ttl_sec and _cached_daily is not None:
+                    # FIX-DEL-TICKBOX-V2-20260729: 缓存命中时也需更新实例属性
+                    # 旧bug: 缓存命中直接return, 不更新_kline_box_daily/weekly
+                    #   → detect_box/classify_extreme_state读取旧值(可能来自其他合约)导致串台
+                    self._kline_box_daily = _cached_daily
+                    self._kline_box_weekly = _cached_weekly
+                    return _cached_daily, _cached_weekly
 
-            # 数据源优先级: 外部传入 > DataService > tick缓存降采样
+            # 数据源优先级: 外部传入 > DataService > klines_raw > ticks_raw聚合 > tick缓存降采样
+            # FIX-KLINE-PRELOAD-FALLBACK-V2-20260728: 增加klines_raw直接fallback
             bars = daily_bars
+            bars_source = 'external'
             if bars is None:
                 bars = self._fetch_daily_bars_from_dataservice(instrument_id)
-            if bars is None or len(bars) < 1:
-                bars = self._build_daily_bars_from_cache()
+                bars_source = 'dataservice'
+            # FIX-S3S4-MINBARS-3-V2-20260729: 删除 _min_bars_needed=max(3,15)=15 的统一阈值
+            # 用户2026-07-29澄清: S3日内容只需3根日K线(不需要15根); S4隔夜才需3根周K线(=15根日K)
+            # 旧设计 _min_bars_needed=15 把S3和S4的阈值混为一谈, 违背用户原意:
+            #   - S3日内: 只需满足 daily_min=3, 不应被 weekly_min*5=15 的阈值阻塞
+            #   - S4隔夜: 需要 weekly_min*5=15 根日K(聚合为3根周K)
+            # 修复: 用日K阈值(daily_min=3)和周K阈值(weekly_min*5=15)分别触发fallback
+            #   - bars >= daily_min=3 即可进行日K箱体检测(S3日内)
+            #   - bars >= weekly_min*5=15 才能进行周K箱体检测(S4隔夜, 不够则weekly_box.is_valid=False)
+            _daily_min_needed = self._kline_min_bars_daily             # S3: 3根日K
+            _weekly_min_needed = self._kline_min_bars_weekly * 5      # S4: 3根周K = 15根日K
+            # 日K fallback阈值: 至少满足S3日内3根日K
+            if bars is None or len(bars) < _daily_min_needed:
+                _prev_len = len(bars) if bars else 0
+                _kraw_bars = self._fetch_daily_bars_from_klines_raw(instrument_id)
+                if _kraw_bars and len(_kraw_bars) > _prev_len:
+                    bars = _kraw_bars
+                    bars_source = 'klines_raw'
+            if bars is None or len(bars) < _daily_min_needed:
+                _prev_len = len(bars) if bars else 0
+                _traw_bars = self._fetch_daily_bars_from_ticks_raw(instrument_id)
+                if _traw_bars and len(_traw_bars) > _prev_len:
+                    bars = _traw_bars
+                    bars_source = 'ticks_raw'
+            if bars is None or len(bars) < _daily_min_needed:
+                _prev_len = len(bars) if bars else 0
+                _cache_bars = self._build_daily_bars_from_cache()
+                if _cache_bars and len(_cache_bars) > _prev_len:
+                    bars = _cache_bars
+                    bars_source = 'tick_cache'
+            # FIX-S4-D1-KLINE-20260730: 当日K数据不足以形成3根周K(需15根日K)时,
+            # 从MarketCenter直接加载D1日K线, 绕过M1→日K聚合的数据量限制。
+            # 根因: klines_raw仅累积7根日K(history_minutes=1440每日加载1天M1),
+            #       7根日K聚合为2根周K < 3根 → S4 weekly_box.is_valid=False → S4永远0下单。
+            # 修复: 当bars < _weekly_min_needed(15)时, 尝试从MarketCenter获取D1日K线。
+            #       MarketCenter D1可提供20+根日K, 足以聚合3根周K。
+            # 不改变策略逻辑: 仅新增数据源, 箱体检测算法不变, fail-closed保持。
+            # FIX-D1-FALLBACK-DIAG-20260730: 在D1条件判断前打印bars值,确诊为何14:30日志无"D1 fallback触发"
+            _d1_bars_len = len(bars) if bars else 0
+            logger.info("[KLINE-BOX] D1条件检查: inst=%s bars=%d daily_min=%d weekly_min=%d will_trigger=%s",
+                       instrument_id, _d1_bars_len, _daily_min_needed, _weekly_min_needed,
+                       str(bars is None or _d1_bars_len < _weekly_min_needed))
+            if bars is None or len(bars) < _weekly_min_needed:
+                _prev_len = len(bars) if bars else 0
+                logger.info("[KLINE-BOX] D1 fallback触发: inst=%s bars=%d < weekly_min=%d, 尝试MarketCenter D1",
+                           instrument_id, _prev_len, _weekly_min_needed)
+                _mc_bars = self._fetch_daily_bars_from_market_center(instrument_id)
+                if _mc_bars and len(_mc_bars) > _prev_len:
+                    bars = _mc_bars
+                    bars_source = 'market_center_d1'
+                    logger.info("[KLINE-BOX] D1 fallback成功: inst=%s D1_bars=%d > prev=%d, source=market_center_d1",
+                               instrument_id, len(_mc_bars), _prev_len)
+                else:
+                    logger.info("[KLINE-BOX] D1 fallback未改善: inst=%s mc_bars=%d prev=%d",
+                               instrument_id, len(_mc_bars) if _mc_bars else 0, _prev_len)
+            # 注: 不再为S4周K单独触发更多fallback — S4若bars<15则weekly聚合后<3根周K,
+            #     _detect_kline_box_from_bars会自然返回is_valid=False(fail-closed), 符合用户原意
 
-            # 日K小箱体检测
+            # FIX-S3S4-TICKS-TOLERANCE-V2-20260729: 读取品种tick_size用于"三高点/三低点差异"判定
+            # 用户需求: "高\低点差异在10个最小变动单位内" — 指三高点内部差异和三低点内部差异
+            try:
+                from config.instrument_spec import get_tick_size_for_instrument
+                _tick_size = get_tick_size_for_instrument(instrument_id)
+            except Exception as e:
+                logger.debug("[KLINE-BOX] get_tick_size_for_instrument failed: inst=%s err=%s",
+                             instrument_id, e)
+                _tick_size = 0.0
+
+            # 日K小箱体检测 (S3日内: 3根日K, 三高点/三低点差异<=10*tick_size)
             daily_box = self._detect_kline_box_from_bars(
-                bars=bars,
+                bars=bars if bars else [],
                 min_bars=self._kline_min_bars_daily,
                 width_max_pct=self._kline_box_width_max_pct,
                 box_type=BoxType.INTRADAY_SMALL,
+                tick_size=_tick_size,  # FIX-S3S4-TICKS-TOLERANCE-V2-20260729
             )
 
-            # 周K中箱体检测: 先将日K线聚合为周K线
-            weekly_bars = self._aggregate_to_weekly_klines(bars)
+            # 周K中箱体检测 (S4隔夜: 3根周K, 三高点/三低点差异<=10*tick_size)
+            # 先将日K线聚合为周K线; bars<15根日K时聚合后<3根周K, 自然返回is_valid=False
+            weekly_bars = self._aggregate_to_weekly_klines(bars if bars else [])
             weekly_box = self._detect_kline_box_from_bars(
                 bars=weekly_bars,
                 min_bars=self._kline_min_bars_weekly,
                 width_max_pct=self._kline_box_width_max_pct,
                 box_type=BoxType.OVERNIGHT_MEDIUM,
+                tick_size=_tick_size,  # FIX-S3S4-TICKS-TOLERANCE-V2-20260729
             )
 
-            # 更新缓存
+            # FIX-S3-CACHE-20260728: 更新per-instrument缓存
+            self._kline_box_cache[instrument_id] = (daily_box, weekly_box, now)
+
+            # FIX-DEL-TICKBOX-V2-20260729: 更新实例属性供detect_box/classify_extreme_state读取
             self._kline_box_daily = daily_box
             self._kline_box_weekly = weekly_box
-            self._kline_box_instrument_id = instrument_id
-            self._kline_box_last_update = now
 
-            logger.info(
-                "[KLINE-BOX] detect_kline_box: inst=%s daily=%s(upper=%.2f lower=%.2f w=%.2f%% bars=%d conf=%.3f) "
-                "weekly=%s(upper=%.2f lower=%.2f w=%.2f%% bars=%d conf=%.3f)",
-                instrument_id,
+            # 限制缓存大小防止内存泄漏
+            if len(self._kline_box_cache) > 500:
+                _oldest_key = min(self._kline_box_cache, key=lambda k: self._kline_box_cache[k][2])
+                del self._kline_box_cache[_oldest_key]
+
+            # FIX-KLINE-BOX-DIAG-20260730: 升级为INFO(前5次+每1000次), 原DEBUG生产不可见
+            # S3/S4零下单根因诊断需要daily_box/weekly_box的is_valid/width_pct/bars值
+            _diag_kbox_count = getattr(self, '_diag_kbox_log_count', 0) + 1
+            self._diag_kbox_log_count = _diag_kbox_count
+            _kbox_log_level = logging.INFO if (_diag_kbox_count <= 5 or _diag_kbox_count % 1000 == 0) else logging.DEBUG
+            logger.log(
+                _kbox_log_level,
+                "[KLINE-BOX] detect_kline_box: inst=%s src=%s daily=%s(upper=%.2f lower=%.2f w=%.2f%% bars=%d conf=%.3f) "
+                "weekly=%s(upper=%.2f lower=%.2f w=%.2f%% bars=%d conf=%.3f) bars_len=%d",
+                instrument_id, bars_source,
                 '✓' if daily_box.is_valid else '✗',
                 daily_box.upper, daily_box.lower, daily_box.width_pct, daily_box.bar_count, daily_box.confidence,
                 '✓' if weekly_box.is_valid else '✗',
                 weekly_box.upper, weekly_box.lower, weekly_box.width_pct, weekly_box.bar_count, weekly_box.confidence,
+                len(bars) if bars else 0,
             )
 
             return daily_box, weekly_box
@@ -964,45 +922,12 @@ class BoxDetector:
         Returns:
             日K线列表(近似，仅当外部日K线不可用时的降级方案)
         """
-        if len(self._price_closes) < 3:
-            return []
-
-        # 简化日K线构建：每lookback_bars/tick_per_day根bar合为一根"日K线"
-        # 这是一个近似方案，真实日K线应从DataService获取
-        closes = list(self._price_closes)
-        highs = list(self._price_highs)
-        lows = list(self._price_lows)
-        timestamps = list(self._timestamps)
-
-        bars = []
-        # 按天分组（简化: 以日期字符串为key）
-        daily_groups: Dict[str, Dict[str, Any]] = {}
-        for i in range(len(closes)):
-            ts_str = timestamps[i] if i < len(timestamps) else ''
-            if not ts_str:
-                continue
-            try:
-                day_key = ts_str[:10]  # "2026-07-24"
-            except (IndexError, TypeError):
-                continue
-
-            if day_key not in daily_groups:
-                daily_groups[day_key] = {
-                    'timestamp': ts_str,
-                    'open': closes[i],
-                    'high': highs[i] if i < len(highs) else closes[i],
-                    'low': lows[i] if i < len(lows) else closes[i],
-                    'close': closes[i],
-                    'volume': 0.0,
-                }
-            else:
-                g = daily_groups[day_key]
-                g['high'] = max(g['high'], highs[i] if i < len(highs) else closes[i])
-                g['low'] = min(g['low'], lows[i] if i < len(lows) else closes[i])
-                g['close'] = closes[i]
-
-        bars = sorted(daily_groups.values(), key=lambda x: x.get('timestamp', ''))
-        return bars
+        # FIX-DEL-TICKBOX-V2-20260729: tick级缓存(_price_closes等)已删除
+        # 旧实现: 从 _price_closes/_price_highs/_price_lows/_timestamps 按天聚合成日K线
+        # 新实现: 返回空列表(tick级状态已删除, 无法从tick缓存构建日K线)
+        # 调用方(detect_kline_box fallback链路)会因此跳过此fallback, 符合用户原意
+        # (用户要求K线从DataService/klines_raw/ticks_raw获取, 不从tick缓存构建)
+        return []
 
     def _fetch_daily_bars_from_dataservice(
         self,
@@ -1027,10 +952,33 @@ class BoxDetector:
 
             from datetime import date, timedelta as _td
             end_date = date.today()
-            # 取最近10个交易日的日K线(足够覆盖3根日K线箱体检测)
-            start_date = end_date - _td(days=21)  # 3周≈15交易日
+            # FIX-S3S4-KLINE-RANGE-V2-20260729: 查询前20天内所有K线(用户明确要求)
+            # 用户2026-07-29要求: "历史k线应当查询\接受前20天内所有k线,以满足S4需要"
+            # S4隔夜需要3根周K(=15根日K), 20天≈14-15个交易日, 覆盖3周周K聚合需求
+            start_date = end_date - _td(days=20)
 
-            result = ds.get_symbol_daily_ohlc(instrument_id, start_date, end_date)
+            # FIX-S3-TICKSRAW-CACHEBYPASS-20260728: 直接用ds.query并禁用缓存,
+            # 避免首次预加载(symbol_daily_aggregates为空)时空结果被缓存
+            _sda_sql = """
+                SELECT * FROM symbol_daily_aggregates
+                WHERE instrument_id = ? AND date BETWEEN ? AND ?
+                ORDER BY date
+            """
+            result = ds.query(_sda_sql, [instrument_id, start_date, end_date], use_cache=False)
+            # FIX-S3-DIAG-20260728: 记录query返回值类型和大小
+            _result_rows = 0
+            if result is not None:
+                if hasattr(result, 'num_rows'):
+                    _result_rows = result.num_rows
+                elif hasattr(result, 'shape'):
+                    _result_rows = result.shape[0] if hasattr(result.shape, '__len__') else 0
+                elif hasattr(result, '__len__'):
+                    try:
+                        _result_rows = len(result)
+                    except:
+                        _result_rows = -1
+            logger.info("[KLINE-BOX] sda_query: inst=%s result_type=%s rows=%d",
+                        instrument_id, type(result).__name__, _result_rows)
             if result is None:
                 # FIX-KLINE-FLUSH-20260725-FALLBACK: 主数据源返回None时仍尝试klines_raw fallback,
                 # 避免DataService视图缺失/异常时直接放弃K线箱体检测。
@@ -1039,6 +987,10 @@ class BoxDetector:
                     logger.info("[KLINE-BOX] get_symbol_daily_ohlc=None, klines_raw fallback: inst=%s bars=%d",
                                 instrument_id, len(klines_raw_bars))
                     return klines_raw_bars
+                # FIX-S3-KLINE-TICKSRAW-20260728: klines_raw也失败时, 尝试ticks_raw fallback
+                ticks_raw_bars = self._fetch_daily_bars_from_ticks_raw(instrument_id)
+                if ticks_raw_bars:
+                    return ticks_raw_bars
                 return None
 
             # 兼容pa.Table和pd.DataFrame
@@ -1050,6 +1002,19 @@ class BoxDetector:
                 return None
 
             if not data or not data.get('date'):
+                # FIX-KLINE-PRELOAD-FALLBACK-20260728: 视图返回空结果时也执行klines_raw fallback
+                # 根因: get_symbol_daily_ohlc返回非None但data为空(视图存在但无数据)时,
+                #   原代码直接return None, 跳过了klines_raw fallback → K线箱体检测永远失败
+                # 修复: 与result=None分支一致, 尝试klines_raw fallback
+                klines_raw_bars = self._fetch_daily_bars_from_klines_raw(instrument_id)
+                if klines_raw_bars:
+                    logger.info("[KLINE-BOX] data empty(no date), klines_raw fallback: inst=%s bars=%d",
+                                instrument_id, len(klines_raw_bars))
+                    return klines_raw_bars
+                # FIX-S3-KLINE-TICKSRAW-20260728: klines_raw也失败时, 尝试ticks_raw fallback
+                ticks_raw_bars = self._fetch_daily_bars_from_ticks_raw(instrument_id)
+                if ticks_raw_bars:
+                    return ticks_raw_bars
                 return None
 
             # 转换为_detect_kline_box_from_bars所需格式
@@ -1089,7 +1054,11 @@ class BoxDetector:
                     'volume': v,
                 })
 
-            if bars:
+            # FIX-S3-MINBARS-FALLBACK-20260729: bars非空但行数不足min_bars时也执行fallback
+            # 根因: sda_query返回2行数据, if bars: return bars 直接返回2行
+            #   → detect_kline_box收到2行 → min_bars=20检查失败 → 0箱体检测
+            # 修复: 仅当bars行数>=min_bars时才直接返回, 否则继续尝试klines_raw fallback
+            if bars and len(bars) >= self._kline_min_bars_daily:
                 return bars
 
             # FIX-KLINE-FLUSH-20260725: symbol_daily_aggregates表无数据时,
@@ -1103,11 +1072,18 @@ class BoxDetector:
                             instrument_id, len(klines_raw_bars))
                 return klines_raw_bars
 
+            # FIX-S3-KLINE-TICKSRAW-20260728: klines_raw也失败时, 尝试ticks_raw fallback
+            ticks_raw_bars = self._fetch_daily_bars_from_ticks_raw(instrument_id)
+            if ticks_raw_bars:
+                return ticks_raw_bars
+
             return None
 
         except Exception as e:
-            logger.debug("[KLINE-BOX] _fetch_daily_bars_from_dataservice failed: inst=%s err=%s",
-                         instrument_id, e)
+            # FIX-S3-DIAG-20260728: 升级为INFO级别, 便于诊断_fetch_daily_bars_from_dataservice静默失败
+            logger.info("[KLINE-BOX] _fetch_daily_bars_from_dataservice EXCEPTION: inst=%s err=%s type=%s",
+                         instrument_id, e, type(e).__name__)
+            traceback.print_exc()
             return None
 
     def _fetch_daily_bars_from_klines_raw(self, instrument_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -1126,27 +1102,51 @@ class BoxDetector:
                 return None
 
             # 查询internal_id(klines_raw用internal_id, 不是instrument_id)
+            # FIX-KLINE-RAW-FALLBACK-20260728: internal_id不可用时尝试instrument_id直接查询
+            # 根因: get_instrument_meta_by_id在启动早期返回None(DB未就绪)或
+            #   internal_id字段缺失 → _fetch_daily_bars_from_klines_raw→None
+            #   → detect_kline_box所有数据源失败 → K线箱体永远未确认 → S3/S4永远0下单
+            # 修复: 三层fallback: (1)internal_id查询 (2)instrument_id查询 (3)返回None
+            # 不改变策略逻辑: 仅数据源获取方式, 箱体检测/信号生成逻辑不变
             from config.params_service import get_params_service
             ps = get_params_service()
             meta = ps.get_instrument_meta_by_id(instrument_id)
-            if meta is None:
-                return None
-            internal_id = meta.get('internal_id')
+            internal_id = meta.get('internal_id') if meta else None
+            use_instrument_id_fallback = False
             if internal_id is None:
-                return None
+                # Fallback: 尝试用instrument_id直接查询(部分实现klines_raw用instrument_id)
+                use_instrument_id_fallback = True
+                _query_id = instrument_id
+                _query_col = 'instrument_id'
+                logging.debug("[KLINE-BOX] internal_id=None for inst=%s, trying instrument_id fallback", instrument_id)
+            else:
+                _query_id = internal_id
+                _query_col = 'internal_id'
 
-            # 查询最近21天的M1 K线(覆盖3周≈15交易日)
+            # FIX-S3S4-KLINE-RANGE-V2-20260729: 查询前20天内所有M1 K线(用户明确要求, 满足S4需要)
             from datetime import date, timedelta as _td
             end_date = date.today()
-            start_date = end_date - _td(days=21)
+            start_date = end_date - _td(days=20)
 
-            sql = """
+            # FIX-KLINE-RAW-FALLBACK-20260728: 动态列名支持internal_id/instrument_id两种查询
+            sql = f"""
                 SELECT trade_date, open, high, low, close, volume
                 FROM klines_raw
-                WHERE internal_id = ? AND trade_date BETWEEN ? AND ?
+                WHERE {_query_col} = ? AND trade_date BETWEEN ? AND ?
                 ORDER BY trade_date, timestamp
             """
-            result = ds.query(sql, [internal_id, start_date, end_date])
+            result = ds.query(sql, [_query_id, start_date, end_date], use_cache=False)
+            if result is None and use_instrument_id_fallback:
+                # instrument_id fallback也失败, 尝试用internal_id查询(双重保险)
+                logging.debug("[KLINE-BOX] instrument_id fallback failed for inst=%s, trying internal_id", instrument_id)
+                if internal_id is not None:
+                    _fallback_sql = """
+                        SELECT trade_date, open, high, low, close, volume
+                        FROM klines_raw
+                        WHERE internal_id = ? AND trade_date BETWEEN ? AND ?
+                        ORDER BY trade_date, timestamp
+                    """
+                    result = ds.query(_fallback_sql, [internal_id, start_date, end_date], use_cache=False)
             if result is None:
                 return None
 
@@ -1210,23 +1210,323 @@ class BoxDetector:
                          instrument_id, e)
             return None
 
+    def _fetch_daily_bars_from_market_center(
+        self,
+        instrument_id: str,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """从MarketCenter直接加载D1(日)K线数据 (FIX-S4-D1-KLINE-20260730)
+
+        根因: S4隔夜策略需要3根周K线(=15根日K), 但klines_raw表仅累积7根日K
+              (history_minutes=1440每日仅加载1天M1数据, MarketCenter M1仅7天数据)。
+              7根日K聚合为2根周K < 3根 → weekly_box.is_valid=False → S4永远0下单。
+
+        修复: 直接从MarketCenter请求D1(日)K线, 绕过M1→日K聚合的限制。
+              MarketCenter.get_kline_data(style='D1')返回历史日K线,
+              可提供20+根日K, 足以聚合3根周K满足S4需求。
+
+        设计原则:
+          - 不改变策略逻辑: 仅新增数据源, 箱体检测算法(_detect_kline_box_from_bars)不变
+          - 不错误降级: 返回的数据格式与_fetch_daily_bars_from_klines_raw一致, 同样的校验
+          - fail-closed: 任何异常返回None, 不影响已有数据源的结果
+          - 非半拉子工程: 完整的exchange推断+D1请求+格式转换+异常处理
+
+        Args:
+            instrument_id: 合约ID(期货, 如IF2608/IH2608)
+
+        Returns:
+            日K线列表 或 None(获取失败/MarketCenter不可用)
+        """
+        try:
+            import re as _re
+            # 1. 获取StrategyEcosystem(持有_runtime_market_center和get_kline)
+            from strategy.strategy_ecosystem import get_strategy_ecosystem
+            eco = get_strategy_ecosystem()
+            if eco is None:
+                logger.warning("[KLINE-BOX] _fetch_daily_bars_from_market_center: get_strategy_ecosystem()=None, inst=%s", instrument_id)
+                return None
+
+            # 2. 获取get_kline函数(由lifecycle_bind._compat_get_kline_data包装)
+            get_kline_fn = getattr(eco, 'get_kline', None)
+            if not callable(get_kline_fn):
+                # 尝试直接从_runtime_market_center获取
+                mc = getattr(eco, '_runtime_market_center', None)
+                if mc and hasattr(mc, 'get_kline_data'):
+                    get_kline_fn = mc.get_kline_data
+                else:
+                    logger.warning("[KLINE-BOX] _fetch_daily_bars_from_market_center: get_kline不可用, eco.get_kline=%s, _runtime_mc=%s, inst=%s",
+                                   get_kline_fn, mc, instrument_id)
+                    return None
+
+            # 3. 推断交易所代码(从instrument_id提取product → 查instrument_spec)
+            exchange = ''
+            try:
+                from config.instrument_spec import _lookup_spec_case_insensitive
+                # 期货: 提取字母前缀作为product (IF2608→IF, rb2609→rb)
+                m = _re.match(r'^([A-Za-z]+)', instrument_id.strip())
+                if m:
+                    product = m.group(1)
+                    spec = _lookup_spec_case_insensitive(product)
+                    if spec:
+                        exchange = spec.exchange
+            except Exception:
+                pass
+
+            if not exchange:
+                # fallback: 常见交易所尝试
+                # CFFEX品种: IF/IH/IC/IM/IO/HO/MO/T/TF/TS/TL
+                _product = _re.match(r'^([A-Za-z]+)', instrument_id.strip())
+                _prod = _product.group(1).upper() if _product else ''
+                if _prod in ('IF', 'IH', 'IC', 'IM', 'IO', 'HO', 'MO', 'T', 'TF', 'TS', 'TL'):
+                    exchange = 'CFFEX'
+                elif _prod in ('CU', 'AL', 'ZN', 'PB', 'NI', 'AU', 'AG', 'RB', 'WR', 'HC', 'SS', 'BU', 'RU', 'NR', 'FU', 'BC', 'LU', 'BC'):
+                    exchange = 'SHFE'
+                elif _prod in ('A', 'B', 'M', 'Y', 'P', 'C', 'CS', 'JD', 'LH', 'RR', 'I', 'J', 'JM', 'L', 'V', 'PP', 'EG', 'EB', 'PG', 'CJ'):
+                    exchange = 'DCE'
+                elif _prod in ('CF', 'SR', 'TA', 'OI', 'RI', 'RS', 'RM', 'FG', 'SF', 'SM', 'AP', 'CJ', 'UR', 'SA', 'PF', 'PK', 'SH', 'PX', 'PR'):
+                    exchange = 'CZCE'
+                else:
+                    return None  # 无法确定交易所, fail-closed
+
+            # 4. 请求D1(日)K线, 取最近30根(覆盖3周+裕量)
+            try:
+                klines = get_kline_fn(exchange, instrument_id=instrument_id, style='D1', count=-30)
+            except TypeError:
+                # 某些MarketCenter版本签名不同, 尝试位置参数
+                try:
+                    klines = get_kline_fn(exchange, instrument_id, 'D1')
+                except Exception as _te:
+                    logger.warning("[KLINE-BOX] _fetch_daily_bars_from_market_center: get_kline位置参数调用也失败, inst=%s exchange=%s err=%s", instrument_id, exchange, _te)
+                    return None
+
+            if not klines:
+                logger.debug("[KLINE-BOX] _fetch_daily_bars_from_market_center: klines为空, inst=%s exchange=%s", instrument_id, exchange)
+                return None
+
+            # 5. 转换为日K线格式(与_fetch_daily_bars_from_klines_raw一致)
+            daily_bars: List[Dict[str, Any]] = []
+            for k in klines:
+                try:
+                    # PythonGO K线对象格式: {'datetime': datetime, 'open': float, 'high': float, 'low': float, 'close': float, 'volume': float}
+                    dt = k.get('datetime') if isinstance(k, dict) else getattr(k, 'datetime', None)
+                    o = float(k.get('open', 0) if isinstance(k, dict) else getattr(k, 'open', 0))
+                    h = float(k.get('high', 0) if isinstance(k, dict) else getattr(k, 'high', 0))
+                    l = float(k.get('low', 0) if isinstance(k, dict) else getattr(k, 'low', 0))
+                    c = float(k.get('close', 0) if isinstance(k, dict) else getattr(k, 'close', 0))
+                    v = float(k.get('volume', 0) if isinstance(k, dict) else getattr(k, 'volume', 0))
+
+                    if dt is None or h <= 0 or l <= 0 or c <= 0:
+                        continue
+
+                    # 转换datetime为日期字符串(timestamp字段)
+                    if hasattr(dt, 'strftime'):
+                        ts_str = dt.strftime('%Y-%m-%d')
+                    elif hasattr(dt, 'isoformat'):
+                        ts_str = dt.isoformat()[:10]
+                    else:
+                        ts_str = str(dt)[:10]
+
+                    daily_bars.append({
+                        'timestamp': ts_str,
+                        'open': o,
+                        'high': h,
+                        'low': l,
+                        'close': c,
+                        'volume': v,
+                    })
+                except (ValueError, TypeError, AttributeError):
+                    continue
+
+            # 按timestamp排序去重(同一日期可能有多根)
+            if not daily_bars:
+                logger.debug("[KLINE-BOX] _fetch_daily_bars_from_market_center: daily_bars为空(所有K线转换失败), inst=%s", instrument_id)
+                return None
+
+            seen_dates: Dict[str, Dict[str, Any]] = {}
+            for bar in daily_bars:
+                d = bar['timestamp']
+                if d not in seen_dates:
+                    seen_dates[d] = bar
+                else:
+                    # 同日取合并(high取最大, low取最小)
+                    seen_dates[d]['high'] = max(seen_dates[d]['high'], bar['high'])
+                    seen_dates[d]['low'] = min(seen_dates[d]['low'], bar['low'])
+                    seen_dates[d]['close'] = bar['close']
+                    seen_dates[d]['volume'] += bar['volume']
+
+            result = sorted(seen_dates.values(), key=lambda x: x.get('timestamp', ''))
+            logger.info(
+                "[KLINE-BOX] _fetch_daily_bars_from_market_center: inst=%s exchange=%s D1_bars=%d",
+                instrument_id, exchange, len(result),
+            )
+            return result if result else None
+
+        except Exception as e:
+            # FIX-D1-FALLBACK-LOG-20260730: 升级为WARNING, 原logger.debug在INFO级别不可见
+            # 导致D1 fallback失败时完全无法诊断MarketCenter可用性
+            logger.warning("[KLINE-BOX] _fetch_daily_bars_from_market_center failed: inst=%s err=%s type=%s",
+                         instrument_id, e, type(e).__name__)
+            return None
+
+    def _fetch_daily_bars_from_ticks_raw(self, instrument_id: str) -> Optional[List[Dict[str, Any]]]:
+        """从ticks_raw表查询tick数据并聚合成日K线(FIX-S3-KLINE-TICKSRAW-20260728)
+
+        当symbol_daily_aggregates和klines_raw表均无数据时, 从ticks_raw表查询
+        原始tick数据, 按date聚合成日K线(open/high/low/close/volume)。
+
+        根因: K线预加载50个期货全部失败(ok=0 fail=50), 原因是:
+          1. symbol_daily_aggregates表无数据(从未聚合过日K线)
+          2. klines_raw表无数据(flush_incomplete_klines未落库或表为空)
+          3. _build_daily_bars_from_cache返回空(update_bar从未被调用)
+          → 三层fallback全部失败 → K线箱体永远未确认 → S3/S4永远0下单
+
+        修复: 增加第四层fallback, 从ticks_raw表查询原始tick数据,
+          用DuckDB的arg_min/arg_max聚合函数按date聚合成日K线。
+          ticks_raw表由实时tick写入管道持续填充, 是最可靠的数据源。
+
+        Returns:
+            日K线列表 或 None(获取失败)
+        """
+        try:
+            from data.data_service import get_data_service
+            ds = get_data_service()
+            if ds is None:
+                return None
+
+            from datetime import date, timedelta as _td
+            end_date = date.today()
+            # FIX-S3S4-KLINE-RANGE-V2-20260729: 查询前20天内所有ticks(用户明确要求, 满足S4需要)
+            start_date = end_date - _td(days=20)
+
+            # FIX-S3-KLINE-TICKSRAW-20260728: 用DuckDB聚合函数从ticks_raw构建日K线
+            # arg_min(value, order): 返回按order排序后的第一个value (即open)
+            # arg_max(value, order): 返回按order排序后的最后一个value (即close)
+            # FIX-S3-TICKSRAW-CACHEBYPASS-20260728: 禁用查询缓存, 避免首次预加载时
+            #   ticks_raw为空导致空结果被缓存, 后续重试返回缓存空结果而非实时查询
+            sql = """
+                SELECT
+                    date as trade_date,
+                    arg_min(last_price, timestamp) as open,
+                    max(last_price) as high,
+                    min(last_price) as low,
+                    arg_max(last_price, timestamp) as close,
+                    coalesce(sum(volume), 0) as volume
+                FROM ticks_raw
+                WHERE instrument_id = ?
+                  AND date BETWEEN ? AND ?
+                  AND last_price > 0
+                GROUP BY date
+                ORDER BY date
+            """
+            # FIX-S3-TICKSRAW-CACHEBYPASS-20260728: use_cache=False绕过查询缓存
+            result = ds.query(sql, [instrument_id, start_date, end_date], use_cache=False)
+            if result is None:
+                logger.info("[KLINE-BOX] ticks_raw query returned None: inst=%s", instrument_id)
+                return None
+
+            # 兼容pa.Table和pd.DataFrame
+            if hasattr(result, 'to_pydict'):
+                data = result.to_pydict()
+            elif hasattr(result, 'to_dict'):
+                data = result.to_dict(orient='list')
+            else:
+                logger.info("[KLINE-BOX] ticks_raw result type unknown: inst=%s type=%s",
+                            instrument_id, type(result).__name__)
+                return None
+
+            if not data or not data.get('trade_date'):
+                # FIX-S3-TICKSRAW-DIAG-20260728: 诊断ticks_raw为何返回空结果
+                # 查询ticks_raw中实际有哪些instrument_id(仅首次诊断时执行)
+                if not getattr(self, '_ticks_raw_diag_done', False):
+                    self._ticks_raw_diag_done = True
+                    try:
+                        diag_sql = "SELECT DISTINCT instrument_id FROM ticks_raw LIMIT 20"
+                        diag_result = ds.query(diag_sql, use_cache=False)
+                        if diag_result is not None:
+                            if hasattr(diag_result, 'to_pydict'):
+                                diag_data = diag_result.to_pydict()
+                            elif hasattr(diag_result, 'to_dict'):
+                                diag_data = diag_result.to_dict(orient='list')
+                            else:
+                                diag_data = {}
+                            _insts = diag_data.get('instrument_id', [])
+                            logger.info("[KLINE-BOX] ticks_raw DIAG: queried inst=%s but no rows. "
+                                        "ticks_raw has %d distinct instrument_ids: %s",
+                                        instrument_id, len(_insts), _insts[:10])
+                    except Exception as _diag_err:
+                        logger.info("[KLINE-BOX] ticks_raw DIAG failed: %s", _diag_err)
+                return None
+
+            trade_dates = data.get('trade_date', [])
+            opens = data.get('open', [])
+            highs = data.get('high', [])
+            lows = data.get('low', [])
+            closes = data.get('close', [])
+            volumes = data.get('volume', [])
+
+            bars = []
+            for i in range(len(trade_dates)):
+                d = trade_dates[i]
+                if hasattr(d, 'isoformat'):
+                    ts_str = d.isoformat()
+                else:
+                    ts_str = str(d)
+
+                o = float(opens[i]) if i < len(opens) and opens[i] is not None else 0.0
+                h = float(highs[i]) if i < len(highs) and highs[i] is not None else 0.0
+                l = float(lows[i]) if i < len(lows) and lows[i] is not None else 0.0
+                c = float(closes[i]) if i < len(closes) and closes[i] is not None else 0.0
+                v = float(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0.0
+
+                if h <= 0 or l <= 0 or c <= 0:
+                    continue
+
+                bars.append({
+                    'timestamp': ts_str,
+                    'open': o,
+                    'high': h,
+                    'low': l,
+                    'close': c,
+                    'volume': v,
+                })
+
+            if bars:
+                logger.info("[KLINE-BOX] ticks_raw fallback: inst=%s bars=%d dates=[%s..%s]",
+                            instrument_id, len(bars),
+                            bars[0].get('timestamp', '')[:10],
+                            bars[-1].get('timestamp', '')[:10])
+            return bars if bars else None
+
+        except Exception as e:
+            # FIX-S3-TICKSRAW-DIAG-20260728: 升级为INFO级别, 便于诊断静默失败
+            logger.info("[KLINE-BOX] _fetch_daily_bars_from_ticks_raw failed: inst=%s err=%s",
+                         instrument_id, e)
+            return None
+
     def check_kline_box_precondition(
         self,
         instrument_id: str,
         days_to_expiry: int = 0,
         daily_bars: Optional[List[Dict[str, Any]]] = None,
+        box_type: Optional[BoxType] = None,
     ) -> Tuple[bool, Optional[KLineBoxProfile]]:
         """K线箱体前置条件检查 — S3/S4策略信号产生的唯一箱体来源
 
-        规则：
-        - 日内交易(dte≤5): 必须有日K小箱体确认(INTRADAY_SMALL)
-        - 隔夜交易(dte>5): 必须有周K中箱体确认(OVERNIGHT_MEDIUM)
-        - K线箱体确认后自动更新_current_box，作为信号生成的箱体边界
+        FIX-DEL-DTE-SWITCH-20260729: 删除 dte≤5/dte>5 条件切换(用户明确要求)
+        用户原意: S3是日内策略(永远用日K箱体), S4是隔夜策略(永远用周K箱体),
+        不应通过 days_to_expiry 来切换箱体类型。
+
+        新规则:
+        - box_type=INTRADAY_SMALL → 只检查日K小箱体(S3日内)
+        - box_type=OVERNIGHT_MEDIUM → 只检查周K中箱体(S4隔夜)
+        - box_type=None → 同时检查两个箱体, 优先返回日K(日内合约更可能日K有效),
+                          隔夜合约更可能周K有效(日K不足3根时周K也不足, 自然fail-closed)
+        - K线箱体确认后自动更新_current_box, 作为信号生成的箱体边界
 
         Args:
             instrument_id: 合约ID
-            days_to_expiry: 距到期日天数(0=默认按隔夜)
+            days_to_expiry: 距到期日天数(仅用于日志, 不再用于切换箱体类型)
             daily_bars: 外部传入的日K线数据
+            box_type: 明确指定箱体类型(可选, None=同时检查两个)
 
         Returns:
             (passed, kline_box) 是否通过前置条件 + 匹配的K线箱体轮廓
@@ -1236,15 +1536,15 @@ class BoxDetector:
             daily_bars=daily_bars,
         )
 
-        # dte≤5 → 日内交易 → 检查日K小箱体
-        if days_to_expiry <= 5:
+        # FIX-DEL-DTE-SWITCH-20260729: 删除 dte≤5/dte>5 切换, 改为按 box_type 选择
+        if box_type == BoxType.INTRADAY_SMALL:
+            # S3日内: 只检查日K小箱体
             if daily_box is not None and daily_box.is_valid:
-                # K线箱体确认 → 更新_current_box为K线箱体边界
                 self._update_current_box_from_kline(daily_box, 'INTRADAY_SMALL')
                 return True, daily_box
             else:
                 logger.debug(
-                    "[KLINE-BOX] PRECONDITION FAIL: inst=%s dte=%d 日内交易需日K小箱体(upper=%.2f lower=%.2f bars=%d valid=%s)",
+                    "[KLINE-BOX] PRECONDITION FAIL: inst=%s dte=%d 日K小箱体未确认(upper=%.2f lower=%.2f bars=%d valid=%s)",
                     instrument_id, days_to_expiry,
                     daily_box.upper if daily_box else 0.0,
                     daily_box.lower if daily_box else 0.0,
@@ -1253,15 +1553,14 @@ class BoxDetector:
                 )
                 return False, daily_box
 
-        # dte>5 → 隔夜交易 → 检查周K中箱体
-        else:
+        elif box_type == BoxType.OVERNIGHT_MEDIUM:
+            # S4隔夜: 只检查周K中箱体
             if weekly_box is not None and weekly_box.is_valid:
-                # K线箱体确认 → 更新_current_box为K线箱体边界
                 self._update_current_box_from_kline(weekly_box, 'OVERNIGHT_MEDIUM')
                 return True, weekly_box
             else:
                 logger.debug(
-                    "[KLINE-BOX] PRECONDITION FAIL: inst=%s dte=%d 隔夜交易需周K中箱体(upper=%.2f lower=%.2f bars=%d valid=%s)",
+                    "[KLINE-BOX] PRECONDITION FAIL: inst=%s dte=%d 周K中箱体未确认(upper=%.2f lower=%.2f bars=%d valid=%s)",
                     instrument_id, days_to_expiry,
                     weekly_box.upper if weekly_box else 0.0,
                     weekly_box.lower if weekly_box else 0.0,
@@ -1269,6 +1568,32 @@ class BoxDetector:
                     weekly_box.is_valid if weekly_box else False,
                 )
                 return False, weekly_box
+
+        else:
+            # box_type=None: 同时检查两个箱体(兼容旧调用方)
+            # 优先日K(日内合约更可能日K有效), 日K无效时检查周K(隔夜合约)
+            if daily_box is not None and daily_box.is_valid:
+                self._update_current_box_from_kline(daily_box, 'INTRADAY_SMALL')
+                return True, daily_box
+            elif weekly_box is not None and weekly_box.is_valid:
+                self._update_current_box_from_kline(weekly_box, 'OVERNIGHT_MEDIUM')
+                return True, weekly_box
+            else:
+                logger.debug(
+                    "[KLINE-BOX] PRECONDITION FAIL: inst=%s dte=%d 日K和周K箱体均未确认 "
+                    "(daily: upper=%.2f lower=%.2f bars=%d valid=%s; "
+                    "weekly: upper=%.2f lower=%.2f bars=%d valid=%s)",
+                    instrument_id, days_to_expiry,
+                    daily_box.upper if daily_box else 0.0,
+                    daily_box.lower if daily_box else 0.0,
+                    daily_box.bar_count if daily_box else 0,
+                    daily_box.is_valid if daily_box else False,
+                    weekly_box.upper if weekly_box else 0.0,
+                    weekly_box.lower if weekly_box else 0.0,
+                    weekly_box.bar_count if weekly_box else 0,
+                    weekly_box.is_valid if weekly_box else False,
+                )
+                return False, daily_box
 
     def _update_current_box_from_kline(
         self,
@@ -1307,8 +1632,8 @@ class BoxDetector:
             self._current_box = profile
             self._box_history.append(profile)
             self._stats['boxes_detected'] += 1
-            self._bounce_at_lower = 0
-            self._bounce_at_upper = 0
+            # FIX-DEL-TICKBOX-V2-20260729: _bounce_at_lower/_bounce_at_upper已删除(tick级状态)
+            # 旧代码 self._bounce_at_lower=0 / self._bounce_at_upper=0 会触发AttributeError
 
             logger.info(
                 "[KLINE-BOX] _update_current_box: box_id=%s type=%s upper=%.2f lower=%.2f w=%.2f%% bars=%d conf=%.3f",
@@ -1386,10 +1711,16 @@ class BoxDetector:
             stats = dict(self._stats)
             stats['current_box_valid'] = self._current_box.is_valid if self._current_box else False
             stats['iv_history_size'] = len(self._iv_history)
-            stats['price_bars'] = len(self._price_closes)
-            stats['adx_period'] = self._adx_period
-            stats['adx_threshold'] = self._adx_threshold
-            stats['bounce_tolerance_pct'] = self._bounce_tolerance_pct
+            # FIX-DEL-TICKBOX-V2-20260729: 删除已废弃的tick级状态读取
+            # 旧代码读 len(self._price_closes)/self._adx_period/self._adx_threshold/self._bounce_tolerance_pct
+            # 这些属性已删除(tick级箱体彻底删除), 读取会触发AttributeError
+            # 新代码: 报告K线箱体状态(替代tick级price_bars)
+            stats['kline_box_daily_valid'] = self._kline_box_daily.is_valid if self._kline_box_daily else False
+            stats['kline_box_weekly_valid'] = self._kline_box_weekly.is_valid if self._kline_box_weekly else False
+            stats['kline_box_daily_upper'] = self._kline_box_daily.upper if self._kline_box_daily else 0.0
+            stats['kline_box_daily_lower'] = self._kline_box_daily.lower if self._kline_box_daily else 0.0
+            stats['kline_box_weekly_upper'] = self._kline_box_weekly.upper if self._kline_box_weekly else 0.0
+            stats['kline_box_weekly_lower'] = self._kline_box_weekly.lower if self._kline_box_weekly else 0.0
             return stats
 
     def get_box_history(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -1421,20 +1752,17 @@ _box_detector_lock = threading.Lock()
 
 
 def get_box_detector(**kwargs) -> BoxDetector:
+    """BoxDetector 单例工厂
+
+    FIX-DEL-TICKBOX-V2-CLEANUP-V4-20260729: 不再从 config 加载已删除的 tick 级参数
+    旧代码: 从 get_cached_params() 加载 'box_gain_ratio', 'plr_normalization_base' 并作为
+            **kwargs 传给 BoxDetector — 这两个参数已在 FIX-DEL-TICKBOX-V2-20260729 中删除,
+            若配置中存在这些 key 会触发 TypeError: unexpected keyword argument
+    新代码: 直接以默认参数构造(tick级箱体已删除, BoxDetector.__init__只接受 params/lookback_bars/iv_history_maxlen)
+    """
     global _box_detector
     with _box_detector_lock:
         if _box_detector is None:
-            if not kwargs:
-                try:
-                    from config.config_service import get_cached_params
-                    all_params = get_cached_params()
-                    detector_keys = ['box_gain_ratio', 'plr_normalization_base']
-                    for k in detector_keys:
-                        if k in all_params and k not in kwargs:
-                            kwargs[k] = all_params[k]
-                except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                    logging.debug("[R3-L2] silent except triggered: %s", _r3_err)
-                    pass
             _box_detector = BoxDetector(**kwargs)
         return _box_detector
 

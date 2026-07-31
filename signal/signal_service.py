@@ -259,42 +259,8 @@ class SignalGenerator:
             return ctx
 
         # === S5套利硬约束 ===
-        try:
-            from strategy.monitor.arbitrage_monitor import ArbitrageMonitor
-            _arb = ArbitrageMonitor.get_instance()
-            _last_sig = _arb.get_last_simulated_signal()
-            if _last_sig is not None:
-                # 检查TTL: 信号生成时间在60秒内有效
-                import time as _time
-                _sig_age = _time.time() - getattr(_last_sig, 'timestamp', 0.0)
-                if _sig_age <= 60.0:
-                    _s5_dir = str(getattr(_last_sig, 'direction', '')).upper()
-                    _s5_inst = str(getattr(_last_sig, 'instrument_id', ''))
-                    # 仅当instrument_id匹配时才硬约束（同品种）
-                    if _s5_inst == ctx.instrument_id and _s5_dir and _s5_dir != _signal_dir:
-                        self._svc._stats['filtered_signals'] += 1
-                        self._svc._stats['s5_s6_conflict_filtered'] = self._svc._stats.get('s5_s6_conflict_filtered', 0) + 1
-                        logging.info(
-                            "[S5S6-CHAIN] 信号被S5套利硬约束拒绝: %s %s vs S5=%s (age=%.1fs)",
-                            ctx.instrument_id, _signal_dir, _s5_dir, _sig_age,
-                        )
-                        ctx.rejected = True
-                        ctx.reject_reason = f's5_arbitrage_conflict: signal={_signal_dir} s5={_s5_dir}'
-                        ctx.filter_name = 's5_s6_monitor'
-                        return ctx
-        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _s5_err:
-            # FIX-6 RC-7: S5套利监控查询失败分层处理
-            # 根因: dry_run模拟下单模式ArbitrageMonitor未初始化会抛AttributeError/ImportError
-            #       原fail-safe永久阻断导致S1/S3的0订单。改为dry_run=fail-open放行，实盘=fail-safe仅本周期阻断。
-            _dry = self._is_dry_run()
-            if _dry:
-                logging.warning("[S5S6-CHAIN] S5套利监控查询失败, dry_run fail-open放行: %s", _s5_err)
-            else:
-                logging.error("[S5S6-CHAIN] S5套利监控查询失败, 实盘 fail-safe本周期阻断: %s", _s5_err)
-                ctx.rejected = True
-                ctx.reject_reason = f's5_monitor_query_failure: {_s5_err}'
-                ctx.filter_name = 's5_s6_monitor'
-                return ctx
+        # DEL-S5-20260729: S5套利策略(ArbitrageMonitor)已彻底删除(用户决策放弃)
+        # 原S5硬约束代码已移除,不再检查S5信号方向冲突
 
         # === S6做市商硬约束 ===
         try:
@@ -517,22 +483,8 @@ class SignalGenerator:
             logging.debug("[R3-L2] suppressed exception", exc_info=True)
             pass
             pass
-        # FIX-20260711-S5S6-CHAIN: 收集S5套利/S6做市商维度（与7模块做相同处理）
-        try:
-            from strategy.monitor.arbitrage_monitor import ArbitrageMonitor
-            _arb = ArbitrageMonitor.get_instance()
-            _last_arb = _arb.get_last_simulated_signal()
-            if _last_arb is not None:
-                kwargs['s5_arbitrage_signal'] = {
-                    'direction': getattr(_last_arb, 'direction', ''),
-                    'deviation_bps': getattr(_last_arb, 'deviation_bps', 0.0),
-                    'confidence': getattr(_last_arb, 'confidence', 0.0),
-                    'quality_score': getattr(_last_arb, 'quality_score', 0.0),
-                    'instrument_id': getattr(_last_arb, 'instrument_id', ''),
-                }
-        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-            logging.debug("[R3-L2] S5套利维度收集失败", exc_info=True)
-            pass
+        # FIX-20260711-S5S6-CHAIN: 收集S6做市商维度（与7模块做相同处理）
+        # DEL-S5-20260729: S5套利维度收集已移除(ArbitrageMonitor已删除)
         try:
             from strategy.monitor.market_making_monitor import MarketMakingMonitor
             # FIX-20260711-S6-TOP-TIER: P2 多合约registry — 按instrument_id获取实例

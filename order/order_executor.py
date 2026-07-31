@@ -366,12 +366,13 @@ class OrderExecutor(_OrderExecutorBase):
                 continue
 
             # FIX-FAKE-INSTR-FILTER-20260723: 过滤假合约信号（半拉子工程双重保险）
-            # 根因: S5/S6 fallback信号使用假合约ID(S5_ARB_FALLBACK/S5_ARB/S6_MM/S6_MM_FALLBACK)
+            # 根因: S6 fallback信号使用假合约ID(S6_MM/S6_MM_FALLBACK)
             #   → execute_by_ranking不过滤capital_allocation/instrument_id → send_order创建持仓
             #   → resolve_product_exchange解析失败82次 → 持仓无法平仓（半拉子工程）
             # 修复: 在下游下单入口过滤假合约ID，与strategy_business_layer源头过滤形成双重保险
-            #   正常S5/S6信号instrument_id为真实合约ID（如rb2609/CU609等），不受影响
-            #   S6_MM_FALLBACK: market_making_monitor.py L1052 在instrument_id为空时设置的fallback
+            #   正常S6信号instrument_id为真实合约ID（如rb2609/CU609等），不受影响
+            #   S6_MM_FALLBACK: market_making_monitor.py 在instrument_id为空时设置的fallback
+            # DEL-S5-20260729: S5已删除, S5_ARB/S5_ARB_FALLBACK过滤器保留作为防御性兜底
             if instrument_id in ('S5_ARB_FALLBACK', 'S5_ARB', 'S6_MM', 'S6_MM_FALLBACK'):
                 _fake_filter_count = getattr(svc, '_fake_inst_filter_count', 0) + 1
                 svc._fake_inst_filter_count = _fake_filter_count
@@ -398,16 +399,28 @@ class OrderExecutor(_OrderExecutorBase):
 
             # FIX-OPEN-UNIQUE-07: OPEN动作时检查同合约同方向是否已有未成交订单
             if target_action == 'OPEN':
-                _dedup_key = (instrument_id, target_direction)
+                # FIX-DEDUP-STRATEGY-AWARE-20260730: 去重key加入策略源(open_reason)
+                # 根因: 原去重key=(instrument_id, direction)不含策略标识,
+                #   S1-HFT开仓HO2608-C-2900 BUY后, S6做市/S7背离反转同合约BUY信号
+                #   在5分钟内被cross_cycle_open_attempted误拦截 → S6/S7永远0下单
+                # 11:00会话实证: S1-HFT 11:03:51开仓HO2608-C-2900 BUY,
+                #   S6 11:07:51同合约BUY信号被拦截(240s<300s TTL) → S6=0单
+                # 修复: 去重key加入open_reason(HIGH_FREQ/MARKET_MAKING/DIVERGENCE_REVERSAL/BOX_EXTREME/BOX_SPRING),
+                #   不同策略独立去重,同策略仍保持原TTL防重复
+                _strategy_key = target.get('open_reason', '') or target.get('source', '') or 'default'
+                _dedup_key = (instrument_id, target_direction, _strategy_key)
                 if _dedup_key in _seen_open_instruments:
-                    logging.debug("[OPEN-UNIQUE-07] execute_by_ranking同合约同方向重复开仓target跳过: inst=%s dir=%s",
-                                    instrument_id, target_direction)
+                    logging.debug("[OPEN-UNIQUE-07] execute_by_ranking同策略同合约同方向重复开仓target跳过: inst=%s dir=%s strategy=%s",
+                                    instrument_id, target_direction, _strategy_key)
                     continue
                 # FIX-P1-2: 跨周期去重 — 5分钟内已尝试开仓的合约不再重复
                 # FIX-20260716-SIM-DEDUP: 模拟信号使用10秒TTL
-                _cross_key = f"{instrument_id}_{target_direction}"
+                # FIX-DEDUP-STRATEGY-AWARE-20260730: cross_key加入策略源,不同策略互不阻塞
+                _cross_key = f"{instrument_id}_{target_direction}_{_strategy_key}"
                 _last_attempt_ts = svc._cross_cycle_open_attempted.get(_cross_key, 0)
-                _effective_ttl = 10 if _is_simulated else _cross_cycle_ttl
+                # FIX-S1-HFT-UNBLOCK-20260728: 优先使用target自带的dedup_ttl
+                #   S1 HFT需要10秒短TTL去重(高频交易特征), 但不再使用simulated=True作为标记
+                _effective_ttl = target.get('dedup_ttl', 10 if _is_simulated else _cross_cycle_ttl)
                 if _last_attempt_ts and (_now_ts - _last_attempt_ts) < _effective_ttl:
                     continue
                 # 检查order_service中是否已有同合约同方向未成交OPEN订单

@@ -326,7 +326,7 @@ PARAM_GRID_BOX_EXTREME = {
 }
 
 PARAM_DEFAULTS_BOX_EXTREME = {
-    "box_detection_threshold": 0.03,
+    "box_detection_threshold": 0.01,  # FIX-BOX-DUAL-WIDTH-20260730: 3%→1%统一
     "box_min_bars": 20,
     "extreme_entry_ratio": 0.5,
     "close_take_profit_ratio": 2.0,

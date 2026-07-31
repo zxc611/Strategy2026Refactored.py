@@ -1396,10 +1396,10 @@ def _load_full_chain_entry_counts() -> Dict[str, int]:
 def _log_full_chain_entry_counts(runtime_subscribed_count: int) -> None:
     counts = _load_full_chain_entry_counts()
     if not counts:
-        logging.info("[%s] 全链路入口统计: 暂无可用DB统计，runtime_subscribed=%d", MONITORED_DIAG_LABEL, runtime_subscribed_count)
+        logging.debug("[%s] 全链路入口统计: 暂无可用DB统计，runtime_subscribed=%d", MONITORED_DIAG_LABEL, runtime_subscribed_count)
         return
     expected = counts.get('audit_config_count') or counts.get('registry_count') or 0
-    logging.info(
+    logging.debug(
         "[%s] 全链路入口统计: config=%d, registry=%d, futures=%d, options=%d, runtime_subscribed=%d, "
         "ticks_raw_today=%d(real=%d, simulated=%d), klines_raw_today=%d",
         MONITORED_DIAG_LABEL,
@@ -1414,7 +1414,7 @@ def _log_full_chain_entry_counts(runtime_subscribed_count: int) -> None:
         counts.get('klines_raw_today_count', 0),
     )
     if counts.get('audit_rows', 0):
-        logging.info(
+        logging.debug(
             "[%s] 最新覆盖审计: config=%d -> subscribe=%d -> tick_return=%d -> tick_buffer=%d -> "
             "ticks_raw=%d -> klines_raw=%d, simulated_tick=%d, simulated_kline=%d",
             MONITORED_DIAG_LABEL,
@@ -3811,9 +3811,9 @@ def record_tick_probe(stage: str, instrument_id: str, price: float, error_msg: O
                             logging.error("[PROBE_TICK_SUMMARY] ERROR | %s @ %s | %s", err['instrument_id'], err['price'], err['error'])
                         logging.error("[PROBE_TICK_SUMMARY] Total errors in last 30s: %d (showing last 5)", len(errors))
                 else:
-                    logging.info("[PROBE_TICK_SUMMARY] %s | Count: %d ticks in last 30s", stage, count)
+                    logging.debug("[PROBE_TICK_SUMMARY] %s | Count: %d ticks in last 30s", stage, count)
                     if 'samples' in stats and stats['samples']:
-                        logging.info("[PROBE_TICK_SUMMARY] %s | Samples: %s", stage, stats['samples'][:5])
+                        logging.debug("[PROBE_TICK_SUMMARY] %s | Samples: %s", stage, stats['samples'][:5])
             stats['count'] = 0
             stats['last_log'] = now
             if 'samples' in stats:
