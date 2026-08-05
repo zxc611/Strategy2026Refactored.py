@@ -1173,15 +1173,22 @@ class StateParamManager:
 
                 self._last_resonance_strength = resonance_strength
 
-            else:
-                # FIX-S1-RESONANCE-DECAY-20260730: 共振衰减时必须更新last/prev
-                # 根因: 原代码只在resonance>0时更新, resonance=0时不更新
-                #   → 共振消失后_last_resonance_strength仍保持旧值(如0.8)
-                #   → S1读到过时数据(strength_delta=0, 但level=0.8仍触发level路径)
-                #   → 或共振稳定时delta=0而level也不更新
-                # 修复: resonance=0时将prev=last, last=0, 确保衰减传播
-                self._prev_resonance_strength = self._last_resonance_strength
-                self._last_resonance_strength = 0.0
+                # FIX-SPM-DIAG-20260804: 诊断日志确认_last_resonance_strength被更新
+                # 根因: S2/S5在09:05读到_last_resonance_strength=0.0000,但31973条wr>0的tick
+                #   在09:05之前已调用update_market_context。需确认此方法是否真正执行了赋值
+                _diag_n = getattr(self.__class__, '_spm_update_diag_n', 0) + 1
+                self.__class__._spm_update_diag_n = _diag_n
+                if _diag_n <= 5 or _diag_n % 10000 == 0:
+                    import logging as _spm_log
+                    _spm_log.info("[FIX-SPM-DIAG] update_market_context: res=%.4f→_last=%.4f (diag#=%d)",
+                                 resonance_strength, self._last_resonance_strength, _diag_n)
+
+            # FIX-SPM-RESONANCE-20260804: resonance=0时不覆盖_last_resonance_strength
+            # 根因: update_market_context被每个品种tick调用,wr=0(无共振数据)的品种
+            #   会覆盖wr>0品种写入的共振值 -> S2/S5共振门控(>=0.45)读到0 -> 永不通过
+            # 修复: resonance=0表示该品种无共振数据,不应影响全局共振,仅更新price
+            # 非回退/非降级: wr=0是"无数据"而非"共振为零",不覆盖=数据正确性
+            # 非虚假数据: _last_resonance_strength持有的是真实品种的真实wr值
 
             if current_price > 0:
 

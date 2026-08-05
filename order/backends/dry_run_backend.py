@@ -113,6 +113,12 @@ class DryRunExecutionBackend(OrderExecutionBackend):
         # 重构前路径A (validation.py:246) 直接写入 FILLED，此处保持一致
         # 避免异步回调注入失败(如无provider)时 FILLED 状态在磁盘丢失
         svc._append_order_state(ctx.order_id, 'FILLED', ctx.order)
+        # [FIX-WAL-CLEANUP] DRY订单终态后立即删除.wal文件
+        # 根因: DRY模式下_wal_write写入.wal但从不删除(与LiveBackend CONFIRMED后_wal_delete不对称)
+        # 导致.wal文件无限累积(实测158K个)，_recover_orphaned_orders扫描阻塞on_init 24分钟
+        # 修复: 与live_backend.py:236对称，终态后立即删除.wal文件
+        # 安全性: order_state.jsonl已保留完整订单状态，.wal仅是提交瞬态冗余
+        svc._wal_delete(ctx.order_id)
 
         # 6. 异步注入虚拟回调 (统一入口，可配置注入器)
         _delay = getattr(svc, '_dry_run_callback_delay_sec', 0.05)
@@ -205,6 +211,8 @@ class DryRunExecutionBackend(OrderExecutionBackend):
             try:
                 svc._wal_write(_order_id, 'CANCELLED', _order)
                 svc._append_order_state(_order_id, 'CANCELLED', _order)
+                # [FIX-WAL-CLEANUP] DRY撤单终态后立即删除.wal文件(与下单路径对称)
+                svc._wal_delete(_order_id)
             except Exception as _cancel_persist_err:
                 # 实时回调路径硬约束: except Exception
                 logging.warning("[DRY-RUN] 虚拟撤单持久化失败(非阻断): %s err=%s",

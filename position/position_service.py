@@ -535,6 +535,9 @@ class PositionService(object):
         'OTHER_SCALP': (1.1, 0.30),
         'BOX_SPRING': (1.3, 0.40),  # [FIX-20260712-S4] tp 2.0→1.3(匹配弹簧短持仓特性)
         'ARBITRAGE': (1.2, 0.30), 'MARKET_MAKING': (1.1, 0.20), 'BOX_EXTREME': (1.2, 0.40),
+        # ADD-S5-20260731: S5隔夜仓止盈止损(持仓>12小时, 追求大盈亏比2:1)
+        # 根因: OVERNIGHT未注册→回退_FALLBACK_TP_SL=(1.8,0.30)→与S5设计(2.0,0.4)不符
+        'OVERNIGHT': (2.0, 0.40),
         'MANUAL': (1.5, 0.50), '': (1.5, 0.50),
     }
     _FALLBACK_TP_SL = (1.8, 0.30)

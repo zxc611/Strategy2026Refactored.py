@@ -611,6 +611,8 @@ STRATEGY_MODE_HFT = "hft"
 STRATEGY_MODE_BOX_EXTREME = "box_extreme"
 STRATEGY_MODE_BOX_SPRING = "box_spring"
 # DEL-S5-20260729: STRATEGY_MODE_ARBITRAGE已删除(S5套利策略用户决策放弃)
+# ADD-S5-20260731: S5语义复用为隔夜仓策略(用户决策),与原S5套利完全隔离
+STRATEGY_MODE_OVERNIGHT = "s5_overnight"
 STRATEGY_MODE_MARKET_MAKING = "s6_market_making"
 STRATEGY_MODE_HIGH_FREQ = "s1_hft"
 STRATEGY_MODE_DIVERGENCE_REVERSAL = "divergence_reversal"
@@ -623,6 +625,7 @@ ALL_STRATEGY_MODES = (
     STRATEGY_MODE_BOX,
     STRATEGY_MODE_HFT,
     STRATEGY_MODE_DIVERGENCE_REVERSAL,
+    STRATEGY_MODE_OVERNIGHT,
 )
 
 STRATEGY_MODE_CORRECT_TRENDING_DEFENSIVE = "correct_trending_defensive"
@@ -667,6 +670,8 @@ _STATE_REASON_MAP = {
     's1_hft': 'HIGH_FREQ',
     'intraday': 'INTRADAY',  # [FIX-20260712-S2] S2日内交易策略
     # DEL-S5-20260729: 's5_arbitrage': 'ARBITRAGE' 已删除(S5套利策略用户决策放弃)
+    # ADD-S5-20260731: S5复用为隔夜仓策略,开仓理由OVERNIGHT
+    's5_overnight': 'OVERNIGHT',
     's6_market_making': 'MARKET_MAKING',
     'divergence_reversal': 'DIVERGENCE_REVERSAL',
     'box_extreme': 'BOX_EXTREME',
@@ -744,6 +749,7 @@ STRATEGY_DEFAULTS = {
         'box_extreme': 0.3,
         'hft': 0.2,
         'intraday': 0.5,  # [FIX-20260712-S2] S2日内交易止损比率
+        'overnight': 0.4,  # ADD-S5-20260731: S5隔夜仓止损比率(保守)
     },
     'max_signals_per_window': 5,
     'state_confirm_bars': 5,
@@ -756,6 +762,17 @@ STRATEGY_DEFAULTS = {
     'position_timeout_sec': 3600,
     'daily_drawdown_multiplier': 2.0,
     'circuit_breaker_trigger_sigma': 3.0,
+    # ADD-S5-REFINE-20260731: S5隔夜仓模块配置化开关与资金分配
+    # 默认启用; 资金分配1.5%(介于S2的2%和S6的1%之间, 体现隔夜跳空风险)
+    's5_overnight_enabled': True,
+    's5_capital_allocation': 0.015,
+    # ADD-S345-RISK-BYPASS-20260731: 模拟下单状态下S3/S4/S5风控跳过开关
+    # 用户决策(2026-07-31): 实盘模拟下单状态下暂时关闭S3/S4/S5风控, 只为验证策略跑通模拟下单
+    # 语义: True=在dry_run模式下跳过S3/S4/S5风控(默认打开)
+    # 安全保障: 仅在dry_run=True时生效; 实盘模式(dry_run=False)风控始终启用, 此开关不起作用
+    # 影响范围: s3_box/s4_spring/s5_overnight 三个策略组
+    # 影响环节: 硬时间止损(check_position_hard_time_stop) + 止盈止损 + 开仓前检查(check_before_trade)
+    's3_s4_s5_risk_bypass_in_dry_run': True,
 }
 
 # R24-P1-DF-06修复: 中心化默认值常量体系、单一真相源
@@ -800,6 +817,7 @@ CENTRALIZED_DEFAULTS = {
         'box_extreme': 0.3,  # 箱体极值止损比率
         'hft': 0.2,  # HFT止损比率
         'intraday': 0.5,  # [FIX-20260712-S2] S2日内交易止损比率
+        'overnight': 0.4,  # ADD-S5-20260731: S5隔夜仓止损比率(保守)
     },
     'position_timeout_sec': 3600,  # R24-P1-DF-12修复: 持仓超时默认值(秒)
     'max_retry_count': 3,  # R24-P1-DF-14修复: 最大重试次数默认值

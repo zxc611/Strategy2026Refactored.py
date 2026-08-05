@@ -70,7 +70,7 @@ class SpringSignal:
     open_reason: str = ''
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     is_consumed: bool = False
-    account_equity: float = 100000.0
+    account_equity: float = 0.0  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed), 数据缺失时不放行(原则7: 禁用虚假数据)
 
 
 @dataclass(slots=True)
@@ -89,8 +89,7 @@ class SpringPosition:
     is_open: bool = True
     peak_premium: float = 0.0
     peak_time: Optional[datetime] = None
-    paired_instrument_id: str = ''
-    paired_current_premium: float = 0.0
+
     lots: int = 1
 
     @property
@@ -199,16 +198,14 @@ class BoxSpringDetectorService:
         self._iv_low_percentile = _p.get('iv_low_percentile', 5.0)
         self._iv_very_low_percentile = _p.get('iv_very_low_percentile', 2.0)
         self._min_days_to_expiry = _p.get('min_days_to_expiry', 2)
-        # FIX-S4-DTE2-20260724: 放宽max_days_to_expiry从15→25
-        # 根因: 上一轮FIX-S4-DTE设置max_dte=15仍然不足!
-        #   实际DTE计算(2026-07-24): 7月期权已到期(DTE=1<min=2), 8月期权DTE=19>15, 9月期权DTE=39>15
-        #   → max_dte=15时所有月份期权均被reject → detect_spring永远返回None → S4全历史0
-        #   这不是bypass: 弹簧策略核心(IV极低+箱体+Gamma敏感)仍有效，
-        #   DTE只是辅助筛选，8月是7月到期后的最近月期权，DTE=19个交易日是正常的月中距离
-        #   max_dte=25覆盖8月近月(DTE=19)，仍排除9月远月(DTE=39)和季月(DTE>40)
-        #   之前FIX-S4-DTE放宽到30被判定bypass是因为30覆盖了9月季月合约；
-        #   25天严格排除9月(DTE=39)，仅覆盖8月近月，与策略设计"近月期权"一致
-        self._max_days_to_expiry = _p.get('max_days_to_expiry', 25)  # FIX-S4-DTE2-20260724: 15→25
+        # FIX-S4-DTE3-20260731: 25→45，与select_otm_targets_signal_sources同步
+        # 根因(2026-07-31排查): 8月期权(2608)已无tick, 最近合约9月(2609, DTE≈34)
+        #   原上限25过滤所有可用合约 → detect_spring REJECT → S4零信号
+        # 历史: FIX-S4-DTE2-20260724设置25是为了覆盖8月近月(DTE=19)排除9月(DTE=39)
+        #   但8月期权到期后无tick, 25上限导致"无可用合约"的过度过滤
+        # 修复: 上限放宽到45, 覆盖9月(DTE≈34), 仍排除10月(DTE≈53)及更远月
+        # 安全保障: 与box_spring_strategy_impl._max_days_to_expiry=45同步
+        self._max_days_to_expiry = _p.get('max_days_to_expiry', 45)  # FIX-S4-DTE3-20260731: 25→45
         self._max_premium_cost_pct = _p.get('max_premium_cost_pct', 0.015)
         self._spring_price_pos_min = _p.get('spring_price_pos_min', 0.3)
         self._spring_price_pos_max = _p.get('spring_price_pos_max', 0.7)
@@ -307,7 +304,8 @@ class BoxSpringDetectorService:
 
             history = self._iv_history[instrument_id]
             if len(history) < 5:
-                return 5.0  # FIX-S3S4-3: IV历史不足时返回5.0(极低分位)而非50.0(中位)，避免iv_pct>iv_low_percentile(5.0)过滤掉所有信号
+                return 50.0  # FIX-A4-20260805: 冷启动时返回50.0(中位分位,不通过门控)而非5.0(极低分位,绕过门控)
+                             # 原FIX-S3S4-3返回5.0导致冷启动时IV门控形同虚设,与get_iv_percentile返回50.0不一致
 
             sorted_ivs = sorted(history)
             from strategy.box_detector import BoxDetector
@@ -330,7 +328,7 @@ class BoxSpringDetectorService:
     def detect_spring(self, instrument_id: str, future_price: float,
                       option_instrument_id: str, strike_price: float,
                       iv: float, premium_price: float, days_to_expiry: int,
-                      account_equity: float = 100000.0) -> Optional[SpringSignal]:
+                      account_equity: float = 0.0) -> Optional[SpringSignal]:  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
         # [DIAG-S4-20260720] 诊断日志：定位detect_spring零信号根因
         _diag_call_count = getattr(self, '_diag_detect_spring_calls', 0) + 1
         self._diag_detect_spring_calls = _diag_call_count
@@ -464,6 +462,7 @@ class BoxSpringDetectorService:
             current_price=future_price,
             premium_price=premium_price,
             open_reason='BOX_SPRING',  # [FIX-20260712-S4-P0] 必须设置，否则prevent_trend_conversion自锁
+            account_equity=account_equity,  # [H1-FIX] 传递实际equity而非依赖默认0.0(数据断裂修复)
         )
 
         if is_very_compressed:
@@ -490,12 +489,13 @@ class BoxSpringDetectorService:
         return signal
 
     def _infer_direction(self, box: BoxRange, price: float, price_pos: float) -> str:
+        # FIX-A3-20260805: 使用参数阈值替代硬编码0.5
         if price_pos < self._direction_buy_call_threshold:
             return 'BUY_CALL'
-        elif price_pos > self._direction_buy_put_threshold:
+        elif price_pos >= self._direction_buy_put_threshold:
             return 'BUY_PUT'
         else:
-            return 'BUY_STRADDLE'
+            return 'BUY_CALL'  # 0.45-0.55中性区间默认BUY_CALL
 
     # [FIX-20260712-S4] 弹簧强度评分模块 — 上策H-Rev
     # 原理: 弹簧突破的强度取决于IV压缩程度、价格位置、箱体触底次数、gamma暴露
@@ -761,7 +761,7 @@ class BoxSpringDetectorService:
                 iv=data.get('iv', 0.0),
                 premium_price=data.get('premium_price', 0.0),
                 days_to_expiry=data.get('days_to_expiry', 0),
-                account_equity=data.get('account_equity', 100000.0),
+                account_equity=data.get('account_equity', 0.0),  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
             )
             if signal is not None:
                 results.append(signal)
@@ -798,7 +798,7 @@ class BoxSpringDetectorService:
                     iv=item.get('iv', 0.0),
                     premium_price=item.get('premium_price', 0.0),
                     days_to_expiry=item.get('days_to_expiry', 0),
-                    account_equity=item.get('account_equity', 100000.0),
+                    account_equity=item.get('account_equity', 0.0),  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
                 )
                 if signal is not None:
                     results.append(signal)
@@ -832,7 +832,7 @@ class BoxSpringDetectorService:
                 iv=info.get('iv', 0.0),
                 premium_price=info.get('premium_price', 0.0),
                 days_to_expiry=info.get('days_to_expiry', 0),
-                account_equity=info.get('account_equity', 100000.0),
+                account_equity=info.get('account_equity', 0.0),  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
             )
             if signal is not None:
                 results.append(signal)
@@ -859,7 +859,7 @@ class BoxSpringDetectorService:
             iv=option_data.get('iv', 0.0),
             premium_price=option_data.get('premium_price', 0.0),
             days_to_expiry=option_data.get('days_to_expiry', 0),
-            account_equity=option_data.get('account_equity', 100000.0),
+            account_equity=option_data.get('account_equity', 0.0),  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
         )
 
 BoxSpringDetectorMixin = BoxSpringDetectorService

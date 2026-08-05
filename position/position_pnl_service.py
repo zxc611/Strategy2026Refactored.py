@@ -137,8 +137,39 @@ class PositionPnlService:
             return 'unknown'
         return _result
 
+    def _is_s3_s4_s5_risk_bypassed(self, record) -> bool:
+        """ADD-S345-RISK-BYPASS-20260731: 判断是否跳过S3/S4/S5风控
+
+        用户决策: dry_run模式下暂时关闭S3/S4/S5风控, 只为验证策略跑通模拟下单
+        安全保障: 仅在dry_run=True时生效; 实盘模式风控始终启用
+        """
+        _sg = getattr(record, 'strategy_group', '')
+        if _sg not in ('s3_box', 's4_spring', 's5_overnight'):
+            return False
+        try:
+            from strategy.strategy_config_layer import STRATEGY_DEFAULTS as _bypass_cfg
+            _bypass_enabled = _bypass_cfg.get('s3_s4_s5_risk_bypass_in_dry_run', True)
+        except Exception:
+            _bypass_enabled = True
+        if not _bypass_enabled:
+            return False
+        _is_dry_run = False
+        try:
+            from config.params_service import get_params_service
+            _is_dry_run = get_params_service().get_bool('dry_run_mode', False) or False
+        except Exception:
+            pass
+        if not _is_dry_run:
+            _is_dry_run = bool(getattr(self._ps, '_dry_run_active', False))
+        if _is_dry_run:
+            return True
+        return False
+
     def _check_stop_profit(self, record, current_price: float) -> None:
         # FIX-20260704-STARTUP-GRACE: 启动后30秒内跳过止盈检查
+        # ADD-S345-RISK-BYPASS-20260731: dry_run模式下跳过S3/S4/S5止盈检查
+        if self._is_s3_s4_s5_risk_bypassed(record):
+            return
         _now_ts = time.time()
         if not hasattr(self._ps, '_startup_close_grace_until'):
             self._ps._startup_close_grace_until = _now_ts + 30.0
@@ -166,6 +197,9 @@ class PositionPnlService:
 
     def _check_stop_loss(self, record, current_price: float) -> None:
         # FIX-20260704-STARTUP-GRACE: 启动后30秒内跳过止损检查
+        # ADD-S345-RISK-BYPASS-20260731: dry_run模式下跳过S3/S4/S5止损检查
+        if self._is_s3_s4_s5_risk_bypassed(record):
+            return
         _now_ts = time.time()
         if not hasattr(self._ps, '_startup_close_grace_until'):
             self._ps._startup_close_grace_until = _now_ts + 30.0
@@ -246,6 +280,7 @@ class PositionPnlService:
                     continue
                 if record.volume == 0:
                     continue
+                # 注: 期权到期平仓是平仓操作, 不影响开仓验证, 不设dry_run跳过开关(用户决策2026-07-31)
                 try:
                     days_to_expiry = self._calc_days_to_expiry(instrument_id)
                     if days_to_expiry is not None and days_to_expiry <= 0:
@@ -293,6 +328,7 @@ class PositionPnlService:
         # 根因: 从JSONL恢复的持仓open_time为旧时间，elapsed远超hold_time，
         # 启动时立即触发全量平仓→平台拒绝result=-1→重试耗尽→CANNOT_CLOSE
         # 修复: 启动后30秒宽限期内跳过时间止损，待平台就绪+行情到达后再正常检查
+        # 注: 时间止损是平仓操作, 不影响开仓验证, 不设dry_run跳过开关(用户决策2026-07-31)
         _now_ts = time.time()
         if not hasattr(self._ps, '_startup_close_grace_until'):
             self._ps._startup_close_grace_until = _now_ts + 30.0
@@ -313,6 +349,8 @@ class PositionPnlService:
             'spring': 5.0, 'box': 60.0, 'arbitrage': 30.0,
             'market_making': 15.0, 'high_freq': 1.0,
             'intraday': 240.0, 'divergence': 45.0, 'resonance': 5.0,
+            # ADD-S5-20260731: S5隔夜仓持仓时间(24小时, 与max_hold_minutes一致)
+            's5_overnight': 1440.0,
         }
         if _sg in _STRATEGY_HOLD_OVERRIDES:
             max_hold_minutes = _STRATEGY_HOLD_OVERRIDES[_sg]
@@ -446,6 +484,9 @@ class PositionPnlService:
     def _check_two_stage_stop(self, record, now: datetime = None) -> None:
         # FIX-20260704-STARTUP-GRACE: 启动后30秒内跳过两阶段止损检查
         # 根因: 同_check_time_stop，恢复的持仓open_time为旧时间，立即触发止损
+        # ADD-S345-RISK-BYPASS-20260731: dry_run模式下跳过S3/S4/S5两阶段止损
+        if self._is_s3_s4_s5_risk_bypassed(record):
+            return
         _now_ts = time.time()
         if not hasattr(self._ps, '_startup_close_grace_until'):
             self._ps._startup_close_grace_until = _now_ts + 30.0
@@ -583,6 +624,11 @@ class PositionPnlService:
                         if record.volume != 0:
                             _sg = getattr(record, 'strategy_group', '')
                             if _sg in ('spring', 'arbitrage') and eod_reason == "EOD_Night_Close":
+                                continue
+                            # 注: EOD平仓是平仓操作, 不影响开仓验证, 不设dry_run跳过开关(用户决策2026-07-31)
+                            # FIX-S5-EOD-20260731: S5隔夜仓不应被EOD平仓(持仓>12小时, 跨日)
+                            # 即使实盘模式, s5_overnight也不应被EOD_Close/EOD_Night_Close平仓
+                            if _sg == 's5_overnight':
                                 continue
                             _eod_close_records.append(record)
             for record in _eod_close_records:

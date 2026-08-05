@@ -1,4 +1,4 @@
-﻿# [M1-43] 订单流实时桥接服务
+﻿﻿# [M1-43] 订单流实时桥接服务
 
 # MODULE_ID: M1-136
 
@@ -160,6 +160,14 @@ class OrderFlowBridge:
         if product is None:
             return self._get_aggregate_flow_consistency()
 
+        # FIX-OFI-PRODUCT-20260805: 合约ID→品种代码转换
+        # 根因: 业务层传入_bs_future_inst是合约ID(如"IF2609")，但analyzer按品种代码(如"IF")存储
+        #       get_ofi('IF2609')→_products.get('IF2609')→None→返回0.0→S4永远无法触发
+        # 修复: 使用_extract_product转换后再查询analyzer
+        _product_code = self._extract_product(product)
+        if _product_code:
+            product = _product_code
+
         now = time.time()
         self._cleanup_flow_cache(now)
         cache_key = f"fc_{product}"
@@ -290,7 +298,7 @@ class OrderFlowBridge:
         try:
             from infra.shared_utils import extract_product_code
             product = extract_product_code(instrument_id)
-        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+        except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:  # [M1-FIX] 补捕获ImportError
             product = ''
 
         if product:

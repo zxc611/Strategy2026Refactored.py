@@ -302,7 +302,7 @@ class QueryService:
 
     def _get_cached_instruments(self) -> Dict[str, Dict[str, Any]]:
         ps = self._get_params_service()
-        return ps.get_all_instrument_cache() if ps else {}
+        return ps.get_all_instrument_cache() if ps is not None else {}
 
     def _ensure_internal_id_index(self) -> Dict[int, str]:
         with self._idx_lock:

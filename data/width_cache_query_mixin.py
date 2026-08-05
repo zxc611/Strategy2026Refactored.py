@@ -777,19 +777,20 @@ class WidthCacheQueryService:
                 best_candidates.sort(key=lambda x: x['volume'], reverse=True)
 
                 # BUG-14 fix: iterate candidates, skip those with existing positions
-                # FIX-S4-DTE-FILTER-20260729: 增加DTE过滤,优先近月合约(dte≤25)
+                # FIX-S4-DTE-FILTER-20260729: 增加DTE过滤,优先近月合约(dte≤45)
                 # 根因: best_candidates按volume排序选最高,但9月远月合约volume可能>8月近月
                 #   → 选中9月(dte≈35)>max_days_to_expiry=25 → detect_spring REJECT → S4零信号
-                # 修复: 在候选选择时过滤dte不在[2,25]的合约,优先选择近月高volume合约
-                #   与BoxSpringDetectorService._min_days_to_expiry=2/_max_days_to_expiry=25对齐
+                # 修复: 在候选选择时过滤dte不在[2,45]的合约,优先选择近月高volume合约
+                #   与BoxSpringDetectorService._min_days_to_expiry=2/_max_days_to_expiry=45对齐
                 #   不是bypass: DTE检查是策略核心(近月期权Gamma敏感),远月合约不符合弹簧策略设计
+                # FIX-S4-DTE3-20260803: 25→45,与select_otm_targets_signal_sources(L1173)/box_spring_detector(L209)/box_spring_strategy_impl(L109)统一
                 _s4_min_dte = 2
-                _s4_max_dte = 25
+                _s4_max_dte = 45  # FIX-S4-DTE3-20260803: 25→45,与select_otm_targets_signal_sources/box_spring_detector/box_spring_strategy_impl对齐
                 try:
                     _s4_params = self._get_params()
                     if _s4_params and hasattr(_s4_params, 'get'):
                         _s4_min_dte = _s4_params.get('min_days_to_expiry', 2) or 2
-                        _s4_max_dte = _s4_params.get('max_days_to_expiry', 25) or 25
+                        _s4_max_dte = _s4_params.get('max_days_to_expiry', 45) or 45  # FIX-S4-DTE3-20260803: 25→45
                 except Exception:
                     pass
                 best = None
@@ -1114,43 +1115,39 @@ class WidthCacheQueryService:
             future_rising = self._future_rising.get(fid, False)
             opt_type = 'CALL' if future_rising else 'PUT'
 
-            # v2.8.1: 优先按 month_candidates 顺序尝试（按 primary_score 降序，scheme 感知）
-            # 若 month_candidates 不可用，回退到遍历所有月份桶（向后兼容）
+            # FIX-20260803-MONTH-SELECT: 月份竞争排序改为诊断信息，合约选择改为按 DTE 升序（近月优先）
+            # 根因: 期权交易选定品种后应直接选近月（权利金最小、Gamma最大、杠杆最高）。
+            #   原实现按 month_candidates 的 primary_score 降序遍历月份，本质是"选最强月份"，
+            #   但这与期权交易逻辑矛盾，且后续 DTE 过滤会覆盖该排序——徒增计算开销。
+            # 修正: 遍历该品种所有可用月份桶，按 DTE 升序（近月优先）排序后选第一个通过
+            #   持仓检查与 DTE 过滤的合约。month_candidates 仅作为诊断信息保留。
+            # 安全保障: DTE 过滤范围 [2, 45] 与 box_spring_detector / select_otm_targets_by_volume 对齐。
             best_candidates = []
-            if month_candidates_info:
-                # v2.8.1: 按候选列表优先级尝试，利用 score_delta_to_next / rank_confidence 决策
-                for cand_info in month_candidates_info:
-                    mth = cand_info.get('month')
-                    if not mth:
-                        continue
-                    mth_candidates = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
-                    if mth_candidates and mth_candidates[0]:
-                        entry = mth_candidates[0]
-                        # v2.8.1: 附加候选诊断信息（含 v2.8 D 字段 + 向后兼容 net_score）
-                        entry['rank_confidence'] = cand_info.get('rank_confidence', 0.0)
-                        entry['score_delta_to_next'] = cand_info.get('score_delta_to_next')
-                        entry['net_score'] = cand_info.get('net_score', 0.0)
-                        entry['D'] = cand_info.get('D', 0.0)
-                        entry['primary_score'] = cand_info.get('primary_score', cand_info.get('net_score', 0.0))
-                        best_candidates.append(entry)
-            else:
-                # 向后兼容：无 month_candidates 时遍历所有月份桶
-                all_buckets = self._sort_buckets.get(fid, {})
-                for mth in all_buckets:
-                    mth_candidates = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
-                    if mth_candidates and mth_candidates[0]:
-                        best_candidates.append(mth_candidates[0])
+            all_buckets = self._sort_buckets.get(fid, {})
+            for mth in all_buckets:
+                mth_candidates = self.select_from_sort_bucket(fid, mth, opt_type, top_n=1)
+                if mth_candidates and mth_candidates[0]:
+                    entry = mth_candidates[0]
+                    # 附加诊断信息（从 month_candidates_info 中查找对应月份，若无则用默认值）
+                    _diag_info = {}
+                    if month_candidates_info:
+                        for _ci in month_candidates_info:
+                            if _ci.get('month') == mth:
+                                _diag_info = _ci
+                                break
+                    entry['rank_confidence'] = _diag_info.get('rank_confidence', 0.0)
+                    entry['score_delta_to_next'] = _diag_info.get('score_delta_to_next')
+                    entry['net_score'] = _diag_info.get('net_score', 0.0)
+                    entry['D'] = _diag_info.get('D', 0.0)
+                    entry['primary_score'] = _diag_info.get('primary_score', _diag_info.get('net_score', 0.0))
+                    # FIX-20260803: 附加 DTE 用于近月优先排序
+                    entry['_dte_for_sort'] = self._approx_dte_from_year_month(mth)
+                    best_candidates.append(entry)
             if not best_candidates:
                 continue
 
-            # v2.8.1: month_candidates 已按 primary_score 降序（scheme 感知），
-            # 优先使用高 rank_confidence 的候选
-            # 仅当无 month_candidates_info 时才按 volume 排序（向后兼容）
-            if month_candidates_info:
-                # 保持 month_candidates 的 primary_score 优先顺序
-                pass
-            else:
-                best_candidates.sort(key=lambda x: x.get('volume', 0), reverse=True)
+            # FIX-20260803: 按 DTE 升序排序（近月优先），不再按 primary_score 或 volume 排序
+            best_candidates.sort(key=lambda x: x.get('_dte_for_sort', 999))
 
             try:
                 from position.position_service import get_position_service
@@ -1162,19 +1159,26 @@ class WidthCacheQueryService:
             for cand in best_candidates:
                 if pos_svc and hasattr(pos_svc, 'has_position') and pos_svc.has_position(cand['instrument_id']):
                     continue
-                # FIX-S4-DTE-FILTER-20260729: DTE过滤,跳过远月合约(dte>25)
-                # 根因: 9月远月合约volume可能>8月近月→选中9月(dte≈35)>25→detect_spring REJECT→S4零信号
-                # 修复: 在候选选择时过滤dte不在[2,25]的合约,优先选择近月高volume/score合约
+                # FIX-S4-DTE-FILTER-20260731: DTE过滤,跳过远月合约(dte>45)
+                # 根因(2026-07-31排查): 8月期权(2608)已无tick数据,最近合约是9月(2609, DTE≈34)
+                #   原上限25会过滤掉所有可用合约(9月DTE=34>25) → targets=0 → S3/S4/S5全0信号
+                # 历史: FIX-S4-DTE2-20260724设置25是为了覆盖8月近月(DTE=19)排除9月(DTE=39)
+                #   但8月期权到期后无tick, 25上限导致"无可用合约"的过度过滤
+                # 修复: 上限放宽到45, 覆盖9月(DTE≈34), 仍排除10月(DTE≈53)及更远月
+                # 安全保障: 与box_spring_detector._max_days_to_expiry=45同步, 保持一致
                 _cand_dte = self._approx_dte_from_year_month(cand.get('month', ''))
-                if _cand_dte < 2 or _cand_dte > 25:
+                if _cand_dte < 2 or _cand_dte > 45:
                     logging.debug(
-                        "[select_otm_targets_signal_sources] DTE过滤: dte=%d not in [2,25] inst=%s month=%s",
+                        "[select_otm_targets_signal_sources] DTE过滤: dte=%d not in [2,45] inst=%s month=%s",
                         _cand_dte, cand.get('instrument_id', ''), cand.get('month', ''))
                     continue
                 best = cand
                 break
             if best is None:
                 continue
+
+            # FIX-20260803: 清除临时排序字段，避免污染下游消费
+            best.pop('_dte_for_sort', None)
 
             lots = self.TIER1_LOTS if sp.get('tier') == 1 else self.TIER2_LOTS
             # FIX-S4-ROOT-20260720: 补充期货/期权元数据字段
@@ -1226,6 +1230,15 @@ class WidthCacheQueryService:
                 'order_flow_imbalance': 0.0,
                 'option_chain_activity': 0.0,
             })
+
+        # FIX-DECAY-TS0-20260731: 诊断日志,验证targets构建结果
+        _diag_build_count = getattr(self, '_diag_targets_build_count', 0) + 1
+        self._diag_targets_build_count = _diag_build_count
+        if _diag_build_count <= 5 or _diag_build_count % 100 == 0:
+            logging.info(
+                "[FIX-DECAY-TS0] targets构建完成: sorted=%d targets=%d signal_source=%s call#=%d",
+                len(sorted_products), len(targets), signal_source, _diag_build_count
+            )
 
         return targets
 

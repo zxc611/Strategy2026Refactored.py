@@ -94,6 +94,10 @@ class HardTimeStopAndComplianceService:
         's2_resonance': {'stage1_minutes': 3.0, 'stage2_minutes': 5.0, 'stage1_profit_threshold': 0.005},
         's7_divergence': {'stage1_minutes': 45.0, 'stage2_minutes': 90.0, 'stage1_profit_threshold': 0.003},
         'intraday': {'stage1_minutes': 120.0, 'stage2_minutes': 240.0, 'stage1_profit_threshold': 0.002},  # [FIX-20260712-S2] S2日内: 2-4小时
+        # ADD-S5-20260731: S5隔夜仓风控参数(用户决策复用S3两阶段硬时间止损机制)
+        # 设计依据: 隔夜仓持仓时间8-24小时, stage1=8小时无利润止损, stage2=24小时强制平仓
+        # 与S3方法完全一致, 仅参数适配隔夜仓的时间尺度
+        's5_overnight': {'stage1_minutes': 480.0, 'stage2_minutes': 1440.0, 'stage1_profit_threshold': 0.002},
     }
 
     def check_position_hard_time_stop(self, position_id: str, open_time,
@@ -111,6 +115,34 @@ class HardTimeStopAndComplianceService:
                                        stats: Dict[str, Any] = None,
 
                                        strategy_group: str = '') -> Optional[str]:
+
+        # ADD-S345-RISK-BYPASS-20260731: 模拟下单状态下S3/S4/S5风控跳过
+        # 用户决策: dry_run模式下暂时关闭S3/S4/S5硬时间止损, 只为验证策略跑通模拟下单
+        # 安全保障: 仅在dry_run=True时生效; 实盘模式风控始终启用
+        if strategy_group in ('s3_box', 's4_spring', 's5_overnight'):
+            try:
+                from strategy.strategy_config_layer import STRATEGY_DEFAULTS as _bypass_cfg
+                _bypass_enabled = _bypass_cfg.get('s3_s4_s5_risk_bypass_in_dry_run', True)
+            except Exception:
+                _bypass_enabled = True  # 配置不可用时默认启用跳过(保守: 不阻断模拟验证)
+            if _bypass_enabled:
+                _is_dry_run = False
+                try:
+                    from config.params_service import get_params_service
+                    _is_dry_run = get_params_service().get_bool('dry_run_mode', False) or False
+                except Exception:
+                    pass
+                if not _is_dry_run:
+                    try:
+                        _is_dry_run = bool(getattr(self, '_dry_run_active', False))
+                    except Exception:
+                        pass
+                if _is_dry_run:
+                    logging.info(
+                        "[S345-RISK-BYPASS] dry_run模式跳过S3/S4/S5硬时间止损: pos=%s group=%s",
+                        position_id, strategy_group,
+                    )
+                    return None  # 跳过硬时间止损检查
 
         if not hasattr(self, '_closing_positions'):
             self._closing_positions: Dict[str, float] = {}

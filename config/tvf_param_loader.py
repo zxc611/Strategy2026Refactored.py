@@ -889,8 +889,15 @@ SORTER_CONFIG = {
     # scheme_2: product_score=D, 主信号=D/Q正交分解
     # scheme_3: product_score=D, 主信号=entropy/concentration/direction_bias
     # all: 全特征输出(research模式)
-    'scoring_scheme': 'scheme_2',          # FIX-P1-1-RC2 (2026-07-23): 从scheme_1→scheme_2，使用D/Q四象限正交分解替代已弃用net_score
+    'scoring_scheme': 'scheme_1',          # FIX-20260803: 恢复为scheme_1作为实盘默认值，与params.yaml及设计文档对齐；scheme_2/3保留用于回测
 }
+
+# v2.8 §21: 启动日志确认当前默认排序方案，防止静默scheme漂移
+logger.info(
+    "[SORTER_CONFIG] default scoring_scheme='%s', output_mode='%s'",
+    SORTER_CONFIG['scoring_scheme'],
+    SORTER_CONFIG['output_mode'],
+)
 
 
 def update_sorter_config_from_v7_recommendation(config_delta: Dict) -> Dict:

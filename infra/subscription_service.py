@@ -64,7 +64,7 @@ def classify_registered_instruments(storage) -> Tuple[List[str], Dict[int, List[
     logger.info("[InitServices] 已注册合约数据 %d", len(registered_ids))
     params_service = get_params_service()
     # FIX-20260710-SUB-META-v3: 多级fallback获取instrument metadata
-    _ics = params_service.__dict__.get('_instrument_cache_service') if params_service else None
+    _ics = params_service.__dict__.get('_instrument_cache_service') if params_service is not None else None
     for inst_id in registered_ids:
         if SubscriptionInstrumentService.is_option(inst_id):
             try:

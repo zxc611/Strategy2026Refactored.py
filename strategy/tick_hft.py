@@ -7,7 +7,7 @@ import time
 import threading
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 from infra._helpers import get_logger  # R9-5
@@ -249,40 +249,87 @@ def dispatch_hft_tick(svc, tick: Any, instrument_id: str, last_price: float, vol
             pass
 
         width_resonance = 0.0
+        # FIX-WR-CHAIN-PROBE-20260731: INFO级链路诊断(前20+每1000次), 定位width_resonance=0断裂点
+        _wr_chain_n = getattr(dispatch_hft_tick, '_wr_chain_count', 0) + 1
+        dispatch_hft_tick._wr_chain_count = _wr_chain_n
+        _wr_chain_log = _wr_chain_n <= 20 or _wr_chain_n % 1000 == 0
         try:
             ps = None
             try:
                 from config.params_service import get_params_service
                 ps = get_params_service()
             except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                logging.debug("[R3-L2] get_params_service failed: %s", _r3_err)
+                if _wr_chain_log:
+                    logging.info("[WR-CHAIN] #%d inst=%s BREAK: get_params_service failed: %s", _wr_chain_n, instrument_id, _r3_err)
                 pass
-            if ps:
+            # FIX-WR-PS-BOOL-20260731: 改用 `ps is None` 代替 `not ps`
+            # 根因: ParamsService实现了__len__()方法(返回len(_params)),
+            #   当_params字典为空时len=0, Python调用__len__使bool(ps)=False,
+            #   导致有效的ParamsService实例被`not ps`误判为None → 整条width_resonance链路断裂
+            # 这是一个Python陷阱: 有__len__且len=0的对象, bool()返回False
+            # 影响范围: 全部6个候选断裂点中ps=None是实际断裂点(WR-CHAIN日志100%在此断)
+            if ps is None:
+                if _wr_chain_log:
+                    logging.info("[WR-CHAIN] #%d inst=%s BREAK: ps=None", _wr_chain_n, instrument_id)
+            else:
                 meta = ps.get_instrument_meta_by_id(instrument_id)
-                if meta:
+                if not meta:
+                    if _wr_chain_log:
+                        logging.info("[WR-CHAIN] #%d inst=%s BREAK: meta=None", _wr_chain_n, instrument_id)
+                else:
                     uf_id = meta.get('underlying_future_id')
                     if not uf_id:
                         uf_id = meta.get('internal_id')
-                    if uf_id:
+                    if not uf_id:
+                        if _wr_chain_log:
+                            logging.info("[WR-CHAIN] #%d inst=%s BREAK: uf_id=None (both underlying_future_id and internal_id empty)", _wr_chain_n, instrument_id)
+                    else:
                         tts = svc._state_store.get_ref('t_type_service') if svc._state_store else None
+                        tts_src = 'state_store'
                         if tts is None:
                             try:
                                 from data.t_type_service import get_t_type_service
                                 tts = get_t_type_service()
+                                tts_src = 'singleton'
                             except (ValueError, KeyError, TypeError, AttributeError, ImportError) as _r3_err:
-                                logging.debug("[R3-L2] get_t_type_service failed: %s", _r3_err)
+                                if _wr_chain_log:
+                                    logging.info("[WR-CHAIN] #%d inst=%s BREAK: tts=None (state_store+singleton both failed: %s)", _wr_chain_n, instrument_id, _r3_err)
                                 pass
-                        wc = getattr(tts, '_width_cache', None) if tts else None
-                        if wc:
-                            ws_method = getattr(wc, 'get_width_strength', None)
-                            get_months_method = getattr(wc, 'get_all_months', None)
-                            if ws_method and get_months_method:
-                                months = get_months_method(int(uf_id))
-                                if months:
-                                    ws = ws_method(int(uf_id), months)
-                                    width_resonance = min(ws / 10.0, 1.0) if ws > 0 else 0.0
+                        if tts is None:
+                            if _wr_chain_log:
+                                logging.info("[WR-CHAIN] #%d inst=%s BREAK: tts=None", _wr_chain_n, instrument_id)
+                        else:
+                            wc = getattr(tts, '_width_cache', None) if tts else None
+                            if not wc:
+                                if _wr_chain_log:
+                                    logging.info("[WR-CHAIN] #%d inst=%s BREAK: wc=None (tts=%s src=%s, _width_cache attr missing)", _wr_chain_n, instrument_id, type(tts).__name__, tts_src)
+                            else:
+                                ws_method = getattr(wc, 'get_width_strength', None)
+                                get_months_method = getattr(wc, 'get_all_months', None)
+                                if not (ws_method and get_months_method):
+                                    if _wr_chain_log:
+                                        logging.info("[WR-CHAIN] #%d inst=%s BREAK: methods missing (ws=%s months=%s)", _wr_chain_n, instrument_id, ws_method is not None, get_months_method is not None)
+                                else:
+                                    months = get_months_method(int(uf_id))
+                                    if not months:
+                                        if _wr_chain_log:
+                                            # 输出_months键样本帮助诊断键不匹配
+                                            _sample_keys = list(getattr(wc, '_months', {}).keys())[:5]
+                                            _opt_info_count = len(getattr(wc, '_option_info', {}))
+                                            _sync_otm_count = len(getattr(wc, '_sync_otm_count', {}))
+                                            # FIX-WR-CHAIN-20260731: 增加WC params_service诊断
+                                            _wc_ps = getattr(wc, '_params_service', None)
+                                            _wc_ps_meta_count = len(getattr(_wc_ps, '_instrument_meta_by_id', {})) if _wc_ps else -1
+                                            logging.info("[WR-CHAIN] #%d inst=%s BREAK: months=[] (uf_id=%r type=%s, _months_keys=%s, _opt_info=%d, _sync_otm_fids=%d, wc_ps_meta=%d, tts_src=%s)",
+                                                         _wr_chain_n, instrument_id, uf_id, type(uf_id).__name__, _sample_keys, _opt_info_count, _sync_otm_count, _wc_ps_meta_count, tts_src)
+                                    else:
+                                        ws = ws_method(int(uf_id), months)
+                                        width_resonance = min(ws / 10.0, 1.0) if ws > 0 else 0.0
+                                        if _wr_chain_log:
+                                            logging.info("[WR-CHAIN] #%d inst=%s OK: uf_id=%r months=%s ws=%d wr=%.4f", _wr_chain_n, instrument_id, uf_id, months, ws, width_resonance)
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-            logging.debug("[R3-L2] width_resonance computation failed: %s", _r3_err)
+            if _wr_chain_log:
+                logging.info("[WR-CHAIN] #%d inst=%s BREAK: exception: %s", _wr_chain_n, instrument_id, _r3_err)
             pass
 
         # FIX-SYNC-OTM-20260730: 诊断日志，确认width_resonance和resonance_strength是否非零
@@ -456,7 +503,19 @@ def execute_pursuit_exit(svc, hft: Any, exit_signal: Dict[str, Any], instrument_
                         logging.debug("[R16-P2-6.1] pursuit exit: platform_order_id=%s matched internal order", _poid)
         elif pos and not pos.platform_confirmed and not platform_order_ids:
             pe._positions.pop(instrument_id, None)
-            logging.warning("[HFT] pursuit exit: %s was never opened on platform, cleaned up", instrument_id)
+            # FIX-HFT-NEVER-OPENED-NOISE-20260803: 频率控制(60s冷却+汇总计数)
+            # 根因: DRY-RUN模式下每60s超时清理产生大量"never opened"警告(6081条/小时)
+            #   淹没其他重要日志, 且此警告在DRY-RUN模式属正常行为(虚拟开仓回调模拟)
+            # 修复: 60s冷却+汇总计数, 与V4-FIX-O12模式一致
+            _never_opened_now = time.time()
+            _never_opened_last = getattr(pe.__class__, '_never_opened_warn_ts', None) or {}
+            _never_opened_count = _never_opened_last.get('_count', 0) + 1
+            _never_opened_last['_count'] = _never_opened_count
+            if _never_opened_now - _never_opened_last.get('_last_log', 0.0) >= 60:
+                logging.warning("[HFT] pursuit exit: %d positions were never opened on platform, cleaned up (DRY-RUN normal)", _never_opened_count)
+                _never_opened_last['_last_log'] = _never_opened_now
+                _never_opened_last['_count'] = 0
+            setattr(pe.__class__, '_never_opened_warn_ts', _never_opened_last)
             return
     close_signal_type = 'CLOSE_LONG' if direction == 'SELL' else 'CLOSE_SHORT'
     # FIX-R37-UNIQUE-CLOSE(A6): execute_pursuit_exit 必须设置 PositionService 持仓 _closing 标志，
@@ -584,9 +643,10 @@ def execute_pursuit_entry(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: A
         bids = [(bid_price, 100)] if bid_price > 0 else None
         asks = [(ask_price, 100)] if ask_price > 0 else None
         # FIX-S1-SUPerset-20260730: 按signal_source适配信号强度归一化分母
-        # surge(默认): delta/0.3; level_resonance: delta/0.45; degrade_order_flow: delta/0.08
+        # FIX-S1-RESONANCE-REQUIRED-20260803: degrade_order_flow已删除(无共振不开仓)
+        # surge(默认): delta/0.3; level_resonance: delta/0.45
         _sig_src = pursuit_signal.get('signal_source', 'surge')
-        _strength_denom = {'surge': 0.3, 'level_resonance': 0.45, 'degrade_order_flow': 0.08}.get(_sig_src, 0.3)
+        _strength_denom = {'surge': 0.3, 'level_resonance': 0.45}.get(_sig_src, 0.3)
         signal_strength = min(abs(strength_delta) / _strength_denom, 1.0) if _strength_denom > 0 else 0.0
         order_ids = order_svc.send_order_split(
             instrument_id=instrument_id, volume=signal_volume, price=price,
@@ -638,9 +698,10 @@ def execute_pursuit_add(svc, hft: Any, pursuit_signal: Dict[str, Any], tick: Any
         bids = [(bid_price, 100)] if bid_price > 0 else None
         asks = [(ask_price, 100)] if ask_price > 0 else None
         # FIX-S1-SUPerset-ADD-20260730: 加仓信号强度按signal_source归一化(与execute_pursuit_entry对齐)
-        # surge: delta/0.3; level_resonance: delta/0.45; degrade_order_flow: delta/0.08
+        # FIX-S1-RESONANCE-REQUIRED-20260803: degrade_order_flow已删除(无共振不开仓)
+        # surge: delta/0.3; level_resonance: delta/0.45
         _add_sig_src = pursuit_signal.get('signal_source', 'surge')
-        _add_strength_denom = {'surge': 0.3, 'level_resonance': 0.45, 'degrade_order_flow': 0.08}.get(_add_sig_src, 0.3)
+        _add_strength_denom = {'surge': 0.3, 'level_resonance': 0.45}.get(_add_sig_src, 0.3)
         _add_signal_strength = (min(abs(strength_delta) / _add_strength_denom, 1.0) * 0.8
                                 if strength_delta != 0.0 and _add_strength_denom > 0 else 0.0)
         order_ids = order_svc.send_order_split(
@@ -830,29 +891,15 @@ class DynamicPursuitEngine:
         self._stop_profit_trail_ratio = stop_profit_trail_ratio
         self._max_total_position_pct = max_total_position_pct
         self._tight_sl_pct = tight_stop_loss_pct
-        self._fut_momentum_threshold_bps: float = 15.0
         self._positions: Dict[str, PursuitPosition] = {}
-        self._fut_price_ref: Dict[str, Tuple[str, float]] = {}
         self._lock = threading.RLock()
-        self._of_bridge = None  # FIX-S1-DEGRADE-20260730: OrderFlowBridge延迟初始化
         self._stats = {
             'total_pursuit_entries': 0, 'surge_detected': 0,
-            'fut_momentum_entries': 0,
             'stop_profit_trails': 0, 'positions_closed': 0,
         }
         # FIX-S1-DYNAMIC-COOLDOWN-20260730: 基于交易表现的动态冷却
         self._instrument_stats: Dict[str, Dict[str, Any]] = {}
         self._cooldown_config = self._load_cooldown_config()
-
-    def _get_of_bridge(self):
-        """FIX-S1-DEGRADE-20260730: 延迟获取OrderFlowBridge单例(避免热路径每次import)"""
-        if self._of_bridge is None:
-            try:
-                from order.order_flow_bridge import get_order_flow_bridge
-                self._of_bridge = get_order_flow_bridge()
-            except Exception:
-                pass
-        return self._of_bridge
 
     def _load_cooldown_config(self) -> Dict[str, Any]:
         """FIX-S1-DYNAMIC-COOLDOWN-20260730: 读取动态冷却参数,失败时使用默认值"""
@@ -923,7 +970,7 @@ class DynamicPursuitEngine:
 
     def evaluate_surge(self, instrument_id: str, current_strength: float,
                        prev_strength: float, current_price: float,
-                       direction: str, account_equity: float = 100000.0,
+                       direction: str, account_equity: float = 0.0,  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
                        product: str = '') -> Optional[Dict[str, Any]]:
         if direction not in ('BUY', 'SELL'):
             logging.warning("[DynamicPursuitEngine] Invalid direction '%s', rejected", direction)
@@ -932,99 +979,34 @@ class DynamicPursuitEngine:
             return None
         strength_delta = current_strength - prev_strength
         _effective_threshold = self._surge_threshold
-        _is_futures = not ('-C-' in instrument_id or '-P-' in instrument_id or '-c-' in instrument_id or '-p-' in instrument_id)
-        _use_fut_momentum = False
-        _fut_momentum_delta_bps = 0.0
-        _signal_source = 'surge'  # FIX-S1-SUPerset: 信号来源标记(surge/level_resonance/degrade_order_flow)
+        _signal_source = 'surge'  # FIX-S1-SUPerset: 信号来源标记(surge/level_resonance)
         # FIX-S1-DYNAMIC-COOLDOWN-20260730: 基于交易表现的动态冷却
         # 未确认持仓重试(confirm_ticks累积)在_should_cooldown内部被放行
         if self._should_cooldown(instrument_id):
             return None
+        # FIX-S1-RESONANCE-REQUIRED-20260803: S1本意=共振+订单流，必须通过共振后才能开仓
+        # 用户决策(2026-08-03): 无共振数据时不交易(tick级数据总会有共振数据)
+        # 删除的降级路径(违背S1本意):
+        #   A. 期货价格动量路径(FIX-S1-FUT-MOMENTUM-20260728): resonance=0时用价格突破开仓 → 无共振开仓
+        #   B. 期权order_flow降级路径(FIX-S1-DEGRADE-20260730): resonance=0时用order_flow开仓 → 无共振开仓
+        # 保留的路径(有共振数据):
+        #   1. surge路径: strength_delta >= surge_threshold(0.3) — 共振跳变
+        #   2. level_resonance路径: current_strength >= 0.45 — 共振稳态高位
         if current_strength == 0 and prev_strength == 0:
-            if _is_futures:
-                # FIX-S1-FUT-MOMENTUM-20260728: 期货品种width_resonance不适用(T-type是期权指标)
-                # 根因: 期货没有期权链宽度数据→width_resonance=0→V4-FIX-O2 fail-closed永远阻断→S1期货0信号
-                # 修复: 对期货品种使用价格动量突破(纯客观数据,无增强推断):
-                #   - 追踪每个品种最近参考价
-                #   - 价格向direction方向移动>15bps(0.15%)视为动量突破
-                #   - 期权路径完全保持V4-FIX-O2 fail-closed不变
-                _key = f"{instrument_id}_{direction}"
-                with self._lock:
-                    _ref = self._fut_price_ref.get(_key)
-                    if _ref is None or _ref[0] != direction:
-                        self._fut_price_ref[_key] = (direction, current_price)
-                        return None
-                    _ref_dir, _ref_price = _ref
-                    if _ref_price <= 0:
-                        self._fut_price_ref[_key] = (direction, current_price)
-                        return None
-                    if direction == 'BUY':
-                        _fut_momentum_delta_bps = (current_price - _ref_price) / _ref_price * 10000.0
-                    else:
-                        _fut_momentum_delta_bps = (_ref_price - current_price) / _ref_price * 10000.0
-                    if _fut_momentum_delta_bps >= self._fut_momentum_threshold_bps:
-                        _use_fut_momentum = True
-                        strength_delta = _fut_momentum_delta_bps / 100.0
-                        _effective_threshold = self._fut_momentum_threshold_bps / 100.0
-                        self._fut_price_ref[_key] = (direction, current_price)
-                    else:
-                        return None
-            else:
-                # FIX-S1-DEGRADE-20260730: 期权降级路径(对齐S2降维条件A)
-                # 根因: V4-FIX-O2对期权resonance=0完全阻断(1,233次), 但S2降维路径允许
-                #   resonance=0时通过order_flow+rank_confidence触发(条件A)
-                #   → S2在resonance=0时仍能触发, S1却完全阻断 → S2信号反超S1
-                # 日志实证: [S2-INTRADAY] inst=... res=0.0000 of=-0.5152 → S2在resonance=0时仍触发
-                # 修复: 期权resonance=0时, 若order_flow有方向性(对齐S2的_S2_ORDER_FLOW_THRESH=0.08),
-                #   允许追仓(fail-closed: order_flow也无方向→不开仓)
-                _s1_of_imbalance = 0.0
-                try:
-                    _of_bridge = self._get_of_bridge()
-                    if _of_bridge and product:
-                        _s1_of_imbalance = _of_bridge.get_instant_imbalance(product) or 0.0
-                except Exception:
-                    pass
-                # FIX-S1-DEGRADE-DIR-20260730: 退化路径必须检查order_flow方向与S1 direction一致
-                # 根因: 仅abs(imbalance)>=0.08不足,若order_flow方向与S1 direction相反,
-                #   会逆着订单流方向开仓(如of<0但direction=BUY),与S2"条件A"的语义不符,
-                #   也违背用户"只做条件成就时的正确交易"原则
-                # 修复: 要求(_s1_of_imbalance>0 AND direction=BUY) OR (_s1_of_imbalance<0 AND direction=SELL)
-                _of_direction_ok = (
-                    (_s1_of_imbalance > 0 and direction == 'BUY') or
-                    (_s1_of_imbalance < 0 and direction == 'SELL')
-                )
-                if abs(_s1_of_imbalance) >= 0.08 and _of_direction_ok:  # 对齐S2的_S2_ORDER_FLOW_THRESH
-                    strength_delta = abs(_s1_of_imbalance)
-                    _effective_threshold = 0.08
-                    _signal_source = 'degrade_order_flow'
-                    # 限频日志(60s冷却)
-                    _degrade_now = time.time()
-                    _degrade_last = self.__class__.__dict__.get('_s1_degrade_ts', {})
-                    if not isinstance(_degrade_last, dict):
-                        _degrade_last = {}
-                    _degrade_count = _degrade_last.get('_count', 0) + 1
-                    _degrade_last['_count'] = _degrade_count
-                    if _degrade_now - _degrade_last.get('_last_log', 0.0) >= 60:
-                        logging.info("[FIX-S1-DEGRADE] 期权降级路径通过: inst=%s of=%.4f dir=%s ×%d",
-                                     instrument_id, _s1_of_imbalance, direction, _degrade_count)
-                        _degrade_last['_last_log'] = _degrade_now
-                        _degrade_last['_count'] = 0
-                    setattr(self.__class__, '_s1_degrade_ts', _degrade_last)
-                else:
-                    # order_flow也无方向 → fail-closed(与S2降维条件A一致)
-                    _o2_now = time.time()
-                    _o2_last = self.__class__.__dict__.get('_o2_warn_ts', {})
-                    if not isinstance(_o2_last, dict):
-                        _o2_last = {}
-                    _o2_count = _o2_last.get('_count', 0) + 1
-                    _o2_last['_count'] = _o2_count
-                    if _o2_now - _o2_last.get('_last_log', 0.0) >= 60:
-                        logging.info("[V4-FIX-O2] 数据降级模式, 不追仓 (strength=0, of=%.4f) ×%d instruments",
-                                     _s1_of_imbalance, _o2_count)
-                        _o2_last['_last_log'] = _o2_now
-                        _o2_last['_count'] = 0
-                    setattr(self.__class__, '_o2_warn_ts', _o2_last)
-                    return None
+            # 无共振数据 → fail-closed不开仓(用户2026-08-03决策)
+            _no_res_now = time.time()
+            _no_res_last = self.__class__.__dict__.get('_s1_no_res_ts', {})
+            if not isinstance(_no_res_last, dict):
+                _no_res_last = {}
+            _no_res_count = _no_res_last.get('_count', 0) + 1
+            _no_res_last['_count'] = _no_res_count
+            if _no_res_now - _no_res_last.get('_last_log', 0.0) >= 60:
+                logging.info("[FIX-S1-RESONANCE-REQUIRED] 无共振数据,不开仓(fail-closed) inst=%s ×%d",
+                             instrument_id, _no_res_count)
+                _no_res_last['_last_log'] = _no_res_now
+                _no_res_last['_count'] = 0
+            setattr(self.__class__, '_s1_no_res_ts', _no_res_last)
+            return None
 
         # FIX-S1-SUPerset-20260730: 绝对共振level路径(对齐S2)
         # 根因: S1测DELTA(变化量>=0.3), S2测LEVEL(绝对水平>=0.45), 正交条件
@@ -1034,25 +1016,20 @@ class DynamicPursuitEngine:
         #   即使delta<0.3也允许pursuit信号(30s冷却防重复入场)
         _level_threshold = 0.45  # 对齐S2的_S2_RESONANCE_THRESH
         _level_ok = current_strength >= _level_threshold
-        if _level_ok and strength_delta < _effective_threshold and not _use_fut_momentum:
+        if _level_ok and strength_delta < _effective_threshold:
             # FIX-S1-DYNAMIC-COOLDOWN-20260730: 稳态共振路径不再使用固定30秒冷却,
             #   统一由evaluate_surge入口的_should_cooldown基于交易表现决策。
             #   未确认持仓重试已在_should_cooldown内部放行。
             strength_delta = current_strength  # 用绝对level替代delta作为信号强度
             _signal_source = 'level_resonance'
 
-        if not _use_fut_momentum and strength_delta < _effective_threshold and not _level_ok:
+        if strength_delta < _effective_threshold and not _level_ok:
             return None
         self._stats['surge_detected'] += 1
-        if _use_fut_momentum:
-            self._stats['fut_momentum_entries'] = self._stats.get('fut_momentum_entries', 0) + 1
         # FIX-20260712-S1-P0: 为每次追击信号生成唯一signal_id，防止HFT订单重复/追踪断裂
         from infra.shared_utils import generate_prefixed_id as _gen_id
         _signal_id = f"PURSUIT_SIG_{instrument_id}_{int(time.time()*1000)}_{_gen_id('', 8)}"
         with self._lock:
-            if _use_fut_momentum:
-                _fkey = f"{instrument_id}_{direction}"
-                self._fut_price_ref[_fkey] = (direction, current_price)
             pos = self._positions.get(instrument_id)
             if pos and pos.is_open:
                 if pos.direction != direction:
@@ -1083,7 +1060,7 @@ class DynamicPursuitEngine:
                 add_volume = max(1, int(base_volume * self._add_volume_ratio))
                 new_stop_profit = self._calc_trailing_stop(pos.weighted_avg_price, current_price, pos.direction)
                 pos.entries.append({
-                    'price': current_price, 'volume': add_volume, 'strength': current_strength if not _use_fut_momentum else max(current_strength, strength_delta),
+                    'price': current_price, 'volume': add_volume, 'strength': current_strength,
                     'strength_delta': strength_delta, 'timestamp': time.time(), 'entry_type': 'pursuit_add',
                 })
                 pos.total_volume += add_volume
@@ -1104,7 +1081,7 @@ class DynamicPursuitEngine:
                 pos = PursuitPosition(
                     position_id=f"PURSUIT_{instrument_id}_{int(time.time()*1000)}_{_gen_id('', 8)}",
                     instrument_id=instrument_id, direction=direction,
-                    entries=[{'price': current_price, 'volume': 1, 'strength': current_strength if not _use_fut_momentum else max(current_strength, strength_delta),
+                    entries=[{'price': current_price, 'volume': 1, 'strength': current_strength,
                               'strength_delta': strength_delta, 'timestamp': time.time(), 'entry_type': 'initial'}],
                     total_volume=1, weighted_avg_price=current_price,
                     current_stop_profit=stop_profit,

@@ -101,8 +101,12 @@ class BoxSpringStrategy:
         self._iv_low_percentile = params.get('iv_low_percentile', 5.0)
         self._iv_very_low_percentile = params.get('iv_very_low_percentile', 2.0)
         self._min_days_to_expiry = params.get('min_days_to_expiry', 2)
-        # FIX-S4-DTE2-20260724: 15→25，与BoxSpringDetectorService对齐(详见该文件注释)
-        self._max_days_to_expiry = params.get('max_days_to_expiry', 25)
+        # FIX-S4-DTE3-20260731: 25→45，与select_otm_targets_signal_sources同步
+        # 根因(2026-07-31排查): 8月期权(2608)已无tick, 最近合约9月(2609, DTE≈34)
+        #   原上限25过滤所有可用合约 → detect_spring REJECT → S4零信号
+        # 修复: 上限放宽到45, 覆盖9月(DTE≈34), 仍排除10月(DTE≈53)及更远月
+        # 安全保障: 与box_spring_detector._max_days_to_expiry=45同步
+        self._max_days_to_expiry = params.get('max_days_to_expiry', 45)
         self._max_premium_cost_pct = params.get('max_premium_cost_pct', 0.015)
         self._stop_profit_ratio = params.get('stop_profit_ratio', 5.0)
         self._max_loss_pct = params.get('max_loss_pct', 0.95)
@@ -215,8 +219,7 @@ class BoxSpringStrategy:
     def is_spring_position(self, instrument_id: str) -> bool:
         with self._lock:
             for pos in self._positions.values():
-                if (pos.option_instrument_id == instrument_id or
-                    pos.paired_instrument_id == instrument_id) and pos.is_open:
+                if pos.option_instrument_id == instrument_id and pos.is_open:
                     return True
         return False
 

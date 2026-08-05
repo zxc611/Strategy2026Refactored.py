@@ -326,6 +326,10 @@ class OrderWALStateService:
 
 
 
+    _ORPHAN_SCAN_MAX_FILES = 500
+    _ORPHAN_SCAN_TIMEOUT_SEC = 5.0
+    _ORPHAN_CLEANUP_AGE_HOURS = 24.0
+
     def _recover_orphaned_orders(self) -> None:
 
         try:
@@ -334,62 +338,119 @@ class OrderWALStateService:
 
                 return
 
+            # [FIX-ORPHAN-EARLY-RETURN] _orders_by_id为空时扫描是NO-OP(无法恢复任何孤儿订单)
+            # 直接跳过，避免无用的文件I/O
+            if not self._provider._orders_by_id:
+                return
+
+            _scan_start = time.monotonic()
             orphaned_count = 0
+            scanned_count = 0
+            skipped_count = 0
 
-            for fname in os.listdir(self._provider._wal_dir):
+            _all_files = []
+            try:
+                for fname in os.listdir(self._provider._wal_dir):
+                    if fname.endswith('.wal'):
+                        _all_files.append(fname)
+            except Exception:
+                pass
 
-                if not fname.endswith('.wal'):
-
-                    continue
-
-                fpath = os.path.join(self._provider._wal_dir, fname)
-
+            _total_wal = len(_all_files)
+            if _total_wal > self._ORPHAN_SCAN_MAX_FILES:
+                logging.warning(
+                    "[FIX-ORPHAN-PERF] .wal文件数=%d 超过扫描上限=%d, 跳过扫描并清理旧文件",
+                    _total_wal, self._ORPHAN_SCAN_MAX_FILES
+                )
                 try:
+                    _wal_dir = self._provider._wal_dir
+                    _now = time.time()
+                    _cutoff = _now - self._ORPHAN_CLEANUP_AGE_HOURS * 3600
+                    _cleaned = 0
+                    for fname in _all_files:
+                        if time.monotonic() - _scan_start > self._ORPHAN_SCAN_TIMEOUT_SEC:
+                            break
+                        fpath = os.path.join(_wal_dir, fname)
+                        try:
+                            if os.path.getmtime(fpath) < _cutoff:
+                                os.remove(fpath)
+                                _cleaned += 1
+                                skipped_count += 1
+                        except Exception:
+                            pass
+                    if _cleaned > 0:
+                        logging.info("[FIX-ORPHAN-PERF] 清理%d个超过%.0f小时的旧.wal文件(耗时%.1fs)",
+                                     _cleaned, self._ORPHAN_CLEANUP_AGE_HOURS, time.monotonic() - _scan_start)
+                except Exception as _clean_err:
+                    logging.debug("[FIX-ORPHAN-PERF] 旧文件清理异常(非致命): %s", _clean_err)
+            else:
+                for fname in _all_files:
+                    fpath = os.path.join(self._provider._wal_dir, fname)
+                    scanned_count += 1
+                    if time.monotonic() - _scan_start > self._ORPHAN_SCAN_TIMEOUT_SEC:
+                        logging.warning("[FIX-ORPHAN-PERF] 扫描超时%.1fs, 停止扫描(已扫描=%d)",
+                                       time.monotonic() - _scan_start, scanned_count)
+                        break
+                    orphaned_count = self._scan_single_wal(fpath, orphaned_count)
 
-                    with open(fpath, 'r', encoding='utf-8') as f:
-
-                        entry = json_loads(f.read())  # R3-2修复
-
-                    if entry.get('state') == 'PENDING':
-
-                        order_id = entry.get('order_id', '')
-
-                        with self._provider._lock:
-
-                            order = self._provider._orders_by_id.get(order_id)
-
-                            if order and order.get('status') in ('SUBMITTED', 'PENDING'):
-
-                                order['status'] = 'ORPHANED'
-
-                                order['updated_at'] = datetime.now(CHINA_TZ)
-
-                                orphaned_count += 1
-
-                                logging.warning(
-
-                                    "[OrderService] R25-TO-03-FIX: 孤儿订单恢复: order_id=%s instrument=%s "
-
-                                    "状态从SUBMITTED/PENDING标记为ORPHANED",
-
-                                    order_id, entry.get('instrument_id', ''),
-
-                                )
-
-                        self._wal_write(order_id, 'ORPHANED', {'order_id': order_id, 'instrument_id': entry.get('instrument_id', '')})
-
-                except Exception as e:
-
-                    # [FIX-WAL-EXCEPT-20260720] 扩展为except Exception，符合NEW-1硬约束
-                    logging.warning("[OrderService] R25-TO-03-FIX: WAL文件恢复异常: %s err=%s", fname, e)
-
-            if orphaned_count > 0:
-
-                logging.info("[OrderService] R25-TO-03-FIX: 启动时恢复d个孤儿订单", orphaned_count)
+            _elapsed = time.monotonic() - _scan_start
+            if orphaned_count > 0 or _total_wal > self._ORPHAN_SCAN_MAX_FILES:
+                logging.info(
+                    "[FIX-ORPHAN-PERF] 孤儿订单恢复完成: orphaned=%d scanned=%d skipped=%d total_wal=%d elapsed=%.2fs",
+                    orphaned_count, scanned_count, skipped_count, _total_wal, _elapsed
+                )
         except Exception as e:
 
-            # [FIX-WAL-EXCEPT-20260720] 扩展为except Exception，符合NEW-1硬约束
             logging.warning("[OrderService] R25-TO-03-FIX: 孤儿订单恢复过程异常: %s", e)
+
+    def _scan_single_wal(self, fpath: str, orphaned_count: int) -> int:
+
+        try:
+
+            with open(fpath, 'r', encoding='utf-8') as f:
+
+                entry = json_loads(f.read())
+
+            if entry.get('state') == 'PENDING':
+
+                order_id = entry.get('order_id', '')
+
+                _marked = False
+                with self._provider._lock:
+
+                    order = self._provider._orders_by_id.get(order_id)
+
+                    if order and order.get('status') in ('SUBMITTED', 'PENDING'):
+
+                        order['status'] = 'ORPHANED'
+
+                        order['updated_at'] = datetime.now(CHINA_TZ)
+
+                        orphaned_count += 1
+
+                        _marked = True
+
+                        logging.warning(
+
+                            "[OrderService] R25-TO-03-FIX: 孤儿订单恢复: order_id=%s instrument=%s "
+                            "状态从SUBMITTED/PENDING标记为ORPHANED",
+
+                            order_id, entry.get('instrument_id', ''),
+
+                        )
+
+                # [FIX-ORPHAN-WAL] 仅在订单实际被标记ORPHANED时才写WAL+删除.wal文件
+                # 原bug: _wal_write('ORPHANED')在if条件外，订单不存在时仍写WAL
+                # 导致.wal文件残留且永远不会被清理
+                if _marked:
+                    self._wal_write(order_id, 'ORPHANED', {'order_id': order_id, 'instrument_id': entry.get('instrument_id', '')})
+                    self._wal_delete(order_id)
+
+        except Exception as e:
+
+            logging.debug("[OrderService] R25-TO-03-FIX: WAL文件恢复异常: %s err=%s", fpath, e)
+
+        return orphaned_count
 
 
 
@@ -596,6 +657,13 @@ class OrderWALStateService:
         finally:
             # 标记恢复完成(退出降级模式)
             self._provider._order_state_recovering = False
+            # [FIX-ORPHAN-CALLBACK] 异步恢复完成后补调_recover_orphaned_orders
+            # 根因: _recover_orphaned_orders在OrderService()构造函数中调用时_orders_by_id为空(NO-OP)
+            # 异步恢复完成后_orders_by_id有数据，此时才能真正恢复孤儿订单
+            try:
+                self._recover_orphaned_orders()
+            except Exception as _orphan_err:
+                logging.warning("[FIX-ORPHAN-CALLBACK] 异步恢复后孤儿订单扫描失败(非致命): %s", _orphan_err)
             # [FIX-EXT] 清理线程引用
             self._order_state_recover_thread = None
 

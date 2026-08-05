@@ -680,7 +680,16 @@ class WidthCacheStateService:
                 self.__class__._reg_option_count = _reg_count + 1
             instrument_id = self._normalize_instrument_id(instrument_id)
             if not self._get_future_product_by_underlying_id(underlying_future_id):
-                logging.warning("[register_option] 无法解析标的期货产品: inst=%s fid=%s", instrument_id, underlying_future_id)
+                # FIX-WR-CHAIN-20260731: 升级为WARNING+增加诊断信息
+                # 根因: 当WC._params_service没有instrument缓存时, _get_future_product_by_underlying_id返回空
+                #   → 所有register_option被跳过 → _months永远为空 → width_resonance=0
+                # 增加: WC的params_service状态, 帮助定位是否params_service问题
+                _wc_ps = getattr(self, '_params_service', None)
+                _wc_ps_meta_count = len(getattr(_wc_ps, '_instrument_meta_by_id', {})) if _wc_ps else -1
+                logging.warning("[register_option] 无法解析标的期货产品: inst=%s fid=%s (wc_ps=%s, ps_meta=%d) — "
+                                "若ps_meta=0说明WC的params_service未加载instrument缓存, 需要先调用load_caches_from_db",
+                                instrument_id, underlying_future_id,
+                                type(_wc_ps).__name__ if _wc_ps else 'None', _wc_ps_meta_count)
                 return None
             opt_type_upper = self._normalize_option_type(option_type)
             if not opt_type_upper or opt_type_upper not in ('CALL', 'PUT'):

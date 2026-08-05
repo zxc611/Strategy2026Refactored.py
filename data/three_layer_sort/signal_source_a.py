@@ -234,6 +234,15 @@ class AsymmetricDecay:
         last_update: Dict[str, float],
         now: Optional[float] = None,
     ) -> Dict[str, float]:
+        # FIX-DECAY-TS0-20260731: 修复last_update_ts=0导致counts被衰减为0的根因
+        # 根因: greeks_calculator未接收到underlying_price(TICK_FIELD_NAMES无该字段)
+        #   → update_greeks_from_tick从未被调用 → _option_last_update字典为空
+        #   → get_last_update()返回0.0 → select_otm_targets_signal_sources传入
+        #   last_update_ts=0.0 → 本函数elapsed=now-0=1.78e9秒 → counts*0.5^(1.78e9/60)≈0
+        #   → total_eff=0 → active_months=0 → coverage=0 → correct_up_pct=0
+        #   → tier=3, product_score=0.0 → 所有合约score=0.0
+        # 修复: ts<=0时视为"无时间戳数据",使用now(不衰减),保留原始counts
+        # 安全保障: 仅在ts<=0(无数据)时生效; 有真实时间戳时正常衰减
         now = now or time.time()
         norm_counts = {k.lower(): v for k, v in counts.items()}
         norm_update = {k.lower(): v for k, v in last_update.items()}
@@ -241,6 +250,10 @@ class AsymmetricDecay:
         for state in ('cr', 'cf', 'wr', 'wf', 'other'):
             raw = norm_counts.get(state, 0)
             ts = norm_update.get(state, now)
+            # FIX-DECAY-TS0-20260731: ts<=0视为无时间戳,不衰减
+            if ts <= 0:
+                decayed[state] = float(raw)
+                continue
             half_life = self._half_lives.get(state, 60)
             if half_life <= 0 or raw <= 0:
                 decayed[state] = float(raw)
@@ -590,6 +603,15 @@ class AlphaEngine:
                 f"falling back to 'scheme_1'"
             )
             self._scoring_scheme = 'scheme_1'
+        # FIX-20260803: 打印实际生效的 scoring_scheme，覆盖 params_service 运行时覆盖后的真实值
+        logger.info(
+            "[AlphaEngine] product_id=? scoring_scheme='%s' output_mode='%s' "
+            "resonance_enabled=%s rank_normalize=%s",
+            self._scoring_scheme,
+            self._output_mode,
+            bool(self._config.get('resonance_enabled', False)),
+            self._enable_rank_normalize,
+        )
 
         # v2.5: Rank 标准化引擎
         self._rank_normalizer = RankNormalizer(
@@ -791,10 +813,18 @@ class AlphaEngine:
                 'wf_eff': wf_eff,
             })
 
+        # FIX-20260803-RESONANCE: 保留原始到期日顺序的候选列表副本，供共振 D_term_structure 使用
+        # 根因: 共振需要 month_data_list[0]=近月、[-1]=远月（按到期日顺序），
+        #   而月份竞争排序会打乱此顺序。因此先保存原始顺序副本，再做竞争排序。
+        # 安全保障: 浅拷贝候选字典列表（元素为独立字典，排序不会修改原对象）。
+        candidates_original_order = list(candidates)
+
         # v2.8.1 fix: month_candidates 按 primary_score 降序排列（scheme 感知）
         # scheme_1: 按 net_score 降序（v2.7 兼容）
         # scheme_2/3/all: 按 D 降序（v2.8 正交分解方向强度）
         # 向后兼容：primary_score 缺失时回退到 net_score
+        # FIX-20260803: month_candidates 仅供诊断与向后兼容，不再作为合约选择依据
+        # （合约选择改为下游 select_otm_targets_* 按近月 DTE 选定，见 width_cache_query_mixin.py）
         month_candidates = sorted(
             candidates,
             key=lambda x: -_safe_float(x.get('primary_score', x.get('net_score', 0.0))),
@@ -867,8 +897,15 @@ class AlphaEngine:
         }
 
         if self._resonance_engine is not None and self._resonance_engine.enabled:
+            # FIX-20260803-RESONANCE: 共振 D_term_structure 需要原始到期日顺序的月份列表
+            # 根因: 原实现传入 month_candidates（按 primary_score 降序排列），
+            #   导致 resonance_engine 中 month_data_list[0]=最强月份、month_data_list[-1]=最弱月份，
+            #   而 D_term_structure 注释写的是"近月与远月方向同向性"——语义被替换为"最强与最弱月份"。
+            # 修正: 传入 candidates_original_order（原始到期日顺序），保证 D_term_structure
+            #   拿到的 month_data_list[0]=近月、month_data_list[-1]=远月，与设计意图一致。
+            # 安全保障: candidates_original_order 在月份竞争排序之前构造，未受 primary_score 影响。
             resonance_result = self._resonance_engine.compute(
-                month_data_list=month_candidates,
+                month_data_list=candidates_original_order,
                 call_counts=call_counts,
                 put_counts=put_counts,
                 current_price=current_price,
@@ -903,6 +940,8 @@ class AlphaEngine:
             # === v2.5 新字段 ===
             'product_score': round(product_score, 6),       # v2.8: = weighted D (替代原 net_score 汇总)
             'product_score_ts': round(product_score_ts, 6),
+            # FIX-20260803: month_candidates 仅供诊断/向后兼容，不再作为合约选择依据
+            # 合约选择由下游 select_otm_targets_* 按 DTE 升序（近月优先）+ DTE 过滤 [2,45] 决定
             'month_candidates': output_candidates,
             # === v2.6/v2.7 共振字段 ===
             **resonance_fields,

@@ -63,7 +63,7 @@ class DataExportService:
 
     def _get_cached_instruments(self):
         ps = self._get_params_service()
-        return ps.get_all_instrument_cache() if ps else {}
+        return ps.get_all_instrument_cache() if ps is not None else {}
 
     def _get_info_internal_id(self, info):
         if info is None:
@@ -222,7 +222,7 @@ class DataExportService:
         """
         summaries = []
         ps = self._get_params_service()
-        all_ids = ps.get_all_instrument_ids() if ps else []
+        all_ids = ps.get_all_instrument_ids() if ps is not None else []
         for instrument_id in all_ids:
             summary = self.get_instrument_summary(instrument_id)
             if summary:

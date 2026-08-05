@@ -209,6 +209,8 @@ class LiveExecutionBackend(OrderExecutionBackend):
                                 svc._consecutive_failures += 1
                             svc._wal_write(ctx.order_id, 'FAILED', ctx.order)
                             svc._append_order_state(ctx.order_id, 'FAILED', ctx.order)
+                            # [FIX-WAL-CLEANUP] FAILED终态后立即删除.wal文件
+                            svc._wal_delete(ctx.order_id)
                             ctx.rejected, ctx.reject_code, ctx.reject_message = True, 'platform_rejected', f'平台下单返回失败: result={result}'
                             return ctx
 
@@ -263,6 +265,8 @@ class LiveExecutionBackend(OrderExecutionBackend):
                             svc._circuit_breaker_opened_at = time.time()
                     svc._wal_write(ctx.order_id, _order_status, ctx.order)
                     svc._append_order_state(ctx.order_id, _order_status, ctx.order)
+                    # [FIX-WAL-CLEANUP] TIMEOUT/FAILED终态后立即删除.wal文件
+                    svc._wal_delete(ctx.order_id)
                     ctx.rejected, ctx.reject_code, ctx.reject_message = True, _reject_code, _reject_msg
                     return ctx
 
@@ -287,6 +291,8 @@ class LiveExecutionBackend(OrderExecutionBackend):
                 if ctx.order_id:
                     svc._wal_write(ctx.order_id, 'FAILED', {'order_id': ctx.order_id, 'instrument_id': ctx.instrument_id, 'direction': ctx.direction, 'volume': ctx.volume, 'price': ctx.price})
                     svc._append_order_state(ctx.order_id, 'FAILED', {'order_id': ctx.order_id, 'status': 'FAILED'})
+                    # [FIX-WAL-CLEANUP] 异常FAILED终态后立即删除.wal文件
+                    svc._wal_delete(ctx.order_id)
             except Exception:
                 # 实时回调路径硬约束: except Exception (扩展自原窄异常元组)
                 logging.debug("[R3-L2] suppressed exception", exc_info=True)

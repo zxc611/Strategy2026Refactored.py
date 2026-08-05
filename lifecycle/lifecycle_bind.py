@@ -128,6 +128,22 @@ class LifecycleBind:
         p._inject_runtime_context(strategy_obj)
         p._api_ready = callable(p.subscribe) and callable(p.unsubscribe)
         p._kline_ready = callable(p.get_kline)
+        # FIX-D1-ECO-INJECTION-V4-20260731: 注入D1 provider到StrategyEcosystem单例(单渠道)
+        # 根因: box_detector._fetch_daily_bars_from_market_center通过get_strategy_ecosystem()获取eco,
+        #        但get_kline在StrategyCoreService(p)上, eco无此属性→None→D1 fallback失败
+        # 修复: 将p.get_kline和p._runtime_market_center注入StrategyEcosystem单例, 保持单一渠道(原则2)
+        # V3版本通过模块级_d1_get_kline注入违反原则2(四唯一), V4改为注入到eco单例
+        try:
+            from strategy.strategy_ecosystem import get_strategy_ecosystem
+            _eco = get_strategy_ecosystem()
+            if _eco is not None:
+                _eco.get_kline = p.get_kline
+                _eco._runtime_market_center = p._runtime_market_center
+                logging.info("[bind_platform_apis] D1 provider注入StrategyEcosystem: "
+                             "get_kline=%s, market_center=%s",
+                             p.get_kline is not None, p._runtime_market_center is not None)
+        except Exception as _d1_err:
+            logging.warning("[bind_platform_apis] StrategyEcosystem D1 provider注入失败: %s", _d1_err)
         _data_service = None
         try:
             from data.data_service import get_data_service

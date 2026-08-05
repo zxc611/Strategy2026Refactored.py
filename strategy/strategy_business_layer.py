@@ -20,6 +20,12 @@ except Exception:
     def get_param_provider():
         return None
 
+# ADD-S5-REFINE-20260731: S5配置项读取(STRATEGY_DEFAULTS)
+try:
+    from strategy.strategy_config_layer import STRATEGY_DEFAULTS as _S5_STRATEGY_DEFAULTS
+except Exception:  # 配置层不可用时降级为空dict, S5使用代码内默认值
+    _S5_STRATEGY_DEFAULTS = {}
+
 
 def _normalize_signal_source(signal_source: Any) -> str:
     src = str(signal_source or '').upper()
@@ -28,6 +34,59 @@ def _normalize_signal_source(signal_source: Any) -> str:
     if src == 'AUTO':
         return 'C'
     return 'legacy'
+
+
+# ============================================================================
+# ADD-S5-20260731: S5隔夜仓模块辅助函数
+# 用户决策(2026-07-31): S5=日K线+S1/S2共振+订单流模式+S3风控, 不新建模块
+# 这两个辅助函数是S5独有的"日K趋势判断"和"方向一致性校验"逻辑
+# ============================================================================
+
+def _judge_daily_trend(daily_bars: List[Dict[str, Any]]) -> str:
+    """S5隔夜仓: 判断最近N根日K线的趋势方向
+
+    算法: 取传入日K线列表的首尾close比较, 涨跌幅>0.5%视为方向性趋势
+    Args:
+        daily_bars: 日K线列表, 每项含open/high/low/close字段
+    Returns:
+        'BUY'(上涨趋势) / 'SELL'(下跌趋势) / ''(无方向)
+    """
+    if not daily_bars or len(daily_bars) < 2:
+        return ''
+    try:
+        _first_close = float(daily_bars[0].get('close', 0.0))
+        _last_close = float(daily_bars[-1].get('close', 0.0))
+    except (ValueError, TypeError):
+        return ''
+    if _first_close <= 0 or _last_close <= 0:
+        return ''
+    _pct_change = (_last_close - _first_close) / _first_close
+    if _pct_change > 0.005:   # 涨幅>0.5%
+        return 'BUY'
+    if _pct_change < -0.005:  # 跌幅>0.5%
+        return 'SELL'
+    return ''
+
+
+def _reconcile_direction(bar_direction: str, of_imbalance: float) -> str:
+    """S5隔夜仓: 日K趋势方向 × 订单流方向 双重确认
+
+    第五维独有校验(对齐S2四维门控之上的S5专属维度):
+      - 日K上涨 + 订单流正 imbalance → BUY
+      - 日K下跌 + 订单流负 imbalance → SELL
+      - 方向不一致 → 返回空(fail-closed, 不开仓)
+
+    Args:
+        bar_direction: 日K趋势方向 'BUY'/'SELL'/''
+        of_imbalance: 订单流不平衡值(正=买方主导, 负=卖方主导)
+    Returns:
+        'BUY' / 'SELL' / ''(方向不一致,不开仓)
+    """
+    if bar_direction == 'BUY' and of_imbalance > 0:
+        return 'BUY'
+    if bar_direction == 'SELL' and of_imbalance < 0:
+        return 'SELL'
+    return ''
 
 
 class StrategyBusinessLayer:
@@ -438,7 +497,7 @@ class StrategyBusinessLayer:
                                               _rec_closing_oid in _pending_variants or
                                               _rec_closing_oid.startswith('PARTIAL_')):
                         _rec_close_method = getattr(_rec, 'close_method', '')
-                        _non_reset_methods = ('risk_reduce', 'emergency_close', 'spring_straddle_abort')
+                        _non_reset_methods = ('risk_reduce', 'emergency_close')
                         if _rec_close_method in _non_reset_methods:
                             _rec.closing_order_id = 'CANNOT_CLOSE'
                             _reset_count += 1
@@ -728,17 +787,15 @@ class StrategyBusinessLayer:
                 'MARKET_MAKING': 's6_mm', 'S6_MM': 's6_mm',
                 'DIVERGENCE_REVERSAL': 's7_divergence',
                 'OTHER_SCALP': 'other_scalp',
+                # ADD-S5-20260731: S5隔夜仓策略映射(持仓>12小时, 真正隔夜仓)
+                # 根因: S5的open_reason='OVERNIGHT'未注册→快照strategy_group='unknown'
+                'OVERNIGHT': 's5_overnight',
             }
             for t in targets:
                 _reason = t.get('open_reason', open_reason or 'UNKNOWN')
-                # S6已有各自Monitor的save_snapshot，跳过避免重复
-                # DEL-S5-20260729: S5套利策略已彻底删除(用户决策放弃)
-                if _reason in ('MARKET_MAKING', 'S6_MM'):
-                    continue
-                # FIX-SNAPSHOT-S1-20260728: 不再跳过simulated=True的target
-                # 根因: S1 HFT target的simulated=True(用于execute_by_ranking判断), 但快照应记录所有信号
-                #       原代码跳过simulated=True→S1快照永远不保存→无法统计S1开仓
-                # 修复: 只跳过S6的simulated target(它们有各自的Monitor快照)
+                # FIX-SNAPSHOT-S6-20260805: 不再跳过S6，S6的Monitor.save_snapshot保存在market_making_monitor目录，
+                # 不在signal_snapshots统一目录→三角度统计时S6快照=0。修复: S6也保存到signal_snapshots。
+                # FIX-SNAPSHOT-SIMULATED: 只跳过S6的simulated target(它们有各自的Monitor快照)
                 if t.get('simulated', False) and t.get('source', '') in ('s6_mm_monitor_v1',):
                     continue
                 _inst = t.get('instrument_id', 'unknown')
@@ -906,18 +963,20 @@ class StrategyBusinessLayer:
                                     _futures_set.add(_fid)
                         except Exception:
                             pass
-                        # fallback: 从provider的订阅列表获取
-                        if not _futures_set:
-                            try:
-                                _sub_insts = getattr(provider, '_subscribed_instruments', None) or []
-                                for _si in _sub_insts:
-                                    _sid2 = _si if isinstance(_si, str) else _si.get('instrument_id', '')
-                                    if _sid2 and '-' not in _sid2:
-                                        _futures_set.add(_sid2)
-                            except Exception:
-                                pass
-                        # 限制最多预加载50个期货合约(防止启动太慢)
-                        _futures_list = sorted(_futures_set)[:50]
+                        # FIX-KLINE-PRELOAD-COVERAGE-20260803: 始终合并订阅列表(原:仅当_futures_set为空时)
+                        # 根因: params_service可能不包含全部品种(如AP610/i2609/fu2609)
+                        #   → 预加载遗漏 → KLINE-BOX日志缺失 → 箱体检测覆盖不全
+                        # 修复: 无论params_service是否返回结果,都合并provider的订阅列表
+                        try:
+                            _sub_insts = getattr(provider, '_subscribed_instruments', None) or []
+                            for _si in _sub_insts:
+                                _sid2 = _si if isinstance(_si, str) else _si.get('instrument_id', '')
+                                if _sid2 and '-' not in _sid2:
+                                    _futures_set.add(_sid2)
+                        except Exception:
+                            pass
+                        # FIX-KLINE-PRELOAD-COVERAGE-20260803: 50→200,确保64+品种全覆盖
+                        _futures_list = sorted(_futures_set)[:200]
                         _preload_ok = 0
                         _preload_fail = 0
                         for _fut_id in _futures_list:
@@ -927,8 +986,9 @@ class StrategyBusinessLayer:
                                     _preload_ok += 1
                                 else:
                                     _preload_fail += 1
-                            except Exception:
+                            except Exception as _preload_e:
                                 _preload_fail += 1
+                                logging.warning("[FIX-KLINE-PRELOAD] detect_kline_box异常: inst=%s err=%s", _fut_id, _preload_e)
                         logging.info("[FIX-KLINE-PRELOAD] 期货日K线箱体预加载完成: futures=%d ok=%d fail=%d",
                                      len(_futures_list), _preload_ok, _preload_fail)
                         # FIX-S3-KLINE-RETRY-20260728: 预加载失败时不标记为已完成, 允许后续tick重试
@@ -1112,7 +1172,9 @@ class StrategyBusinessLayer:
                 bss = None
             try:
                 if bss is not None:
-                    _bs_tick_targets = targets if targets else _fallback_instruments
+                    # FIX-S4-INFINITE-LOOP-20260801: 防御性修复 — list拷贝避免遍历中append导致无限循环
+                    # (S4当前不在循环内直接append到targets, 但bss.on_tick/detect_spring可能通过回调间接修改)
+                    _bs_tick_targets = list(targets) if targets else _fallback_instruments
                     # FIX-S4-ROOT-20260720: S4-Spring on_tick/detect_spring必须使用期货数据
                     # 根因: targets中instrument_id=期权ID, price=期权premium
                     #   但detect_spring期望instrument_id=期货合约ID(用于box检测),
@@ -1156,7 +1218,8 @@ class StrategyBusinessLayer:
                     # [DIAG-S4-20260720] 诊断：detect_spring循环是否进入
                     _diag_s4_cycle = getattr(self, '_diag_s4_detect_cycle', 0) + 1
                     self._diag_s4_detect_cycle = _diag_s4_cycle
-                    if _diag_s4_cycle <= 10 or _diag_s4_cycle % 100 == 0:
+                    # FIX-S4-DIAG-20260805: 每次cycle都打印(原<=10或%100导致长时间无诊断日志)
+                    if _diag_s4_cycle <= 20 or _diag_s4_cycle % 10 == 0:
                         logging.info("[DIAG-S4] detect_spring cycle #%d: targets=%d keys_sample=%s",
                                      _diag_s4_cycle, len(_bs_tick_targets),
                                      list(_bs_tick_targets[0].keys())[:15] if _bs_tick_targets else 'EMPTY')
@@ -1170,9 +1233,11 @@ class StrategyBusinessLayer:
                             continue
                         # V4-FIX-O12: strike/iv/days/premium_price硬编码兜底改为数据缺失时跳过(fail-closed)
                         # 原则: 数据不可用=不开仓, 不再用future_price/0.15/3等硬编码兜底
+                        # FIX-S4-O12-COLDSTART-20260803: 非信号源target(S7/S6追加)可能缺iv/dte字段
+                        # 兜底策略: 与select_otm_targets_signal_sources一致, iv=0.15, dte=3, premium=price
                         _bs_strike = t.get('strike_price', 0.0)
-                        _bs_iv = t.get('iv', 0.0)
-                        _bs_dte = t.get('days_to_expiry', 0)
+                        _bs_iv = t.get('iv', 0.0) or 0.15   # 兜底0.15(与select_otm_targets对齐)
+                        _bs_dte = t.get('days_to_expiry', 0) or 3  # 兜底3(与select_otm_targets对齐)
                         _bs_prem = t.get('premium_price', 0.0) or t.get('price', 0.0)
                         if _bs_strike <= 0 or _bs_iv <= 0 or _bs_dte <= 0 or _bs_prem <= 0:
                             # FIX-NOISE-O12-20260724: 全局60s冷却+汇总计数(期权品种数>300)
@@ -1189,6 +1254,23 @@ class StrategyBusinessLayer:
                             # detect_spring中K线箱体直接创建BoxRange，无需tick级喂线
                             continue
                         try:
+                            # FIX-S4-EQUITY-20260803: 从shadow_strategy_engine读取真实账户权益
+                            # 根因: target字典不含account_equity → t.get('account_equity',0.0)永远=0.0
+                            #   → detect_spring premium_cost_pct=1.0(100%) > max=0.015(1.5%) → 全部REJECT
+                            # 修复: 从paper_account['current_equity']读取真实权益(初始100万,随交易更新)
+                            # 安全保障: 读取失败时fail-closed=0.0(不开仓),不使用虚假值
+                            # 原则7(禁用虚假数据): paper_account是真实初始化的模拟账户,非硬编码虚假值
+                            _bs_account_equity = 0.0
+                            try:
+                                _bs_se = getattr(provider, '_shadow_engine', None)
+                                if _bs_se is None:
+                                    from strategy.shadow_strategy_facade import get_shadow_strategy_engine
+                                    _bs_se = get_shadow_strategy_engine()
+                                if _bs_se is not None and hasattr(_bs_se, '_paper_account'):
+                                    _bs_account_equity = float(_bs_se._paper_account.get('current_equity', 0.0))
+                            except Exception as _bs_eq_e:
+                                logging.debug("[S4-EQUITY] 读取账户权益异常(fail-closed=0.0): %s", _bs_eq_e)
+                                _bs_account_equity = 0.0
                             _bs_signal = bss.detect_spring(
                                 instrument_id=_bs_future_inst,             # 期货合约ID(用于box查找)
                                 future_price=_bs_future_price,             # 期货价格(用于strike_close)
@@ -1197,7 +1279,7 @@ class StrategyBusinessLayer:
                                 iv=_bs_iv,
                                 premium_price=_bs_prem,
                                 days_to_expiry=_bs_dte,
-                                account_equity=t.get('account_equity', 100000.0),
+                                account_equity=_bs_account_equity,  # FIX-S4-EQUITY-20260803: 从paper_account读取真实权益
                             )
                             if _bs_signal is not None:
                                 # [FIX-20260712-S4] 弹簧强度评分 — 上策H-Rev: 过滤低质量弹簧信号
@@ -1207,7 +1289,7 @@ class StrategyBusinessLayer:
                                     _spring_strength = bss.detect_spring_strength(
                                         _bs_signal, _spring_box
                                     ) if hasattr(bss, 'detect_spring_strength') else 0.5
-                                    _spring_threshold = getattr(bss, 'SPRING_STRENGTH_THRESHOLD', 0.25)  # 统一引用类常量, fallback=0.25(与box_spring_detector.py FIX-OO5b对齐)
+                                    _spring_threshold = getattr(bss, 'SPRING_STRENGTH_THRESHOLD', 0.45)  # FIX-B3-20260805: fallback对齐类常量0.45(原0.25过宽松)
                                     if _spring_strength < _spring_threshold:
                                         logging.info(
                                             "[FIX-20260712-S4] 弹簧强度不足, 过滤信号: inst=%s strength=%.3f threshold=%.3f",
@@ -1273,6 +1355,7 @@ class StrategyBusinessLayer:
                                                     'open_reason': 'BOX_SPRING',
                                                     'dry_run': getattr(provider, '_dry_run_active', False),
                                                     'strategy_id': getattr(provider, 'strategy_id', ''),
+                                                    'strategy_group': 's4_spring',
                                                 },
                                             }
                                             _fp_bs = os.path.join(_snap_dir, f"BOX_SPRING_{_bs_future_inst}_{_ts_bs}.json")
@@ -1893,7 +1976,13 @@ class StrategyBusinessLayer:
                 _s2_call_count = getattr(provider, '_s2_call_count', 0) + 1
                 provider._s2_call_count = _s2_call_count
                 if _s2_call_count % 30 == 1:  # 30tick采样一次(S2日内不需要高频)
-                    _s2_targets = targets if targets else _fallback_instruments
+                    # FIX-S2-INFINITE-LOOP-20260801: 根因修复 — 下单退化根因
+                    # 原代码 _s2_targets = targets (同一引用), for t in _s2_targets 遍历 targets
+                    # 同时 targets.append(_s2_target) 向正在遍历的列表追加 → 列表无限增长 → 循环永不终止
+                    # → _trading_lock 被永久持有 → S2/S6/S7 全部卡死, 只有走独立路径的 S1 HFT 能下单
+                    # 触发条件: AsymmetricDecay+DTE修复使 targets 非空(150条) → _s2_targets=targets(同引用)
+                    # 修复: list(targets) 创建拷贝, 循环遍历拷贝(固定长度), append 到原 targets(独立增长)
+                    _s2_targets = list(targets) if targets else _fallback_instruments
                     # V4-CLEANUP: 原_s2_degraded_count重置已移除(死代码清理, 因V4-FIX-O6降级限流不可达)
                     # 获取希腊字母评分和三角评判评分(从RiskComputeService)
                     _s2_greeks_score = 0.0  # V4-FIX-O5: 数据不可用=不满足条件(fail-closed), 原0.5中性导致bypass
@@ -1934,15 +2023,12 @@ class StrategyBusinessLayer:
                     # FIX-D: S2 resonance_strength从SPM读取(与S1一致)，target dict不含此字段
                     _spm_s2 = getattr(provider, '_state_param_manager', None)
                     _s2_market_resonance = getattr(_spm_s2, '_last_resonance_strength', 0.0) if _spm_s2 else 0.0
-                    # FIX-S2-RESONANCE-20260721: resonance=0时降级可选(与greeks一致)
-                    # 根因: _s2_market_resonance=0有两层原因:
-                    #   (1) _spm_s2=None: provider无_state_param_manager属性(SPM未注入)
-                    #   (2) _last_resonance_strength=0: width_resonance=min(ws/10,1.0),ws=0→永远0
-                    #       width_cache.get_width_strength()返回0(缓存未填充或计算失败)
-                    #   → resonance恒0 → _s2_res < 0.45 → 全部skip → S2零信号
-                    # 修复: resonance=0时(数据不可用)跳过共振过滤,仅用order_flow+tri二维过滤
-                    #       resonance>0时(数据可用)正常要求resonance>=threshold
-                    # 逻辑: 缺数据≠不适合交易,仅缺一个维度证据不应阻断整个策略
+                    # FIX-S2-RESONANCE-20260721 → FIX-S2-RESONANCE-REQUIRED-20260804: 共振过阈值才交易
+                    # 原修复(20260721): resonance=0时降级可选(跳过共振过滤)
+                    # 新修复(20260804): 用户决策"共振过阈值才交易,无共振数据不交易"
+                    #   - 删除条件C(纯排序通道冷启动降维)和条件B(共振>0即可)
+                    #   - 共振=0或<阈值(0.45) → fail-closed不交易
+                    #   - 共振过阈值后,允许其他维度降维(订单流有方向即可)
                     _s2_res_available = _s2_market_resonance > 0
                     # FIX-S2-FOUR-DIM-20260721: 诊断日志(每100次采样输出一次四维实际值)
                     _s2_diag_count = getattr(provider, '_s2_diag_count', 0) + 1
@@ -1953,6 +2039,10 @@ class StrategyBusinessLayer:
                                      _s2_greeks_score, _s2_tri_score,
                                      type(_spm_s2).__name__ if _spm_s2 else 'None',
                                      _s2_call_count)
+                    # FIX-S2-DEDUP-20260801: 按合约去重, 避免同一合约生成多个S2信号
+                    # 根因: signal source C的targets可能含重复合约(同instrument_id多次出现),
+                    #   原代码为每个重复项都生成S2 target → targets列表膨胀 → execute_by_ranking处理耗时
+                    _s2_seen_insts = set()
                     for t in _s2_targets:
                         _s2_inst = t.get('instrument_id', '')
                         _s2_price = t.get('price', 0.0)
@@ -1965,6 +2055,10 @@ class StrategyBusinessLayer:
                         _s2_dir_hint = t.get('direction', '')
                         if not _s2_inst or _s2_price <= 0:
                             continue
+                        # FIX-S2-DEDUP-20260801: 跳过已处理的合约(同合约只生成1个S2信号)
+                        if _s2_inst in _s2_seen_insts:
+                            continue
+                        _s2_seen_insts.add(_s2_inst)
                         # [FIX-20260712-S2-P0] 订单流必须按目标合约获取，空字符串返回全局/默认值。
                         _s2_of_imbalance = 0.0
                         try:
@@ -1984,18 +2078,20 @@ class StrategyBusinessLayer:
                                 _s2_of_imbalance = _s2_ofb.get_instant_imbalance(_s2_product) or 0.0
                         except Exception:  # FIX-U: 扩大异常捕获
                             pass
-                        # FIX-S2-INTRADAY-GATE-20260724: 用户设计原意区分隔夜仓与日内交易门控
-                        # 隔夜仓: 四维门控必须全部通过(resonance+order_flow+greeks+tri)
+                        # FIX-S2-INTRADAY-GATE-20260724: 用户设计原意区分夜间仓与日内交易门控
+                        # 夜间仓: 四维门控必须全部通过(resonance+order_flow+greeks+tri)
                         # 日内交易: 若四维门控数据不可用，仅需满足"期权排序过阈值+订单流支持"
                         #         或"四周期共振"即可(不要求四维全满足)
                         # 修复: V4-FIX-O6的fail-closed(continue)违背日内交易设计原意
-                        #       改为按交易类型分流: 隔夜仓严格四维, 日内交易降维可选
+                        #       改为按交易类型分流: 夜间仓严格四维, 日内交易降维可选
+                        # NAMING-CLARIFY-20260731: 原"隔夜仓"命名误导, 实际S2夜间仓4小时内平仓
+                        #   真正隔夜仓(持仓>12小时, 次日平仓)是S5策略, 非S2
                         _s2_of_available = abs(_s2_of_imbalance) > 0
-                        # FIX-S2-OVERNIGHT-20260724: 隔夜仓判断实现
-                        # 用户设计原意: 隔夜仓(夜盘时段开仓)必须四维门控全部通过
+                        # FIX-S2-OVERNIGHT-20260724: 夜间仓判断实现
+                        # 用户设计原意: 夜间仓(夜盘时段开仓)必须四维门控全部通过
                         #               日内交易(日盘时段开仓)数据缺失时可降维
                         # 判断方式: 当前是否在夜盘时段(21:00~次日02:30)
-                        #   夜盘开仓=隔夜仓(次日才能平) → 严格四维
+                        #   夜盘开仓=夜间仓(4小时内平仓, 非真正隔夜) → 严格四维
                         #   日盘开仓=日内交易(当日可平) → 降维可选
                         try:
                             from datetime import datetime as _dt_check
@@ -2007,7 +2103,7 @@ class StrategyBusinessLayer:
                         # 判断是否日内交易降维路径: 数据不全(任一维度缺失)时走降维
                         _s2_data_incomplete = (not _s2_res_available) or (not _s2_of_available)
                         if _s2_is_overnight:
-                            # 隔夜仓: 四维全部硬门控(用户设计原意)
+                            # 夜间仓: 四维全部硬门控(用户设计原意)
                             if not _s2_res_available or _s2_res < _S2_RESONANCE_THRESH:
                                 continue
                             if not _s2_of_available or abs(_s2_of_imbalance) < _S2_ORDER_FLOW_THRESH:
@@ -2019,33 +2115,34 @@ class StrategyBusinessLayer:
                                 logging.debug("[DIAG-S2] REJECT(overnight): greeks=%.4f<thresh=%.4f", _s2_greeks_score, _S2_GREEKS_THRESH)
                                 continue
                         elif _s2_data_incomplete:
-                            # 日内交易+数据不全: 降维路径(用户设计原意)
-                            # FIX-S2-DEGRADE-CORRECT-20260724: 修正降维条件
-                            # 原代码错误: 降维路径仍用严格阈值(abs(imbalance)>=0.08, res>=0.45)
-                            #   = 未真正降维 = S2零开仓
-                            # 用户要求: 日内交易数据缺失时仅需满足以下之一:
-                            #   条件A: 期权排序过阈值(在targets中即满足) + 订单流支持(imbalance有方向!=0)
-                            #   条件B: 四周期共振(resonance>0即可, 不要求达严格阈值0.45)
-                            _s2_rank_conf = float(t.get('rank_confidence', 1.0) or 1.0)
-                            _s2_cond_a = (_s2_of_available and _s2_rank_conf > 0)
-                            _s2_cond_b = _s2_res_available
-                            if not (_s2_cond_a or _s2_cond_b):
-                                # FIX-NOISE-S2-20260724: 全局60s冷却+汇总计数
+                            # 日内交易+数据不全: 降维路径
+                            # FIX-S2-RESONANCE-REQUIRED-20260804: 共振过阈值才交易，无共振数据不交易(用户决策)
+                            # 删除条件C(纯排序通道冷启动降维) — 允许共振=0时交易违背S2本意
+                            # 删除条件B(共振>0即可) — 共振必须过阈值(0.45)，共振<阈值也不交易
+                            # 保留条件A(期权排序+订单流) — 但前置共振过阈值检查
+                            if not _s2_res_available or _s2_res < _S2_RESONANCE_THRESH:
+                                # 共振=0或<阈值 → fail-closed不交易(用户2026-08-04决策)
                                 _s2_skip_now = time.time()
                                 _s2_skip_last = getattr(self.__class__, '_s2_skip_ts', None) or {}
                                 _s2_skip_count = _s2_skip_last.get('_count', 0) + 1
                                 _s2_skip_last['_count'] = _s2_skip_count
                                 if _s2_skip_now - _s2_skip_last.get('_last_log', 0.0) >= 60:
-                                    logging.info("[DIAG-S2] 日内降维: A(期权排序+订单流)=%s B(共振)=%s 均不满足, skip ×%d instruments",
-                                                 _s2_cond_a, _s2_cond_b, _s2_skip_count)
+                                    logging.info("[FIX-S2-RESONANCE-REQUIRED] 共振<阈值,不开仓 res=%.4f<thresh=%.4f ×%d instruments",
+                                                 _s2_res, _S2_RESONANCE_THRESH, _s2_skip_count)
                                     _s2_skip_last['_last_log'] = _s2_skip_now
                                     _s2_skip_last['_count'] = 0
                                 setattr(self.__class__, '_s2_skip_ts', _s2_skip_last)
                                 continue
+                            # 共振过阈值后，允许降维(订单流有方向即可，tri/greeks可选)
+                            _s2_rank_conf = float(t.get('rank_confidence', 1.0) or 1.0)
+                            _s2_cond_a = (_s2_of_available and _s2_rank_conf > 0)
+                            if not _s2_cond_a:
+                                continue
                             if _s2_diag_count <= 10:
-                                logging.info("[DIAG-S2] 日内降维通过: A=%s B=%s inst=%s", _s2_cond_a, _s2_cond_b, _s2_inst)
+                                logging.info("[DIAG-S2] 日内降维通过(共振过阈值): res=%.4f>=%.4f inst=%s",
+                                             _s2_res, _S2_RESONANCE_THRESH, _s2_inst)
                         else:
-                            # 日内交易+数据完整: 四维全部硬门控(与隔夜仓一致)
+                            # 日内交易+数据完整: 四维全部硬门控(与夜间仓一致)
                             if _s2_res < _S2_RESONANCE_THRESH:
                                 continue
                             if abs(_s2_of_imbalance) < _S2_ORDER_FLOW_THRESH:
@@ -2101,6 +2198,171 @@ class StrategyBusinessLayer:
                 provider._s2_err_count = _s2_err_count
                 if _s2_err_count <= 3 or _s2_err_count % 100 == 0:
                     logging.warning("[S2-INTRADAY] 四维信号组装异常(第%d次): %s", _s2_err_count, _s2_err)
+            # ====================================================================
+            # ADD-S5-20260731: S5 隔夜仓模块 — 日K线 + S1/S2共振+订单流模式
+            # 用户决策(2026-07-31): 复用S1/S2共振+订单流模式, K线设定为日K线,
+            #                       风控复用S3两阶段硬时间止损, 资金分配1.5%(隔夜仓保守)
+            # 设计原则: 100%复用现有方法,不新建模块文件
+            #   - width_resonance/resonance_strength: 复用S1/S2的SPM链路
+            #   - order_flow: 复用S2的OrderFlowBridge.get_instant_imbalance
+            #   - daily_bars: 复用S3的BoxDetector._fetch_daily_bars_from_dataservice
+            #   - 风控: 复用S3的SafetyMetaPosition.check_position_hard_time_stop
+            #   - 下单: 复用统一targets机制+execute_by_ranking
+            # 第五维独有: 日K趋势方向 × 订单流方向 双重确认(fail-closed)
+            # ====================================================================
+            # ADD-S5-REFINE-20260731: 批判式完善(对齐报告10.3/10.4优化项)
+            #   P1-1: 补齐四维门控(tri_score+greeks_score), 复用S2的RiskComputeService评分链路
+            #   P1-2: 引入独立_s5_call_count, 解除对_s2_call_count的耦合
+            #   P2-1: _s5_enabled/capital_allocation配置化(STRATEGY_DEFAULTS)
+            #   P2-2: 增加夜盘时段门控(21:00-02:30), 隔夜仓本意=夜盘开仓次日平
+            #   P3-1: 日K数据进程内缓存(300秒TTL), 避免每个tick查询数据库拖慢主循环
+            # ====================================================================
+            try:
+                # P2-1: 配置化开关与资金分配(从STRATEGY_DEFAULTS读取, 默认值保持向后兼容)
+                _s5_cfg = _S5_STRATEGY_DEFAULTS
+                _s5_enabled = bool(_s5_cfg.get('s5_overnight_enabled', True))
+                if _s5_enabled:
+                    # P1-2: 独立采样计数器(解除与_s2_call_count耦合)
+                    _s5_call_count = getattr(provider, '_s5_call_count', 0) + 1
+                    provider._s5_call_count = _s5_call_count
+                    if _s5_call_count % 30 == 1:  # 30tick采样一次(与S2同频但独立)
+                        # P2-2: 夜盘时段门控(21:00-23:59 或 00:00-02:30)
+                        # 隔夜仓本意: 夜盘开仓次日才能平仓, 日盘开仓属日内交易(S2范畴)
+                        try:
+                            from datetime import datetime as _s5_dt
+                            _s5_now_hour = _s5_dt.now().hour
+                            _s5_is_overnight_session = (_s5_now_hour >= 21) or (_s5_now_hour < 3)
+                        except Exception:
+                            _s5_is_overnight_session = False  # 异常保守: 不开仓
+                        if not _s5_is_overnight_session:
+                            # 非夜盘时段: S5不开仓(避免日内频繁触发虚假隔夜信号)
+                            pass
+                        else:
+                            _s5_spm = getattr(provider, '_state_param_manager', None)
+                            _s5_resonance = getattr(_s5_spm, '_last_resonance_strength', 0.0) if _s5_spm else 0.0
+                            _S5_RESONANCE_THRESH = 0.45   # 对齐S2的_S2_RESONANCE_THRESH
+                            _S5_ORDER_FLOW_THRESH = 0.08  # 对齐S2的_S2_ORDER_FLOW_THRESH
+                            _S5_GREEKS_THRESH = 0.3       # 对齐S2的_S2_GREEKS_THRESH
+                            _S5_TRI_THRESH = 0.4          # 对齐S2的_S2_TRI_THRESH
+                            _S5_MIN_DAILY_BARS = 5         # 至少5根日K线才能判断趋势
+                            # P1-1: 四维门控之共振维度
+                            if _s5_resonance >= _S5_RESONANCE_THRESH:
+                                # P1-1: 四维门控之tri+greeks评分(复用S2的RiskComputeService链路)
+                                _s5_greeks_score = 0.0
+                                _s5_tri_score = 0.0
+                                try:
+                                    from risk.risk_service import get_risk_service
+                                    _s5_rs = get_risk_service()
+                                    if _s5_rs and hasattr(_s5_rs, '_compute_service'):
+                                        _s5_rc = _s5_rs._compute_service
+                                        try:
+                                            _s5_gd = getattr(_s5_rs, '_greeks_dashboard', None)
+                                            _s5_greeks_score = _s5_rc._compute_greeks_usage_score(_s5_gd)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            _s5_tri_score = _s5_rc._compute_tri_validation_score(None)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                                # P1-1: 四维门控之tri维度(tri<thresh → fail-closed)
+                                if _s5_tri_score >= _S5_TRI_THRESH and _s5_greeks_score >= _S5_GREEKS_THRESH:
+                                    try:
+                                        from strategy.box_detector import get_box_detector
+                                        from order.order_flow_bridge import get_order_flow_bridge as _s5_get_ofb
+                                        from infra.shared_utils import extract_product_code as _s5_extract_product
+                                        _s5_bd = get_box_detector()
+                                        _s5_ofb = _s5_get_ofb()
+                                        # FIX-S5-INFINITE-LOOP-20260801: 潜伏bug修复 — 与S2同根因
+                                        # 原代码 _s5_targets_src = targets(同引用), 循环内 targets.append(_s5_target)
+                                        # → 遍历中append → 无限循环。S2修复前S5永不执行(S2先无限循环), S2修复后会触发
+                                        _s5_targets_src = list(targets) if targets else _fallback_instruments
+                                        for _s5_t in _s5_targets_src:
+                                            _s5_inst = _s5_t.get('instrument_id', '')
+                                            _s5_price = _s5_t.get('price', 0.0)
+                                            if not _s5_inst or _s5_price <= 0:
+                                                continue
+                                            # P3-1: 日K数据进程内缓存(300秒TTL, 避免每tick查库)
+                                            _s5_cache = getattr(provider, '_s5_daily_bars_cache', None)
+                                            if _s5_cache is None:
+                                                _s5_cache = {}
+                                                provider._s5_daily_bars_cache = _s5_cache
+                                            _s5_cache_entry = _s5_cache.get(_s5_inst)
+                                            _s5_now_ts = time.time()
+                                            if _s5_cache_entry and (_s5_now_ts - _s5_cache_entry[0]) < 300:
+                                                _s5_daily_bars = _s5_cache_entry[1]
+                                            else:
+                                                try:
+                                                    _s5_daily_bars = _s5_bd._fetch_daily_bars_from_dataservice(_s5_inst)
+                                                except Exception:
+                                                    _s5_daily_bars = None
+                                                if _s5_daily_bars:
+                                                    _s5_cache[_s5_inst] = (_s5_now_ts, _s5_daily_bars)
+                                            if not _s5_daily_bars or len(_s5_daily_bars) < _S5_MIN_DAILY_BARS:
+                                                continue
+                                            # 2. 日K趋势判断(最近5根日K线方向)
+                                            _s5_bar_direction = _judge_daily_trend(_s5_daily_bars[-_S5_MIN_DAILY_BARS:])
+                                            if not _s5_bar_direction:
+                                                continue
+                                            # 3. 订单流确认(复用S2的OrderFlowBridge) — 四维门控之订单流维度
+                                            _s5_product = _s5_extract_product(_s5_inst)
+                                            _s5_of_imbalance = 0.0
+                                            try:
+                                                if _s5_product:
+                                                    _s5_of_imbalance = _s5_ofb.get_instant_imbalance(_s5_product) or 0.0
+                                            except Exception:
+                                                pass
+                                            if abs(_s5_of_imbalance) < _S5_ORDER_FLOW_THRESH:
+                                                continue
+                                            # 4. 方向一致性校验(日K方向 × 订单流方向 双重确认) — 第五维独有
+                                            _s5_dir = _reconcile_direction(_s5_bar_direction, _s5_of_imbalance)
+                                            if not _s5_dir:
+                                                continue  # 方向不一致 → fail-closed
+                                            # 5. 组装S5隔夜仓target
+                                            _s5_capital = float(_s5_cfg.get('s5_capital_allocation', 0.015))
+                                            _s5_target = {
+                                                'instrument_id': _s5_inst,
+                                                'direction': _s5_dir,
+                                                'price': _s5_price,
+                                                'volume': 0,
+                                                'lots': 1,
+                                                'action': 'OPEN',
+                                                'reason': 'OVERNIGHT',
+                                                'open_reason': 'OVERNIGHT',
+                                                'strategy_group': 's5_overnight',
+                                                'signal_id': generate_prefixed_id('S5ONT', 12),
+                                                'take_profit_ratio': 2.0,    # 隔夜仓追求大盈亏比
+                                                'stop_loss_ratio': 0.4,      # 保守止损
+                                                'max_hold_minutes': 1440.0,  # 24小时(隔夜)
+                                                's5_scores': {
+                                                    'resonance': round(_s5_resonance, 4),
+                                                    'order_flow': round(_s5_of_imbalance, 4),
+                                                    'greeks': round(_s5_greeks_score, 4),
+                                                    'tri': round(_s5_tri_score, 4),
+                                                    'daily_trend': _s5_bar_direction,
+                                                    'daily_bars_count': len(_s5_daily_bars),
+                                                },
+                                                'source': 's5_overnight_v1',
+                                                # P2-1: 资金分配配置化(默认0.015, 介于S2的2%和S6的1%之间)
+                                                # 决策依据: 隔夜跳空风险 > 日内, 单笔期望盈亏比2:1可适度降低占比
+                                                # 并发测算: S5×3=4.5% < position_limit_max_ratio=20%, 安全
+                                                'capital_allocation': _s5_capital,
+                                                'simulated': False,
+                                            }
+                                            targets.append(_s5_target)
+                                            provider._s5_last_signal = _s5_target
+                                            logging.info(
+                                                "[S5-OVERNIGHT] 日K共振+订单流信号追加targets: inst=%s dir=%s res=%.3f of=%.4f greeks=%.3f tri=%.3f daily_trend=%s bars=%d",
+                                                _s5_inst, _s5_dir, _s5_resonance, _s5_of_imbalance, _s5_greeks_score, _s5_tri_score, _s5_bar_direction, len(_s5_daily_bars),
+                                            )
+                                    except Exception as _s5_inner_err:
+                                        logging.warning("[S5-OVERNIGHT] 数据获取异常: %s", _s5_inner_err)
+            except Exception as _s5_err:
+                _s5_err_count = getattr(provider, '_s5_err_count', 0) + 1
+                provider._s5_err_count = _s5_err_count
+                if _s5_err_count <= 3 or _s5_err_count % 100 == 0:
+                    logging.warning("[S5-OVERNIGHT] 信号组装异常(第%d次): %s", _s5_err_count, _s5_err)
             if not targets:
                 # FIX-R6: targets为空时输出节流warning日志，避免完全静默
                 # 每5分钟输出一次，包含诊断信息

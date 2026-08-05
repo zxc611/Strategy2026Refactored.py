@@ -83,126 +83,7 @@ def _record_spring_trade(self_or_signal, signal=None) -> Dict[str, Any]:
     return {"recorded": True, "signal_id": sig_id}
 
 
-def _construct_straddle_pair_from_id(
-    option_instrument_id: str, paired_opt_type: str, width_cache: Any
-) -> Optional[Tuple[str, float, str]]:
-    """FIX-S4-STRADDLE-FALLBACK-20260722: 从期权ID构造配对期权ID并在width_cache中查找。
 
-    根因: 部分期权(如al2608P22800)不在width_cache._option_info中→原_find_straddle_pair
-          找不到→STRADDLE REJECT→S4仅3次下单(190次TRIGGERED)。
-
-    策略: 从期权ID中提取品种+行权价+月份，构造反类型期权ID，在width_cache中模糊匹配。
-    期权ID格式: al2608P22800, cu2608P104000, nr2608C14800, IO2609-P-4700 等
-    """
-    import re
-
-    # 格式1: 小写品种+数字+P/C+行权价 (如al2608P22800, nr2608C14800)
-    m1 = re.match(r'^([a-z]+\d+)([CP])(\d+)$', option_instrument_id)
-    # 格式2: 大写品种+数字+-P/C-+行权价 (如IO2609-P-4700, HO2609-C-3200)
-    m2 = re.match(r'^([A-Z]+\d+)-([CP])-(\d+)$', option_instrument_id)
-
-    if not m1 and not m2:
-        return None
-
-    if m1:
-        underlying = m1.group(1)   # e.g. al2608
-        orig_type = m1.group(2)    # P or C
-        strike = m1.group(3)       # e.g. 22800
-        # 构造配对: al2608C22800 (P→C) or al2608P22800 (C→P)
-        paired_id_constructed = f"{underlying}{paired_opt_type}{strike}"
-    else:
-        underlying = m2.group(1)
-        orig_type = m2.group(2)
-        strike = m2.group(3)
-        paired_id_constructed = f"{underlying}-{paired_opt_type}-{strike}"
-
-    orig_opt_type = 'PUT' if orig_type == 'P' else 'CALL'
-
-    # 在width_cache中查找构造的配对期权
-    if width_cache is not None and hasattr(width_cache, '_option_info'):
-        for _piid, _pinfo in width_cache._option_info.items():
-            _iid = _pinfo.get('instrument_id', _piid)
-            if _iid == paired_id_constructed:
-                _paired_prem = width_cache._option_price.get(_piid, 0.0)
-                logging.info("[DIAG-S4-EXEC] _construct_straddle_pair: 找到配对 %s→%s prem=%.4f",
-                             option_instrument_id, paired_id_constructed, _paired_prem)
-                return paired_id_constructed, _paired_prem, orig_opt_type
-
-    # 模糊匹配: 遍历同品种+同行权价+反类型的期权
-    if width_cache is not None and hasattr(width_cache, '_option_info'):
-        for _piid, _pinfo in width_cache._option_info.items():
-            _iid = _pinfo.get('instrument_id', _piid)
-            _opt_type = _pinfo.get('option_type', '')
-            # 同品种前缀+同行权价+反类型
-            if (_iid.startswith(underlying) and
-                _opt_type == paired_opt_type and
-                paired_id_constructed[-6:] in _iid):  # 行权价后6位模糊匹配
-                _paired_prem = width_cache._option_price.get(_piid, 0.0)
-                logging.info("[DIAG-S4-EXEC] _construct_straddle_pair(模糊): 找到配对 %s→%s prem=%.4f",
-                             option_instrument_id, _iid, _paired_prem)
-                return _iid, _paired_prem, orig_opt_type
-
-    logging.debug("[DIAG-S4-EXEC] _construct_straddle_pair: 无法构造配对 for %s", option_instrument_id)
-    return None
-
-
-def _find_straddle_pair(self_or_signal, signal=None) -> Tuple[str, float, str]:
-    actual_signal = signal if signal is not None else self_or_signal
-    # FIX-20260718-SANDBOX-E2E: 兼容 SpringSignal dataclass（原仅支持 dict）
-    if isinstance(actual_signal, dict):
-        option_instrument_id = actual_signal.get("option_instrument_id", "")
-        premium = actual_signal.get("premium", 0.0)
-        _dir = actual_signal.get("direction", "")
-        opt_type = "PUT" if "PUT" in _dir else "CALL"
-    else:
-        option_instrument_id = getattr(actual_signal, "option_instrument_id", "")
-        premium = getattr(actual_signal, "premium_price", 0.0)
-        _dir = getattr(actual_signal, "direction", "")
-        opt_type = "PUT" if "PUT" in _dir else "CALL"
-
-    # FIX-S4-STRADDLE-PAIR-20260721: 从width_cache查找配对期权而非返回期货ID
-    # 根因: 原返回signal.instrument_id(期货ID如p2608)，不是PUT期权ID(如IO2607P4000)
-    #   → _execute_straddle_entry中put_instrument=期货ID → send_order(instrument_id=期货ID)
-    #   → L754 price<=0检查可能通过但instrument_id不是期权 → 下单失败或映射错误
-    # 修复: 从width_cache中查找同underlying_future_id+同strike_price+反类型的期权
-    paired_opt_type = 'PUT' if opt_type == 'CALL' else 'CALL'
-    try:
-        from data.width_cache import get_width_cache
-        _wc = get_width_cache()
-        if _wc is not None and hasattr(_wc, '_option_info'):
-            _found_original = False
-            for _iid, _info in _wc._option_info.items():
-                if _info.get('instrument_id', '') == option_instrument_id or _iid == option_instrument_id:
-                    _underlying_fid = _info.get('underlying_future_id', '')
-                    _strike = _info.get('strike_price', 0.0)
-                    _month = _info.get('month', '')
-                    _found_original = True
-                    # 在同underlying+同strike+同month中查找反类型
-                    for _piid, _pinfo in _wc._option_info.items():
-                        if (_pinfo.get('underlying_future_id', '') == _underlying_fid
-                            and abs(_pinfo.get('strike_price', 0.0) - _strike) < 0.01
-                            and _pinfo.get('month', '') == _month
-                            and _pinfo.get('option_type', '') == paired_opt_type):
-                            _paired_id = _pinfo.get('instrument_id', _piid)
-                            _paired_prem = _wc._option_price.get(_piid, 0.0)
-                            return _paired_id, _paired_prem, opt_type
-                    break  # 找到原期权信息但无配对，退出外层循环
-
-            # FIX-S4-STRADDLE-FALLBACK-20260722: width_cache中找不到原期权时的fallback
-            # 根因: _option_info中不含某些期权(如al2608P22800)→_found_original=False
-            #   → 跳过整个查找逻辑 → 返回空 → STRADDLE REJECT: no pair found
-            #   → 190次TRIGGERED仅3次入场(仅走BUY_PUT/BUY_CALL非STRADDLE路径)
-            # 修复: 从期权ID中提取underlying+strike+month，构造配对期权ID进行查找
-            if not _found_original and option_instrument_id:
-                logging.info("[DIAG-S4-EXEC] _find_straddle_pair fallback: 期权%s不在width_cache中，尝试ID构造配对",
-                             option_instrument_id)
-                _paired_constructed = _construct_straddle_pair_from_id(option_instrument_id, paired_opt_type, _wc)
-                if _paired_constructed:
-                    return _paired_constructed
-    except Exception:
-        logging.debug("[BoxSpring] _find_straddle_pair: width_cache查找失败，返回原始信号信息")
-    # fallback: 无配对时返回空(而非期货ID)，让_execute_straddle_entry正确拒绝
-    return "", 0.0, opt_type
 
 
 class BoxSpringExecutorService:
@@ -267,7 +148,7 @@ class BoxSpringExecutorService:
         if premium_price <= 0 or account_equity <= 0:
             return 1
         max_loss = max_loss_pct if max_loss_pct is not None else self._max_loss_pct
-        risk_budget = account_equity * self._max_risk_ratio
+        risk_budget = account_equity * min(self._max_risk_ratio, max_loss)  # FIX-A5-20260805: max_loss参与计算
         cost_per_lot = premium_price * self._option_multiplier
         # R27-P2-FP-17修复: int()截断→safe_float_to_int()
         lots = max(1, safe_float_to_int(risk_budget / cost_per_lot))
@@ -278,7 +159,7 @@ class BoxSpringExecutorService:
         if instrument_id and hasattr(self, '_positions') and self._positions:
             existing_lots = 0
             for pos in self._positions.values():
-                pos_inst = getattr(pos, 'instrument_id', '') if hasattr(pos, 'instrument_id') else ''
+                pos_inst = getattr(pos, 'option_instrument_id', '') if hasattr(pos, 'option_instrument_id') else ''
                 if pos_inst == instrument_id:
                     pos_lots = abs(getattr(pos, 'lots', 0) or getattr(pos, 'volume', 0) or 0)
                     existing_lots += pos_lots
@@ -418,8 +299,6 @@ class BoxSpringExecutorService:
 
                 self._record_spring_trade(signal)
 
-                if signal.direction == 'BUY_STRADDLE':
-                    return self._execute_straddle_entry(signal)
 
                 action_map = {
                     'BUY_CALL': ('BUY', 'OPEN'),
@@ -428,14 +307,15 @@ class BoxSpringExecutorService:
                 direction, action = action_map.get(signal.direction, ('BUY', 'OPEN'))
 
                 equity_lots = self.compute_equity_based_lots(
-                    signal.premium_price, signal.account_equity if hasattr(signal, 'account_equity') else 100000.0,
+                    signal.premium_price, signal.account_equity if hasattr(signal, 'account_equity') else 0.0,  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
+                    instrument_id=signal.option_instrument_id,  # FIX-A2-20260805: 传入instrument_id避免超仓
                 )
                 actual_lots = min(signal.lots, equity_lots) if signal.lots > 0 else equity_lots
 
                 if actual_lots <= 0:
                     cheaper = self.find_cheaper_strike_same_month(
                         signal.option_instrument_id, signal.premium_price,
-                        signal.account_equity if hasattr(signal, 'account_equity') else 100000.0,
+                        signal.account_equity if hasattr(signal, 'account_equity') else 0.0,  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
                         signal.direction,
                     )
                     if cheaper is None:
@@ -447,7 +327,8 @@ class BoxSpringExecutorService:
                     signal.premium_price = cheaper['premium_price']
                     actual_lots = self.compute_equity_based_lots(
                         cheaper['premium_price'],
-                        signal.account_equity if hasattr(signal, 'account_equity') else 100000.0,
+                        signal.account_equity if hasattr(signal, 'account_equity') else 0.0,  # FIX-FAKE-EQUITY-20260731: 100000.0→0.0(fail-closed)
+                        instrument_id=cheaper['instrument_id'],  # FIX-A2-20260805: 传入instrument_id避免超仓
                     )
                     logging.info("[BoxSpring] 降级选择低权利金行权价: %s lots=%d", cheaper['instrument_id'], actual_lots)
 
@@ -503,152 +384,6 @@ class BoxSpringExecutorService:
 
         return None
 
-    def _execute_straddle_entry(self, signal: SpringSignal) -> Optional[str]:
-        paired_instrument_id, paired_premium, signal_opt_type = self._find_straddle_pair(signal)
-
-        if not paired_instrument_id or not signal_opt_type:
-            logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: no pair found for %s (paired_id=%s opt_type=%s)",
-                         signal.option_instrument_id, paired_instrument_id, signal_opt_type)
-            return None
-
-        is_call = signal_opt_type == 'CALL'
-        call_instrument = signal.option_instrument_id if is_call else paired_instrument_id
-        put_instrument = paired_instrument_id if is_call else signal.option_instrument_id
-        call_premium = signal.premium_price if is_call else paired_premium
-        put_premium = paired_premium if is_call else signal.premium_price
-
-        # FIX-S4-STRADDLE-PREM-20260721: STRADDLE路径premium<=0纵深防线
-        # 根因: call_premium或put_premium<=0时send_order被L754拒绝
-        #   call_premium=signal.premium_price(已在execute_spring_entry检查>0)
-        #   put_premium=paired_premium(从width_cache获取,可能为0)
-        if call_premium <= 0:
-            logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: call_premium=%.4f<=0 opt=%s",
-                         call_premium, call_instrument)
-            return None
-        if put_premium <= 0:
-            logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: put_premium=%.4f<=0 opt=%s",
-                         put_premium, put_instrument)
-            return None
-
-        try:
-            from order.order_service import get_order_service
-            osvc = get_order_service()
-            if not osvc:
-                logging.info("[DIAG-S4-EXEC] STRADDLE REJECT: order_service is None")
-                return None
-        except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
-            logging.error("[BoxSpring] STRADDLE: get_order_service failed: %s", e)
-            return None
-
-        call_order_id = osvc.send_order(
-            instrument_id=call_instrument,
-            volume=signal.lots,
-            price=call_premium,
-            direction='BUY',
-            action='OPEN',
-            open_reason=self.OPEN_REASON,
-            signal_id=getattr(signal, 'signal_id', ''),
-        )
-
-        if not call_order_id:
-            logging.warning("[BoxSpring] STRADDLE: Call order failed for %s, aborting straddle",
-                            call_instrument)
-            return None
-
-        put_order_id = osvc.send_order(
-            instrument_id=put_instrument,
-            volume=signal.lots,
-            price=put_premium,
-            direction='BUY',
-            action='OPEN',
-            open_reason=self.OPEN_REASON,
-            signal_id=getattr(signal, 'signal_id', ''),
-        )
-
-        if not put_order_id:
-            logging.warning("[BoxSpring] STRADDLE: Put order failed for %s, closing Call leg to avoid single-leg risk",
-                            put_instrument)
-            # FIX-R37-UNIQUE-CLOSE(A7): straddle abort close 必须设置 PositionService 持仓 _closing，
-            # 否则止盈止损检查时 _closing=False 会重复触发平仓
-            try:
-                from position.position_service import get_position_service
-                _pos_svc = get_position_service()
-                if _pos_svc:
-                    with _pos_svc._get_instrument_lock(call_instrument):
-                        for _rec in _pos_svc.positions.get(call_instrument, {}).values():
-                            if not getattr(_rec, '_closing', False):
-                                _rec._closing = True
-                                _rec.closing_order_id = f"PENDING_SPRING_ABORT_{_rec.position_id}"
-                                _rec.close_method = 'spring_straddle_abort'
-                                _rec.close_reason = 'STRADDLE_ABORT_CLOSE'
-            except Exception:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
-                pass
-            try:
-                _spring_close_result = osvc.send_order(
-                    instrument_id=call_instrument,
-                    volume=signal.lots,
-                    price=call_premium,
-                    direction='SELL',
-                    action='CLOSE',
-                    open_reason=self.OPEN_REASON,
-                    signal_id=getattr(signal, 'signal_id', ''),
-                    ref_price=call_premium,
-                )
-                if _spring_close_result and getattr(_spring_close_result, 'ok', False):
-                    _spring_actual_oid = getattr(_spring_close_result, 'order_id', '')
-                    if _spring_actual_oid:
-                        from position.position_service import get_position_service
-                        _pos_svc = get_position_service()
-                        if _pos_svc:
-                            with _pos_svc._get_instrument_lock(call_instrument):
-                                for _rec in _pos_svc.positions.get(call_instrument, {}).values():
-                                    if getattr(_rec, 'closing_order_id', '').startswith('PENDING_SPRING_ABORT_'):
-                                        _rec.closing_order_id = _spring_actual_oid
-                                        break
-            except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception(实时回调路径硬约束)
-                logging.error("[BoxSpring] STRADDLE: failed to close Call leg after Put failure: %s", e)
-            return None
-
-        total_entry_premium = call_premium + put_premium
-
-        # R27-P2-FP-16修复: int()截断→safe_float_to_int()
-        # FIX-R37-UNIQUE-ID: 增加随机熵，避免同毫秒同合约pos_id冲突导致持仓覆盖
-        from infra.shared_utils import generate_prefixed_id as _gen_id
-        pos_id = f"SIG_POS_STRADDLE_{signal.instrument_id}_{safe_float_to_int(time.time()*1000)}_{_gen_id('', 8)}"
-        position = SpringPosition(
-            position_id=pos_id,
-            signal_id=signal.signal_id,
-            instrument_id=signal.instrument_id,
-            option_instrument_id=call_instrument,
-            direction='BUY_STRADDLE',
-            entry_premium=total_entry_premium,
-            current_premium=call_premium,
-            entry_time=self._get_now(),
-            stop_profit_ratio=self._stop_profit_ratio,
-            max_loss_pct=self._max_loss_pct,
-            box_id=signal.box_id,
-            paired_instrument_id=put_instrument,
-            paired_current_premium=put_premium,
-        )
-        with self._lock:
-            self._positions[pos_id] = position
-            estimated_plr = self.estimate_plr_before_entry(signal.instrument_id) if hasattr(self, 'estimate_plr_before_entry') else 0.0
-            if self._dynamic_tp_sl_enabled and estimated_plr > 0:
-                position.adjust_tp_sl_by_plr(estimated_plr)
-            signal.is_consumed = True
-            self._stats['positions_opened'] += 1
-
-        logging.info(
-            "[BoxSpring] STRADDLE ENTRY: call=%s(oid=%s) put=%s(oid=%s) "
-            "call_prem=%.4f put_prem=%.4f total=%.4f stop_profit=%.1fx max_loss=%.0f%%",
-            call_instrument, call_order_id, put_instrument, put_order_id,
-            call_premium, put_premium, total_entry_premium,
-            self._stop_profit_ratio, self._max_loss_pct * 100
-        )
-
-        return call_order_id
-
-    _find_straddle_pair = _find_straddle_pair
 
     # ========================================================================
     # 平仓纪律：弹簧松开即走 / 接受归零
@@ -661,30 +396,13 @@ class BoxSpringExecutorService:
         with self._lock:
             open_positions = [
                 p for p in self._positions.values()
-                if (p.option_instrument_id == option_instrument_id or
-                    p.paired_instrument_id == option_instrument_id) and p.is_open
+                if p.option_instrument_id == option_instrument_id and p.is_open
             ]
 
         if not open_positions:
             return None
 
         pos = open_positions[0]
-
-        if pos.direction == 'BUY_STRADDLE' and pos.paired_instrument_id:
-            if option_instrument_id == pos.paired_instrument_id:
-                pos.paired_current_premium = current_premium
-            else:
-                pos.current_premium = current_premium
-            total_premium = pos.current_premium + pos.paired_current_premium
-            if total_premium > pos.peak_premium:
-                pos.peak_premium = total_premium
-                pos.peak_time = self._get_now()
-
-            close_action = self._evaluate_close_straddle(pos)
-            if close_action:
-                pos.current_premium = total_premium
-                return self._execute_close(pos, close_action)
-            return None
 
         pos.current_premium = current_premium
 
@@ -696,26 +414,6 @@ class BoxSpringExecutorService:
         if close_action:
             return self._execute_close(pos, close_action)
 
-        return None
-
-    def _evaluate_close_straddle(self, pos: SpringPosition) -> Optional[str]:
-        total_premium = pos.current_premium + pos.paired_current_premium
-        if pos.entry_premium <= 0:
-            return 'STOP_LOSS'
-        pnl_ratio = total_premium / pos.entry_premium
-        pnl_ratio = max(min(pnl_ratio, 100.0), -100.0)  # NP-P2-11: pnl_ratio溢出clip
-        if pnl_ratio >= pos.stop_profit_ratio:
-            return 'TAKE_PROFIT'
-        loss_pct = 1.0 - (total_premium / pos.entry_premium)
-        if loss_pct >= pos.max_loss_pct:
-            return 'STOP_LOSS'
-        hold_minutes = (self._get_now() - pos.entry_time).total_seconds() / 60.0
-        max_hold = self.params.get('max_spring_hold_minutes', 120)
-        if hold_minutes > max_hold:
-            return 'TIME_EXPIRE'
-        box = self._boxes.get(pos.instrument_id)
-        if box and not box.is_active:
-            return 'BOX_BROKEN'
         return None
 
     def _evaluate_close(self, pos: SpringPosition) -> Optional[str]:
@@ -742,7 +440,7 @@ class BoxSpringExecutorService:
             osvc = get_order_service()
             if osvc:
                 _CLOSE_DIRECTION_MAP = {
-                    'BUY_CALL': 'SELL', 'BUY_PUT': 'SELL', 'BUY_STRADDLE': 'SELL',
+                    'BUY_CALL': 'SELL', 'BUY_PUT': 'SELL',
                     'SELL_CALL': 'BUY', 'SELL_PUT': 'BUY',
                 }
                 close_direction = _CLOSE_DIRECTION_MAP.get(pos.direction, 'SELL')
@@ -787,33 +485,10 @@ class BoxSpringExecutorService:
                     signal_id=getattr(pos, 'signal_id', ''),
                     ref_price=pos.current_premium,
                 )
-                if pos.direction == 'BUY_STRADDLE' and pos.paired_instrument_id:
-                    # FIX-R37-UNIQUE-CLOSE(A5): straddle 配对腿也设置 _closing
-                    if _pos_svc:
-                        try:
-                            with _pos_svc._get_instrument_lock(pos.paired_instrument_id):
-                                for _rec in _pos_svc.positions.get(pos.paired_instrument_id, {}).values():
-                                    if not getattr(_rec, '_closing', False):
-                                        _rec._closing = True
-                                        _rec.closing_order_id = f"PENDING_SPRING_{_rec.position_id}"
-                                        _rec.close_method = f'spring_{reason.lower()}_paired'
-                                        _rec.close_reason = f'SPRING_{reason}'
-                        except Exception:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception
-                            pass
-                    paired_close_dir = _CLOSE_DIRECTION_MAP.get(pos.direction, 'SELL')
-                    osvc.send_order(
-                        instrument_id=pos.paired_instrument_id,
-                        volume=close_lots,
-                        price=pos.paired_current_premium,
-                        direction=paired_close_dir,
-                        action='CLOSE',
-                        signal_id=getattr(pos, 'signal_id', ''),
-                        ref_price=pos.paired_current_premium,
-                    )
                 osvc.persist_close_event(
                     order_id=pos.position_id,
                     close_reason=f'SIG_{reason}',
-                    pnl=(pos.current_premium + pos.paired_current_premium) - pos.entry_premium if pos.direction == 'BUY_STRADDLE' else pos.current_premium - pos.entry_premium,
+                    pnl=pos.current_premium - pos.entry_premium,
                 )
         except Exception as e:  # FIX-S4-EXCEPT-20260721: 窄异常→Exception
             logging.error("[BoxSpring] Close error: %s", e)
@@ -832,7 +507,7 @@ class BoxSpringExecutorService:
             sig = self._signals.get(pos.signal_id)
             if sig:
                 sig.spring_state = SpringState.EXPIRED
-        pnl = (pos.current_premium + pos.paired_current_premium) - pos.entry_premium if pos.direction == 'BUY_STRADDLE' else pos.current_premium - pos.entry_premium
+        pnl = pos.current_premium - pos.entry_premium
 
         with self._lock:
             self._stats['total_pnl'] += pnl

@@ -249,6 +249,34 @@ class RiskService:
 
         self._dashboard_service = get_risk_dashboard_service()
 
+    def get_strategy_net_exposure(self, strategy_group: str) -> Optional[float]:
+        """FIX-S4-CROSSRISK-20260804: 获取指定策略组的净敞口
+
+        返回值语义(H2-FIX):
+        - float: 数据可用,返回净敞口(可为0.0,表示无持仓)
+        - None: 数据不可用(PositionService未初始化/异常),调用方fail-closed阻断
+        box_spring_executor._check_cross_strategy_risk通过 if _net_exposure is None 检查,
+        数据不可用时必须返回None而非0.0,否则0.0会被误认为"无持仓(安全)"而放行
+        """
+        try:
+            from position.position_service import get_position_service
+            _ps = get_position_service()
+            if _ps is None:
+                return None  # [H2-FIX] 数据不可用→返回None→调用方fail-closed阻断(原返回0.0导致死代码)
+            _net = 0.0
+            with _ps.global_lock:
+                for _inst_id, pos_dict in _ps.positions.items():
+                    for _pid, rec in pos_dict.items():
+                        _sg = getattr(rec, 'strategy_group', None)
+                        if _sg is None:
+                            _sg = getattr(rec, 'open_signal_strat', None)  # [M2-FIX] 用None替代''避免空字符串or误判
+                        if _sg == strategy_group and getattr(rec, 'volume', 0) != 0:
+                            _net += rec.volume
+            return float(_net)
+        except Exception as _exposure_err:
+            logging.warning("[FIX-S4-CROSSRISK] get_strategy_net_exposure异常: %s", _exposure_err)
+            return None  # [H2-FIX] 异常→返回None→fail-closed阻断(原返回0.0导致放行)
+
     def _get_life_estimator(self) -> Any:
         """委托到RiskConfigProvider的懒加载life estimator"""
         return self._config_provider._get_life_estimator()
@@ -325,6 +353,36 @@ class RiskService:
                 check_safety_meta_layer,
                 validate_circuit_breaker_vs_time_stop,
             )
+
+            # ADD-S345-RISK-BYPASS-20260731: dry_run模式下跳过S3/S4/S5开仓前风控检查
+            # 用户决策: 模拟下单状态下暂时关闭S3/S4/S5风控, 只为验证策略跑通模拟下单
+            # 安全保障: 仅在dry_run=True时生效; 实盘模式风控始终启用
+            if isinstance(signal, dict):
+                _signal_reason = signal.get('open_reason', '') or signal.get('reason', '')
+                _signal_group = signal.get('strategy_group', '')
+                _is_s345 = _signal_group in ('s3_box', 's4_spring', 's5_overnight') or \
+                           _signal_reason in ('BOX_EXTREME', 'BOX_SPRING', 'OVERNIGHT')
+                if _is_s345:
+                    try:
+                        from strategy.strategy_config_layer import STRATEGY_DEFAULTS as _bypass_cfg
+                        _bypass_enabled = _bypass_cfg.get('s3_s4_s5_risk_bypass_in_dry_run', True)
+                    except Exception:
+                        _bypass_enabled = True
+                    if _bypass_enabled:
+                        _is_dry_run = False
+                        try:
+                            from config.params_service import get_params_service
+                            _is_dry_run = get_params_service().get_bool('dry_run_mode', False) or False
+                        except Exception:
+                            pass
+                        if not _is_dry_run:
+                            _is_dry_run = bool(getattr(self, '_dry_run_active', False))
+                        if _is_dry_run:
+                            logging.info(
+                                "[S345-RISK-BYPASS] dry_run模式跳过S3/S4/S5开仓前风控: reason=%s group=%s",
+                                _signal_reason, _signal_group,
+                            )
+                            return RiskCheckResponse.pass_result(message='s345_risk_bypass_in_dry_run')
 
             _cb_paused = getattr(self, '_is_circuit_breaker_paused', False)
             _hard_time_stop = getattr(self, '_hard_time_stop_triggered', False)

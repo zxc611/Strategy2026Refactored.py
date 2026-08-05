@@ -110,7 +110,7 @@ class InstrumentQueryService:
         try:
             if self._storage:
                 ps = self._get_params_service()
-                if ps:
+                if ps is not None:
                     info = ps.get_instrument_meta_by_id(normalized_id)
                     if info:
                         exchange = str(info.get('exchange') or '').strip()
@@ -176,7 +176,7 @@ class InstrumentQueryService:
         """
         if not instrument_ids:
             ps = self._get_params_service()
-            return ps.get_all_instrument_ids() if ps else []
+            return ps.get_all_instrument_ids() if ps is not None else []
 
         registered_ids: List[str] = []
         seen = set()
@@ -188,7 +188,7 @@ class InstrumentQueryService:
 
             # ✅ 统一为params_service缓存查询（唯一权威源）'
             ps = self._get_params_service()
-            if ps and ps.get_instrument_meta_by_id(normalized_id):
+            if ps is not None and ps.get_instrument_meta_by_id(normalized_id):
                 registered_ids.append(normalized_id)
 
         return registered_ids

@@ -525,10 +525,20 @@ class TradingEVService:
         if not kline_passed:
             # FIX-S3-BOXTYPE-20260730: box_type已固定为INTRADAY_SMALL, 日志直接使用
             _kb_type = kline_box.box_type.name if kline_box and kline_box.box_type else 'INTRADAY_SMALL'
-            logging.debug(
-                "[S3-KLINE-BOX] REJECT: K线箱体未确认 inst=%s dte=%d box_type=%s",
-                instrument_id, days_to_expiry, _kb_type,
-            )
+            # FIX-S3-REJECT-LOG-V2-20260731: DEBUG→INFO升级+节流+补全字段(S4对齐)
+            _diag_s3_count = getattr(self, '_diag_s3_count', 0) + 1
+            self._diag_s3_count = _diag_s3_count
+            if _diag_s3_count <= 20 or _diag_s3_count % 1000 == 0:
+                logging.info(
+                    "[S3-KLINE-BOX] REJECT: K线箱体未确认 inst=%s dte=%d box_type=%s "
+                    "upper=%.2f lower=%.2f w=%.2f%% bars=%d valid=%s",
+                    instrument_id, days_to_expiry, _kb_type,
+                    kline_box.upper if kline_box else 0.0,
+                    kline_box.lower if kline_box else 0.0,
+                    kline_box.width_pct if kline_box else 0.0,
+                    kline_box.bar_count if kline_box else 0,
+                    kline_box.is_valid if kline_box else False,
+                )
             return {
                 'action': 'filtered',
                 'reason': f'K线箱体未确认({_kb_type})',

@@ -47,6 +47,10 @@ _REASON_STRATEGY_MAP = {
     'OTHER_SCALP': 'box', 'BOX_SPRING': 'spring', 'BOX_EXTREME': 'box',
     'ARBITRAGE': 'arbitrage', 'MARKET_MAKING': 'market_making',
     'INTRADAY': 'intraday',
+    # ADD-S5-20260731: S5隔夜仓策略映射(持仓>12小时, 真正隔夜仓)
+    # 根因: S5的open_reason='OVERNIGHT'未注册→_resolve_strategy_group返回'unknown'
+    #       →持仓strategy_group错误→风控480min/1440min参数失效
+    'OVERNIGHT': 's5_overnight',
     'MANUAL': 'manual',
     # FIX-SG-MAP-BLOCKED-20260727: V4-FIX-O21合法reason注册到映射表
     # 根因: V4-FIX-O21(strategy_config_layer.py L317-321)设计的'BLOCKED'是合法reason

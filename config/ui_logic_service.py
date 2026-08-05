@@ -871,7 +871,7 @@ class UILogicService:
 
                 params_service = getattr(storage, '_params_service', None)
 
-                if params_service and hasattr(params_service, 'clear_instrument_cache'):
+                if params_service is not None and hasattr(params_service, 'clear_instrument_cache'):
 
                     params_service.clear_instrument_cache()
 

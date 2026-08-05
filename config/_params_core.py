@@ -139,6 +139,31 @@ class ParamsService:
         # P0 Bug #9修复：在。_init__中调用init_instrument_cache，确保缓存容器已初始化
         self.init_instrument_cache()
 
+        # FIX-DEADCODE-20260731: 以下初始化代码原误置于__getattr__方法的try/finally块之后,
+        # 因try块必然return或raise, finally之后的代码永远不会执行(死代码).
+        # 根因: 编辑错误导致__init__和__getattr__之间的代码块缩进错乱
+        # 影响: _audit_observer/_param_backup/_param_backup_lock/_hot_update_txn_lock/EventBus订阅
+        #       未被初始化, 热更新/数据格式变更/审计功能失效
+        # 修复: 将死代码移回__init__方法末尾, 确保正常初始化
+        self._audit_observer = ParamAuditObserver()
+        self._observers.add(self._audit_observer)
+
+        # OPS-P1-03修复: 参数变更通知 _P1-05修复: 统一走EventBus，不再需要本地回调列表
+
+        # UPG-P1-07修复: 热更新事务性保存存参数备份
+        self._param_backup: Optional[Dict[str, Any]] = None
+        self._param_backup_lock = threading.Lock()
+        self._hot_update_txn_lock = threading.Lock()
+
+        # DFG-P1-08修复: 订阅数据格式变更事件，刷新合约缓存
+        try:
+            from infra.event_bus import get_global_event_bus
+            _bus = get_global_event_bus()
+            if _bus is not None:
+                _bus.subscribe_weak('DataFormatChangedEvent', self._on_data_format_changed)
+        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
+            logging.warning("[R22-EP-P1] ParamsService exception swallowed")
+
 
 
     def __getattr__(self, name):
@@ -191,46 +216,6 @@ class ParamsService:
         finally:
 
             _local.recursing = False
-
-
-
-        self._audit_observer = ParamAuditObserver()
-
-        self._observers.add(self._audit_observer)
-
-
-
-        # OPS-P1-03修复: 参数变更通知 _P1-05修复: 统一走EventBus，不再需要本地回调列表
-
-
-        # UPG-P1-07修复: 热更新事务性保存存参数备份
-
-        self._param_backup: Optional[Dict[str, Any]] = None
-
-        self._param_backup_lock = threading.Lock()
-
-        self._hot_update_txn_lock = threading.Lock()
-
-
-
-        # DFG-P1-08修复: 订阅数据格式变更事件，刷新合约缓存
-        try:
-
-            from infra.event_bus import get_global_event_bus
-
-            _bus = get_global_event_bus()
-
-            if _bus is not None:
-
-                _bus.subscribe_weak('DataFormatChangedEvent', self._on_data_format_changed)
-
-        except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
-
-            logging.warning("[R22-EP-P1] ParamsService exception swallowed")
-
-            pass
-
-
 
     # ========================================================================
 

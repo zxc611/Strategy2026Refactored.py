@@ -252,7 +252,7 @@ class LifecycleInit:
         try:
             from config.params_service import get_params_service
             ps = get_params_service()
-            meta = ps.get_instrument_meta_by_id(inst_id) if ps else None
+            meta = ps.get_instrument_meta_by_id(inst_id) if ps is not None else None
             if meta and meta.get('underlying_future_id'):
                 return meta['underlying_future_id']
         except (ValueError, KeyError, TypeError, AttributeError) as _r3_err:
@@ -289,6 +289,20 @@ class LifecycleInit:
         logging.info("[AnalyticsInit] Step 1/7: 获取 t_type_service 单例")
         p.t_type_service = get_t_type_service()
         logging.info("[AnalyticsInit] Step 2/7: t_type_service 实例已获取: %s", p.t_type_service is not None)
+        # FIX-WR-CHAIN-20260731: 注册t_type_service到state_store
+        # 根因: tick_hft.py L281 svc._state_store.get_ref('t_type_service') 永远返回None
+        #   → 需要fallback到get_t_type_service()单例 → 增加延迟和不确定性
+        #   → 若单例也被重置则width_resonance链路彻底断裂
+        # 修复: 在初始化时注册到state_store, 使tick_hft.py可以直接获取
+        try:
+            _state_store = getattr(p, '_state_store', None)
+            if _state_store is not None and hasattr(_state_store, 'set_ref'):
+                _state_store.set_ref('t_type_service', p.t_type_service)
+                logging.info("[AnalyticsInit] t_type_service registered in state_store (FIX-WR-CHAIN)")
+            else:
+                logging.warning("[AnalyticsInit] _state_store not available, t_type_service not registered in state_store")
+        except Exception as _ss_err:
+            logging.warning("[AnalyticsInit] t_type_service state_store registration failed: %s", _ss_err)
         _storage = getattr(p, 'storage', None) or storage
         _sm = None
         if _storage is not None:

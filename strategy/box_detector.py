@@ -51,6 +51,11 @@ from infra.shared_utils import CHINA_TZ as _CHINA_TZ
 
 logger = get_logger(__name__)  # R9-5
 
+# FIX-D1-ECO-INJECTION-V4-20260731: 删除模块级_d1_get_kline/_d1_market_center/set_d1_kline_provider
+# 根因: V3版本通过模块级全局变量注入,与StrategyEcosystem.get_kline形成双通道,违反原则2(四唯一)
+# 修复: lifecycle_bind._do_bind_platform_apis将get_kline/_runtime_market_center注入
+#        StrategyEcosystem单例, 本模块仅从eco获取(单一渠道)
+
 
 class BoxType(Enum):
     """箱体类型枚举 — S3/S4策略箱体标准化
@@ -149,6 +154,7 @@ class BoxStrategyParams:
     min_extreme_confidence: float = 0.6
     min_bounce_count: int = 2
     box_width_max_pct: float = 1.0  # FIX-BOX-DUAL-WIDTH-20260730: 5%→1%,三高点/三低点百分比宽度上限(期货)
+    iv_history_min_for_percentile: int = 20  # FIX-S3S4-9: IV历史不足此数时返回50.0(中位),避免冷启动期误过滤
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -402,7 +408,22 @@ class BoxDetector:
             # FIX-20260714-S3: IV不可用时(current_iv=0)不阻塞信号，仅当IV有值且低于阈值时才过滤
             # V4-FIX-O9: IV=0(数据不可用)时iv_filter_passed=False(fail-closed)
             # 原则: 数据不可用=不满足条件, 不再放行iv_filter_passed=True
-            iv_filter_passed = iv_percentile >= self._params.iv_percentile_min if current_iv > 0 else False
+            # FIX-S3-COLDSTART-20260803: IV冷启动期(iv_sorted_list为空/不足→percentile=0.0)允许降级
+            # 根因: 重启后iv_sorted_list为空→percentile=0.0<50→全部拦截→S3冷启动期零下单(持续数十分钟)
+            #   iv_percentile=0.0有两层含义: (1)iv_sorted_list为空/不足=数据不可用→应降级通过
+            #                                 (2)IV极低=真实百分位低→应拦截
+            #   区分方法: iv_sorted_list长度<min_history=数据不可用→降级
+            # 修复: 数据不可用时iv_filter_passed=True(降级), IV有历史数据但percentile低时仍拦截
+            # 安全: 置信度评分中iv_score=0(降级时)拉低confidence,需其他维度补足,不会产生低质量信号
+            _iv_history_available = len(self._iv_sorted) >= self._params.iv_history_min_for_percentile
+            if current_iv <= 0:
+                iv_filter_passed = False  # IV=0: 数据不可用,降级通过(见下方覆盖)
+                if not _iv_history_available:
+                    iv_filter_passed = True  # IV历史不足: 冷启动降级,避免阻断所有信号
+            else:
+                iv_filter_passed = iv_percentile >= self._params.iv_percentile_min
+                if not iv_filter_passed and not _iv_history_available:
+                    iv_filter_passed = True  # IV历史不足: 冷启动降级
             if not iv_filter_passed and current_iv > 0:
                 self._stats['iv_filtered'] += 1
                 # FIX-S3-1: IV filter 过滤诊断日志（WARNING级别写入signals.jsonl）
@@ -443,14 +464,24 @@ class BoxDetector:
                 (is_bottom_extreme or is_top_extreme)
             )
 
-            # FIX-S3-3: confidence不足诊断日志（WARNING级别写入signals.jsonl）
-            # 根因: confidence < min_extreme_confidence(0.7) 时信号不可交易，但无日志记录导致无法排查
+            # FIX-S3-3: 不可交易诊断日志（WARNING级别写入signals.jsonl）
+            # FIX-S3-LOG-20260731: 修正日志格式, 区分"confidence不足"和"IV filter拦截"
+            # 原bug: confidence=0.687≥0.600但日志说"confidence不足"→误导排查方向
+            # 实际: tradeable=False可能是confidence不足 OR iv_filter未通过 OR 无extreme_type
             if not tradeable and extreme_type:
+                _reason = ''
+                if confidence < self._params.min_extreme_confidence:
+                    _reason = 'confidence不足'
+                elif not iv_filter_passed:
+                    _reason = 'IV filter拦截'
+                else:
+                    _reason = '其他条件不满足'
                 logger.warning(
-                    "[S3-BOX] confidence不足: inst=%s confidence=%.3f < min=%.3f "
-                    "(extreme_type=%s iv_passed=%s is_bottom=%s is_top=%s)",
-                    instrument_id, confidence, self._params.min_extreme_confidence,
-                    extreme_type, iv_filter_passed, is_bottom_extreme, is_top_extreme
+                    "[S3-BOX] %s: inst=%s confidence=%.3f(%.3f) iv_passed=%s iv_pct=%.1f "
+                    "(extreme_type=%s price_s=%.3f res_s=%.3f iv_s=%.3f flow_s=%.3f flow_exh=%s)",
+                    _reason, instrument_id, confidence, self._params.min_extreme_confidence,
+                    iv_filter_passed, iv_percentile,
+                    extreme_type, price_score, resonance_score, iv_score, flow_score, flow_exhaustion
                 )
 
             if tradeable:
@@ -497,9 +528,11 @@ class BoxDetector:
             return passed
 
     @staticmethod
-    def compute_iv_percentile(iv_value: float, iv_sorted_list: List[float]) -> float:
+    def compute_iv_percentile(iv_value: float, iv_sorted_list: List[float], min_history: int = 20) -> float:
         if not iv_sorted_list or iv_value <= 0:
-            return 50.0  # FIX-S3S4-8: IV历史为空时返回50.0(中位)而非0.0，避免0.0<iv_percentile_min(50.0)过滤掉所有信号
+            return 0.0  # FIX-S3S4-8-FIX-20260731: 数据不可用返回0.0(fail-closed), 不再合成50.0放行(原则7: 禁用虚假数据)
+        if len(iv_sorted_list) < min_history:
+            return 0.0  # FIX-S3S4-9-FIX-20260731: IV历史不足返回0.0(fail-closed), 冷启动期不交易(原则7: 禁用虚假数据)
         count_below = bisect_left(iv_sorted_list, iv_value)
         return count_below / len(iv_sorted_list) * 100.0
 
@@ -511,7 +544,8 @@ class BoxDetector:
         return potential_gain / avg_loss
 
     def _compute_iv_percentile(self, current_iv: float) -> float:
-        return BoxDetector.compute_iv_percentile(current_iv, self._iv_sorted)
+        return BoxDetector.compute_iv_percentile(
+            current_iv, self._iv_sorted, self._params.iv_history_min_for_percentile)
 
     def check_order_flow_exhaustion(
         self,
@@ -604,6 +638,7 @@ class BoxDetector:
         min_bars: int = 3,
         width_max_pct: float = 1.0,  # FIX-BOX-DUAL-WIDTH-20260730: 5%→1%,参数化
         box_type: BoxType = BoxType.INTRADAY_SMALL,
+        instrument_id: str = '',  # FIX-S4-DIAG-FIX-20260803: 补充instrument_id参数(原BOX-DIAG日志引用未定义变量导致NameError)
         # FIX-S3S4-TICKS-TOLERANCE-V2-20260729: 重写为"三高点/三低点内部差异"判定
         # 用户2026-07-29澄清(关键):
         #   "高\低点差异在10个最小变动单位内"是指【三高点内部差异】和【三低点内部差异】,
@@ -746,6 +781,21 @@ class BoxDetector:
             bar_score = min(1.0, confirming_bars / (min_bars * 2))
             confidence = 0.4 * width_score + 0.6 * bar_score
 
+        # FIX-S4-DIAG-20260803: 增加详细诊断日志,输出三高点/三低点差异百分比
+        # 用户要求: 需确认哪些品种三高点差异≤1% AND 三低点差异≤1%
+        _diag_valid = "✓" if is_valid else "✗"
+        _diag_tick = f"tick_ok={ticks_ok}" if tick_size > 0 else "no_tick"
+        logger.info(
+            "[BOX-DIAG] inst=%s box_type=%s %s valid=%s highs=[%s] lows=[%s] "
+            "highs_spread=%.4f(%.4f%%) lows_spread=%.4f(%.4f%%) box_width=%.4f(%.4f%%) "
+            "tick_size=%.4f %s spread_pct_ok=%s",
+            instrument_id, box_type.name, _diag_valid, is_valid,
+            ",".join(f"{h:.2f}" for h in highs), ",".join(f"{l:.2f}" for l in lows),
+            highs_spread, highs_spread_pct, lows_spread, lows_spread_pct,
+            box_upper - box_lower, width_pct,
+            tick_size, _diag_tick, spread_pct_ok,
+        )
+
         return KLineBoxProfile(
             box_type=box_type,
             upper=box_upper,
@@ -871,6 +921,7 @@ class BoxDetector:
                 min_bars=self._kline_min_bars_daily,
                 width_max_pct=self._kline_box_width_max_pct,
                 box_type=BoxType.INTRADAY_SMALL,
+                instrument_id=instrument_id,  # FIX-S4-DIAG-FIX-20260803
                 tick_size=_tick_size,  # FIX-S3S4-TICKS-TOLERANCE-V2-20260729
             )
 
@@ -882,6 +933,7 @@ class BoxDetector:
                 min_bars=self._kline_min_bars_weekly,
                 width_max_pct=self._kline_box_width_max_pct,
                 box_type=BoxType.OVERNIGHT_MEDIUM,
+                instrument_id=instrument_id,  # FIX-S4-DIAG-FIX-20260803
                 tick_size=_tick_size,  # FIX-S3S4-TICKS-TOLERANCE-V2-20260729
             )
 
@@ -897,11 +949,16 @@ class BoxDetector:
                 _oldest_key = min(self._kline_box_cache, key=lambda k: self._kline_box_cache[k][2])
                 del self._kline_box_cache[_oldest_key]
 
-            # FIX-KLINE-BOX-DIAG-20260730: 升级为INFO(前5次+每1000次), 原DEBUG生产不可见
-            # S3/S4零下单根因诊断需要daily_box/weekly_box的is_valid/width_pct/bars值
-            _diag_kbox_count = getattr(self, '_diag_kbox_log_count', 0) + 1
-            self._diag_kbox_log_count = _diag_kbox_count
-            _kbox_log_level = logging.INFO if (_diag_kbox_count <= 5 or _diag_kbox_count % 1000 == 0) else logging.DEBUG
+            # FIX-KLINE-BOX-DIAG-20260803: 改为per-instrument首次+is_valid时输出INFO
+            # 原: 前5次+每1000次 → 仅10/64品种可见,58品种无日志
+            # 新: 每个品种首次调用 + 任何box成立时 → 全品种覆盖+关键事件不遗漏
+            if not hasattr(self, '_diag_kbox_logged_insts'):
+                self._diag_kbox_logged_insts = set()
+            _first_for_inst = instrument_id not in self._diag_kbox_logged_insts
+            self._diag_kbox_logged_insts.add(instrument_id)
+            _kbox_log_level = logging.INFO if (
+                _first_for_inst or daily_box.is_valid or weekly_box.is_valid
+            ) else logging.DEBUG
             logger.log(
                 _kbox_log_level,
                 "[KLINE-BOX] detect_kline_box: inst=%s src=%s daily=%s(upper=%.2f lower=%.2f w=%.2f%% bars=%d conf=%.3f) "
@@ -1238,17 +1295,17 @@ class BoxDetector:
         """
         try:
             import re as _re
-            # 1. 获取StrategyEcosystem(持有_runtime_market_center和get_kline)
+            # FIX-D1-ECO-INJECTION-V4-20260731: 直接从StrategyEcosystem获取(单渠道)
+            # 根因已修复: lifecycle_bind将get_kline/_runtime_market_center注入StrategyEcosystem单例
+            # 原V3版本通过模块级_d1_get_kline全局变量注入,与eco.get_kline形成双通道(违反原则2)
             from strategy.strategy_ecosystem import get_strategy_ecosystem
             eco = get_strategy_ecosystem()
             if eco is None:
                 logger.warning("[KLINE-BOX] _fetch_daily_bars_from_market_center: get_strategy_ecosystem()=None, inst=%s", instrument_id)
                 return None
-
-            # 2. 获取get_kline函数(由lifecycle_bind._compat_get_kline_data包装)
             get_kline_fn = getattr(eco, 'get_kline', None)
             if not callable(get_kline_fn):
-                # 尝试直接从_runtime_market_center获取
+                # fallback: 从eco._runtime_market_center获取get_kline_data
                 mc = getattr(eco, '_runtime_market_center', None)
                 if mc and hasattr(mc, 'get_kline_data'):
                     get_kline_fn = mc.get_kline_data
@@ -1291,11 +1348,23 @@ class BoxDetector:
             try:
                 klines = get_kline_fn(exchange, instrument_id=instrument_id, style='D1', count=-30)
             except TypeError:
-                # 某些MarketCenter版本签名不同, 尝试位置参数
+                # FIX-D1-POSITION-ARG-V3-20260731: 位置参数fallback(从eco._runtime_market_center获取)
+                # 根因: get_kline_fn(exchange, instrument_id, 'D1')的第3个位置参数在
+                #   _compat_get_kline_data签名(exchange, instrument_id=None, instrument=None, style="M1")
+                #   中赋给instrument而非style → style取默认"M1" → silent退化为M1数据
+                # 修复: 使用eco._runtime_market_center.get_kline_data直接调用(绕过_compat), 仍用style='D1' kwarg
                 try:
-                    klines = get_kline_fn(exchange, instrument_id, 'D1')
+                    _mc = getattr(eco, '_runtime_market_center', None)
+                    if _mc and callable(getattr(_mc, 'get_kline_data', None)):
+                        klines = _mc.get_kline_data(
+                            exchange=exchange, instrument_id=instrument_id, style='D1', count=-30)
+                    else:
+                        logger.warning("[KLINE-BOX] _fetch_daily_bars: TypeError fallback无raw MC可用, inst=%s exchange=%s",
+                                       instrument_id, exchange)
+                        return None
                 except Exception as _te:
-                    logger.warning("[KLINE-BOX] _fetch_daily_bars_from_market_center: get_kline位置参数调用也失败, inst=%s exchange=%s err=%s", instrument_id, exchange, _te)
+                    logger.warning("[KLINE-BOX] _fetch_daily_bars: raw MC调用也失败, inst=%s exchange=%s err=%s",
+                                   instrument_id, exchange, _te)
                     return None
 
             if not klines:

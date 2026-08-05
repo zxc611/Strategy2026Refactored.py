@@ -423,19 +423,25 @@ class OrderExecutor(_OrderExecutorBase):
                 _effective_ttl = target.get('dedup_ttl', 10 if _is_simulated else _cross_cycle_ttl)
                 if _last_attempt_ts and (_now_ts - _last_attempt_ts) < _effective_ttl:
                     continue
-                # 检查order_service中是否已有同合约同方向未成交OPEN订单
+                # FIX-PENDING-STRATEGY-AWARE-20260804: 检查同策略同合约同方向未成交OPEN订单
+                # 根因: 原_has_pending_open只检查(instrument_id, direction), 不区分策略源
+                #   S2 INTRADAY对PF609C7700 SELL下单成功(PENDING)后, S5 OVERNIGHT同合约同方向被误拦截
+                #   不同策略的平仓方式不同(max_hold_minutes/stop_loss_ratio等), 不应互相阻止
+                # 修复: 加入open_reason维度, 仅同策略的未成交订单才阻止重复开仓
+                #   与FIX-DEDUP-STRATEGY-AWARE-20260730对称: dedup_key和cross_key都已含策略源
                 try:
                     _has_pending_open = False
                     for _o in svc._orders_by_id.values():
                         if (_o.get('instrument_id') == instrument_id
                             and _o.get('action') == 'OPEN'
                             and _o.get('direction') == target_direction
+                            and _o.get('open_reason', '') == _strategy_key
                             and _o.get('status') in ('PENDING', 'NEW', 'ACCEPTED', 'PARTIAL_FILLED')):
                             _has_pending_open = True
                             break
                     if _has_pending_open:
-                        logging.debug("[OPEN-UNIQUE-07] inst=%s dir=%s 已有未成交OPEN订单，跳过本次开仓",
-                                        instrument_id, target_direction)
+                        logging.debug("[OPEN-UNIQUE-07] inst=%s dir=%s strategy=%s 已有同策略未成交OPEN订单，跳过本次开仓",
+                                        instrument_id, target_direction, _strategy_key)
                         continue
                 except Exception as _chk_err:
                     # 实时回调路径硬约束: except Exception

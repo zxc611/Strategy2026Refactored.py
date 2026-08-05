@@ -436,6 +436,15 @@ def init_order_service_attrs(svc, params=None):
 
     svc._recover_order_state()
 
+    # [FIX-ORPHAN-AFTER-RECOVER] 同步恢复路径: _recover_order_state完成后_orders_by_id有数据
+    # 此时补调_recover_orphaned_orders才能真正恢复孤儿订单
+    # 异步路径: _async_recover_worker的finally块中已补调
+    if not getattr(svc, '_ORDER_STATE_ASYNC_RECOVER', True):
+        try:
+            svc._recover_orphaned_orders()
+        except Exception as _orphan_sync_err:
+            logging.warning("[FIX-ORPHAN-AFTER-RECOVER] 同步恢复后孤儿订单扫描失败(非致命): %s", _orphan_sync_err)
+
     # FIX-20260707-DRY-RUN: 从params读取dry_run_mode配置
     # dry_run模式下不实际下单，但保留完整策略逻辑+持仓+快照记录
     svc._dry_run_mode = False
