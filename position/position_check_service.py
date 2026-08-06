@@ -1,4 +1,4 @@
-﻿# MODULE_ID: M1-202
+# MODULE_ID: M1-202
 """Position Check Service - 风控检查联动
 
 从position_service.py拆分(CC-09):

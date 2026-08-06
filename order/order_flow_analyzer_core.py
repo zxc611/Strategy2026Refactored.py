@@ -1,4 +1,4 @@
-﻿# [M1-44-02] 订单流分析器-核心
+# [M1-44-02] 订单流分析器-核心
 
 import logging
 import threading

@@ -1,4 +1,4 @@
-﻿# [M1-43-02] 订单流桥接-检测器
+# [M1-43-02] 订单流桥接-检测器
 
 import time
 import logging

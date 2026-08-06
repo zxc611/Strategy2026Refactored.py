@@ -1,4 +1,4 @@
-﻿# [M1-44-03] 订单流分析器-高级指标
+# [M1-44-03] 订单流分析器-高级指标
 
 import time
 import threading

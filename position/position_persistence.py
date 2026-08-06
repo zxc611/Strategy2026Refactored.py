@@ -1,4 +1,4 @@
-﻿# MODULE_ID: M1-205
+# MODULE_ID: M1-205
 """Position Persistence Service - 持仓持久化+快照
 
 从position_service.py拆分(CC-09):
